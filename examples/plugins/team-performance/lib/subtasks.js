@@ -18,9 +18,8 @@ const A = require('./analytics.js');
 const P = require('./phases.js');
 const TZ = require('./tz.js');
 
-// One design vocabulary for the whole plugin: phases.js owns it; the local
-// copy is byte-identical and only used while phases.js does not export it.
-const RE_DESIGN = P.RE_DESIGN || P.RE_DESIGN_WORK || /design|spike|poc|research|investigat/i;
+// One design vocabulary for the whole plugin: phases.js owns it.
+const { RE_DESIGN } = P;
 const DEV_PHASES = new Set(['implementation']);
 const round2 = (v) => Math.round(v * 100) / 100;
 

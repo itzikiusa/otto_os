@@ -2,6 +2,7 @@
 // plus the git/PR side data into the metric suite the views and reports read
 // (phases, DORA, flow, capacity, PR flow, rework, sub-tasks, guardrails).
 // Pure apart from the inputs handed in — server.js does all the file I/O.
+// Every `share` / `*_rate` / `coverage` in the output is a 0..1 FRACTION.
 'use strict';
 
 const A = require('./analytics.js');
@@ -17,10 +18,44 @@ const DAY = 86400000;
 const toMs = (v) => (v == null ? null : typeof v === 'number' ? v : Number.isFinite(Date.parse(v)) ? Date.parse(v) : null);
 const round2 = (x) => (x == null || !Number.isFinite(x) ? null : Math.round(x * 100) / 100);
 
+// TODO(scope-rules): lib/scope-rules.js (P1) owns weekendOf; drop the local
+// copy once it has landed everywhere. Until then prefer it when present.
+let SR = null;
+try { SR = require('./scope-rules.js'); } catch { SR = null; }
+
 /** workweek ([1..5] weekday numbers) → weekend days for tz/capacity helpers. */
 function weekendOf(workweek) {
+  if (SR && typeof SR.weekendOf === 'function') return SR.weekendOf(workweek);
   const ww = new Set(Array.isArray(workweek) && workweek.length ? workweek : [1, 2, 3, 4, 5]);
   return [0, 1, 2, 3, 4, 5, 6].filter((d) => !ww.has(d));
+}
+
+/** Strong rework = high confidence (explicit link / key in title + more), or a
+ *  bug that rewrote the origin's code soon after delivery. Weak relates-to /
+ *  keyword-only / self-reopened matches count only toward rate_all. */
+const STRONG_REWORK_SIGNALS = new Set(['bug_after_delivery']);
+const isStrongRework = (r) => r.rework_confidence === 'high' || (r.rework_signals || []).some((x) => STRONG_REWORK_SIGNALS.has(x));
+const REWORK_ITEMS_CAP = 200;
+
+/** DORA config from the plugin config + per-call side data (never hard-coded). */
+function doraConfig(config = {}, side = {}, window, extra = {}) {
+  const num = (v) => (v != null && Number(v) > 0 ? Number(v) : null);
+  const cfg = {
+    timezone: side.timezone || config.timezone || 'UTC',
+    weekend: weekendOf(config.workweek),
+    failure_window_days: num(side.bug_window_days) ?? num(config.failure_window_days) ?? 7,
+    min_n: num(config.dora_min_n) ?? num(config.min_n) ?? 3,
+    window: { start: window.since, end: window.until },
+    prs: side.prs || [],
+    deploy_tag_patterns: side.deploy_tag_patterns || config.deploy_tag_patterns,
+    hotfix_tag_patterns: side.hotfix_tag_patterns || config.hotfix_tag_patterns || ['hf', 'hotfix'],
+    branch: side.branch || config.branch || null,
+    repos: side.repos || config.repos || undefined,
+    ...extra,
+  };
+  if (typeof side.tagKind === 'function') cfg.tagKind = side.tagKind;
+  if (typeof side.tagContains === 'function') cfg.tagContains = side.tagContains;
+  return cfg;
 }
 
 /** YYYY-MM-DD set of a person's time-off days (inclusive ranges). */
@@ -195,6 +230,11 @@ function flowRecord(r, estimates) {
     actual_days: A.isDone(r) ? A.actualDays(r) : null,
     hotfix_linked: r.deployed_kind === 'hotfix',
     bucket: r.type,
+    summary: r.summary ?? null,
+    deployed_at: toMs(r.deployed_at),
+    rework_of: Array.isArray(r.rework_of) ? r.rework_of[0] || null : r.rework_of || null,
+    sprints: r.sprints || [],
+    sprint_changes: (r.sprint_changes || []).map((c) => ({ ...c, at: toMs(c.at) })),
     phases: ph
       ? { design: ph.design.days, dev: ph.dev.days, review: ph.review.total, deployment: ph.deploy.days, rework: ph.rework.in_days ?? null }
       : null,
@@ -203,7 +243,9 @@ function flowRecord(r, estimates) {
 
 /**
  * Full metric suite for a scope + window ({since, until} ms).
- * side = { tags, prs, target_ref_age_days, unmatched_authors, prs_status }.
+ * side = { tags, prs, target_ref_age_days, unmatched_authors, prs_status,
+ *          bug_window_days, timezone, deploy_tag_patterns, hotfix_tag_patterns,
+ *          tagKind(name, cfg), tagContains(tag, sha), branch, repos, epics }.
  */
 function computeMetrics(scope, window, side = {}) {
   const { config, estimates, people, canonical } = scope;
@@ -227,40 +269,71 @@ function computeMetrics(scope, window, side = {}) {
   for (const [id, a] of Object.entries(capacity.people)) a.name = ((scope.flat_people || {})[id] || {}).name || id;
 
   const weight = (r) => Number(r.estimate_days) || 0;
+  const capWeeks = capacity.capacity_days > 0 ? capacity.capacity_days / 5 : null;
+  const activity = activityOf(recs, scope, window, side.prs);
+  // ONE eligible population for the phase metrics: done in window, not a
+  // sub-task, not scope-excluded, with phases attached.
+  const phaseRecs = recs.filter((r) => r.phases && A.isDone(r) && !r.subtask && !(Boolean(r.scope_excluded) || A.isExcluded(r)) && (() => { const t = toMs(r.eff_done_at ?? r.done_at); return t >= window.since && t < window.until; })());
+  const phaseKeys = new Set(phaseRecs.map((r) => r.key));
   const flow = {
     throughputPerWeek: F.throughputPerWeek(fr.map((r) => ({ ...r, assignee_id: r.assignee_id && canonical(r.assignee_id) })), window, { people: capPeople, weight, capacity: capOpts }),
     wip: F.wip(fr),
     agingWip: F.agingWip(fr),
-    contextSwitching: F.contextSwitching(activityOf(recs, scope, window)),
+    contextSwitching: F.contextSwitching(activity),
     investmentMix: F.investmentMix(fr, window),
     unplannedShare: F.unplannedShare(fr, window),
     estimateAccuracy: F.estimateAccuracy(fr, window),
-    cycleTimeByPhase: F.cycleTimeByPhase(fr, window),
+    cycleTimeByPhase: { ...F.cycleTimeByPhase(fr.filter((r) => phaseKeys.has(r.key)), window), population: phaseKeys.size },
+    flowEfficiency: F.flowEfficiency(fr, window),
+    focusShare: F.focusShare(activity),
+    escapeRate: F.escapeRate(fr, window),
+    sprintPlanning: F.sprintPlanning(fr, (config.sprints || []).map((sp) => ({ ...sp, start: toMs(sp.start), end: toMs(sp.end) }))),
+    reworkRateByPerson: F.reworkRateByPerson(fr.map((r) => ({ ...r, assignee_id: r.assignee_id && canonical(r.assignee_id) })), window),
+    investmentByEpic: F.investmentByEpic(fr, window, side.epics || epicSummaries(scope.records)),
   };
 
-  const phaseRecs = recs.filter((r) => r.phases && A.isDone(r) && !r.subtask && (() => { const t = toMs(r.eff_done_at ?? r.done_at); return t >= window.since && t < window.until; })());
   const phases = P.phaseSummary(phaseRecs);
   const phaseGuards = phaseGuardrails(phases);
 
   const tags = side.tags || [];
   const doraRecs = recs.map((r) => ({ ...r, created: toMs(r.created), done_at: toMs(r.eff_done_at ?? r.done_at), deployed_at: toMs(r.deployed_at), first_commit_at: toMs(r.first_commit_at), reopened_at: toMs(r.reopened_at) }));
-  const dora = D.doraMetrics(doraRecs, tags, {
-    timezone: side.timezone,
-    failure_window_days: 7,
-    min_n: 3,
-    window: { start: window.since, end: window.until },
-    prs: side.prs || [],
-    deploy_tag_patterns: side.deploy_tag_patterns,
-  });
+  const dora = D.doraMetrics(doraRecs, tags, doraConfig(config, side, window, { capacity_days: capacity.capacity_days }));
 
   const prsInWin = (side.prs || []).filter((p) => { const t = toMs(p.merged_at); return t != null && t >= window.since && t < window.until; });
-  const pr_flow = { ...PR.prFlowSummary(prsInWin), total: prsInWin.length, approximated_times: prsInWin.filter((p) => p.opened_at_source === 'first_commit' || p.merged_at_source === 'updated_at').length };
+  const prCap = {};
+  for (const [id, a] of Object.entries(capacity.people)) prCap[id] = { capacity_days: a.capacity_days };
+  const prSummary = PR.prFlowSummary(prsInWin, { capacityDays: prCap });
+  const pr_flow = {
+    ...prSummary,
+    total: prsInWin.length,
+    approximated_times: prsInWin.filter((p) => p.opened_at_source === 'first_commit' || p.merged_at_source === 'updated_at').length,
+    // Headline 0..1 share of merged PRs nobody reviewed; null without PR data.
+    unreviewed_share: side.prs && prsInWin.length ? prSummary.unreviewed.share ?? null : null,
+    merges_per_capacity_week: side.prs && capWeeks ? round2(prsInWin.length / capWeeks) : null,
+  };
+  const pr_people = PR.prByPerson(prsInWin, prCap);
+  const review_load = PR.reviewLoad(pr_people);
 
   const reworkRecs = recs.filter((r) => { const t = toMs(r.eff_done_at ?? r.done_at); return A.isDone(r) && t >= window.since && t < window.until; });
+  const reworkSet = new Set(reworkRecs);
   const rate = R.reworkRate(reworkRecs);
+  const reworkAll = reworkRecs.filter((r) => !r.subtask && r.rework_of);
+  const reworkStrong = reworkAll.filter(isStrongRework);
+  const deliveredN = reworkRecs.filter((r) => !r.subtask).length;
+  const bySignal = {};
+  for (const r of reworkAll) for (const sg of new Set(r.rework_signals || [])) bySignal[sg] = (bySignal[sg] || 0) + 1;
+  const reworkItems = recs.filter((r) => r.rework_of && reworkSet.has(r)).map((r) => ({ key: r.key, rework_of: r.rework_of, confidence: r.rework_confidence, signals: r.rework_signals || [], strong: isStrongRework(r), days: r.rework_out || 0 }));
   const rework = {
     ...rate,
-    items: recs.filter((r) => r.rework_of && reworkRecs.includes(r)).map((r) => ({ key: r.key, rework_of: r.rework_of, confidence: r.rework_confidence, signals: r.rework_signals || [], days: r.rework_out || 0 })).slice(0, 200),
+    // Ticket-count shares (0..1) of done tickets that are rework of another:
+    // rate_strong counts only high-confidence / strong-signal links.
+    rate_all: deliveredN ? round2(reworkAll.length / deliveredN) : null,
+    rate_strong: deliveredN ? round2(reworkStrong.length / deliveredN) : null,
+    n: deliveredN,
+    by_signal: bySignal,
+    items: reworkItems.slice(0, REWORK_ITEMS_CAP),
+    truncated: reworkItems.length > REWORK_ITEMS_CAP,
+    total_items: reworkItems.length,
   };
 
   const subtasks = recs.filter((r) => r.substantive_subtask).map((r) => ({
@@ -282,10 +355,15 @@ function computeMetrics(scope, window, side = {}) {
     unmapped_authors: (side.unmatched_authors || []).map((a) => a.name || a),
     capacity: { capacity_days: capacity.capacity_days, business_days: capacity.business_days },
     deploy_tags: tagsInWin,
+    pr_partial: side.prs ? prsInWin.filter((p) => p.partial).length : 0,
   });
   guardrails.push(...phaseGuards);
   for (const g of dora.guardrails || []) guardrails.push({ id: g.id, code: g.code, metric: `dora.${g.metric}`, severity: 'warning', reason: g.reason, action: 'Widen the period before comparing.' });
   if (typeof A.reworkGuardrails === 'function') for (const g of A.reworkGuardrails(recs) || []) guardrails.push({ severity: 'warning', ...g });
+  const partialPrs = side.prs ? prsInWin.filter((p) => p.partial).length : 0;
+  if (partialPrs && !guardrails.some((g) => g.code === 'pr_partial')) {
+    guardrails.push({ code: 'pr_partial', metric: 'prSize', severity: 'warning', reason: `${partialPrs} PR(s) are missing commits or diff data (a daemon sub-call failed); they are refetched on the next scan.`, action: 'Treat PR size, review depth and rounds as incomplete.' });
+  }
   if (pr_flow.approximated_times) {
     guardrails.push({ code: 'pr_times_approximated', metric: 'prPickup', severity: 'warning', reason: `${pr_flow.approximated_times} PR(s) have open/merge times approximated from commits or last update.`, action: 'Treat PR timings as indicative.' });
   }
@@ -295,19 +373,53 @@ function computeMetrics(scope, window, side = {}) {
     if (b) badges[k] = b;
   }
 
-  return { window, dora, flow, capacity, phases, pr_flow, rework, subtasks, guardrails, badges, investment: flow.investmentMix.value, estimate_accuracy: flow.estimateAccuracy.value };
+  return {
+    window, dora, flow, capacity, phases, phase_population: phaseRecs.length, pr_flow, pr_people, review_load, rework, subtasks, guardrails, badges,
+    investment: flow.investmentMix.value, estimate_accuracy: flow.estimateAccuracy.value,
+  };
 }
 
-/** [{person, day, key}] from keyed commits + status transitions (canonical person). */
-function activityOf(records, scope, window) {
+/** { epic_key: summary } from feature/epic records in the scope. */
+function epicSummaries(records) {
+  const out = {};
+  for (const r of records || []) if (r && r.key && (r.feature || /epic/i.test(String(r.type || '')))) out[r.key] = r.summary ?? null;
+  return out;
+}
+
+/**
+ * [{person, day, key}] for focus / context-switching: keyed commits + status
+ * transitions of the assignee, commits of SUBSTANTIVE sub-tasks (credited to
+ * whoever did the work, keyed by the parent story) and PR review events
+ * (each non-author reviewer/commenter, keyed by the PR's first ticket key).
+ */
+function activityOf(records, scope, window, prs) {
   const out = [];
+  const inW = (t) => t != null && t >= window.since && t < window.until;
   for (const r of records) {
-    if (!r.assignee_id || r.subtask) continue;
+    if (r.subtask) {
+      if (!r.substantive_subtask) continue;
+      const who = r.credited_to || r.assignee_id;
+      if (!who) continue;
+      const person = scope.canonical(who);
+      for (const t of r.commit_ts || []) if (inW(toMs(t))) out.push({ person, day: toMs(t), key: r.parent_key || r.key });
+      continue;
+    }
+    if (!r.assignee_id) continue;
     const person = scope.canonical(r.assignee_id);
-    for (const t of r.commit_ts || []) if (t >= window.since && t < window.until) out.push({ person, day: t, key: r.key });
+    for (const t of r.commit_ts || []) if (inW(toMs(t))) out.push({ person, day: toMs(t), key: r.key });
     for (const iv of r.intervals || []) {
       const t = toMs(iv.from);
-      if (t != null && t >= window.since && t < window.until) out.push({ person, day: t, key: r.key });
+      if (inW(t)) out.push({ person, day: t, key: r.key });
+    }
+  }
+  for (const p of prs || []) {
+    if (!p) continue;
+    const key = (p.keys && p.keys[0]) || `PR#${p.number}`;
+    for (const rv of p.reviewers || []) {
+      const t = toMs(rv.reviewed_at);
+      const who = rv.id ?? rv.name;
+      if (!who || rv.name === p.author || !inW(t)) continue;
+      out.push({ person: scope.canonical(who), day: t, key, source: 'pr_review' });
     }
   }
   return out;
@@ -318,4 +430,4 @@ function bannerOf(list) {
   return (list || []).map((g) => ({ id: /^phase_.+_weak$/.test(g.code || '') ? g.code : `${g.code}:${g.metric}`, code: g.code, metric: g.metric, level: g.severity === 'danger' ? 'bad' : 'warn', msg: `${g.reason}${g.action ? ` ${g.action}` : ''}` }));
 }
 
-module.exports = { weekendOf, offDaySet, prsByKey, attachPhases, activityOfRaw, phaseGuardrails, phaseSum, flowRecord, computeMetrics, activityOf, bannerOf, toMs, round2 };
+module.exports = { doraConfig, epicSummaries, isStrongRework, weekendOf, offDaySet, prsByKey, attachPhases, activityOfRaw, phaseGuardrails, phaseSum, flowRecord, computeMetrics, activityOf, bannerOf, toMs, round2 };

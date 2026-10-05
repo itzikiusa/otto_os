@@ -8,12 +8,27 @@
 //            Which tags count and their kind come from gitscan's isDeployTag /
 //            tagKind — never a local regex — so the scan and DORA agree.
 //   config:  {timezone, weekend, failure_window_days, min_n, window:{start,end},
-//            prs, deploy_tag_patterns, branch, repos, tagContains(tag, sha)}
+//            prs, deploy_tag_patterns, hotfix_tag_patterns, tagKind(name, cfg),
+//            branch, repos, tagContains(tag, sha), capacity_days}
+//
+// Every share / rate below is a 0..1 FRACTION (never a percentage).
 //
 // Definitions (documented so a number is never misread):
-//   deploy_frequency    distinct (repo, kind, LOCAL day) deploy events in the
-//                       window, per week. Several regular tags on one day in one
-//                       repo = 1 deploy; a same-day hotfix is its OWN deploy.
+//   deploy_frequency    distinct deploy events in the window, per week. An
+//                       event = one (repo, tagged sha): several tags on the same
+//                       commit in one repo = 1 deploy; different commits are
+//                       different deploys even on the same day. A tag with no
+//                       repo (or no sha) is its own event per tag name.
+//                       Kind 'hotfix' when any of its tag names contains one of
+//                       hotfix_tag_patterns (default hf / hotfix), or per the
+//                       caller's tagKind(name, cfg) callback.
+//   deploys_per_capacity_week  deploys / (team capacity_days / 5) — present
+//                       only when the caller passes capacity_days (vacations
+//                       already removed), so frequency is read against people.
+//   hotfix_rate         hotfix deploys / all deploys in the window.
+//   batch_size          tickets shipped per deploy event (P50 / P85).
+//   time_to_first_commit business days ticket start (first_active_at) → first
+//                       commit, P50 over tickets deployed in the window.
 //   lead_time           PRIMARY: per merged PR, business days (team timezone)
 //                       first commit → first deploy tag containing the merge
 //                       sha (else the linked ticket's deployed_at). Secondary
@@ -29,6 +44,11 @@
 //   mttr                per incident: detection (bug created) — else the deploy
 //                       itself, flagged from_deploy — → restore (the bug's own
 //                       deploy in the same repo, else the last chained hotfix).
+//                       Split into time_to_detect (deploy → detection, only for
+//                       detected incidents) and time_to_restore (detection →
+//                       restore); from_deploy_share = from_deploy / restored.
+//   open_incidents      window incidents with no restore yet: {n, oldest_age}
+//                       (oldest_age in calendar days, deploy → window end).
 // Every metric is {value:null} (never 0 / NaN) when its denominator is empty,
 // and gets a canonical guardrail (id = tile key) when its sample is weak.
 'use strict';
@@ -39,6 +59,33 @@ const G = require('./gitscan.js');
 
 const DAY = 86400000;
 const HOUR = 3600000;
+const DEFAULT_HOTFIX_PATTERNS = ['hf', 'hotfix'];
+
+/** Hotfix tag patterns from config (case-insensitive substrings). */
+function hotfixPatterns(cfg = {}) {
+  const p = Array.isArray(cfg.hotfix_tag_patterns) ? cfg.hotfix_tag_patterns.map((x) => String(x || '').trim().toLowerCase()).filter(Boolean) : [];
+  return p.length ? p : DEFAULT_HOTFIX_PATTERNS;
+}
+
+/** 'hotfix' | 'regular' for a deploy tag: caller's tagKind(name, cfg) wins,
+ *  else a case-insensitive substring match on hotfix_tag_patterns. */
+function deployKind(name, cfg = {}, patterns = hotfixPatterns(cfg)) {
+  if (typeof cfg.tagKind === 'function') return cfg.tagKind(name, cfg) === 'hotfix' ? 'hotfix' : 'regular';
+  const n = String(name || '').toLowerCase();
+  return patterns.some((p) => n.includes(p)) ? 'hotfix' : 'regular';
+}
+
+/** Index of the first element of sorted `arr` with ts >= t (arr.length when none). */
+function lowerBound(arr, t) {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].ts < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
 
 // DORA (State of DevOps) performance bands. Lower bound inclusive for
 // frequency; upper bound inclusive for the "smaller is better" metrics.
@@ -155,20 +202,22 @@ function doraMetrics(records, tags, config) {
     end: Number.isFinite(win.end) ? win.end : allTs.length ? allTs[allTs.length - 1] + 1 : 0,
   };
 
-  // Dedupe ONLY same repo + kind + local day: a hotfix the same day as a
-  // regular deploy is a distinct (restoring) deploy, never swallowed.
+  // Dedupe by repo + tagged sha: several tags on one commit = one deploy.
+  // A null repo or a missing sha can't be matched safely → its own event per
+  // tag name. Kind upgrades to hotfix when any tag of the event is one.
+  const hfPatterns = hotfixPatterns(cfg);
   const events = new Map();
   const eventOfTag = new Map(); // `${repo}|${name}` -> event
   for (const t of deployTagsAll) {
     const repo = t.repo || null;
-    const kind = G.tagKind(t.name) === 'hotfix' ? 'hotfix' : 'regular';
+    const kind = deployKind(t.name, cfg, hfPatterns);
     const day = tz.dayKey(t.ts, zone);
-    const id = `${repo || ''}|${kind}|${day}`;
+    const id = repo && t.sha ? `${repo}|sha:${t.sha}` : `${repo || ''}|name:${t.name}`;
     let e = events.get(id);
     if (!e) {
       e = { id, repo, kind, day, ts: t.ts, tags: [], shas: [], contains: [] };
       events.set(id, e);
-    }
+    } else if (kind === 'hotfix') e.kind = 'hotfix';
     e.tags.push(t.name);
     if (t.sha) e.shas.push(t.sha);
     if (t.contains) e.contains.push(t.contains);
@@ -207,6 +256,8 @@ function doraMetrics(records, tags, config) {
     const perWeekByRepo = {};
     for (const [r, n] of Object.entries(byRepo)) perWeekByRepo[r] = weeks > 0 ? round2(n / weeks) : null;
     deploy_frequency = { value: perWeek, per_week: perWeek, total, by_repo: byRepo, per_week_by_repo: perWeekByRepo, by_kind: byKind, band: bandFor('deploy_frequency', perWeek), status: 'ok' };
+    const capWeeks = Number(cfg.capacity_days) > 0 ? Number(cfg.capacity_days) / 5 : null;
+    deploy_frequency.per_capacity_week = capWeeks ? round2(total / capWeeks) : null;
     if (weeks <= 0) guardrails.push({ id: 'dora_deploy_frequency', metric: 'dora_deploy_frequency', code: 'empty_window', severity: 'weak', n: total, min_n: minN, reason: 'window has no length' });
     else weak('dora_deploy_frequency', total, 'deploys in window');
   }
@@ -241,21 +292,49 @@ function doraMetrics(records, tags, config) {
   const ticket_lead_time = { ...dist(ticketLeads), basis: 'ticket' };
 
   const byKey = new Map(records.filter((r) => r.key).map((r) => [r.key, r]));
-  const tagHasSha = (tag, sha) => {
-    if (typeof cfg.tagContains === 'function') return Boolean(cfg.tagContains(tag, sha));
-    return tag.sha === sha || has(tag.contains, sha);
+  // sha → earliest deploy tag containing it, per repo and repo-agnostic
+  // (built once from tag.sha + tag.contains, tags already ts-sorted → first
+  // write wins). O(1) per PR; a caller tagContains() callback is the
+  // fallback, binary-searched to the first tag at/after the merge.
+  const shaFirst = new Map(); // `${repo}|${sha}` and `*|${sha}` -> tag
+  const tagsByRepo = new Map(); // repo -> ts-sorted tags
+  for (const t of deployTagsAll) {
+    const repo = t.repo || '';
+    if (!tagsByRepo.has(repo)) tagsByRepo.set(repo, []);
+    tagsByRepo.get(repo).push(t);
+    const shas = [t.sha, ...(Array.isArray(t.contains) ? t.contains : t.contains instanceof Set ? [...t.contains] : [])];
+    for (const s of shas) {
+      if (!s) continue;
+      if (!shaFirst.has(`${repo}|${s}`)) shaFirst.set(`${repo}|${s}`, t);
+      if (!shaFirst.has(`*|${s}`)) shaFirst.set(`*|${s}`, t);
+    }
+  }
+  const findDeployTag = (repo, sha, merged) => {
+    const hit = shaFirst.get(repo ? `${repo}|${sha}` : `*|${sha}`) || (repo ? shaFirst.get(`|${sha}`) : null);
+    if (hit && hit.ts >= merged) return hit;
+    if (typeof cfg.tagContains !== 'function') return null;
+    const pools = repo ? [tagsByRepo.get(repo) || [], tagsByRepo.get('') || []] : [deployTagsAll];
+    let best = null;
+    for (const pool of pools) {
+      for (let i = lowerBound(pool, merged); i < pool.length; i++) {
+        if (best && pool[i].ts >= best.ts) break;
+        if (cfg.tagContains(pool[i], sha)) { best = pool[i]; break; }
+      }
+    }
+    return best;
   };
   const prLeads = [];
-  const prSources = { tag_contains_merge: 0, ticket_deployed_at: 0 };
+  const prSources = { tag_contains_merge: 0, ticket_deployed_at: 0, considered: 0, tag_contains_merge_coverage: null };
   for (const p of Array.isArray(cfg.prs) ? cfg.prs : []) {
     const merged = toMs(p && p.merged_at);
     if (!Number.isFinite(merged)) continue;
     const start = toMs(p.first_commit_at) ?? toMs(p.opened_at);
     if (!Number.isFinite(start)) continue;
+    prSources.considered++;
     let dep = null;
     const sha = p.merge_commit || p.head_sha;
     if (sha) {
-      const t = deployTagsAll.find((x) => x.ts >= merged && (!p.repo || !x.repo || x.repo === p.repo) && tagHasSha(x, sha));
+      const t = findDeployTag(p.repo || null, sha, merged);
       if (t) { dep = t.ts; prSources.tag_contains_merge++; }
     }
     if (dep === null) {
@@ -266,6 +345,7 @@ function doraMetrics(records, tags, config) {
     if (dep === null || !inWindow(dep, w) || start > dep) continue;
     prLeads.push(bdays(start, dep));
   }
+  prSources.tag_contains_merge_coverage = prSources.considered ? round2(prSources.tag_contains_merge / prSources.considered) : null;
   const lead_time = prLeads.length
     ? { ...dist(prLeads), basis: 'pr', sources: prSources }
     : { ...ticket_lead_time, basis: 'ticket', fallback_reason: 'no_merged_prs_with_deploy' };
@@ -345,6 +425,9 @@ function doraMetrics(records, tags, config) {
   const restores = [];
   const mttrEvidence = [];
   const failures = [];
+  const detects = [];
+  const restoresFromDetect = [];
+  const openInc = [];
   for (const inc of winIncidents) {
     inc.signals.sort((a, b) => a.at - b.at);
     const kinds = new Set(inc.signals.map((s) => s.kind));
@@ -371,8 +454,11 @@ function doraMetrics(records, tags, config) {
       if (last.repo === d.repo && last.ts > from) { to = last.ts; restoredBy = last.tags[0]; }
     }
     const hours = to !== null ? round2((to - from) / HOUR) : null;
+    if (bugSig) detects.push(round2((bugSig.at - d.ts) / HOUR));
+    if (hours === null) openInc.push(d);
     if (hours !== null) {
       restores.push(hours);
+      if (bugSig) restoresFromDetect.push(hours);
       mttrEvidence.push({ deploy: d.tags[0], repo: d.repo, from, from_source: fromSource, from_deploy: fromSource === 'from_deploy', restored_at: to, restored_by: restoredBy, hours, signal: (bugSig || inc.signals[0]).ref });
     }
     const primary = bugSig || inc.signals[0];
@@ -395,7 +481,37 @@ function doraMetrics(records, tags, config) {
     unit: 'hours', n: restores.length, incidents: failed,
     from_deploy: mttrEvidence.filter((e) => e.from_deploy).length,
     evidence: mttrEvidence, band: bandFor('mttr_hours', mttrP50),
+    from_deploy_share: restores.length ? round2(mttrEvidence.filter((e) => e.from_deploy).length / restores.length) : null,
+    // Detection vs repair: deploy → bug created, and bug created → restore
+    // (detected incidents only; from_deploy incidents have no detection time).
+    time_to_detect: { p50: percentile(detects, 0.5), p85: percentile(detects, 0.85), n: detects.length, unit: 'hours' },
+    time_to_restore: { p50: percentile(restoresFromDetect, 0.5), p85: percentile(restoresFromDetect, 0.85), n: restoresFromDetect.length, unit: 'hours' },
   };
+  const open_incidents = {
+    n: openInc.length,
+    oldest_age: openInc.length ? round2((w.end - Math.min(...openInc.map((x) => x.ts))) / DAY) : null,
+    unit: 'days',
+    deploys: openInc.map((x) => x.tags[0]),
+  };
+
+  // Hotfix rate, batch size, time to first commit.
+  const hotfix_rate = { value: total ? round2(byKind.hotfix / total) : null, hotfix: byKind.hotfix, total };
+  const shippedCount = new Map();
+  for (const r of records) {
+    if (!leadEligible(r)) continue;
+    const e = recEvent.get(r);
+    if (e && windowIds.has(e.id)) shippedCount.set(e.id, (shippedCount.get(e.id) || 0) + 1);
+  }
+  const batches = windowDeploys.map((d) => shippedCount.get(d.id) || 0).filter((n) => n > 0);
+  const batch_size = { p50: percentile(batches, 0.5), p85: percentile(batches, 0.85), n: batches.length, unit: 'tickets', deploys_without_tickets: total - batches.length };
+  const ttfc = [];
+  for (const r of records) {
+    const st = toMs(r.first_active_at ?? r.started_at);
+    const fc = toMs(r.first_commit_at);
+    if (!leadEligible(r) || !inWindow(toMs(r.deployed_at), w) || !Number.isFinite(st) || !Number.isFinite(fc) || fc < st) continue;
+    ttfc.push(bdays(st, fc));
+  }
+  const time_to_first_commit = { p50: percentile(ttfc, 0.5), p85: percentile(ttfc, 0.85), n: ttfc.length, unit: 'business_days' };
   if (total > 0) weak('dora_mttr', restores.length, 'restored incidents');
 
   // Bugs created in the window that point at nothing: CFR can't see them.
@@ -404,7 +520,11 @@ function doraMetrics(records, tags, config) {
     guardrails.push({ id: 'unlinked_bugs_in_window', metric: 'dora_cfr', code: 'unlinked_bugs', severity: 'weak', n: unlinked.length, keys: unlinked.slice(0, 50), reason: `${unlinked.length} bug(s) in the period are not linked to the ticket that caused them — the change failure rate may be understated.` });
   }
 
-  return { deploy_frequency, lead_time, ticket_lead_time, change_failure_rate, mttr, guardrails, bands: DORA_BANDS, window: w, timezone: zone };
+  return {
+    deploy_frequency, lead_time, ticket_lead_time, change_failure_rate, mttr, open_incidents, hotfix_rate, batch_size, time_to_first_commit,
+    deploys_per_capacity_week: deploy_frequency.per_capacity_week ?? null,
+    guardrails, bands: DORA_BANDS, window: w, timezone: zone, weekend, failure_window_days: failWinMs / DAY, min_n: minN,
+  };
 }
 
-module.exports = { doraMetrics, DORA_BANDS, bandFor, percentile };
+module.exports = { doraMetrics, DORA_BANDS, bandFor, percentile, deployKind, hotfixPatterns, lowerBound, DEFAULT_HOTFIX_PATTERNS };

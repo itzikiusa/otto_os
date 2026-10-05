@@ -8,14 +8,21 @@
 // whose `updated_at` changed. The list walk stops once a whole page is older
 // than the cursor (the daemon lists most-recently-updated first); `cursor.page`
 // records the last finished page so an interrupted walk resumes there.
+// A PR whose commits or diff sub-call failed is stored with `partial` set and
+// refetched on the next run (even when its updated_at is unchanged); partial
+// PRs count toward the PR-data guardrail.
+//
+// Every `share` produced here is a 0..1 FRACTION (never a percentage).
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const { writeJsonAtomicAsync } = require('./store.js');
 
 const SCHEMA = 1;
 const KEY_RE = /[A-Z][A-Z0-9]+-\d+/g;
 const PER_PAGE = 50;
+const MAX_PARTIAL_REFETCH = 25; // per sync, bounded so a broken diff route can't stall a run
 const DAY_MS = 86400000;
 
 // ---------- persistence ----------
@@ -49,12 +56,9 @@ function loadCache(dataDir, repoId, onWarn) {
   }
 }
 
-function saveCache(dataDir, repoId, cache) {
-  const file = cacheFile(dataDir, repoId);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, JSON.stringify({ schema: SCHEMA, cursor: cache.cursor, prs: cache.prs, meta: cache.meta || {} }));
-  fs.renameSync(tmp, file);
+/** Async atomic write (unique tmp per call — concurrent syncs never share one). */
+async function saveCache(dataDir, repoId, cache) {
+  await writeJsonAtomicAsync(cacheFile(dataDir, repoId), { schema: SCHEMA, cursor: cache.cursor, prs: cache.prs, meta: cache.meta || {} });
 }
 
 // ---------- normalization ----------
@@ -174,7 +178,10 @@ function businessDaysBetween(a, b) {
 
 const r2 = (x) => Math.round(x * 100) / 100;
 
+/** Lines changed (additions + deletions) → bucket; null/unknown size → null. */
 function sizeBucket(n) {
+  if (n == null || !Number.isFinite(Number(n))) return null;
+  n = Number(n);
   if (n < 50) return '<50';
   if (n < 200) return '<200';
   if (n < 400) return '<400';
@@ -186,6 +193,8 @@ function sizeBucket(n) {
  * review  = first review → last approval (merge when never approved)
  * merge_lag = last approval → merge
  * Each is null when either end is unknown.
+ * review_depth = reviewer comments per 100 changed lines; null when the size
+ * is unknown or 0 (no lines → no meaningful depth).
  */
 function derivePrMetrics(pr, businessDaysFn = businessDaysBetween) {
   const span = (a, b) => (a && b ? r2(businessDaysFn(a, b)) : null);
@@ -210,9 +219,10 @@ function derivePrMetrics(pr, businessDaysFn = businessDaysBetween) {
     review_days: span(firstReview, reviewEnd),
     merge_lag_days: span(pr.last_approval_at, pr.merged_at),
     size,
-    size_bucket: size == null ? null : sizeBucket(size),
+    size_bucket: sizeBucket(size),
     review_depth: size ? r2((reviewerComments / size) * 100) : null,
     unreviewed: !pr.first_review_at && !pr.first_approval_at,
+    partial: Boolean(pr.partial),
   };
 }
 
@@ -254,6 +264,9 @@ const FLOW_KEYS = ['pickup_days', 'review_days', 'merge_lag_days', 'coding_days'
  * `opts.capacityDays` ({person: available working days, vacations already
  * removed}) adds per-capacity-day rates — never raw counts as productivity.
  * Everything is `{value:null, n:0}` when there is nothing to measure.
+ * Shares (`unreviewed.share`, …) are 0..1 fractions of merged PRs.
+ * `partial` counts PRs whose commits/diff could not be fetched (their size,
+ * depth and rounds are incomplete).
  */
 function prFlowSummary(prs, businessDaysFn = businessDaysBetween, opts = {}) {
   if (businessDaysFn && typeof businessDaysFn === 'object') { opts = businessDaysFn; businessDaysFn = businessDaysBetween; }
@@ -272,6 +285,7 @@ function prFlowSummary(prs, businessDaysFn = businessDaysBetween, opts = {}) {
   out.unreviewed = share((m) => m.unreviewed);
   out.merged_without_approval = share((m) => m.merged_without_approval);
   out.reworked_after_review = share((m) => m.post_review_commits > 0);
+  out.partial = { count: all.filter((p) => p.partial).length, n: all.length, share: all.length ? r2(all.filter((p) => p.partial).length / all.length) : null };
   out.counts = {
     total: all.length,
     merged: merged.length,
@@ -283,6 +297,11 @@ function prFlowSummary(prs, businessDaysFn = businessDaysBetween, opts = {}) {
   return out;
 }
 
+/**
+ * Per-person PR activity: authored / merged / reviews given / comments given /
+ * approvals given. `capacityDays` ({person: available days} or a capacity
+ * people map {person: {capacity_days}}) adds per-capacity-day rates.
+ */
 function prByPerson(prs, capacityDays) {
   const people = {};
   const get = (n) => (people[n] ||= { authored: 0, merged: 0, reviewed_given: 0, comments_given: 0, approvals_given: 0 });
@@ -307,7 +326,8 @@ function prByPerson(prs, capacityDays) {
   }
   if (capacityDays) {
     for (const [name, p] of Object.entries(people)) {
-      const cap = Number(capacityDays[name]);
+      const c = capacityDays[name];
+      const cap = Number(c && typeof c === 'object' ? c.capacity_days : c);
       p.capacity_days = Number.isFinite(cap) ? cap : null;
       p.per_capacity_day = cap > 0
         ? { authored: r2(p.authored / cap), reviewed_given: r2(p.reviewed_given / cap), comments_given: r2(p.comments_given / cap) }
@@ -317,7 +337,7 @@ function prByPerson(prs, capacityDays) {
   return people;
 }
 
-/** How evenly review work is spread: per-reviewer share + top-reviewer share. */
+/** How evenly review work is spread: per-reviewer share + top-reviewer share (0..1). */
 function reviewLoad(byPerson) {
   const rows = Object.entries(byPerson).filter(([, p]) => p.reviewed_given > 0)
     .map(([name, p]) => ({ name, reviews: p.reviewed_given })).sort((a, b) => b.reviews - a.reviews || a.name.localeCompare(b.name));
@@ -370,19 +390,21 @@ function prIngestStatus({ dataDir, configured, repoIds, runtime = {}, unregister
   const pending = [];
   const errors = [];
   let anySynced = false;
+  let partialTotal = 0;
   for (const id of ids) {
     const c = dataDir ? loadCache(dataDir, id) : { cursor: {}, prs: {}, meta: {} };
     const n = Object.keys(c.prs).length;
     fetched += n;
     cursorByRepo[id] = { updated_on_max: c.cursor.updated_on_max || null, synced_at: c.cursor.synced_at || null,
-      in_progress: !!c.cursor.in_progress, prs: n, recovered: !!c.recovered };
+      in_progress: !!c.cursor.in_progress, prs: n, recovered: !!c.recovered, partial: Object.values(c.prs).filter((p) => p && p.partial).length };
+    partialTotal += cursorByRepo[id].partial;
     if (c.cursor.synced_at) anySynced = true;
     if (!c.cursor.synced_at || c.cursor.in_progress) pending.push(id);
     const rt = runtime.repos && runtime.repos[id];
     const err = (rt && rt.ok === false && rt.error) || (c.meta.last_error && (!c.cursor.synced_at || c.meta.last_error_at >= c.cursor.synced_at) ? c.meta.last_error : null);
     if (err) errors.push({ repo: id, error: err });
   }
-  const base = { cursor_by_repo: cursorByRepo, fetched, pending, unregistered };
+  const base = { cursor_by_repo: cursorByRepo, fetched, pending, unregistered, partial: partialTotal };
   if (!configured) {
     return { state: 'not_configured', reason: runtime.error || 'Otto daemon API token not available to the plugin — PR data cannot be fetched.', last_error: null, ...base };
   }
@@ -453,10 +475,13 @@ function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress,
   async function fetchDetail(repoId, n, summary) {
     const enc = encodeURIComponent(repoId);
     const detail = await getJson(`/repos/${enc}/prs/${n}`);
-    const commits = await getJson(`/repos/${enc}/prs/${n}/commits`).catch(() => []);
+    const partial = {};
+    const commits = await getJson(`/repos/${enc}/prs/${n}/commits`).catch(() => { partial.commits = true; return []; });
     let diff = null;
-    if (withDiffstat) diff = await getJson(`/repos/${enc}/prs/${n}/diff?summary=true`).catch(() => null);
-    return normalizePr(summary, detail, Array.isArray(commits) ? commits : commits.items || [], diff);
+    if (withDiffstat) diff = await getJson(`/repos/${enc}/prs/${n}/diff?summary=true`).catch(() => { partial.diff = true; return null; });
+    const pr = normalizePr(summary, detail, Array.isArray(commits) ? commits : commits.items || [], diff);
+    if (Object.keys(partial).length) pr.partial = partial;
+    return pr;
   }
 
   /**
@@ -474,7 +499,7 @@ function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress,
       cache.cursor = startCursor;
       cache.meta = { ...(cache.meta || {}), last_error: String(e.message || e).slice(0, 300), last_error_status: e.status || null,
         last_error_at: new Date().toISOString() };
-      saveCache(dataDir, repoId, cache);
+      await saveCache(dataDir, repoId, cache);
       throw e;
     }
   }
@@ -499,23 +524,32 @@ function createPrClient({ baseUrl, token, fetchImpl, pacer, dataDir, onProgress,
         if (stopAt && upd && upd <= stopAt) continue; // unchanged since the cursor / before `since`
         anyNewer = true;
         const prev = cache.prs[it.number];
-        if (prev && prev.updated_at === upd) continue;
+        if (prev && prev.updated_at === upd && !prev.partial) continue;
         cache.prs[it.number] = await fetchDetail(repoId, it.number, it);
         fetched++;
         progress({ repo: repoId, page, fetched, next_call_eta_ms: pacer.nextCallEtaMs(), backoff_ms: pacer.stats.last_backoff_ms });
       }
       // Page progress is persisted only after the walk proves it can finish a
       // page; on failure syncRepo() restores the starting cursor.
-      saveCache(dataDir, repoId, { ...cache, cursor: { ...cache.cursor, page, in_progress: true } });
+      await saveCache(dataDir, repoId, { ...cache, cursor: { ...cache.cursor, page, in_progress: true } });
       progress({ repo: repoId, page, fetched, next_call_eta_ms: pacer.nextCallEtaMs(), backoff_ms: pacer.stats.last_backoff_ms });
       const hasMore = Array.isArray(resp) ? items.length === PER_PAGE : !!resp.has_more;
       if (!hasMore || !items.length || (stopAt && !anyNewer)) break;
       page++;
     }
+    // Partial PRs older than the cursor are never listed again: refetch them
+    // here (bounded). A refetch that is still partial stays flagged.
+    let refetched = 0;
+    for (const [num, pr] of Object.entries(cache.prs)) {
+      if (!pr || !pr.partial || refetched >= MAX_PARTIAL_REFETCH) continue;
+      cache.prs[num] = await fetchDetail(repoId, pr.number ?? num, pr);
+      refetched++;
+    }
     cache.cursor = { updated_on_max: maxSeen, page: null, in_progress: false, synced_at: new Date().toISOString() };
-    cache.meta = { ...(cache.meta || {}), last_error: null, last_ok_at: cache.cursor.synced_at };
-    saveCache(dataDir, repoId, cache);
-    return { repo: repoId, fetched, listed, pages, total: Object.keys(cache.prs).length, cursor: cache.cursor };
+    const partial = Object.values(cache.prs).filter((p) => p && p.partial).length;
+    cache.meta = { ...(cache.meta || {}), last_error: null, last_ok_at: cache.cursor.synced_at, partial };
+    await saveCache(dataDir, repoId, cache);
+    return { repo: repoId, fetched, listed, pages, refetched, partial, total: Object.keys(cache.prs).length, cursor: cache.cursor };
   }
 
   /** Freshness per cached repo (for /prs/status). */
@@ -540,6 +574,10 @@ module.exports = {
   normalizePr,
   derivePrMetrics,
   prFlowSummary,
+  prByPerson,
+  reviewLoad,
+  sizeBucket,
+  saveCache,
   prSummaryByKey,
   prIngestStatus,
   normalizeState,
@@ -549,4 +587,6 @@ module.exports = {
   loadCache,
   cacheFile,
   DaemonError,
+  // Metric functions whose output computeMetrics must expose (contract-tested).
+  METRIC_FUNCTIONS: ['prFlowSummary', 'prByPerson', 'reviewLoad'],
 };

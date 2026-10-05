@@ -68,8 +68,9 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const C = require('../report/charts.js');
+const THEME = require('./theme.js');
+const SAN = require('./sanitize.js');
 
 const TEMPLATE_VERSION = '2';
 const SECTION_KEYS = [
@@ -93,31 +94,17 @@ const TITLE_FIELDS = new Set(['title', 'summary', 'parent_title', 'epic_name', '
 const { NOT_TRACKED, esc, isNum, fmt } = C;
 
 // ------------------------------------------------------------ palette
-// Single source of every colour in the report, mirroring Otto's tokens
-// (ui/src/lib/tokens.css, native theme). report.css only references var(--…);
-// paletteCss() emits light, dark (prefers-color-scheme unless the reader forced
-// light, plus an explicit [data-theme='dark']) and print.
-const PALETTE = Object.freeze({
-  light: Object.freeze({
-    bg: '#f5f5f7', surface: '#ffffff', 'surface-2': '#f0f0f4', border: 'rgba(0, 0, 0, 0.1)',
-    text: '#1d1d1f', 'text-dim': '#636368', accent: '#0a84ff', 'accent-solid': '#0a6fd6', 'on-accent': '#ffffff', 'on-cat': '#ffffff',
-    danger: '#b3261e', warning: '#8a5100', success: '#17702f', info: '#0858b8',
-    'cat-1': '#1f6fd1', 'cat-2': '#b26a00', 'cat-3': '#178a4c', 'cat-4': '#7a4fd6', 'cat-5': '#c2417a', 'cat-6': '#0f8a8a',
-    'shadow-card': '0 1px 2px rgba(0, 0, 0, 0.05), 0 2px 8px rgba(0, 0, 0, 0.04)',
-  }),
-  dark: Object.freeze({
-    bg: '#1e1e23', surface: '#2a2a30', 'surface-2': '#323238', border: 'rgba(255, 255, 255, 0.1)',
-    text: '#f2f2f5', 'text-dim': '#acacb3', accent: '#0a84ff', 'accent-solid': '#0a84ff', 'on-accent': '#ffffff', 'on-cat': '#16161c',
-    danger: '#ff8a80', warning: '#e3b341', success: '#56d06c', info: '#6cb2ff',
-    'cat-1': '#6cb2ff', 'cat-2': '#e3b341', 'cat-3': '#3fcf8e', 'cat-4': '#b18cff', 'cat-5': '#ff8fb1', 'cat-6': '#5ad1d1',
-    'shadow-card': '0 1px 2px rgba(0, 0, 0, 0.4)',
-  }),
-  print: Object.freeze({ bg: '#ffffff', surface: '#ffffff', 'surface-2': '#f4f4f6', border: '#cccccc', text: '#000000', 'text-dim': '#444444' }),
-});
-function paletteCss(p = PALETTE) {
+// Every colour in the report comes from lib/theme.js, which scripts/gen-theme.js
+// generates from Otto's ui/src/lib/tokens.css (color-mix resolved), so the
+// report can never drift from the app. report.css only references var(--…)
+// (plus a zero-specificity tp:fallback block). paletteCss() emits the scale,
+// light, dark (prefers-color-scheme unless the reader forced light, plus an
+// explicit [data-theme='dark']) and print.
+const PALETTE = Object.freeze({ light: THEME.light, dark: THEME.dark, print: THEME.print });
+function paletteCss(p = PALETTE, scale = THEME.scale) {
   const decl = (o) => Object.entries(o).map(([k, x]) => `--${k}: ${x};`).join(' ');
   return [
-    `:root { color-scheme: light; ${decl(p.light)} }`,
+    `:root { color-scheme: light; ${decl(scale)} ${decl(p.light)} }`,
     `@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) { color-scheme: dark; ${decl(p.dark)} } }`,
     `:root[data-theme='dark'] { color-scheme: dark; ${decl(p.dark)} }`,
     `@media print { :root, :root[data-theme='dark'] { color-scheme: light; ${decl(p.print)} } }`,
@@ -137,7 +124,7 @@ const iso = (v) => {
 };
 const day = (v) => (iso(v) || '').slice(0, 10) || null;
 // Jira links only over https, to a plain host[/path] — anything else drops links.
-const cleanBase = (u) => (typeof u === 'string' && /^https:\/\/[A-Za-z0-9.-]+(:\d+)?(\/[A-Za-z0-9._~/-]*)?$/.test(u.trim()) ? u.trim().replace(/\/+$/, '') : null);
+const cleanBase = (u) => (typeof u === 'string' && SAN.jiraOrigin(u.trim()) && /^https:\/\/[A-Za-z0-9.-]+(:\d+)?(\/[A-Za-z0-9._~/-]*)?$/.test(u.trim()) ? u.trim().replace(/\/+$/, '') : null);
 const median = (xs) => {
   const v = xs.filter(isNum).sort((a, b) => a - b);
   if (!v.length) return null;
@@ -290,7 +277,9 @@ function normPhases(raw) {
     const o = obj(t);
     return { key: str(o.key), title: str(o.title), person: str(o.person), type: str(o.type), estimate_days: num(o.estimate_days), ...phaseVals(o) };
   });
-  const by_period = arr(r.by_period).map((p) => ({ label: str(obj(p).label) || '', ...phaseVals(obj(p)) })).slice(-7);
+  // by_period rows are flat {label, design, dev, …} or reportfeed's {label, rows:[{phase, median_days}]}.
+  const periodVals = (o) => (Array.isArray(o.rows) ? phaseVals(Object.fromEntries(o.rows.map((x) => [obj(x).phase, obj(x).median_days]))) : phaseVals(o));
+  const by_period = arr(r.by_period).map((p, i) => ({ label: str(obj(p).label) || `Period ${i + 1}`, ...periodVals(obj(p)) })).slice(-7);
   return { rows, splits, tickets, by_period };
 }
 
@@ -309,6 +298,16 @@ function normDora(raw) {
     mttr_hours_median: num(d.mttr_hours_median),
     weekly: arr(d.weekly).map((w) => ({ week: str(obj(w).week), deployments: num(obj(w).deployments) })),
     failures,
+    // Deployment tags in the window (gitscan deploy_tags): newest first.
+    deploy_tags: arr(d.deploy_tags ?? d.tags)
+      .map((t) => {
+        const o = obj(t);
+        const name = str(o.name) || '';
+        const kind = o.hotfix === true || o.kind === 'hotfix' || /hotfix|(^|[^a-z])hf([^a-z]|$)/i.test(name) ? 'hotfix' : 'deploy';
+        return { name, repo: str(o.repo), at: iso(o.ts ?? o.at ?? o.day), kind, keys: arr(o.keys).map(str).filter(Boolean) };
+      })
+      .filter((t) => t.name)
+      .sort((a, b) => String(b.at || '').localeCompare(String(a.at || ''))),
   };
 }
 
@@ -324,7 +323,15 @@ function normPrFlow(raw) {
     comments_per_pr: num(p.comments_per_pr),
     reviews_per_pr: num(p.reviews_per_pr),
     unreviewed_share: num(p.unreviewed_share),
-    items: arr(p.items).map((x) => ({ key: str(obj(x).key), person: str(obj(x).person), pickup_hours: num(obj(x).pickup_hours), review_hours: num(obj(x).review_hours), size_lines: num(obj(x).size_lines) })),
+    items: arr(p.items).map((x) => {
+      const o = obj(x);
+      return { key: str(o.key), pr: str(o.pr ?? o.id), repo: str(o.repo), title: str(o.title), person: str(o.person), pickup_hours: num(o.pickup_hours), review_hours: num(o.review_hours), merge_hours: num(o.merge_hours), size_lines: num(o.size_lines ?? o.size), comments: num(o.comments) };
+    }),
+    // Explicit slow-PR list wins; otherwise renderPrFlow derives it from items.
+    slow: p.slow || p.slow_prs ? arr(p.slow ?? p.slow_prs).map((x) => {
+      const o = obj(x);
+      return { key: str(o.key), pr: str(o.pr ?? o.id), repo: str(o.repo), title: str(o.title), person: str(o.person), pickup_hours: num(o.pickup_hours), review_hours: num(o.review_hours), merge_hours: num(o.merge_hours), size_lines: num(o.size_lines ?? o.size), comments: num(o.comments) };
+    }) : null,
     by_person: arr(p.by_person).map((x) => ({ person: str(obj(x).person), prs: num(obj(x).prs), reviews_given: num(obj(x).reviews_given), pickup_hours_median: num(obj(x).pickup_hours_median), size_lines_median: num(obj(x).size_lines_median) })),
     coverage_note: str(p.coverage_note),
   };
@@ -454,6 +461,29 @@ function normOutliers(raw, phases, rework) {
   return { dev, rework: rw, estimate: est, jira_linked: jira };
 }
 
+// What improved / declined vs the comparison period. An explicit list wins;
+// otherwise every KPI with a prior value and a "better" direction is sorted
+// into one of the two lists by its relative change (flat within ±2% is left out).
+function normChanges(raw, kpis) {
+  const o = obj(raw);
+  const row = (x) => {
+    const r = obj(x);
+    return { label: str(r.label) || '', from: num(r.from ?? r.prior), to: num(r.to ?? r.value), unit: str(r.unit) || '', kind: str(r.kind) || 'count', note: str(r.note), anchor: str(r.id) };
+  };
+  if (raw && (o.improved || o.declined)) return { improved: arr(o.improved).map(row).filter((x) => x.label), declined: arr(o.declined).map(row).filter((x) => x.label), derived: false };
+  const improved = [];
+  const declined = [];
+  for (const k of kpis) {
+    if (!isNum(k.value) || !isNum(k.prior) || !k.better) continue;
+    const rel = k.prior === 0 ? (k.value === 0 ? 0 : 1) : (k.value - k.prior) / Math.abs(k.prior);
+    if (Math.abs(rel) < 0.02) continue;
+    const x = { label: k.label, from: k.prior, to: k.value, unit: k.unit, kind: k.kind, note: k.kind === 'ratio' && isNum(k.capacity_days) ? `over ${fmt(k.capacity_days)} capacity days` : null, anchor: k.id, rel };
+    ((rel > 0) === (k.better === 'up') ? improved : declined).push(x);
+  }
+  const byMag = (a, b) => Math.abs(b.rel) - Math.abs(a.rel);
+  return { improved: improved.sort(byMag), declined: declined.sort(byMag), derived: true };
+}
+
 function normGoals(raw) {
   return arr(raw)
     .map((g) => {
@@ -536,6 +566,7 @@ function buildReportModel(input = {}) {
       comments_endpoint: typeof metaIn.comments_endpoint === 'string' && /^\/[^\s"'<>]*$/.test(metaIn.comments_endpoint) ? metaIn.comments_endpoint : null,
     },
   };
+  model.changes = normChanges(src.changes || (src.improved || src.declined ? { improved: src.improved, declined: src.declined } : null), model.kpis);
   model.guardrails.push(...derivedGuardrails(model));
   model.next_steps.push(...derivedNextSteps(model).filter((s) => !model.next_steps.includes(s)));
   model.blind_spots.push(...derivedBlindSpots(model).filter((s) => !model.blind_spots.includes(s)));
@@ -547,6 +578,7 @@ function buildReportModel(input = {}) {
 function derivedGuardrails(model) {
   const out = [];
   const have = new Set(model.guardrails.map((g) => g.metric));
+  if (model.meta.masked) out.push({ level: 'info', metric: 'mask.free_text', message: MASK_FREE_TEXT });
   const add = (metric, level, message) => {
     if (!have.has(metric)) {
       have.add(metric);
@@ -592,6 +624,7 @@ function derivedNextSteps(model) {
   return s;
 }
 
+const MASK_FREE_TEXT = 'Masking replaces known names and ticket keys everywhere and drops ticket titles. Free text (notes, reasons, comments, the summary) is scrubbed for those names and keys only — any other identifying detail written in prose is not masked. Read it before sharing.';
 const STATIC_BLIND_SPOTS = [
   'Only work that leaves a trace in Jira or git is visible. Meetings, support, mentoring, interviews and on-call are not measured.',
   'Estimates are AI-generated and person-agnostic; they measure scope, not effort, and drift when the estimate ruler changes.',
@@ -604,6 +637,7 @@ function derivedBlindSpots(model) {
   if (model.pr_flow.prs == null) s.push('Pull-request data is missing, so review speed and depth cannot be judged.');
   if (model.dora.deployments == null || model.dora.deployments === 0) s.push('No deployment tags were found, so delivery-to-production speed and stability cannot be judged.');
   if (!isNum(model.estimate_basis.est_inflation)) s.push('Estimate inflation was not measured, so a change in "vs estimate" may be the estimates moving rather than the work.');
+  if (model.meta.masked) s.push('Free text is not masked beyond known names and ticket keys — see the note at the top.');
   if (model.meta.ruler_version) s.push(`Estimates in this report use ruler ${model.meta.ruler_version}; reports on a different ruler are not directly comparable.`);
   return s;
 }
@@ -636,18 +670,35 @@ function makeRender(model, comments) {
   };
   const counts = new Map();
   for (const c of comments) counts.set(c.anchor, (counts.get(c.anchor) || 0) + 1);
-  return { tk, text, counts, kind: model.meta.report_kind };
+  const R = { tk, text, counts, kind: model.meta.report_kind };
+  // A ticket row that can be commented on (anchor "t:<key>").
+  R.trow = (key, cells) => (key ? { cells, anchor: ticketAnchor(key), label: String(key), btn: commentBtn(R, ticketAnchor(key), String(key), true) } : cells);
+  return R;
 }
 
 const NTS = `<span class="nt">${NOT_TRACKED}</span>`;
 const v = (x, unit = '', digits = 1) => (isNum(x) ? `${esc(fmt(x, digits))}${unit ? ` ${esc(unit)}` : ''}` : NTS);
 const vp = (x) => (isNum(x) ? esc(pct(x)) : NTS);
 const howto = (html) => `<p class="howto"><strong>How to read it.</strong> ${html}</p>`;
-const tile = (label, value, ctx, extra = '') => `<div class="tile"><div class="v">${value}</div><div class="l">${esc(label)}</div>${extra}${ctx ? `<div class="c">${ctx}</div>` : ''}</div>`;
+// Comment anchors: "section:metric" for a tile, "t:<key>" for a ticket row.
+// Lower-case [a-z0-9_:-] only (sanitize.validAnchor); built from the already-
+// masked model, so a masked report anchors on "t:ticket-3", never a real key.
+const slug = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'x';
+const ticketAnchor = (k) => `t:${slug(k)}`;
+// A tile carries its metric slug; section() turns it into "section:metric" and
+// adds the tile's comment button (it knows the section id and the counts).
+const tile = (label, value, ctx, extra = '') =>
+  `<div class="tile" data-tile="${esc(slug(label))}" data-anchor-label="${esc(label)}"><div class="v">${value}</div><div class="l">${esc(label)}</div>${extra}${ctx ? `<div class="c">${ctx}</div>` : ''}<!--tp:cbtn--></div>`;
+// rows: arrays of cell HTML, or {cells, anchor, label, btn} from R.trow (a
+// commentable ticket row: data-anchor on the <tr>, the button in its first cell).
 const tableHtml = (headers, rows, numericFrom = 1) =>
   rows.length
     ? `<div class="tbl-wrap"><table><thead><tr>${headers.map((h, i) => `<th scope="col"${i >= numericFrom ? ' class="n"' : ''}>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows
-        .map((r) => `<tr>${r.map((c, i) => `<td${i >= numericFrom ? ' class="n"' : ''}>${c}</td>`).join('')}</tr>`)
+        .map((r) => {
+          const cells = Array.isArray(r) ? r : r.cells;
+          const attrs = Array.isArray(r) || !r.anchor ? '' : ` data-anchor="${esc(r.anchor)}" data-anchor-label="${esc(r.label)}"`;
+          return `<tr${attrs}>${cells.map((c, i) => `<td${i >= numericFrom ? ' class="n"' : ''}>${c}${i === 0 && !Array.isArray(r) && r.btn ? r.btn : ''}</td>`).join('')}</tr>`;
+        })
         .join('')}</tbody></table></div>`
     : '<p class="muted small">Nothing in this period.</p>';
 const keyTitle = (R, k, t) => R.tk(k) + (t ? ` <span class="muted">${esc(t)}</span>` : '');
@@ -655,6 +706,7 @@ const keyTitle = (R, k, t) => R.tk(k) + (t ? ` <span class="muted">${esc(t)}</sp
 const SECTION_TITLES = {
   summary: 'Summary',
   kpis: 'Key numbers',
+  changes: 'What improved, what declined',
   trend: 'Trend',
   estimate_basis: 'Estimate basis',
   phases: 'Where the time goes',
@@ -676,6 +728,7 @@ const SECTION_TITLES = {
 const SECTION_GUARDS = {
   kpis: ['kpis'],
   trend: ['trend'],
+  changes: ['kpis', 'changes'],
   estimate_basis: ['estimate_basis', 'estimates', 'ruler'],
   phases: ['phases', 'cycle'],
   dora: ['dora'],
@@ -708,13 +761,22 @@ function sectionPills(model, id) {
 
 const teamPill = (R) => (R.kind === 'dev' ? '<span class="pill team" title="Team-level numbers shown for context. They describe the delivery system, not this person.">Team context (not individual)</span>' : '');
 
-function commentBtn(R, id, label) {
+function commentBtn(R, id, label, mini = false) {
   const n = R.counts.get(id) || 0;
-  return `<button type="button" class="c-btn js-only${n ? ' has' : ''}" data-for="${esc(id)}" aria-label="Comment on ${esc(label)}" title="Comment on ${esc(label)}">${n ? `Comments (${n})` : 'Comment'}</button>`;
+  const text = mini ? (n ? String(n) : '+') : n ? `Comments (${n})` : 'Comment';
+  return `<button type="button" class="c-btn js-only${mini ? ' mini' : ''}${n ? ' has' : ''}" data-for="${esc(id)}" aria-label="Comment on ${esc(label)}${n ? ` (${n})` : ''}" title="Comment on ${esc(label)}">${text}</button>`;
 }
+const unesc = (s) => String(s).replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 
 function section(model, R, id, title, body, extra = '') {
-  return `<section class="card" id="${id}" data-anchor="${id}" data-anchor-label="${esc(title)}" aria-labelledby="${id}-h"><header><h2 id="${id}-h">${esc(title)}<a class="anchor" href="#${id}" aria-label="Link to ${esc(title)}" title="Link to this section">#</a></h2>${extra}${sectionPills(model, id)}${commentBtn(R, id, title)}</header>${body}</section>`;
+  const sid = esc(id);
+  // Tiles become "section:metric" comment anchors with their own button.
+  const withTiles = body.replace(/<div class="tile" data-tile="([a-z0-9_-]+)" data-anchor-label="([^"]*)">([\s\S]*?)<!--tp:cbtn-->/g, (all, metric, label, inner) => {
+    const anchor = `${slug(id)}:${metric}`;
+    const lbl = `${title} · ${unesc(label)}`;
+    return `<div class="tile" data-anchor="${esc(anchor)}" data-anchor-label="${esc(lbl)}">${inner}${commentBtn(R, anchor, lbl, true)}`;
+  });
+  return `<section class="card" id="${sid}" data-anchor="${sid}" data-anchor-label="${esc(title)}" aria-labelledby="${sid}-h"><header><h2 id="${sid}-h">${esc(title)}<a class="anchor" href="#${sid}" aria-label="Link to ${esc(title)}" title="Link to this section">#</a></h2>${extra}${sectionPills(model, id)}${commentBtn(R, id, title)}</header>${withTiles}</section>`;
 }
 
 function trendFor(model, id) {
@@ -741,6 +803,34 @@ function renderKpis(model, R) {
     SECTION_TITLES.kpis,
     howto('Each tile is one number for the whole scope. A ratio is always shown with the capacity it was divided by — a lower ratio in a period with less capacity is not lower productivity. The change is against the comparison period when one was chosen; the small line shows recent periods.') +
       (cards.length ? `<div class="grid">${cards.join('')}</div>` : '<p class="muted small">No headline numbers were computed for this period.</p>'),
+  );
+}
+
+function renderChanges(model, R) {
+  const ch = model.changes || { improved: [], declined: [] };
+  if (!model.meta.compare && !ch.improved.length && !ch.declined.length) return '';
+  const fmtV = (x, kind, unit) => (kind === 'percent' ? vp(x) : v(x, unit));
+  const deltaTxt = (x) => {
+    if (!isNum(x.from) || !isNum(x.to)) return NTS;
+    const d = x.to - x.from;
+    const abs = x.kind === 'percent' ? `${d > 0 ? '+' : ''}${fmt(d * 100)} pp` : `${d > 0 ? '+' : ''}${fmt(d)}${x.unit ? ` ${x.unit}` : ''}`;
+    const rel = x.from !== 0 && x.kind !== 'percent' ? ` (${d > 0 ? '+' : ''}${fmt((d / Math.abs(x.from)) * 100, 0)}%)` : '';
+    return esc(abs + rel);
+  };
+  const list = (title, cls, items) =>
+    `<div class="olist"><h3>${esc(title)}</h3>${
+      items.length
+        ? tableHtml(['Measure', 'Before', 'Now', 'Change'], items.map((x) => [`${esc(x.label)}${x.note ? `<div class="small muted">${R.text(x.note)}</div>` : ''}`, fmtV(x.from, x.kind, x.unit), fmtV(x.to, x.kind, x.unit), `<span class="delta ${cls}">${deltaTxt(x)}</span>`]))
+        : '<p class="muted small">Nothing moved by more than 2% in this direction.</p>'
+    }</div>`;
+  const vs = model.meta.compare ? model.meta.compare.label || `${model.meta.compare.start || '…'} → ${model.meta.compare.end || '…'}` : 'the comparison period';
+  return section(
+    model,
+    R,
+    'changes',
+    SECTION_TITLES.changes,
+    howto(`Each measure against ${esc(vs)}, sorted by how much it moved. "Improved" follows the measure's own direction (shorter lead time is better). A ratio moves with capacity — check the capacity line before reading it as a change in productivity. Measures whose inputs are weak carry a pill on their section.`) +
+      `<div class="grid wide">${list('Improved', 'better', ch.improved)}${list('Declined', 'worse', ch.declined)}</div>`,
   );
 }
 
@@ -814,7 +904,7 @@ function renderPhases(model, R) {
   const tix = P.tickets.length
     ? `<details class="as-table"><summary>Tickets (${P.tickets.length})</summary>${tableHtml(
         ['Ticket', 'Person', ...PHASES.map(([, l]) => l)],
-        P.tickets.map((t) => [keyTitle(R, t.key, t.title), esc(t.person || ''), ...PHASES.map(([id]) => v(t[id], 'd'))]),
+        P.tickets.map((t) => R.trow(t.key, [keyTitle(R, t.key, t.title), esc(t.person || ''), ...PHASES.map(([id]) => v(t[id], 'd'))])),
         2,
       )}</details>`
     : '';
@@ -836,7 +926,7 @@ function renderOutliers(model, R) {
   const list = (title, items, digits = 1) =>
     `<div class="olist"><h3>${esc(title)}</h3>${
       items.length
-        ? `<ol>${items.map((x) => `<li><span class="ov">${v(x.value, x.unit, digits)}</span> ${keyTitle(R, x.key, x.title)}${x.person ? ` <span class="muted">· ${esc(x.person)}</span>` : ''}${x.note ? `<div class="small muted">${R.text(x.note)}</div>` : ''}</li>`).join('')}</ol>`
+        ? `<ol>${items.map((x) => `<li${x.key ? ` data-anchor="${esc(ticketAnchor(x.key))}" data-anchor-label="${esc(x.key)}"` : ''}><span class="ov">${v(x.value, x.unit, digits)}</span> ${keyTitle(R, x.key, x.title)}${x.person ? ` <span class="muted">· ${esc(x.person)}</span>` : ''}${x.key ? commentBtn(R, ticketAnchor(x.key), x.key, true) : ''}${x.note ? `<div class="small muted">${R.text(x.note)}</div>` : ''}</li>`).join('')}</ol>`
         : '<p class="muted small">Nothing stands out — or the data for it is not tracked.</p>'
     }</div>`;
   return section(
@@ -874,14 +964,21 @@ function renderDora(model, R) {
     tile('Time to restore', v(d.mttr_hours_median, 'h'), `${bandPill('mttr', d.mttr_hours_median)} ${isNum(d.incidents) ? `median of ${esc(fmt(d.incidents, 0))} incident${d.incidents === 1 ? '' : 's'}` : 'median'}`, spark('mttr', 'Time to restore', 'h')),
   ];
   const chart = d.weekly.length ? C.columnChart({ id: 'ch-deploys', title: 'Deployments per week', desc: `Deployment tags per week, ${d.weekly.length} weeks.`, points: d.weekly.map((w) => ({ label: w.week, value: w.deployments })), digits: 0 }) : '';
-  const fails = d.failures.length ? `<h3>Failures</h3>${tableHtml(['Ticket', 'Kind', 'Tag', 'Caused by', 'Restore'], d.failures.map((f) => [keyTitle(R, f.key, f.title), esc(f.kind || ''), esc(f.tag || ''), R.tk(f.caused_by), v(f.restore_hours, 'h')]), 4)}` : '';
+  const tags = d.deploy_tags.length
+    ? `<details class="as-table"><summary>Deployment tags (${d.deploy_tags.length}${d.deploy_tags.some((t) => t.kind === 'hotfix') ? `, ${d.deploy_tags.filter((t) => t.kind === 'hotfix').length} hotfix` : ''})</summary>${tableHtml(
+        ['Tag', 'Repository', 'When', 'Kind', 'Tickets'],
+        d.deploy_tags.map((t) => [`<code>${esc(t.name)}</code>`, esc(t.repo || ''), t.at ? `<time datetime="${esc(t.at)}">${esc(t.at.slice(0, 16).replace('T', ' '))}</time>` : NTS, t.kind === 'hotfix' ? '<span class="pill warn">hotfix</span>' : 'deploy', t.keys.map((k) => R.tk(k)).join(', ')]),
+        5,
+      )}</details>`
+    : '';
+  const fails = d.failures.length ? `<h3>Failures</h3>${tableHtml(['Ticket', 'Kind', 'Tag', 'Caused by', 'Restore'], d.failures.map((f) => R.trow(f.key, [keyTitle(R, f.key, f.title), esc(f.kind || ''), esc(f.tag || ''), R.tk(f.caused_by), v(f.restore_hours, 'h')])), 4)}` : '';
   return section(
     model,
     R,
     'dora',
     SECTION_TITLES.dora,
     howto('A deployment is a git tag whose name contains "deployed", "hf" or "hotfix" (hotfixes are deployments too). Change failure rate counts deployments followed by a hotfix or a bug traced to the change. Bands follow the published DORA thresholds. These are team numbers — they describe the delivery system, not any one person.') +
-      `<div class="grid">${tiles.join('')}</div>${chart}${fails}`,
+      `<div class="grid">${tiles.join('')}</div>${chart}${tags}${fails}`,
     teamPill(R),
   );
 }
@@ -904,9 +1001,20 @@ function renderPrFlow(model, R) {
         rows: [
           { label: 'Pickup', values: p.items.map((x) => x.pickup_hours) },
           { label: 'Review', values: p.items.map((x) => x.review_hours) },
+          ...(p.items.some((x) => isNum(x.merge_hours)) ? [{ label: 'Open → merged', values: p.items.map((x) => x.merge_hours) }] : []),
         ],
         unit: 'h',
       })
+    : '';
+  const total = (x) => x.merge_hours ?? (isNum(x.pickup_hours) || isNum(x.review_hours) ? (x.pickup_hours || 0) + (x.review_hours || 0) : null);
+  const slowList = (p.slow || p.items.filter((x) => isNum(total(x))).sort((a, b) => total(b) - total(a)).slice(0, 8)).slice(0, 15);
+  const prName = (x) => `${x.pr ? `#${esc(x.pr)}` : 'PR'}${x.repo ? ` <span class="muted">${esc(x.repo)}</span>` : ''}${x.title ? `<div class="small muted">${esc(x.title)}</div>` : ''}`;
+  const slow = slowList.length
+    ? `<h3>Slowest pull requests</h3>${tableHtml(
+        ['Pull request', 'Ticket', 'Author', 'Pickup', 'Review', 'Open → merged', 'Size', 'Comments'],
+        slowList.map((x) => R.trow(x.key, [prName(x), R.tk(x.key), esc(x.person || ''), v(x.pickup_hours, 'h'), v(x.review_hours, 'h'), v(x.merge_hours, 'h'), v(x.size_lines, '', 0), v(x.comments, '', 0)])),
+        3,
+      )}`
     : '';
   const by = p.by_person.length
     ? `<h3>By person</h3>${tableHtml(['Person', 'PRs', 'Reviews given', 'Pickup (median)', 'Size (median)'], p.by_person.map((x) => [esc(x.person || ''), v(x.prs, '', 0), v(x.reviews_given, '', 0), v(x.pickup_hours_median, 'h'), v(x.size_lines_median, '', 0)]))}`
@@ -917,7 +1025,7 @@ function renderPrFlow(model, R) {
     'pr_flow',
     SECTION_TITLES.pr_flow,
     howto(`Pickup is how long a PR waits for its first reviewer; long pickup usually means reviewers are overloaded, not that authors are slow. Small PRs review faster. The tick plot shows every PR so a few slow ones are not hidden behind a median. ${isNum(p.unreviewed_share) ? `${esc(pct(p.unreviewed_share))} of PRs merged without a review.` : ''}${p.coverage_note ? ` ${R.text(p.coverage_note)}` : ''}`) +
-      `<div class="grid">${tiles.join('')}</div>${strip}${by}`,
+      `<div class="grid">${tiles.join('')}</div>${strip}${slow}${by}`,
     teamPill(R),
   );
 }
@@ -945,7 +1053,7 @@ function renderRework(model, R) {
         )
         .join('')}</ul>`
     : '<p class="muted small">No code-level rework pairs in this period.</p>';
-  const pairRows = (list) => list.map((x) => [R.tk(x.key), R.tk(x.by_key), esc(x.person || ''), v(x.lines, '', 0), v(x.days, 'd')]);
+  const pairRows = (list) => list.map((x) => R.trow(x.key, [R.tk(x.key), R.tk(x.by_key), esc(x.person || ''), v(x.lines, '', 0), v(x.days, 'd')]));
   return section(
     model,
     R,
@@ -957,7 +1065,7 @@ function renderRework(model, R) {
       (r.out.length ? `<h3>Rework out</h3>${tableHtml(['Ticket', 'Rewrote', 'Person', 'Lines', 'Days'], pairRows(r.out), 3)}` : '') +
       `<h3>Jira-detected rework</h3>${tableHtml(
         ['Ticket', 'Reworks', 'Why', 'Points', 'Scope'],
-        r.jira.map((x) => [keyTitle(R, x.key, x.title), R.tk(x.source_key), R.text(x.reason || ''), v(x.points, '', 1), x.excluded_from_scope ? 'not new scope' : 'counted']),
+        r.jira.map((x) => R.trow(x.key, [keyTitle(R, x.key, x.title), R.tk(x.source_key), R.text(x.reason || ''), v(x.points, '', 1), x.excluded_from_scope ? 'not new scope' : 'counted'])),
         3,
       )}`,
   );
@@ -983,7 +1091,7 @@ function renderFlow(model, R) {
       )}`
     : '';
   const unplanned = f.unplanned.length
-    ? `<h3>Unplanned work</h3>${tableHtml(['Ticket', 'Type', 'Person', 'Why unplanned', 'Points'], f.unplanned.map((x) => [keyTitle(R, x.key, x.title), esc(x.type || ''), esc(x.person || ''), R.text(x.reason || ''), v(x.points)]), 4)}`
+    ? `<h3>Unplanned work</h3>${tableHtml(['Ticket', 'Type', 'Person', 'Why unplanned', 'Points'], f.unplanned.map((x) => R.trow(x.key, [keyTitle(R, x.key, x.title), esc(x.type || ''), esc(x.person || ''), R.text(x.reason || ''), v(x.points)])), 4)}`
     : '';
   return section(
     model,
@@ -1021,7 +1129,7 @@ function renderSubtasks(model, R) {
           const commits = list.reduce((a, s) => a + (isNum(s.commits) ? s.commits : 0), 0);
           return `<h3>${esc(person)} <span class="muted small">· ${list.length} sub-task${list.length > 1 ? 's' : ''}, ${esc(fmt(days))} d dev time, ${esc(fmt(commits, 0))} commits credited</span></h3>${tableHtml(
             ['Sub-task', 'Parent', 'Why it counts', 'Dev time', 'Commits'],
-            list.map((s) => [keyTitle(R, s.key, s.title), R.tk(s.parent_key) + (s.parent_owner ? ` <span class="muted">(${esc(s.parent_owner)})</span>` : ''), R.text(s.reason || ''), v(s.dev_days, 'd'), v(s.commits, '', 0)]),
+            list.map((s) => R.trow(s.key, [keyTitle(R, s.key, s.title), R.tk(s.parent_key) + (s.parent_owner ? ` <span class="muted">(${esc(s.parent_owner)})</span>` : ''), R.text(s.reason || ''), v(s.dev_days, 'd'), v(s.commits, '', 0)])),
             3,
           )}`;
         })
@@ -1080,7 +1188,7 @@ function renderPeople(model, R) {
       ['Estimate accuracy', v(p.estimate_ratio_median, '×', 2)],
       ['Credited sub-tasks', subsBy.get(p.name) ? `<a href="#substantive_subtasks">${subsBy.get(p.name)}</a>` : '0'],
     ];
-    const tix = p.tickets.length ? `<details class="as-table"><summary>Tickets (${p.tickets.length})</summary>${tableHtml(['Ticket', 'Status', 'Points', 'Dev time'], p.tickets.map((t) => [keyTitle(R, t.key, t.title), esc(t.status || ''), v(t.points), v(t.dev_days, 'd')]), 2)}</details>` : '';
+    const tix = p.tickets.length ? `<details class="as-table"><summary>Tickets (${p.tickets.length})</summary>${tableHtml(['Ticket', 'Status', 'Points', 'Dev time'], p.tickets.map((t) => R.trow(t.key, [keyTitle(R, t.key, t.title), esc(t.status || ''), v(t.points), v(t.dev_days, 'd')])), 2)}</details>` : '';
     const notes = p.notes.length ? `<ul class="small">${p.notes.map((n) => `<li>${R.text(n)}</li>`).join('')}</ul>` : '';
     return `<div class="person" id="${id}" data-anchor="${id}" data-anchor-label="${esc(label)}"><header><h3>${esc(label)}${p.role ? ` <span class="pill">${esc(p.role)}</span>` : ''}</h3>${commentBtn(R, id, label)}</header><dl class="kv">${kv.map(([k, x]) => `<dt>${esc(k)}</dt><dd>${x}</dd>`).join('')}</dl>${notes}${tix}</div>`;
   });
@@ -1125,12 +1233,16 @@ function renderBlindSpots(model, R) {
   );
 }
 
+// Where a comment's "go to" link points: the section of a tile anchor; a
+// ticket-row anchor has no element id, so report.js resolves it by data-anchor.
+const anchorHref = (a) => (a.startsWith('t:') ? '#main' : `#${a.split(':')[0]}`);
+
 function renderComments(model, R, comments) {
   if (!comments.length) return '';
   const items = comments
     .slice()
     .sort((a, b) => (b.t || 0) - (a.t || 0))
-    .map((c) => `<li class="c-item"><div class="where"><a href="#${esc(c.anchor)}">${esc(c.label || c.anchor)}</a>${c.author ? ` · ${esc(c.author)}` : ''}${c.when ? ` · <time datetime="${esc(c.when)}">${esc(c.when.slice(0, 16).replace('T', ' '))}</time>` : ''}</div><div class="txt">${esc(c.text)}</div></li>`)
+    .map((c) => `<li class="c-item"><div class="where"><a href="${esc(anchorHref(c.anchor))}" data-goto="${esc(c.anchor)}">${esc(c.label || c.anchor)}</a>${c.author ? ` · ${esc(c.author)}` : ''}${c.when ? ` · <time datetime="${esc(c.when)}">${esc(c.when.slice(0, 16).replace('T', ' '))}</time>` : ''}</div><div class="txt">${esc(c.text)}</div></li>`)
     .join('');
   return `<section class="card print-only" id="comments" aria-labelledby="comments-h"><header><h2 id="comments-h">${SECTION_TITLES.comments}</h2></header><ul class="c-static">${items}</ul></section>`;
 }
@@ -1166,7 +1278,7 @@ function normComments(list, scrub) {
       if (typeof o.text !== 'string' || !o.text.trim()) return null;
       const t = o.at == null || o.at === '' ? NaN : new Date(typeof o.at === 'string' && /^\d+$/.test(o.at) ? +o.at : o.at).getTime();
       return {
-        anchor: /^[A-Za-z0-9_-]{1,80}$/.test(String(o.anchor || '')) ? String(o.anchor) : 'report',
+        anchor: SAN.validAnchor(String(o.anchor || '')) ? String(o.anchor) : 'report',
         label: o.label ? scrub(String(o.label)) : '',
         text: scrub(String(o.text)).slice(0, 4000),
         author: o.author ? scrub(String(o.author)) : '',
@@ -1198,6 +1310,7 @@ function renderReport(model, narrative = {}, opts = {}) {
   const body = [
     renderNarrative(model, R, n),
     renderKpis(model, R),
+    renderChanges(model, R),
     renderTrend(model, R),
     renderEstimateBasis(model, R),
     renderPhases(model, R),
@@ -1231,7 +1344,9 @@ function renderReport(model, narrative = {}, opts = {}) {
   const safeJson = (x) => JSON.stringify(x).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
   const a = assets();
   const script = `window.__TP_REPORT__=${safeJson(model)};\nwindow.__TP_COMMENTS__=${safeJson(comments.map(({ anchor, label, text, author, when }) => ({ anchor, label, text, author, at: when })))};\n${a.js}`;
-  const nonce = crypto.createHash('sha256').update(script).update(body).digest('base64').replace(/[^A-Za-z0-9]/g, '').slice(0, 24);
+  // Fresh per render: a nonce that repeats across reports is a CSP bypass waiting
+  // to happen (anything that can replay one report's markup could run in another).
+  const nonce = SAN.newNonce();
   const slots = {
     TITLE: esc(meta.title),
     SUBTITLE: esc(subtitle),
@@ -1249,7 +1364,7 @@ function renderReport(model, narrative = {}, opts = {}) {
       ? comments
           .slice()
           .sort((x, y) => (y.t || 0) - (x.t || 0))
-          .map((c) => `<div class="c-item"><div class="where">${esc(c.label || c.anchor)}${c.author ? ` · ${esc(c.author)}` : ''}${c.when ? ` · ${esc(c.when.slice(0, 16).replace('T', ' '))}` : ''}</div><div class="txt">${esc(c.text)}</div><a class="small" href="#${esc(c.anchor)}">Go to section</a></div>`)
+          .map((c) => `<div class="c-item"><div class="where">${esc(c.label || c.anchor)}${c.author ? ` · ${esc(c.author)}` : ''}${c.when ? ` · ${esc(c.when.slice(0, 16).replace('T', ' '))}` : ''}</div><div class="txt">${esc(c.text)}</div><a class="small" href="${esc(anchorHref(c.anchor))}" data-goto="${esc(c.anchor)}">Go to it</a></div>`)
           .join('')
       : '<p class="muted small">No comments yet.</p>',
     SCRIPT: script.replace(/<\/script/gi, '<\\/script'),

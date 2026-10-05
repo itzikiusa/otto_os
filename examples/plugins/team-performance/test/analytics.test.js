@@ -919,11 +919,72 @@ test('devDaysBasis: one denominator for rework rate and investment', () => {
     rec({ key: 'DB-1', dev_days: 5, rework_in: 2 }), // origin: own 5
     rec({ key: 'DB-2', dev_days: 2, rework_out: 2, rework_of: 'DB-1', scope_excluded: true }), // redo
     rec({ key: 'DB-3', dev_days: 3 }),
-    rec({ key: 'DB-4', dev_days: 1, parent_key: 'DB-3' }), // substantive sub-task
-    rec({ key: 'DB-5', dev_days: 4, parent_key: 'DB-3', rollup: true }), // rolled up: skipped
+    // Substantive sub-task (real work, kept standalone): delivered scope.
+    rec({ key: 'DB-4', dev_days: 1, parent_key: 'DB-3', subtask: true, substantive_subtask: true, rollup: false, credited_to: 'u-y' }),
+    rec({ key: 'DB-5', dev_days: 4, parent_key: 'DB-3', subtask: true, rollup: true }), // rolled up: skipped
   ];
   const b = A.devDaysBasis(recs);
-  assert.equal(b.delivered, 8);
+  assert.equal(b.delivered, 9);
   assert.equal(b.incl_subtasks_rework, 11);
   assert.ok(b.labels.delivered && b.labels.incl_subtasks_rework);
+});
+
+// ---- one time engine: zone + configured weekend + person's time off -------
+test('time engine: UTC+3 Fri/Sat weekend + one vacation day excluded from actual; phases agree', () => {
+  const P = require('../lib/phases.js');
+  // Asia/Riyadh = UTC+3 all year. Workweek Sun–Thu → weekend Fri/Sat.
+  // In Progress Wed 2026-06-03 09:00 local → Done Mon 2026-06-08 09:00 local.
+  //   Wed 0.625 + Thu 1 + (Fri, Sat weekend) + Sun 1 (vacation) + Mon 0.375
+  //   = 3 without the vacation, 2 with it.
+  const config = { workweek: [0, 1, 2, 3, 4], timezone: 'Asia/Riyadh' };
+  const people = { 'u-alice': { time_off: [{ from: '2026-06-07', to: '2026-06-07' }] } };
+  const raw = rawIssue({
+    created: '2026-06-03T06:00:00Z',
+    resolutiondate: '2026-06-08T06:00:00Z',
+    histories: [
+      history('2026-06-03T06:00:00Z', 'To Do', 'In Progress'),
+      history('2026-06-08T06:00:00Z', 'In Progress', 'Done'),
+    ],
+  });
+  const opts = { ...OPTS(), workweek: undefined, config, people, hasDesignStatuses: false };
+  const r = A.analyzeIssue(raw, opts);
+  assert.ok(Math.abs(r.impl_days - 2) < 1e-9, `impl ${r.impl_days}`);
+  assert.ok(Math.abs(r.cycle_days - 2) < 1e-9, `cycle ${r.cycle_days}`);
+  assert.ok(Math.abs(r.dev_days - 2) < 1e-9, `dev ${r.dev_days}`);
+  const actual = A.actualDays(r);
+  assert.ok(Math.abs(actual - 2) < 1e-9, `actual ${actual}`);
+  // Without the person's vacation the same ticket is 3 working days.
+  const noVac = A.analyzeIssue(raw, { ...opts, people: {} });
+  assert.ok(Math.abs(noVac.cycle_days - 3) < 1e-9, `no-vacation cycle ${noVac.cycle_days}`);
+  // phases.js (read-only) under the same zone/weekend/off days: phases sum = actual.
+  const ctx = A.timeCtx({ config, people }, r.assignee_id);
+  const ph = P.phasesFor(r, { tz: ctx.tz, offDays: ctx.offDays, cfg: { weekend: A.weekendOf(config.workweek) } });
+  const sum = [ph.design, ph.dev, ph.review, ph.deploy]
+    .map((p) => (p && typeof p.days === 'number' ? p.days : p && typeof p.total === 'number' ? p.total : 0))
+    .reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sum - actual) < 1e-9, `phase sum ${sum} vs actual ${actual}`);
+});
+
+test('time engine: legacy workweek array keeps UTC semantics; addBusinessDays skips time off', () => {
+  // Mon 2026-06-01 12:00 UTC + 2 days with Tue off → Thu 12:00.
+  const ctx = A.timeCtx({ config: { workweek: [1, 2, 3, 4, 5] }, people: { u: { time_off: [{ from: '2026-06-02', to: '2026-06-02' }] } } }, 'u');
+  assert.equal(A.addBusinessDays(T('2026-06-01T12:00:00Z'), 2, ctx), T('2026-06-04T12:00:00Z'));
+  assert.equal(A.addBusinessDays(T('2026-06-01T12:00:00Z'), 2, [1, 2, 3, 4, 5]), T('2026-06-03T12:00:00Z'));
+  assert.equal(A.businessDays(T('2026-06-01T00:00:00Z'), T('2026-06-08T00:00:00Z'), ctx), 4);
+  assert.deepEqual(A.weekendOf([0, 1, 2, 3, 4]), [5, 6]);
+  assert.equal(A.offDaysFor('nobody', {}), null);
+});
+
+test('devDaysBasis: substantive sub-task credited to credited_to, parent points counted once', () => {
+  const recs = [
+    rec({ key: 'ST-1', dev_days: 4, points: 5, assignee_id: 'u-a' }),
+    rec({ key: 'ST-2', dev_days: 2, points: null, parent_key: 'ST-1', subtask: true, substantive_subtask: true, rollup: false, assignee_id: 'u-b', credited_to: 'u-b' }),
+    rec({ key: 'ST-3', dev_days: 1, points: null, parent_key: 'ST-1', subtask: true }), // checklist
+    rec({ key: 'EP-1', dev_days: 9, points: 8, type: 'Epic' }),
+  ];
+  const b = A.devDaysBasis(recs);
+  assert.equal(b.delivered, 6);
+  assert.equal(b.n_delivered, 2);
+  assert.equal(b.delivered_points, 5);
+  assert.deepEqual(b.by_person, { 'u-a': 4, 'u-b': 2 });
 });

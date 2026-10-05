@@ -36,7 +36,7 @@
           const sum = r.summary || epicSummary(o, inv, k);
           label = `${jiraLink(k)} <span class="dim small">${esc(String(sum || '').slice(0, 70)) || 'summary not scanned'}</span>`;
         } else label = esc(r.label || r.type || k || '—');
-        return [label, `${meter(share, 'share of dev time')} ${fmtPct(share)}`, fmtD(r.days), isNum(r.n) ? String(r.n) : '—'];
+        return [label, `${meter(share, 'share of dev time')} ${TP.shareHtml(share)}${TP.isOver(share) ? ' ' + TP.guardBadge(TP.overGuard(share, 'This share')) : ''}`, fmtD(r.days), isNum(r.n) ? String(r.n) : '—'];
       });
     return table({
       caption,
@@ -64,16 +64,20 @@
       const inv = o.investment || (o.flow && o.flow.investment);
       const byType = toRows(inv && (inv.by_type || (Array.isArray(inv) ? inv.filter((r) => r.kind !== 'epic') : null)));
       const byEpic = toRows(inv && (inv.by_epic || (Array.isArray(inv) ? inv.filter((r) => r.kind === 'epic') : null)));
+      const invGuard = TP.guardFor(o, ['investmentMix'], inv && !Array.isArray(inv) ? inv : null);
+      if (invGuard && invGuard.level === 'bad') host.insertAdjacentHTML('beforeend', `<div class="banner danger" role="note">${TP.icon('warn')}<span><b>Weak inputs:</b> ${esc(invGuard.msg)}</span></div>`);
       const g = document.createElement('div');
-      g.className = 'grid-2';
+      g.className = 'grid-2' + (invGuard && invGuard.level === 'bad' ? ' weak' : '');
       host.appendChild(g);
       section(g, {
         title: 'By ticket type',
+        headerEnd: TP.guardBadge(invGuard),
         infoDef: { title: 'Investment mix', definition: 'Share of delivered estimated days per ticket type. Rework tickets are attributed to rework, not new scope.', formula: 'Σ est-days per type ÷ Σ est-days', quality: inv && inv.quality },
         load: async () => mix(o, inv, byType, 'Delivered scope by ticket type') || notAvailable('Investment by type'),
       });
       section(g, {
         title: 'By epic',
+        headerEnd: TP.guardBadge(invGuard),
         sub: 'Feature-level view: each epic links to Jira.',
         load: async () => {
           const t = mix(o, inv, byEpic, 'Delivered scope by epic (feature level)', true);
@@ -81,11 +85,13 @@
         },
       });
       const un = M((o.flow && (o.flow.unplanned_share || o.flow.unplannedShare)) || (inv && inv.unplanned_share));
+      const unGuard = TP.mergeGuard(TP.guardFor(o, ['unplannedShare'], un), un ? TP.overGuard(un.value, 'Unplanned share') : null);
       section(host, {
         title: 'Planned vs unplanned',
+        headerEnd: TP.guardBadge(unGuard),
         load: async () =>
           un && isNum(un.value)
-            ? `<p>${badge(un.value > 0.35 ? 'warning' : 'success', fmtPct(un.value > 1 ? un.value / 100 : un.value) + ' unplanned')} <span class="dim">of delivered scope was bugs, hotfixes or work added mid-period.</span></p>`
+            ? `<div class="${unGuard && unGuard.level === 'bad' ? 'weak-block' : ''}"><p>${badge(TP.isOver(un.value) ? 'danger' : un.value > 0.35 ? 'warning' : 'success', TP.fmtShare(un.value) + ' unplanned')} <span class="dim">of delivered scope was bugs, hotfixes or work added mid-period.</span></p>${TP.guardReason(unGuard)}</div>`
             : notAvailable('Unplanned share'),
       });
       section(host, {

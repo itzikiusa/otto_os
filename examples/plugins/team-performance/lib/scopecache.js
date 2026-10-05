@@ -5,6 +5,7 @@
 // expensive passes run once per data version, not once per request.
 'use strict';
 const fs = require('fs');
+const zlib = require('zlib');
 
 function mtimeOf(p) {
   try { return fs.statSync(p).mtimeMs; } catch { return -1; } // missing file is a valid (stable) state
@@ -119,4 +120,135 @@ function createScopeCache({ maxEntries = 4 } = {}) {
   return { get, getAsync, memo, entryOf, inflight: (k) => inflight.has(k), invalidate, stats, size: () => map.size, keys: () => [...map.keys()] };
 }
 
-module.exports = { createScopeCache, scopeKey, fingerprint, fingerprintAsync, windowKey };
+// ── Parsed-file cache ──────────────────────────────────────────────────────
+// Scope entries are keyed by EVERY dependency's mtime, so an overrides-only
+// edit rebuilds the scope — but the (large) corpus file did not change. This
+// cache keeps parsed JSON keyed by path + mtime + size and is shared across
+// scope entries, so the rebuild re-reads only what actually changed. Bounded
+// by the summed on-disk byte size (LRU eviction); a file larger than the cap
+// is parsed but never retained. Callers must treat returned objects as
+// READ-ONLY (they are shared).
+
+function createFileCache({ maxBytes = 256 * 1024 * 1024 } = {}) {
+  const map = new Map(); // path -> {sig, bytes, value}; insertion order = LRU
+  const stats = { hits: 0, misses: 0, evictions: 0 };
+  let bytes = 0;
+
+  const sigOf = (st) => `${st.mtimeMs}:${st.size}`;
+
+  function lookup(file, st) {
+    const cur = map.get(file);
+    if (cur && cur.sig === sigOf(st)) {
+      map.delete(file); map.set(file, cur);
+      stats.hits++;
+      return cur;
+    }
+    return null;
+  }
+
+  function store(file, st, value) {
+    drop(file);
+    stats.misses++;
+    if (st.size > maxBytes) return value;
+    map.set(file, { sig: sigOf(st), bytes: st.size, value });
+    bytes += st.size;
+    while (bytes > maxBytes && map.size) {
+      const k = map.keys().next().value;
+      drop(k);
+      stats.evictions++;
+    }
+    return value;
+  }
+
+  function drop(file) {
+    const cur = map.get(file);
+    if (!cur) return;
+    bytes -= cur.bytes;
+    map.delete(file);
+  }
+
+  /** Parsed JSON of `file`, or `fallback` when missing/unparsable (failures are not cached). */
+  function readJson(file, fallback = null) {
+    let st;
+    try { st = fs.statSync(file); } catch { drop(file); return fallback; }
+    const hit = lookup(file, st);
+    if (hit) return hit.value;
+    try { return store(file, st, JSON.parse(fs.readFileSync(file, 'utf8'))); } catch { return fallback; }
+  }
+
+  async function readJsonAsync(file, fallback = null) {
+    let st;
+    try { st = await fs.promises.stat(file); } catch { drop(file); return fallback; }
+    const hit = lookup(file, st);
+    if (hit) return hit.value;
+    try { return store(file, st, JSON.parse(await fs.promises.readFile(file, 'utf8'))); } catch { return fallback; }
+  }
+
+  return { readJson, readJsonAsync, invalidate: drop, clear: () => { map.clear(); bytes = 0; }, stats, size: () => map.size, bytes: () => bytes };
+}
+
+/** Process-wide instance shared by every scope build. */
+const fileCache = createFileCache();
+
+// ── View memo ──────────────────────────────────────────────────────────────
+// memoizeView(scope, key, fn) memoizes a derived view payload ON the scope
+// object itself (WeakMap): a rebuilt scope is a new object, so stale views die
+// with it — no separate invalidation. `key` must encode every argument (use
+// windowKey for time windows). An async fn is memoized as its promise; a
+// rejection is evicted so the next call retries.
+//
+// With { body: true } the result is { value, json, etag, gzip() } — `json` the
+// serialized Buffer, `gzip()` the lazily compressed Buffer, both computed once
+// per (scope, key) so repeat requests skip JSON.stringify and compression.
+
+const viewMemos = new WeakMap(); // scope -> Map(key -> result)
+const MAX_VIEWS_PER_SCOPE = 64;
+
+function bodyOf(value) {
+  const json = Buffer.from(JSON.stringify(value));
+  let gz = null;
+  return {
+    value,
+    json,
+    etag: `W/"${json.length.toString(36)}-${require('crypto').createHash('sha1').update(json).digest('base64url').slice(0, 16)}"`,
+    gzip() {
+      if (!gz) gz = zlib.gzipSync(json, { level: 6 });
+      return gz;
+    },
+  };
+}
+
+function memoizeView(scope, key, fn, { body = false } = {}) {
+  if (!scope || (typeof scope !== 'object' && typeof scope !== 'function')) {
+    const v = fn(scope);
+    return body ? (v && typeof v.then === 'function' ? v.then(bodyOf) : bodyOf(v)) : v;
+  }
+  let m = viewMemos.get(scope);
+  if (!m) { m = new Map(); viewMemos.set(scope, m); }
+  const k = `${body ? 'b' : 'v'}:${key}`;
+  if (m.has(k)) {
+    const hit = m.get(k);
+    m.delete(k); m.set(k, hit);
+    return hit;
+  }
+  let out = fn(scope);
+  if (out && typeof out.then === 'function') {
+    out = out.then((v) => (body ? bodyOf(v) : v));
+    out.catch(() => { if (m.get(k) === out) m.delete(k); });
+  } else if (body) {
+    out = bodyOf(out);
+  }
+  if (m.size >= MAX_VIEWS_PER_SCOPE) m.delete(m.keys().next().value);
+  m.set(k, out);
+  return out;
+}
+
+/** True when the request's Accept-Encoding allows gzip (q=0 excluded). */
+function acceptsGzip(acceptEncoding) {
+  return String(acceptEncoding || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .some((s) => /^(gzip|\*)(;|$)/.test(s) && !/;\s*q=0(\.0+)?\s*$/.test(s));
+}
+
+module.exports = { createScopeCache, scopeKey, fingerprint, fingerprintAsync, windowKey, createFileCache, fileCache, memoizeView, acceptsGzip };

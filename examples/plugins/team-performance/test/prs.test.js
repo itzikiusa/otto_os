@@ -214,3 +214,61 @@ test('prIngestStatus explains every empty state', () => {
   assert.equal(failing.state, 'failing');
   assert.equal(failing.last_error, 'daemon 429');
 });
+
+test('sizeBucket table: boundaries and unknown size', () => {
+  const { sizeBucket } = require('../lib/prs');
+  const table = [[0, '<50'], [199, '<200'], [200, '<400'], [999, '>=400'], [1000, '>=400'], [null, null], [undefined, null]];
+  for (const [n, want] of table) assert.equal(sizeBucket(n), want, `size ${n}`);
+});
+
+test('review_depth is null when the diff has 0 changed lines; size bucket null when size unknown', () => {
+  const base = { opened_at: '2026-01-05T10:00:00Z', merged_at: '2026-01-06T10:00:00Z', reviewer_comment_count: 3 };
+  const zero = derivePrMetrics({ ...base, additions: 0, deletions: 0 });
+  assert.equal(zero.size, 0);
+  assert.equal(zero.review_depth, null);
+  assert.equal(zero.size_bucket, '<50');
+  const unknown = derivePrMetrics({ ...base, additions: null, deletions: null });
+  assert.equal(unknown.size, null);
+  assert.equal(unknown.size_bucket, null);
+  assert.equal(unknown.review_depth, null);
+});
+
+test('a failed commits/diff sub-call marks the PR partial, it is refetched next run and counted', async () => {
+  const dataDir = tmp();
+  const c = clock();
+  const daemon = createMockDaemon({ prs: { r1: [mkPr(1, '2026-01-07T10:00:00Z')] } });
+  let failSubCalls = true;
+  const fetchImpl = (url, init) => {
+    if (failSubCalls && /\/prs\/\d+\/(commits|diff)/.test(url)) {
+      return Promise.resolve({ status: 404, headers: { get: () => null }, text: async () => 'nope', json: async () => ({}) });
+    }
+    return daemon.fetch(url, init);
+  };
+  const mk = () => createPrClient({ baseUrl: 'http://d/api/v1', token: 'T', fetchImpl, dataDir, pacer: createPacer({ sleep: c.sleep, now: c.now }) });
+  const r1 = await mk().syncRepo('r1');
+  assert.equal(r1.partial, 1);
+  let saved = JSON.parse(fs.readFileSync(cacheFile(dataDir, 'r1'), 'utf8'));
+  assert.deepEqual(saved.prs['1'].partial, { commits: true, diff: true });
+  assert.equal(saved.prs['1'].additions, null);
+  const st = prIngestStatus({ dataDir, configured: true, repoIds: ['r1'] });
+  assert.equal(st.partial, 1);
+  assert.equal(st.cursor_by_repo.r1.partial, 1);
+  assert.equal(prFlowSummary(Object.values(saved.prs)).partial.count, 1);
+
+  // Unchanged updated_at, but partial → refetched; now complete.
+  failSubCalls = false;
+  const r2 = await mk().syncRepo('r1');
+  assert.equal(r2.partial, 0);
+  saved = JSON.parse(fs.readFileSync(cacheFile(dataDir, 'r1'), 'utf8'));
+  assert.equal(saved.prs['1'].partial, undefined);
+  assert.equal(saved.prs['1'].additions, 30);
+  assert.equal(prFlowSummary(Object.values(saved.prs)).partial.count, 0);
+});
+
+test('prByPerson accepts a capacity people map', () => {
+  const { prByPerson } = require('../lib/prs');
+  const out = prByPerson([{ author: 'a', merged_at: '2026-01-06T10:00:00Z', reviewers: [{ name: 'b', approved: true }] }], { a: { capacity_days: 10 }, b: 5 });
+  assert.equal(out.a.capacity_days, 10);
+  assert.equal(out.a.per_capacity_day.authored, 0.1);
+  assert.equal(out.b.per_capacity_day.reviewed_given, 0.2);
+});

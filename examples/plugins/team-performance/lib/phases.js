@@ -195,14 +195,25 @@ function phasesFor(record, { prs = [], tags = [], cfg = {}, tz = 'UTC', offDays,
   const qaWindows = winsOf('qa');
   let qa;
   let qaRework = 0;
+  // A real workday commit = local workday, not a personal day off. The
+  // threshold is judged across ALL QA windows of the ticket (a QA→Dev→QA
+  // bounce with one commit day in each still meets min=2); once met, each
+  // window is charged its own commit days as rework, the rest stays wait.
+  const workDay = (t) => {
+    if (!isWorkday(t, tz, weekend)) return null;
+    const k = dayKey(t, tz);
+    return offDays && offDays.has(k) ? null : k;
+  };
+  const workDaysIn = (a, b) => new Set(commits.filter((t) => t >= a && t < b).map(workDay).filter(Boolean));
   if (qaWindows.length) {
+    const perWin = qaWindows.map(([a, b]) => ({ span: bd(a, b), days: workDaysIn(a, b) }));
+    const allDays = new Set(perWin.flatMap((w) => [...w.days]));
+    const met = allDays.size >= qaMin;
     let wait = 0;
-    for (const [a, b] of qaWindows) {
-      const span = bd(a, b);
-      const days = distinctDays(commits.filter((t) => t >= a && t < b), tz).length;
-      const rw = days >= qaMin ? Math.min(days, span) : 0;
+    for (const w of perWin) {
+      const rw = met ? Math.min(w.days.size, w.span) : 0;
       qaRework += rw;
-      wait += span - rw;
+      wait += w.span - rw;
     }
     qa = { wait: round2(wait), rework: round2(qaRework), counted: qaRework > 0 };
   } else {
@@ -235,7 +246,10 @@ function phasesFor(record, { prs = [], tags = [], cfg = {}, tz = 'UTC', offDays,
   const coding_days = commits.length && firstPrOpen !== null && commits[0] < firstPrOpen ? round2(bd(commits[0], firstPrOpen)) : null;
 
   // ---- REVIEW --------------------------------------------------------------
+  // review.in_review is the in-review time WITHOUT review rework; review.total
+  // (open→merge) still includes both. rework=null → no first review → untracked.
   let review;
+  let reviewRework = null;
   if (allPrs.length) {
     const perPr = mergedPrs.map((p) => {
       const fr = p.first_review_at !== null && p.first_review_at >= p.opened_at && p.first_review_at <= p.merged_at ? p.first_review_at : null;
@@ -249,9 +263,16 @@ function phasesFor(record, { prs = [], tags = [], cfg = {}, tz = 'UTC', offDays,
     });
     const totalWins = unionWindows(mergedPrs.map((p) => [p.opened_at, p.merged_at]));
     const inRevWins = unionWindows(mergedPrs.map((p, i) => [perPr[i]._fr, p.merged_at]).filter(([a]) => a !== null));
+    // Review rework: workdays on which the author kept committing after the
+    // first review — that is dev time spent answering the review, not waiting.
+    const rrDays = new Set();
+    for (const [a, b] of inRevWins) for (const k of workDaysIn(a, b)) rrDays.add(k);
+    const inRevTotal = inRevWins.length ? bdWins(inRevWins) : null;
+    reviewRework = inRevTotal === null ? null : Math.min(rrDays.size, inRevTotal);
     review = {
       pickup: median(perPr.map((p) => p.pickup)),
-      in_review: inRevWins.length ? round2(bdWins(inRevWins)) : null,
+      in_review: inRevTotal === null ? null : round2(inRevTotal - reviewRework),
+      rework: reviewRework === null ? null : round2(reviewRework),
       total: mergedPrs.length ? round2(bdWins(totalWins)) : null,
       source: 'pr',
       merged: mergedPrs.length,
@@ -263,8 +284,13 @@ function phasesFor(record, { prs = [], tags = [], cfg = {}, tz = 'UTC', offDays,
     const revWins = unionWindows(winsOf('review'));
     const total = round2(bdWins(revWins));
     review = revWins.length
-      ? { pickup: null, in_review: total, total, source: 'status', merged: 0, unmerged: 0, prs: [] }
-      : { pickup: null, in_review: null, total: null, source: null, merged: 0, unmerged: 0, prs: [] };
+      ? { pickup: null, in_review: total, rework: null, total, source: 'status', merged: 0, unmerged: 0, prs: [] }
+      : { pickup: null, in_review: null, rework: null, total: null, source: null, merged: 0, unmerged: 0, prs: [] };
+  }
+
+  if (reviewRework > 0) {
+    dev.days = round2(dev.days + reviewRework);
+    dev.sources.push('review_rework');
   }
 
   // ---- DEPLOY --------------------------------------------------------------
@@ -312,6 +338,7 @@ const SUMMARY_FIELDS = {
   dev: (p) => p.dev.days,
   review_pickup: (p) => p.review.pickup,
   review_in_review: (p) => p.review.in_review,
+  review_rework: (p) => p.review.rework,
   review_total: (p) => p.review.total,
   qa_wait: (p) => p.qa.wait,
   qa_rework: (p) => p.qa.rework,

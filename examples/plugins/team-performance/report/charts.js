@@ -4,11 +4,16 @@
 // <details> with the exact numbers. Colours come from CSS classes (.s1….s6 →
 // --cat-1…6) so light/dark/print follow the palette.
 //
-// Horizontal charts keep every piece of text OUTSIDE the SVG: row labels sit in
-// an HTML column, value / segment labels are HTML spans positioned over the
-// track by percentage. The SVG itself only draws shapes and is stretched
-// horizontally (preserveAspectRatio="none"), so the chart stays readable at
-// phone width instead of shrinking its text to 6 px.
+// Horizontal charts keep every piece of text OUTSIDE the SVGs: each row is an
+// HTML label + a track holding one tiny stretched SVG (preserveAspectRatio=
+// "none", shapes only) with value / segment labels as HTML spans positioned by
+// percentage. On wide screens label and bar sit side by side; at 600 px or
+// below report.css stacks the label over its bar so neither is squeezed. The
+// row SVGs are decorative (aria-hidden); the chart body is ONE role="img"
+// whose name / description (the data in words) are visually hidden text.
+//
+// Every chart carries its numbers as a "Show as table" <details> — the table
+// is required (a chart without one throws).
 //
 // null values are "not tracked" — drawn as a dashed outline (never a zero bar)
 // and spelled out in the table.
@@ -50,41 +55,50 @@ function svgOpen(id, title, desc, h, extra = '') {
   return `<svg viewBox="0 0 ${VB} ${h}" role="img" aria-labelledby="${esc(tid)} ${esc(did)}" preserveAspectRatio="none"${extra}><title id="${esc(tid)}">${esc(title)}</title><desc id="${esc(did)}">${esc(desc)}</desc>`;
 }
 
-function hFrame({ id, title, desc, rows, shapes, overlay, legend, tbl, axis }) {
-  const h = Math.max(1, rows.length) * ROW;
-  const labels = rows.map((r) => `<div class="hc-l" title="${esc(r)}">${esc(r)}</div>`).join('');
-  return `<figure class="chart hchart" id="${esc(id)}"><figcaption>${esc(title)}</figcaption>${legend || ''}<div class="hc"><div class="hc-labels" aria-hidden="true">${labels}</div><div class="hc-track">${svgOpen(
-    id,
-    title,
-    desc,
-    h,
-    ` style="height:${h}px"`,
-  )}${shapes}</svg><div class="hc-over" aria-hidden="true">${overlay}</div>${axis || ''}</div></div><details class="as-table"><summary>Show as table</summary>${tbl}</details></figure>`;
+function requireTable(id, tbl) {
+  if (typeof tbl !== 'string' || !tbl.includes('<table')) throw new Error(`chart ${id}: a table fallback is required`);
+  return `<details class="as-table"><summary>Show as table</summary>${tbl}</details>`;
+}
+
+// rows: [{label, shapes, over}] — shapes/over use row-local coordinates (y = 0).
+function hFrame({ id, title, desc, rows, legend, tbl, axis }) {
+  const tid = `${id}-t`;
+  const did = `${id}-d`;
+  const body = rows
+    .map(
+      (r) =>
+        `<div class="hc-row"><div class="hc-l" title="${esc(r.label)}">${esc(r.label)}</div><div class="hc-track"><svg class="hc-svg" viewBox="0 0 ${VB} ${ROW}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${r.shapes}</svg><div class="hc-over">${r.over}</div></div></div>`,
+    )
+    .join('');
+  const table = requireTable(id, tbl);
+  return `<figure class="chart hchart" id="${esc(id)}"><figcaption>${esc(title)}</figcaption>${legend || ''}<div class="hc" role="img" aria-labelledby="${esc(tid)} ${esc(did)}"><span class="sr-only" id="${esc(tid)}">${esc(title)}</span><span class="sr-only" id="${esc(did)}">${esc(desc)}</span><div class="hc-rows" aria-hidden="true">${body}${
+    axis ? `<div class="hc-row hc-axis-row"><div class="hc-l"></div><div class="hc-track">${axis}</div></div>` : ''
+  }</div></div>${table}</figure>`;
 }
 
 const pctX = (u) => `${((u / VB) * 100).toFixed(2)}%`;
+const ntRow = (y = 0) => ({
+  shapes: `<rect class="nt-bar" x="1" y="${y + 5}" width="${BAR_MAX / 4}" height="${ROW - 10}" vector-effect="non-scaling-stroke"/>`,
+  over: `<span class="hc-v nt" style="left:calc(${pctX(BAR_MAX / 4)} + 6px)">${NT}</span>`,
+});
 
 // Horizontal bars, one per row. rows: [{label, value}]
 function barChart({ id, title, desc, rows, unit = '', digits = 1, series = 1, cls }) {
   const list = Array.isArray(rows) ? rows : [];
   const max = Math.max(0, ...list.map((r) => (isNum(r.value) ? r.value : 0))) || 1;
-  const shapes = [];
-  const over = [];
-  list.forEach((r, i) => {
-    const y = i * ROW;
+  const out = list.map((r) => {
     const k = r.cls || cls || sClass(series - 1);
-    if (isNum(r.value)) {
-      const w = Math.max(r.value > 0 ? 2 : 0, Math.round((Math.max(0, r.value) / max) * BAR_MAX));
-      shapes.push(`<rect class="${esc(k)}" x="0" y="${y + 5}" width="${w}" height="${ROW - 10}"/>`);
-      over.push(`<span class="hc-v" style="left:calc(${pctX(w)} + 6px);top:${y}px">${esc(withUnit(r.value, unit, digits))}</span>`);
-    } else {
-      shapes.push(`<rect class="nt-bar" x="1" y="${y + 5}" width="${BAR_MAX / 4}" height="${ROW - 10}" vector-effect="non-scaling-stroke"/>`);
-      over.push(`<span class="hc-v nt" style="left:calc(${pctX(BAR_MAX / 4)} + 6px);top:${y}px">${NT}</span>`);
-    }
+    if (!isNum(r.value)) return { label: String(r.label), ...ntRow() };
+    const w = Math.max(r.value > 0 ? 2 : 0, Math.round((Math.max(0, r.value) / max) * BAR_MAX));
+    return {
+      label: String(r.label),
+      shapes: `<rect class="${esc(k)}" x="0" y="5" width="${w}" height="${ROW - 10}"/>`,
+      over: `<span class="hc-v" style="left:calc(${pctX(w)} + 6px)">${esc(withUnit(r.value, unit, digits))}</span>`,
+    };
   });
   const data = list.map((r) => `${r.label}: ${withUnit(r.value, unit, digits)}`).join('; ');
   const tbl = table(['', unit ? `Value (${unit})` : 'Value'], list.map((r) => [esc(r.label), cell(r.value, '', digits)]));
-  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: list.map((r) => String(r.label)), shapes: shapes.join(''), overlay: over.join(''), tbl });
+  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: out, tbl });
 }
 
 // Stacked horizontal bars. series: [name]; rows: [{label, values:[number|null]}];
@@ -96,27 +110,25 @@ function stackedBar({ id, title, desc, series, rows, unit = '', digits = 1, clas
   const klass = (i) => (Array.isArray(classes) && classes[i]) || sClass(i);
   const total = (r) => (r.values || []).reduce((a, v) => a + (isNum(v) && v > 0 ? v : 0), 0);
   const max = Math.max(0, ...list.map(total)) || 1;
-  const shapes = [];
-  const over = [];
-  list.forEach((r, ri) => {
-    const y = ri * ROW;
+  const out = list.map((r) => {
+    if (!total(r) && !(r.values || []).some(isNum)) return { label: String(r.label), ...ntRow() };
+    const shapes = [];
+    const over = [];
     let x = 0;
     (r.values || []).forEach((v, i) => {
       if (!isNum(v) || v <= 0) return;
       const w = Math.max(2, Math.round((v / max) * BAR_MAX));
-      shapes.push(`<rect class="${esc(klass(i))}" x="${x}" y="${y + 4}" width="${w}" height="${ROW - 8}"/>`);
-      if ((w / VB) * NOMINAL_TRACK_PX > MIN_LABEL_PX) over.push(`<span class="hc-seg" style="left:${pctX(x)};width:${pctX(w)};top:${y}px">${esc(fmt(v, digits))}</span>`);
+      shapes.push(`<rect class="${esc(klass(i))}" x="${x}" y="4" width="${w}" height="${ROW - 8}"/>`);
+      if ((w / VB) * NOMINAL_TRACK_PX > MIN_LABEL_PX) over.push(`<span class="hc-seg" style="left:${pctX(x)};width:${pctX(w)}">${esc(fmt(v, digits))}</span>`);
       x += w;
     });
-    if (!total(r) && !(r.values || []).some(isNum)) {
-      shapes.push(`<rect class="nt-bar" x="1" y="${y + 4}" width="${BAR_MAX / 4}" height="${ROW - 8}" vector-effect="non-scaling-stroke"/>`);
-      over.push(`<span class="hc-v nt" style="left:calc(${pctX(BAR_MAX / 4)} + 6px);top:${y}px">${NT}</span>`);
-    } else over.push(`<span class="hc-v" style="left:calc(${pctX(x)} + 6px);top:${y}px">${esc(withUnit(total(r), unit, digits))}</span>`);
+    over.push(`<span class="hc-v" style="left:calc(${pctX(x)} + 6px)">${esc(withUnit(total(r), unit, digits))}</span>`);
+    return { label: String(r.label), shapes: shapes.join(''), over: over.join('') };
   });
   const legend = `<div class="legend" aria-hidden="true">${names.map((n, i) => `<span><i class="${esc(klass(i))}"></i>${esc(n)}</span>`).join('')}</div>`;
   const data = list.map((r) => `${r.label}: ${names.map((n, i) => `${n} ${withUnit((r.values || [])[i], unit, digits)}`).join(', ')}`).join('; ');
   const tbl = table(['', ...names.map((n) => (unit ? `${n} (${unit})` : n)), unit ? `Total (${unit})` : 'Total'], list.map((r) => [esc(r.label), ...names.map((_, i) => cell((r.values || [])[i], '', digits)), cell(total(r) || null, '', digits)]));
-  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: list.map((r) => String(r.label)), shapes: shapes.join(''), overlay: over.join(''), legend, tbl });
+  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: out, legend, tbl });
 }
 
 // Strip plot: one row per series, one tick per observation (a PR), so the
@@ -128,30 +140,29 @@ function stripPlot({ id, title, desc, rows, unit = 'h', digits = 1 }) {
   const all = list.flatMap((r) => r.values).sort((a, b) => a - b);
   const q = (xs, k) => (xs.length ? xs[Math.min(xs.length - 1, Math.floor((xs.length - 1) * k + 0.5))] : null);
   const cap = Math.max(1, q(all, 0.95) || 1);
-  const shapes = [];
-  const over = [];
-  list.forEach((r, ri) => {
-    const y = ri * ROW;
-    shapes.push(`<line class="axis" x1="0" y1="${y + ROW / 2}" x2="${BAR_MAX}" y2="${y + ROW / 2}" vector-effect="non-scaling-stroke"/>`);
+  const out = list.map((r) => {
+    const shapes = [`<line class="axis" x1="0" y1="${ROW / 2}" x2="${BAR_MAX}" y2="${ROW / 2}" vector-effect="non-scaling-stroke"/>`];
     for (const v of r.values) {
       const x = Math.round((Math.min(v, cap) / cap) * BAR_MAX);
-      shapes.push(`<line class="tick${v > cap ? ' over' : ''}" x1="${x}" y1="${y + 5}" x2="${x}" y2="${y + ROW - 5}" vector-effect="non-scaling-stroke"/>`);
+      shapes.push(`<line class="tick${v > cap ? ' over' : ''}" x1="${x}" y1="5" x2="${x}" y2="${ROW - 5}" vector-effect="non-scaling-stroke"/>`);
     }
     const med = q(r.values.slice().sort((a, b) => a - b), 0.5);
+    let over;
     if (isNum(med)) {
       const x = Math.round((Math.min(med, cap) / cap) * BAR_MAX);
-      shapes.push(`<line class="median" x1="${x}" y1="${y + 2}" x2="${x}" y2="${y + ROW - 2}" vector-effect="non-scaling-stroke"/>`);
-      over.push(`<span class="hc-v" style="left:calc(${pctX(BAR_MAX)} + 6px);top:${y}px">median ${esc(withUnit(med, unit, digits))}</span>`);
-    } else over.push(`<span class="hc-v nt" style="left:6px;top:${y}px">${NT}</span>`);
+      shapes.push(`<line class="median" x1="${x}" y1="2" x2="${x}" y2="${ROW - 2}" vector-effect="non-scaling-stroke"/>`);
+      over = `<span class="hc-v" style="left:calc(${pctX(BAR_MAX)} + 6px)">median ${esc(withUnit(med, unit, digits))}</span>`;
+    } else over = `<span class="hc-v nt" style="left:6px">${NT}</span>`;
+    return { label: r.label, shapes: shapes.join(''), over };
   });
-  const axis = `<div class="hc-axis" aria-hidden="true"><span style="left:0">0</span><span style="left:${pctX(BAR_MAX / 2)}">${esc(withUnit(cap / 2, unit, 0))}</span><span style="left:${pctX(BAR_MAX)}">${esc(withUnit(cap, unit, 0))}+</span></div>`;
+  const axis = `<div class="hc-axis"><span style="left:0">0</span><span style="left:${pctX(BAR_MAX / 2)}">${esc(withUnit(cap / 2, unit, 0))}</span><span style="left:${pctX(BAR_MAX)}">${esc(withUnit(cap, unit, 0))}+</span></div>`;
   const stats = list.map((r) => {
     const s = r.values.slice().sort((a, b) => a - b);
     return { label: r.label, n: s.length, med: q(s, 0.5), p85: q(s, 0.85), max: s.length ? s[s.length - 1] : null, over: s.filter((v) => v > cap).length };
   });
   const data = stats.map((s) => `${s.label}: ${s.n} observations, median ${withUnit(s.med, unit, digits)}, p85 ${withUnit(s.p85, unit, digits)}, max ${withUnit(s.max, unit, digits)}`).join('; ');
   const tbl = table(['', 'Count', `Median (${unit})`, `p85 (${unit})`, `Max (${unit})`, 'Beyond axis'], stats.map((s) => [esc(s.label), String(s.n), cell(s.med, '', digits), cell(s.p85, '', digits), cell(s.max, '', digits), String(s.over)]));
-  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: list.map((r) => r.label), shapes: shapes.join(''), overlay: over.join(''), tbl, axis });
+  return hFrame({ id, title, desc: `${desc || ''} ${data}`.trim(), rows: out, tbl, axis });
 }
 
 // Vertical columns over time. points: [{label, value}]. Labels are sparse HTML
@@ -178,7 +189,7 @@ function columnChart({ id, title, desc, points, unit = '', digits = 1 }) {
   const tbl = table(['', unit ? `Value (${unit})` : 'Value'], list.map((p) => [esc(p.label), cell(p.value, '', digits)]));
   return `<figure class="chart vchart" id="${esc(id)}"><figcaption>${esc(title)} <span class="muted">· max ${esc(withUnit(max, unit, digits))}</span></figcaption><div class="vc">${svgOpen(id, title, `${desc || ''} ${data}`.trim(), H, ` style="height:${H}px"`)}${shapes.join(
     '',
-  )}</svg><div class="hc-axis" aria-hidden="true">${labels.join('')}</div></div><details class="as-table"><summary>Show as table</summary>${tbl}</details></figure>`;
+  )}</svg><div class="hc-axis" aria-hidden="true">${labels.join('')}</div></div>${requireTable(id, tbl)}</figure>`;
 }
 
 // Tiny trend line for a tile. Decorative SVG (aria-hidden) + a visually hidden
@@ -214,4 +225,4 @@ function sparkline({ values, labels, label = 'Trend', unit = '', digits = 1 }) {
     .join('')}<circle cx="${lx}" cy="${ly}" r="2"/></svg><span class="sr-only">${esc(label)}: ${esc(words)}</span></span>`;
 }
 
-module.exports = { barChart, stackedBar, stripPlot, columnChart, sparkline, fmt, esc, isNum, PHASE_CLASS, NOT_TRACKED: NT };
+module.exports = { requireTable, barChart, stackedBar, stripPlot, columnChart, sparkline, fmt, esc, isNum, PHASE_CLASS, NOT_TRACKED: NT };

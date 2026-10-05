@@ -52,6 +52,7 @@
     { key: 'delivered', label: 'Delivered est-d', num: true, sort: true, info: { title: 'Delivered scope', definition: 'Estimated ideal days delivered, credited by commit share on shared tickets. Rework is not new scope.', formula: 'Σ estimate × commit share' } },
     { key: 'per_day', label: 'Est-d per capacity day', num: true, sort: true, info: { title: 'Delivered per capacity day', definition: 'Delivered est-days divided by the person’s capacity days. A planning signal, not a productivity score: it ignores reviews, support, mentoring and design. Small samples and missing time off distort it.', formula: 'delivered est-d ÷ capacity days' } },
     { key: 'done', label: 'Done', num: true, sort: true },
+    { key: 'subs', label: 'Sub-tasks with real work', num: true, sort: true, info: { title: 'Sub-tasks with real work', definition: 'Sub-tasks credited to this person because they carried real work: own commits or dev time, under someone else’s story, or under a story with no timing of its own. Checklist sub-tasks are not counted.', formula: 'count(credited substantive sub-tasks)' } },
     { key: 'pace', label: 'Dev-days per est-day', num: true, sort: true, info: { title: 'Pace vs estimate', definition: 'Actual dev working days per estimated day on this person’s tickets. Above ×1 = slower than estimated. Not divided by capacity: time off does not change it.', formula: 'Σ actual dev-days ÷ Σ estimated days' } },
     { key: 'cycle', label: 'Median cycle (business d)', num: true, sort: true },
     { key: 'mape', label: 'Est. error', num: true, sort: true },
@@ -72,12 +73,20 @@
         if (isNum(a.weighted_per_available_day)) return a.weighted_per_available_day;
         return capDays && isNum(a.weighted_done) ? a.weighted_done / capDays : null;
       case 'done': return a.completed;
+      case 'subs': return subCount(o, a.assignee_id);
       case 'pace': return a.pace_vs_est;
       case 'cycle': return a.median_cycle;
       case 'mape': return a.mape;
       case 'wip': return a.avg_wip;
       default: return null;
     }
+  }
+
+  /** Substantive sub-tasks credited to a person (o.subtasks), or null when not reported. */
+  function subCount(o, id) {
+    const list = o.subtasks || (o.flow && o.flow.substantive_subtasks);
+    if (!Array.isArray(list)) return null;
+    return list.filter((x) => (x.credited_to || x.assignee_id) === id).length;
   }
 
   function rowsHtml(o, list) {
@@ -95,8 +104,12 @@
           isNum(a.weighted_done) ? fmtNum(a.weighted_done) : '—',
           isNum(perDay) ? `${fmtNum(perDay, 2)}${isNum(capDays) ? ` <span class="dim small">over ${fmtNum(capDays, 0)} d</span>` : ''}` : '<span class="dim">needs capacity</span>',
           `${a.completed ?? 0}${a.rolled_up ? ` <span class="dim small">+${a.rolled_up} sub</span>` : ''}`,
-          fmtX(a.pace_vs_est),
-          fmtD(a.median_cycle),
+          (() => {
+            const n = subCount(o, a.assignee_id);
+            return n == null ? '<span class="dim">—</span>' : n ? `<button type="button" class="link" data-open="${esc(a.assignee_id)}" data-focus="subtasks" aria-label="${n} sub-tasks with real work — open ${esc(a.assignee_name || a.assignee_id)}">${n}</button>` : '0';
+          })(),
+          isNum(a.pace_vs_est) ? `${fmtX(a.pace_vs_est)} <span class="dim small">independent of capacity</span>` : '—',
+          isNum(a.median_cycle) ? fmtD(a.median_cycle) : TP.NT,
           fmtPct(a.mape),
           isNum(a.avg_wip) ? fmtNum(a.avg_wip) : '—',
           a.goals_total ? badge(a.goals_met === a.goals_total ? 'success' : a.goals_met ? 'warning' : 'danger', `${a.goals_met}/${a.goals_total}`) : '—',
@@ -142,6 +155,8 @@
   TP.views.people = {
     rowsHtml,
     rowGuard,
+    subCount,
+    COLS,
     subtasksHtml,
     render(outer, { o, app }) {
       // Own wrapper per render so delegated listeners never pile up on #view.
@@ -194,7 +209,7 @@
         },
       });
       section(host, {
-        title: 'Credited sub-tasks',
+        title: 'Sub-tasks with real work',
         infoDef: { title: 'Substantive sub-tasks', definition: 'Most sub-tasks are checklists and roll into their story. A sub-task is surfaced when it carries real dev time or commits, sits under someone else’s story, or its story has no timing of its own.', formula: 'commits > 0 OR dev time > 0 OR owner ≠ story owner OR story untimed' },
         load: async () => subtasksHtml(o),
       });

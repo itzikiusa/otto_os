@@ -21,28 +21,53 @@
       .join(' ') + (r.confidence ? ` <span class="dim small">${esc(String(r.confidence))} confidence</span>` : '');
   }
 
-  const share01 = (v) => (isNum(v) ? (v > 1 ? v / 100 : v) : null);
-
   function tiles(o) {
     const rw = o.rework || {};
     const d = o.dora || {};
     const cfr = M(d.change_failure_rate || d.cfr);
+    const rate = M(rw.rate ?? rw.value);
     const items = [
-      ['Rework rate', M(rw.rate ?? rw.value), (v) => fmtPct(share01(v)), 'Share of delivered work that is rework of a recently delivered ticket.', 'rework est-days ÷ delivered est-days'],
-      ['Time charged back', M(rw.charged_days), fmtD, 'Working days of later tickets charged back to the tickets whose recent code they rewrote.', 'Σ rework days (git blame + Jira-detected)'],
-      ['Change failure rate', cfr, (v) => fmtPct(share01(v)), 'Deployments followed by a hotfix or a bug on the same code.', 'failed deploys ÷ deploys'],
-      ['Fix rate', M(o.scope && o.scope.fix_rate), fmtPct, 'Done tickets that needed fix commits within the fix window.', 'tickets with fixes ÷ done'],
+      { t: 'Rework rate', m: rate, share: true, ids: ['rework'], def: 'Share of delivered work that is rework of a recently delivered ticket. A rework ticket’s estimate is not new scope.', fm: 'rework est-days ÷ delivered est-days', dir: 'Lower is better.', drill: rw.charged || rw.tickets || rw.items },
+      { t: 'Time charged back', m: M(rw.charged_days), fmt: fmtD, ids: ['rework'], def: 'Working days of later tickets charged back to the tickets whose recent code they rewrote.', fm: 'Σ rework days (git blame + Jira-detected)', dir: 'Lower is better.' },
+      { t: 'Change failure rate', m: cfr, share: true, ids: ['changeFailureRate'], def: 'Deployments followed by a hotfix or a bug on the same code.', fm: 'failed deploys ÷ deploys', dir: 'Lower is better.' },
+      { t: 'Fix rate', m: M(o.scope && o.scope.fix_rate), share: true, ids: ['rework'], def: 'Done tickets that needed fix commits within the fix window.', fm: 'tickets with fixes ÷ done', dir: 'Lower is better.' },
     ];
     return `<div class="tiles">${items
-      .map(([t, m, f, def, fm]) => `<div class="tile"><div class="label">${esc(t)} ${info({ title: t, definition: def, formula: fm, quality: m && m.quality })}</div><div class="value">${m && isNum(m.value) ? f(m.value) : '<span class="na">not available yet</span>'}</div>${m && isNum(m.failed) && isNum(m.total) ? `<div class="context">${m.failed} of ${m.total} deploys</div>` : m && isNum(m.n) ? `<div class="context">n=${m.n}</div>` : ''}</div>`)
+      .map((x) => {
+        const m = x.m;
+        const has = m && isNum(m.value);
+        const guard = TP.mergeGuard(TP.guardFor(o, x.ids, m), x.share && has ? TP.overGuard(m.value, x.t) : null);
+        const list = Array.isArray(x.drill) ? x.drill : null;
+        return TP.tile({
+          title: x.t,
+          valueHtml: has ? (x.share ? TP.shareHtml(m.value) : x.fmt(m.value)) : '<span class="na">not available yet</span>',
+          context: m && isNum(m.failed) && isNum(m.total) ? `${m.failed} of ${m.total} deploys` : m && isNum(m.n) ? `n=${m.n}` : '',
+          guard,
+          def: { definition: x.def, formula: x.fm, direction: x.dir, quality: m && m.quality },
+          drill: has && list && list.length
+            ? { valueLabel: 'Days', tickets: list.map((r) => ({ key: r.rework_key || r.key, summary: `rework of ${r.original_key || r.of_key || r.rework_of || '—'}`, value: r.days, note: (r.signals || [r.reason]).map((g) => reasonLabel(typeof g === 'string' ? g : (g && (g.reason || g.kind)) || '')).filter(Boolean).join(', ') })) }
+            : null,
+        });
+      })
       .join('')}</div>`;
+  }
+
+  /** Which rework detectors ran: o.rework.sources = {git_blame:{ran,repos}, jira:{ran,tickets}}. */
+  function reworkSources(rw) {
+    const src = (rw && (rw.sources || rw.detectors)) || {};
+    const gb = src.git_blame || src.blame || src.git || null;
+    const jl = src.jira_links || src.jira || null;
+    return [
+      { label: 'git blame scanned', ran: gb ? gb.ran !== false : false, n: gb ? gb.repos ?? gb.n : undefined, unit: 'repos' },
+      { label: 'Jira links checked', ran: jl ? jl.ran !== false : false, n: jl ? jl.tickets ?? jl.n : undefined, unit: 'tickets' },
+    ];
   }
 
   function chargedHtml(o) {
     const rw = o.rework;
-    if (!rw) return notAvailable('Rework attribution');
+    if (!rw) return TP.sourcesEmpty({ what: 'Rework', sources: reworkSources(null) });
     const list = rw.charged || rw.tickets || rw.items || [];
-    if (!list.length) return '<p class="dim">No rework detected in this period.</p>';
+    if (!list.length) return TP.sourcesEmpty({ what: 'Rework', sources: reworkSources(rw) });
     return table({
       caption: `${list.length} rework links — the rework ticket’s estimate is not counted as new scope`,
       cols: [{ label: 'Original ticket' }, { label: 'Rework ticket' }, { label: 'Signal' }, { label: 'Days charged', num: true }, { label: 'Owner' }],
@@ -56,16 +81,28 @@
     });
   }
 
+  /** Hygiene flags: human labels, each a button opening the tickets that carry it. */
   function flagsHtml(o) {
     const f = Object.entries(o.flags || {});
     if (!f.length) return '<p class="dim">No hygiene issues on completed tickets.</p>';
-    return `<div class="chips">${f.map(([k, v]) => badge('warning', `${k.replace(/_/g, ' ')} × ${v}`)).join('')}</div>`;
+    const byFlag = o.flag_tickets || o.flags_tickets || {};
+    return `<ul class="flag-list">${f
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => {
+        const label = TP.hygieneLabel(k);
+        const why = (TP.HYGIENE[k] || [])[1] || '';
+        const list = (byFlag[k] || []).map((t) => (typeof t === 'string' ? { key: t } : t));
+        const ref = TP.drillRef({ title: `${label} — ${v} ticket${v === 1 ? '' : 's'}`, intro: why, valueLabel: 'Days', tickets: list.map((t) => ({ key: t.key, summary: t.summary, value: t.actual_days ?? t.days })), empty: 'This scan did not list the tickets for this flag. Open a person on the People tab to see flags per ticket.' });
+        return `<li><button type="button" class="flag" data-drill="${ref}" aria-haspopup="dialog">${badge('warning', `${label} × ${v}`)}</button> <span class="dim small">${esc(why)}</span></li>`;
+      })
+      .join('')}</ul>`;
   }
 
   TP.views.quality = {
     tiles,
     chargedHtml,
-    render(host, { o }) {
+    flagsHtml,
+    render(host, { o, app }) {
       section(host, { title: 'Quality', load: async () => tiles(o) });
       section(host, {
         title: 'Rework charged back',
@@ -75,7 +112,9 @@
           formula: 'days of the rework ticket → added to the original ticket’s REWORK phase',
           quality: o.rework && o.rework.quality,
         },
+        headerEnd: TP.guardBadge(TP.guardFor(o, ['rework'])),
         load: async () => chargedHtml(o),
+        after: (body) => TP.wireEmptyActs(body, app),
       });
       section(host, { title: 'Hygiene flags', sub: 'Data issues on completed tickets that can skew timing.', load: async () => flagsHtml(o) });
     },

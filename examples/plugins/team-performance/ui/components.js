@@ -20,6 +20,17 @@
     return round(v, 1) + 'd';
   };
   const fmtPct = (v) => (isNum(v) ? Math.round(v * 100) + '%' : '—');
+  /**
+   * A share is ALWAYS a 0..1 fraction — the UI never guesses a 0..100 scale.
+   * A value above 1 is an upstream bug (overlap / double count): it reads
+   * ">100%" and carries a 'bad' guardrail (overGuard) instead of being rescaled.
+   */
+  const isOver = (v) => isNum(v) && v > 1;
+  const fmtShare = (v) => (!isNum(v) ? '—' : isOver(v) ? '>100%' : fmtPct(v));
+  /** fmtShare for HTML contexts (">100%" escaped). */
+  const shareHtml = (v) => esc(fmtShare(v));
+  const overGuard = (v, what = 'This share') =>
+    isOver(v) ? { level: 'bad', msg: `${what} came out above 100% (${round(v, 2)}) — its inputs overlap or are double-counted, so read it as indicative only.`, codes: ['share_over_100'] } : null;
   const fmtNum = (v, d = 1) => (isNum(v) ? String(round(v, d)) : '—');
   const fmtX = (v) => (isNum(v) ? '×' + v.toFixed(2) : '—');
   const fmtDate = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '—');
@@ -118,7 +129,7 @@
   // never read without knowing what it is and how trustworthy its inputs are.
   const INFO = new Map();
   let infoSeq = 0;
-  /** def = {title, definition, formula, quality} (quality may be a string or {level,msg}). */
+  /** def = {title, definition, formula, direction, quality} (quality may be a string or {level,msg}). */
   function info(def) {
     const id = 'i' + ++infoSeq;
     INFO.set(id, def);
@@ -222,6 +233,7 @@
       b,
       `<dl data-describe><dt>${esc(def.title || 'Metric')}</dt><dd>${esc(def.definition || '')}</dd>
         <dt>Formula</dt><dd class="mono small">${esc(def.formula || '—')}</dd>
+        ${def.direction ? `<dt>Direction</dt><dd>${esc(def.direction)}</dd>` : ''}
         <dt>Input quality</dt><dd>${esc(qualityText(def.quality))}</dd></dl>`,
       { label: def.title, describe: true },
     );
@@ -232,23 +244,40 @@
    * Open a modal dialog. Returns {el, close(value), done: Promise<value>}.
    * opts: {title, body (html), actions:[{label, value, primary, danger}], wide, onOpen(el)}
    */
-  function modal({ title, body, actions = [], wide = false, onOpen, labelledBy } = {}) {
+  // While any modal is open the page behind it (toolbar + main) is inert, so
+  // neither pointer, Tab nor a screen reader's virtual cursor can reach it.
+  let modalDepth = 0;
+  const INERT_SEL = ['main', '.toolbar'];
+  function setPageInert(on) {
+    for (const sel of INERT_SEL) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      if (on) el.setAttribute('inert', '');
+      else el.removeAttribute('inert');
+    }
+  }
+  function modal({ title, body, actions = [], wide = false, drawer = false, onOpen, labelledBy } = {}) {
     const prev = document.activeElement;
     const back = document.createElement('div');
-    back.className = 'modal-backdrop';
+    back.className = 'modal-backdrop' + (drawer ? ' drawer-backdrop' : '');
     const id = 'm' + Date.now().toString(36);
-    back.innerHTML = `<div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="${labelledBy || id}">
+    back.innerHTML = `<div class="modal${wide ? ' wide' : ''}${drawer ? ' drawer' : ''}" role="dialog" aria-modal="true" aria-labelledby="${labelledBy || id}">
       ${title ? `<h2 id="${id}">${esc(title)}</h2>` : ''}
       <div class="modal-body">${body || ''}</div>
       ${actions.length ? `<footer>${actions.map((a, i) => `<button type="button" data-act="${i}" class="${a.primary ? 'primary' : a.danger ? 'danger' : ''}">${esc(a.label)}</button>`).join('')}</footer>` : ''}
     </div>`;
     document.body.appendChild(back);
+    if (modalDepth++ === 0) setPageInert(true);
     const dlg = back.firstElementChild;
     let resolve;
+    let closed = false;
     const done = new Promise((r) => (resolve = r));
     const close = (value) => {
+      if (closed) return;
+      closed = true;
       document.removeEventListener('keydown', onKey, true);
       back.remove();
+      if (--modalDepth === 0) setPageInert(false);
       if (prev && prev.focus) prev.focus();
       resolve(value);
     };
@@ -420,7 +449,7 @@
       .map((c) => {
         const cls = c.num ? ' class="num"' : '';
         const aria = c.sort ? ` aria-sort="${sortKey === c.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}"` : '';
-        const inner = c.sort ? `<button type="button" class="sort" data-sort="${esc(c.key)}">${esc(c.label)}${sortKey === c.key ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</button>` : esc(c.label);
+        const inner = c.sort ? `<button type="button" class="sort" data-sort="${esc(c.key)}">${esc(c.label)}${sortKey === c.key ? `<span aria-hidden="true">${sortDir === 'asc' ? ' ▲' : ' ▼'}</span>` : ''}</button>` : esc(c.label);
         return `<th scope="col"${cls}${aria}${c.title ? ` title="${esc(c.title)}"` : ''}>${inner}${c.info ? ' ' + info(c.info) : ''}</th>`;
       })
       .join('');
@@ -432,7 +461,8 @@
         return `<tr ${attrs}>${cells.map((c, i) => (i === 0 ? `<th scope="row">${c}</th>` : `<td${cols[i] && cols[i].num ? ' class="num"' : ''}>${c}</td>`)).join('')}</tr>`;
       })
       .join('');
-    return `<div class="table-wrap"><table${id ? ` id="${esc(id)}"` : ''} class="${stickyFirst ? 'sticky-first' : ''}"><caption>${esc(caption)}</caption><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+    // The scroller is focusable so keyboard users can scroll a wide table.
+    return `<div class="table-wrap" tabindex="0" role="region" aria-label="${esc(caption)}"><table${id ? ` id="${esc(id)}"` : ''} class="${stickyFirst ? 'sticky-first' : ''}"><caption>${esc(caption)}</caption><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   }
 
   // ---- charts (inline SVG, title+desc, always paired with a table) -------
@@ -447,9 +477,11 @@
       open: `<svg viewBox="0 0 ${w} ${h}" role="img" aria-labelledby="${id}t ${id}d" preserveAspectRatio="xMinYMin meet"><title id="${id}t">${esc(title)}</title><desc id="${id}d">${esc(desc)}</desc>`,
     };
   }
-  /** Wrap an SVG + its data table. */
-  const chartBlock = ({ svg, legend = '', tableHtml = '' }) =>
-    `<div class="chart">${legend}${svg}${tableHtml ? `<details><summary>Show as table</summary>${tableHtml}</details>` : ''}</div>`;
+  /** Wrap an SVG + its data table. The table is REQUIRED: every chart has a non-visual twin. */
+  function chartBlock({ svg, legend = '', tableHtml = '' }) {
+    if (!tableHtml) throw new Error('chartBlock: tableHtml is required (every chart needs its data table)');
+    return `<div class="chart">${legend}${svg}<details><summary>Show as table</summary>${tableHtml}</details></div>`;
+  }
   const legendHtml = (items) =>
     `<div class="legend">${items.map((i) => `<span class="key"><span class="swatch${i.hatch ? ' hatch' : ''}" ${i.hatch ? '' : `style="background:var(${i.color})"`}></span>${esc(i.label)}</span>`).join('')}</div>`;
 
@@ -463,7 +495,8 @@
     const pts = arr
       .map((v, i) => (isNum(v) ? `${((i / Math.max(1, arr.length - 1)) * (w - 4) + 2).toFixed(1)},${(hi === lo ? h / 2 : h - 2 - ((v - lo) / (hi - lo)) * (h - 4)).toFixed(1)}` : null))
       .filter(Boolean);
-    return `<svg class="spark" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(label)}: ${vs.length} points, from ${round(vs[0], 2)} to ${round(vs[vs.length - 1], 2)}"><polyline points="${pts.join(' ')}" fill="none" stroke="var(--cat-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+    const text = `${label}: ${vs.length} points, from ${round(vs[0], 2)} to ${round(vs[vs.length - 1], 2)}`;
+    return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false"><polyline points="${pts.join(' ')}" fill="none" stroke="var(--cat-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg><span class="sr-only">${esc(text)}</span>`;
   }
 
   /**
@@ -567,6 +600,220 @@
     return `<span class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(p * 100)}" aria-label="${esc(label || 'share')}"><span style="inline-size:${(p * 100).toFixed(1)}%"></span></span>`;
   };
 
+
+  // ---- guardrails -----------------------------------------------------------
+  // Metric key → canonical tile id (mirrors lib/guardrails TILE_OF), so a
+  // canonical guardrail is found whether it names the metric or only the tiles.
+  const TILE_OF = Object.freeze({
+    deploymentFrequency: 'dora_deploy_frequency', leadTime: 'dora_lead_time', changeFailureRate: 'dora_cfr', mttr: 'dora_mttr',
+    'dora.deploy_frequency': 'dora_deploy_frequency', 'dora.lead_time': 'dora_lead_time', 'dora.change_failure_rate': 'dora_cfr', 'dora.mttr': 'dora_mttr',
+    prPickup: 'pr_pickup', prReview: 'pr_review', prSize: 'pr_size', prMerge: 'pr_merge', prUnreviewed: 'pr_unreviewed',
+    estimateAccuracy: 'estimate_accuracy',
+    throughputPerWeek: 'capacity_throughput', wip: 'capacity_wip', agingWip: 'capacity_aging_wip', contextSwitching: 'capacity_context_switching',
+    investmentMix: 'capacity_investment', unplannedShare: 'capacity_unplanned', rework: 'capacity_rework',
+    cycleTimeByPhase: 'phase_cycle_weak',
+  });
+  const levelOf = (g) => (g.level === 'bad' || g.severity === 'danger' || g.severity === 'bad' ? 'bad' : 'warn');
+
+  /**
+   * Guardrail for a metric, looked up by CANONICAL metric id — never by
+   * matching message text. Sources, in order: the per-metric badge map
+   * (guardrail_badges: {metricId: {severity, codes, reasons}}), then canonical
+   * entries whose `metric`, `id` ("code:metric" or a tile id) or `tiles[]`
+   * name one of the ids, then the metric envelope's own weak_reasons (`env`).
+   * → {level:'bad'|'warn', msg, codes} or null.
+   */
+  function guardFor(o, ids, env) {
+    const want = [].concat(ids || []).filter(Boolean);
+    let out = null;
+    if (o && want.length) {
+      const badges = o.guardrail_badges || {};
+      for (const id of want) {
+        const b = badges[id];
+        if (b) {
+          out = { level: b.severity === 'danger' ? 'bad' : 'warn', msg: (b.reasons || []).join(' '), codes: b.codes || [] };
+          break;
+        }
+      }
+      if (!out) {
+        const tiles = new Set(want.concat(want.map((k) => TILE_OF[k]).filter(Boolean)));
+        const metricOf = (g) => g.metric || (typeof g.id === 'string' && g.id.includes(':') ? g.id.slice(g.id.indexOf(':') + 1) : null);
+        const hits = (Array.isArray(o.guardrails) ? o.guardrails : []).filter(
+          (g) => g && g.level !== 'ok' && (want.includes(metricOf(g)) || tiles.has(g.id) || (Array.isArray(g.tiles) && g.tiles.some((t) => tiles.has(t)))),
+        );
+        if (hits.length) out = { level: hits.some((g) => levelOf(g) === 'bad') ? 'bad' : 'warn', msg: hits.map((g) => g.msg || g.reason).filter(Boolean).join(' '), codes: hits.map((g) => g.code || g.id) };
+      }
+    }
+    const weak = env && typeof env === 'object' && Array.isArray(env.weak_reasons) && env.weak_reasons.length ? env.weak_reasons : null;
+    if (weak && !out) out = { level: 'warn', msg: weak.map((r) => WEAK_TEXT[r] || r.replace(/_/g, ' ')).join(' '), codes: weak };
+    return out;
+  }
+  const WEAK_TEXT = { low_n: 'Fewer than 5 items behind this number.', no_sprint_history: 'No sprint history in Jira, so sprint membership is read from the current sprint field only.' };
+  /** Worse of two guardrails (either may be null); messages are joined. */
+  function mergeGuard(a, b) {
+    if (!a) return b || null;
+    if (!b) return a;
+    return { level: a.level === 'bad' || b.level === 'bad' ? 'bad' : 'warn', msg: [a.msg, b.msg].filter(Boolean).join(' '), codes: [...(a.codes || []), ...(b.codes || [])] };
+  }
+  const guardBadge = (g) => (g ? badge(g.level === 'bad' ? 'danger' : 'warning', g.level === 'bad' ? 'weak inputs' : 'check inputs', g.msg) : '');
+  /** A 'bad' guardrail is never hover-only: its reason is printed inline. */
+  const guardReason = (g) => (g && g.level === 'bad' && g.msg ? `<p class="guard-reason">${icon('warn')}<span>${esc(g.msg)}</span></p>` : '');
+
+  /** "over 18 capacity days (20 working − 2 off)" — the context every per-person / per-team rate carries. */
+  function capContext(cap, unit = 'capacity days') {
+    if (!cap || !isNum(cap.capacity_days)) return 'capacity not available yet — not comparable';
+    const parts = isNum(cap.business_days) ? ` (${fmtNum(cap.business_days, 0)} working − ${fmtNum(cap.time_off_days || 0, 0)} off)` : '';
+    return `over ${fmtNum(cap.capacity_days, 0)} ${unit}${parts}`;
+  }
+
+  // ---- drill-down drawer -------------------------------------------------------
+  // A tile value with contributing tickets is a <button>; it opens a drawer
+  // listing those tickets with Jira links, so a number can always be traced.
+  const DRILL = new Map();
+  let drillSeq = 0;
+  /** def = {title, tickets:[{key, summary, value, note}], valueLabel, empty} */
+  function drillRef(def) {
+    const id = 'd' + ++drillSeq;
+    DRILL.set(id, def);
+    return id;
+  }
+  function drawerHtml(def) {
+    const list = Array.isArray(def.tickets) ? def.tickets : [];
+    if (!list.length) return `<p class="dim">${esc(def.empty || 'The scan did not return the tickets behind this number for this scope.')}</p>`;
+    return table({
+      caption: `${list.length} contributing ticket${list.length === 1 ? '' : 's'}`,
+      cols: [{ label: 'Ticket' }, { label: def.valueLabel || 'Value', num: true }, { label: 'Why it counts' }],
+      rows: list.slice(0, 300).map((t) => [
+        `${jiraLink(t.key)} <span class="dim small">${esc(String(t.summary || '').slice(0, 70))}</span>`,
+        t.value == null ? '—' : isNum(t.value) ? fmtNum(t.value, 2) : esc(t.value),
+        esc(t.note || t.reason || ''),
+      ]),
+    });
+  }
+  function drawer(def) {
+    return modal({ title: def.title || 'Contributing tickets', body: (def.intro ? `<p class="dim small">${esc(def.intro)}</p>` : '') + drawerHtml(def), drawer: true, actions: [{ label: 'Close', value: null }] });
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest && e.target.closest('[data-drill]');
+    if (!b) return;
+    const def = DRILL.get(b.dataset.drill);
+    if (def) drawer(def);
+  });
+
+  /**
+   * The one metric tile. guard 'bad' → hatched + dimmed with the reason
+   * inline; a value with `drill` tickets is a button that opens the drawer.
+   * {title, valueHtml, context, capCtx, guard, def, band, series, drill}
+   */
+  function tile({ title, valueHtml, context = '', capCtx = '', guard = null, def = null, band = '', series = null, drill = null, quality = null }) {
+    const bad = guard && guard.level === 'bad';
+    const val = drill
+      ? `<button type="button" class="tile-value value" data-drill="${drillRef({ title, ...drill })}" aria-haspopup="dialog" title="Show the tickets behind ${esc(title)}">${valueHtml}</button>`
+      : `<span class="value">${valueHtml}</span>`;
+    return `<div class="tile${bad ? ' weak' : ''}">
+      <div class="label">${esc(title)}${def ? ' ' + info({ title, ...def, quality: guard || quality || def.quality }) : ''}</div>
+      <div class="row">${val}${series ? sparkline(series, title) : ''}</div>
+      ${band || guard ? `<div class="row">${band ? bandBadge(band) : ''}${guardBadge(guard)}</div>` : ''}
+      ${context ? `<div class="context">${context}</div>` : ''}
+      ${capCtx ? `<div class="context cap">${esc(capCtx)}</div>` : ''}
+      ${guardReason(guard)}
+    </div>`;
+  }
+
+  // ---- honest empty states -----------------------------------------------------
+  /**
+   * Empty state that names which sources ran. sources: [{label, ran, n, unit}]
+   * → "git blame scanned 4 repos, Jira links 120 tickets — none found", or
+   * "not checked yet" when nothing ran. actions: [{label, act}] (data-empty-act).
+   */
+  function sourcesEmpty({ what, sources = [], actions = [{ label: 'Scan', act: 'scan' }, { label: 'Settings', act: 'settings' }] }) {
+    const ran = sources.filter((x) => x && x.ran !== false && (x.ran || isNum(x.n)));
+    const text = ran.length
+      ? `${ran.map((x) => `${x.label} ${isNum(x.n) ? `${x.n} ${x.unit || ''}`.trim() : 'ran'}`).join(', ')} — none found.`
+      : `${what}: not checked yet — the next scan runs ${sources.map((x) => x.label).join(' and ') || 'the detectors'}.`;
+    return `<div class="empty compact" role="status"><p class="dim">${esc(ran.length ? `No ${what.toLowerCase()} — ${text}` : text)}</p>
+      <div class="form-actions">${actions.map((a) => `<button type="button" class="compact" data-empty-act="${esc(a.act)}">${esc(a.label)}</button>`).join('')}</div></div>`;
+  }
+  /** Wire data-empty-act buttons inside `root` to app.startScan / app.goTab. */
+  function wireEmptyActs(root, app) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('[data-empty-act]').forEach((b) => {
+      b.onclick = () => {
+        if (b.dataset.emptyAct === 'scan' && app && app.startScan) app.startScan(false);
+        else if (app && app.goTab) app.goTab(b.dataset.emptyAct);
+      };
+    });
+  }
+
+  /** Hygiene flag codes (lib/analytics) → human labels + what they mean. */
+  const HYGIENE = Object.freeze({
+    no_code: ['No code found', 'Done in Jira, but no commit carries the ticket key.'],
+    unmerged_code: ['Code never merged', 'Commits exist, but none reached the main branch.'],
+    late_merge: ['Merged after done', 'Marked done more than 2 working days before its code merged.'],
+    done_by_git_only: ['Done by git only', 'Code merged, but the Jira ticket was never closed.'],
+    stale_timing: ['Stale timing', 'Jira statuses span far longer than any git activity.'],
+    zero_time: ['Zero time', 'Closed with no measurable working time.'],
+    multi_dev: ['Several developers', 'Two or more people made substantial commits; time is shared by commit share.'],
+    qa_capped: ['QA time capped', 'QA without commits on enough distinct days does not count as dev time.'],
+    reopened: ['Reopened', 'Reopened after it was done.'],
+    no_estimate: ['No estimate', 'Neither story points nor an estimate.'],
+    skipped_design: ['Design skipped', 'Never passed through the design status.'],
+  });
+  const hygieneLabel = (code) => (HYGIENE[code] ? HYGIENE[code][0] : String(code).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()));
+
+  /** Missing median marker (with a full-text tooltip + sr text), and the unestimated badge. */
+  const NT = '<abbr class="nt" title="Not tracked: no evidence, or fewer than 5 tickets for a median">NT</abbr>';
+  const unestimated = () => badge('warning', 'unestimated', 'No story points or estimate — kept out of estimate-based metrics');
+
+  // ---- deep links (location.hash) ---------------------------------------------
+  // #tab=people&person=<id>&period=3&since=2026-01-01 — tab, person and period
+  // survive reloads and can be shared; localStorage stays the fallback.
+  const PERIODS = ['', '1', '3', '6', '12', 'ytd', 'custom'];
+  const route = {
+    parse(hash) {
+      const out = {};
+      try {
+        const q = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+        if (q.get('tab')) out.tab = q.get('tab');
+        if (q.get('person')) out.person = q.get('person');
+        if (q.has('period') && PERIODS.includes(q.get('period'))) out.period = q.get('period');
+        if (/^\d{4}-\d{2}-\d{2}$/.test(q.get('since') || '')) out.since = q.get('since');
+      } catch {
+        /* malformed hash → defaults */
+      }
+      return out;
+    },
+    build({ tab, person, period, since } = {}) {
+      const q = new URLSearchParams();
+      if (tab) q.set('tab', tab);
+      if (person) q.set('person', person);
+      if (period != null) q.set('period', period);
+      if (period === 'custom' && since) q.set('since', since);
+      return '#' + q.toString();
+    },
+  };
+
+  // ---- theme ------------------------------------------------------------------
+  /**
+   * Every variable the host sends, as [name, value] pairs ('--' added when the
+   * host omits it), plus the surfaces Otto derives but does not send
+   * (--surface-3, --hover, --bg-sidebar, --border-strong) computed from them.
+   */
+  function themeVars(theme) {
+    const out = new Map();
+    if (theme && typeof theme === 'object') {
+      for (const [k0, v] of Object.entries(theme)) {
+        if (typeof v !== 'string' || !v.trim() || !/^-{0,2}[a-z0-9-]+$/i.test(k0)) continue;
+        out.set(k0.startsWith('--') ? k0 : '--' + k0.replace(/^-+/, ''), v.trim());
+      }
+    }
+    if (out.has('--surface-2') && out.has('--text') && !out.has('--surface-3')) out.set('--surface-3', 'color-mix(in srgb, var(--surface-2) 88%, var(--text))');
+    if (out.has('--text') && !out.has('--hover')) out.set('--hover', 'color-mix(in srgb, var(--text) 7%, transparent)');
+    if (out.has('--text') && !out.has('--border-strong')) out.set('--border-strong', 'color-mix(in srgb, var(--text) 22%, transparent)');
+    if (out.has('--bg') && !out.has('--bg-sidebar')) out.set('--bg-sidebar', 'color-mix(in srgb, var(--bg) 94%, var(--text))');
+    return [...out];
+  }
+
   /** localStorage wrappers — private mode / blocked storage must never break the page. */
   const store = {
     get(k, d = null) {
@@ -587,6 +834,8 @@
   };
 
   Object.assign(TP, {
+    route, themeVars, fmtShare, shareHtml, isOver, overGuard, TILE_OF, guardFor, mergeGuard, guardBadge, guardReason, capContext,
+    drillRef, drawer, drawerHtml, tile, sourcesEmpty, wireEmptyActs, HYGIENE, hygieneLabel, NT, unestimated, setPageInert,
     esc, isNum, round, fmtD, fmtPct, fmtNum, fmtX, fmtDate, fmtAgo, fmtSecs, M,
     api, put, post, icon, badge, bandBadge, jiraLink, info, qualityText,
     popover, closePopover, modal, confirmer, toast, toastDuration, announce,

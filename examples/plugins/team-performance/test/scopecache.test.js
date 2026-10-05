@@ -79,3 +79,85 @@ test('store: writeJsonAtomicAsync round-trips and concurrent writers never colli
   assert.deepEqual(fs.readdirSync(path.dirname(f)), ['x.json'], 'no tmp files left');
   assert.equal(await store.readJsonAsync(path.join(dir, 'missing.json'), 'fb'), 'fb');
 });
+
+// ── Parsed-file cache ──
+const zlib = require('zlib');
+const { createFileCache, memoizeView, acceptsGzip } = require('../lib/scopecache.js');
+
+test('file cache: reuses parse while mtime unchanged, shared across scope rebuilds', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fc-'));
+  const corpus = path.join(dir, 'corpus.json'); fs.writeFileSync(corpus, JSON.stringify({ issues: { 'ABC-1': {} } }));
+  const ov = path.join(dir, 'overrides.json'); fs.writeFileSync(ov, '{}');
+  const fc = createFileCache();
+  const sc = createScopeCache();
+  const build = () => ({ corpus: fc.readJson(corpus), ov: fc.readJson(ov) });
+  const e1 = sc.get('k', [corpus, ov], build);
+  // overrides-only change: scope rebuilds, corpus is NOT re-parsed
+  fs.writeFileSync(ov, '{"issues":{}}'); const t = new Date(Date.now() + 5000); fs.utimesSync(ov, t, t);
+  const e2 = sc.get('k', [corpus, ov], build);
+  assert.notEqual(e1, e2);
+  assert.equal(e2.value.corpus, e1.value.corpus, 'same parsed corpus object');
+  assert.deepEqual(e2.value.ov, { issues: {} });
+  assert.equal(fc.stats.hits, 1);
+  // corpus touched → re-parsed
+  fs.writeFileSync(corpus, '{"issues":{}}'); fs.utimesSync(corpus, t, new Date(Date.now() + 9000));
+  assert.notEqual(fc.readJson(corpus), e1.value.corpus);
+  // missing / bad files → fallback, not cached
+  assert.equal(fc.readJson(path.join(dir, 'nope.json'), 'fb'), 'fb');
+  const bad = path.join(dir, 'bad.json'); fs.writeFileSync(bad, '{');
+  assert.equal(fc.readJson(bad, null), null);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('file cache: size cap evicts LRU and never retains oversize files', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fc-'));
+  const mk = (n, len) => { const f = path.join(dir, `${n}.json`); fs.writeFileSync(f, JSON.stringify('x'.repeat(len))); return f; };
+  const a = mk('a', 40), b = mk('b', 40), big = mk('big', 500);
+  const fc = createFileCache({ maxBytes: 100 });
+  fc.readJson(a); fc.readJson(b);
+  assert.equal(fc.size(), 2);
+  const c = mk('c', 40); await fc.readJsonAsync(c);
+  assert.equal(fc.size(), 2); assert.equal(fc.stats.evictions, 1);
+  assert.ok(fc.bytes() <= 100);
+  fc.readJson(big);
+  assert.equal(fc.size(), 2, 'oversize file parsed but not kept');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('memoizeView: once per scope+key, dies with the scope, gzip body cached', async () => {
+  const scope = { records: [1, 2, 3] };
+  let runs = 0;
+  const fn = (s) => { runs++; return { total: s.records.length }; };
+  assert.deepEqual(memoizeView(scope, 'overview:1-2', fn), { total: 3 });
+  memoizeView(scope, 'overview:1-2', fn);
+  assert.equal(runs, 1);
+  memoizeView(scope, 'overview:3-4', fn);
+  assert.equal(runs, 2, 'different key recomputes');
+  memoizeView({ records: [] }, 'overview:1-2', fn);
+  assert.equal(runs, 3, 'new scope object recomputes');
+
+  const b1 = memoizeView(scope, 'assignee:X', fn, { body: true });
+  const b2 = memoizeView(scope, 'assignee:X', fn, { body: true });
+  assert.equal(b1, b2);
+  assert.deepEqual(JSON.parse(b1.json), { total: 3 });
+  assert.equal(b1.gzip(), b1.gzip(), 'gzip computed once');
+  assert.deepEqual(JSON.parse(zlib.gunzipSync(b1.gzip())), { total: 3 });
+  assert.match(b1.etag, /^W\/"/);
+
+  // async fn: rejection is evicted and retried
+  let n = 0;
+  const af = async () => { n++; if (n === 1) throw new Error('boom'); return { ok: true }; };
+  await assert.rejects(memoizeView(scope, 'a', af));
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual((await memoizeView(scope, 'a', af, {})), { ok: true });
+  assert.equal((await memoizeView(scope, 'ab', af, { body: true })).value.ok, true);
+});
+
+test('acceptsGzip parses Accept-Encoding', () => {
+  assert.equal(acceptsGzip('gzip, deflate, br'), true);
+  assert.equal(acceptsGzip('br;q=1.0, gzip;q=0.8'), true);
+  assert.equal(acceptsGzip('gzip;q=0'), false);
+  assert.equal(acceptsGzip('*'), true);
+  assert.equal(acceptsGzip(''), false);
+  assert.equal(acceptsGzip(undefined), false);
+});

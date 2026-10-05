@@ -8,7 +8,8 @@
   const { esc, M, fmtD, fmtNum, fmtPct, isNum, api, section, notAvailable, table, legendHtml, stackedBars, histogram, columns, jiraLink, info, meter } = TP;
   const MIN_N = 5;
   const chartBlock = (o) => (TP.openTablesOnNarrow ? TP.openTablesOnNarrow(TP.chartBlock(o)) : TP.chartBlock(o));
-  const share01 = (v) => (isNum(v) ? (v > 1 ? v / 100 : v) : null);
+  // Every share/coverage is a 0..1 fraction (lib/phases, lib/flow) — never rescaled here.
+  const frac = (v) => (isNum(v) && v >= 0 && v <= 1 ? v : null);
 
   // Canonical phase order; finer splits (review wait vs in review, QA wait vs
   // QA rework) render when the data carries them. `src` = phaseSummary field.
@@ -64,7 +65,7 @@
     let best = null;
     for (const v of Object.values(p)) {
       if (!v || typeof v !== 'object' || !isNum(v.n)) continue;
-      const c = share01(v.coverage);
+      const c = frac(v.coverage);
       if (c && c > 0) best = Math.max(best || 0, Math.round(v.n / c));
     }
     return best;
@@ -96,7 +97,7 @@
     if (d && typeof d === 'object' && isNum(d.n) && isNum(N)) notes.push(`Design: tracked on ${d.n} of ${N} tickets${d.n < MIN_N ? ' — too few to show a median, so it reads “not tracked”' : ''}.`);
     else {
       const cov = M(p.coverage);
-      if (cov && isNum(cov.value)) notes.push(`Design evidence found on ${fmtPct(share01(cov.value))} of tickets.`);
+      if (cov && isNum(cov.value)) notes.push(`Design evidence found on ${TP.fmtShare(cov.value)} of tickets${TP.isOver(cov.value) ? ' — coverage above 100% means overlapping inputs; treat as indicative' : ''}.`);
     }
     const q = p.qa_rework;
     if (q && typeof q === 'object' && isNum(N)) {
@@ -118,9 +119,9 @@
       desc: `Median working days per phase for ${rows.length} groups. Hatched segments mean the phase was not tracked.`,
     });
     const tbl = table({
-      caption: 'Median working days per phase (not tracked = no evidence or fewer than 5 tickets)',
+      caption: 'Median working days per phase (NT = not tracked: no evidence or fewer than 5 tickets)',
       cols: [{ label: 'Group' }, ...used.map((s) => ({ label: s.label, num: true }))],
-      rows: rows.map((r) => [esc(r.label), ...used.map((s) => (r.parts[s.key] == null ? '<span class="dim">not tracked</span>' : fmtD(r.parts[s.key])))]),
+      rows: rows.map((r) => [esc(r.label), ...used.map((s) => (r.parts[s.key] == null ? `${TP.NT}<span class="sr-only"> not tracked</span>` : fmtD(r.parts[s.key])))]),
     });
     const legend = legendHtml([...used.map((s) => ({ label: s.label, color: s.color })), { label: 'Not tracked', hatch: true }]);
     const notes = coverageNotes(p);
@@ -132,16 +133,16 @@
   function prHtml(o) {
     const pr = o.pr_flow;
     const stages = [
-      ['Pickup', pr.pickup_days || pr.pickup, 'PR opened → first review or approval'],
-      ['Review', pr.review_days || pr.review, 'first review → approval'],
-      ['Merge', pr.merge_lag_days || pr.merge_days || pr.merge, 'approval → merged'],
-    ].map(([l, v, d]) => [l, M(v), d]);
+      ['Pickup', pr.pickup_days || pr.pickup, 'PR opened → first review or approval', 'prPickup'],
+      ['Review', pr.review_days || pr.review, 'first review → approval', 'prReview'],
+      ['Merge', pr.merge_lag_days || pr.merge_days || pr.merge, 'approval → merged', 'prMerge'],
+    ].map(([l, v, d, id]) => [l, M(v), d, TP.guardFor(o, [id], M(v))]);
     const max = Math.max(0.01, ...stages.map(([, m]) => (m && isNum(m.value) ? m.value : 0)));
     const funnel = `<div class="funnel" role="list" aria-label="PR flow median days">${stages
       .map(
-        ([l, m, d]) => `<div class="stage" role="listitem"><span>${esc(l)} <span class="dim small">${esc(d)}</span></span>
+        ([l, m, d, g]) => `<div class="stage${g && g.level === 'bad' ? ' weak' : ''}" role="listitem"><span>${esc(l)} <span class="dim small">${esc(d)}</span> ${TP.guardBadge(g)}</span>
           <span class="bar-wrap"><span class="bar" style="display:block;inline-size:${m && isNum(m.value) ? Math.max(1, (m.value / max) * 100) : 0}%"></span></span>
-          <span class="num">${m && isNum(m.value) ? fmtD(m.value) + (isNum(m.n) ? ` <span class="dim small">n=${m.n}</span>` : '') : '<span class="na">not tracked</span>'}</span></div>`,
+          <span class="num">${m && isNum(m.value) ? fmtD(m.value) + (isNum(m.n) ? ` <span class="dim small">n=${m.n}</span>` : '') : '<span class="na">not tracked</span>'}</span>${TP.guardReason(g)}</div>`,
       )
       .join('')}</div>`;
     let size = '';
@@ -158,10 +159,24 @@
     const dm = M(depth.comments_per_pr || depth);
     const un = pr.unreviewed || {};
     const unShare = isNum(pr.unreviewed_share) ? pr.unreviewed_share : un.share;
-    const depthHtml = `<div class="tiles">
-      <div class="tile"><div class="label">Review depth ${info({ title: 'Review depth', definition: 'Review comments per merged PR (median). Very low on large PRs can mean rubber-stamping.', formula: 'median(comments per merged PR)', quality: depth.quality })}</div><div class="value">${dm && isNum(dm.value) ? fmtNum(dm.value) : '<span class="na">not tracked</span>'}</div><div class="context">comments per PR</div></div>
-      <div class="tile"><div class="label">PRs merged</div><div class="value">${isNum(pr.total) ? pr.total : isNum(pr.n) ? pr.n : '—'}</div><div class="context">${isNum(unShare) ? `${fmtPct(unShare)} merged without review` : ''}</div></div>
-    </div>`;
+    const prGuard = (ids, env) => TP.guardFor(o, ids, env);
+    const unGuard = TP.mergeGuard(prGuard(['prUnreviewed'], un), TP.overGuard(unShare, 'Unreviewed share'));
+    const depthHtml = `<div class="tiles">${[
+      TP.tile({
+        title: 'Review depth',
+        valueHtml: dm && isNum(dm.value) ? fmtNum(dm.value) : '<span class="na">not tracked</span>',
+        context: 'comments per merged PR',
+        guard: prGuard(['prReview', 'reviewDepth'], dm),
+        def: { definition: 'Review comments per merged PR (median). Very low on large PRs can mean rubber-stamping.', formula: 'median(comments per merged PR)', direction: 'Neither extreme is good: near zero on big PRs suggests rubber-stamping.', quality: depth.quality },
+      }),
+      TP.tile({
+        title: 'PRs merged',
+        valueHtml: isNum(pr.total) ? String(pr.total) : isNum(pr.n) ? String(pr.n) : '—',
+        context: isNum(unShare) ? `${TP.shareHtml(unShare)} merged without review` : '',
+        guard: unGuard,
+        def: { definition: 'Merged pull requests in the period, and the share merged with no review or approval from someone else.', formula: 'count(merged) · unreviewed ÷ merged', direction: 'A lower unreviewed share is better.' },
+      }),
+    ].join('')}</div>`;
     const approx = isNum(pr.approximated_times) && pr.approximated_times ? `<p class="dim small">${pr.approximated_times} PR timings approximated from commits or last update.</p>` : '';
     return funnel + size + '<h3>Review depth</h3>' + depthHtml + approx;
   }
@@ -243,17 +258,23 @@
         }),
       );
     }
-    const guard = (ids) => (TP.guardFor ? TP.guardFor(o, ids) : null);
     const tiles = [
-      ['Avg WIP', numOf(f.wip), 'Tickets in progress at the same time, averaged per working day.', 'mean(open in-progress tickets per day)', ['wip'], false],
-      ['Context switching', numOf(f.focus || f.context_switching || f.contextSwitching), 'Distinct tickets a person commits to per working day. Higher means more fragmented focus.', 'mean(distinct keys per person-day with commits)', ['contextSwitching'], false],
-      ['Unplanned share', numOf(f.unplanned_share || f.unplannedShare), 'Share of delivered scope that entered after the sprint/period started or is bug/hotfix work.', 'unplanned est-days ÷ delivered est-days', ['unplannedShare'], true],
+      ['Avg WIP', f.wip, 'Tickets in progress at the same time, averaged per working day.', 'mean(open in-progress tickets per day)', ['wip'], false, 'Lower is usually better: fewer parallel tickets finish sooner.'],
+      ['Context switching', f.focus_switches || f.context_switching || f.contextSwitching, 'Distinct tickets a person commits to per working day. Higher means more fragmented focus.', 'mean(distinct keys per person-day with commits)', ['contextSwitching'], false, 'Lower is better.'],
+      ['Unplanned share', f.unplanned_share || f.unplannedShare, 'Share of delivered scope that entered after the sprint/period started or is bug/hotfix work.', 'unplanned est-days ÷ delivered est-days', ['unplannedShare'], true, 'Lower is better; some unplanned work is normal.'],
     ];
     parts.push(
       `<div class="tiles">${tiles
-        .map(([t, v, d, fm, ids, pct]) => {
-          const g = guard(ids);
-          return `<div class="tile"><div class="label">${esc(t)} ${info({ title: t, definition: d, formula: fm, quality: g })}</div><div class="value">${isNum(v) ? (pct ? fmtPct(share01(v)) : fmtNum(v)) : '<span class="na">not available yet</span>'}</div>${g && TP.guardBadge ? `<div class="row">${TP.guardBadge(g)}</div>` : ''}</div>`;
+        .map(([t, raw, d, fm, ids, pct, dir]) => {
+          const v = numOf(raw);
+          const env = raw && typeof raw === 'object' ? raw : null;
+          const guard = TP.mergeGuard(TP.guardFor(o, ids, env), pct ? TP.overGuard(v, t) : null);
+          return TP.tile({
+            title: t,
+            valueHtml: isNum(v) ? (pct ? TP.shareHtml(v) : fmtNum(v)) : '<span class="na">not available yet</span>',
+            guard,
+            def: { definition: d, formula: fm, direction: dir },
+          });
         })
         .join('')}</div>`,
     );
@@ -288,20 +309,21 @@
     render(outer, { o, app }) {
       const host = document.createElement('div');
       outer.appendChild(host);
-      const phaseGuard = TP.guardFor ? TP.guardFor(o, ['cycleTimeByPhase']) : null;
+      const phaseGuard = TP.guardFor(o, ['cycleTimeByPhase']);
       section(host, {
         title: 'Cycle time by phase',
         infoDef: { title: 'Phases', definition: Object.entries(DEFS).map(([k, v]) => `${k}: ${v}`).join(' '), formula: 'per-ticket phase durations in business days, median per group (phases with < 5 tickets: not tracked)', quality: phaseGuard || (o.phases && o.phases.quality) },
-        headerEnd: phaseGuard && TP.guardBadge ? TP.guardBadge(phaseGuard) : '',
+        headerEnd: TP.guardBadge(phaseGuard),
         sub: 'Where the time goes between first work and production.',
-        load: async () => phasesHtml(o),
+        load: async () => TP.guardReason(phaseGuard) + phasesHtml(o),
       });
       const g = document.createElement('div');
       g.className = 'grid-2';
       host.appendChild(g);
       section(g, {
         title: 'Pull requests',
-        infoDef: { title: 'PR flow', definition: 'Bitbucket PR timings fetched through Otto, paced at ≥2 s per call with backoff on 429, cached incrementally.', formula: 'median per stage', quality: (TP.guardFor && TP.guardFor(o, ['prPickup'])) || (o.pr_flow && o.pr_flow.quality) },
+        infoDef: { title: 'PR flow', definition: 'Bitbucket PR timings fetched through Otto, paced at ≥2 s per call with backoff on 429, cached incrementally.', formula: 'median per stage', quality: TP.guardFor(o, ['prPickup', 'prReview', 'prMerge', 'prSize']) || (o.pr_flow && o.pr_flow.quality) },
+        headerEnd: TP.guardBadge(TP.guardFor(o, ['prPickup', 'prReview', 'prMerge', 'prSize'])),
         load: async () => prSection(o, app),
         after(body, rerun) {
           body.querySelectorAll('[data-pr-act]').forEach((b) => {

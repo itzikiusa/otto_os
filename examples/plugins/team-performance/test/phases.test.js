@@ -74,7 +74,7 @@ test('review: PR opened Mon, reviewed Tue, merged Wed → pickup 1, in_review 1,
     { intervals: [iv('In Progress', 0, 0.5)], commit_ts: [MON + 0.25 * D] },
     { prs: [{ number: 7, opened_at: MON + 0.5 * D, first_review_at: MON + 1.5 * D, merged_at: MON + 2.5 * D }] },
   );
-  assert.deepEqual(p.review, { pickup: 1, in_review: 1, total: 2, source: 'pr', merged: 1, unmerged: 0, prs: [{ number: 7, pickup: 1, in_review: 1, open_to_merge: 2 }] });
+  assert.deepEqual(p.review, { pickup: 1, in_review: 1, rework: 0, total: 2, source: 'pr', merged: 1, unmerged: 0, prs: [{ number: 7, pickup: 1, in_review: 1, open_to_merge: 2 }] });
   assert.deepEqual(p.dev, { days: 0.5, sources: ['status'] });
   assert.equal(p.coding_days, 0.25);
 });
@@ -104,8 +104,8 @@ test('review: per-PR — union of windows, median pickup, unmerged counted apart
 
 test('review: no PR falls back to Code Review status; nothing → nulls', () => {
   assert.deepEqual(phasesFor({ intervals: [iv('In Progress', 0, 1), iv('Code Review', 1, 3)] }).review,
-    { pickup: null, in_review: 2, total: 2, source: 'status', merged: 0, unmerged: 0, prs: [] });
-  assert.deepEqual(phasesFor({ intervals: [] }).review, { pickup: null, in_review: null, total: null, source: null, merged: 0, unmerged: 0, prs: [] });
+    { pickup: null, in_review: 2, rework: null, total: 2, source: 'status', merged: 0, unmerged: 0, prs: [] });
+  assert.deepEqual(phasesFor({ intervals: [] }).review, { pickup: null, in_review: null, rework: null, total: null, source: null, merged: 0, unmerged: 0, prs: [] });
 });
 
 test('deploy: reachability (deployed_at) is primary; done_git_at without a PR', () => {
@@ -177,6 +177,48 @@ test('qa: threshold met → commit days are rework, remainder wait; never the wh
   assert.deepEqual(twoDays.dev, { days: 3, sources: ['status', 'qa_rework'] });
   const outside = run([MON + 1.5 * D, MON + 7.5 * D]);
   assert.deepEqual(outside.qa, { wait: 3, rework: 0, counted: false });
+});
+
+test('qa: threshold judged across ALL QA windows — QA→Dev→QA bounce with 1+1 days meets min=2', () => {
+  const rec = { intervals: [iv('In Progress', 0, 1), iv('QA', 1, 2), iv('In Progress', 2, 3), iv('QA', 3, 4)] };
+  const bounce = phasesFor({ ...rec, commit_ts: [MON + 1.5 * D, MON + 3.5 * D] }, { cfg: { qa_work_min_commit_days: 2 } });
+  assert.deepEqual(bounce.qa, { wait: 0, rework: 2, counted: true });
+  assert.deepEqual(bounce.dev, { days: 4, sources: ['status', 'qa_rework'] });
+  // Only one window has a commit day → 1 < 2, nothing counted.
+  const single = phasesFor({ ...rec, commit_ts: [MON + 1.5 * D] }, { cfg: { qa_work_min_commit_days: 2 } });
+  assert.deepEqual(single.qa, { wait: 2, rework: 0, counted: false });
+});
+
+test('qa: weekend and personal days off never count as QA commit days', () => {
+  // QA Fri → next Tue: Fri + Sat + Sun + Mon in window; commits Fri, Sat, Sun.
+  const rec = { intervals: [iv('In Progress', 0, 4), iv('QA', 4, 8)], commit_ts: [MON + 4.5 * D, MON + 5.5 * D, MON + 6.5 * D] };
+  const weekend = phasesFor(rec, { cfg: { qa_work_min_commit_days: 2 } });
+  assert.equal(weekend.qa.counted, false, 'only Fri is a workday → 1 day');
+  const withMon = { ...rec, commit_ts: [...rec.commit_ts, MON + 7.5 * D] };
+  assert.deepEqual(phasesFor(withMon, { cfg: { qa_work_min_commit_days: 2 } }).qa, { wait: 0, rework: 2, counted: true });
+  const off = phasesFor(withMon, { cfg: { qa_work_min_commit_days: 2 }, offDays: new Set(['2026-01-12']) });
+  assert.equal(off.qa.counted, false, 'Mon is a personal day off');
+});
+
+test('review: author commits after first review → review_rework (dev), rest stays in_review', () => {
+  // Open Mon, first review Tue, merged Fri; author pushes fixes Wed (twice) + Sat.
+  const p = phasesFor(
+    { intervals: [iv('In Progress', 0, 0.5)], commit_ts: [MON + 2.2 * D, MON + 2.6 * D, MON + 5.5 * D] },
+    { prs: [{ number: 9, opened_at: MON + 0.5 * D, first_review_at: MON + 1.5 * D, merged_at: MON + 4.5 * D }] },
+  );
+  assert.equal(p.review.pickup, 1);
+  assert.equal(p.review.rework, 1);
+  assert.equal(p.review.in_review, 2, '3 workdays in review − 1 rework day');
+  assert.equal(p.review.total, 4, 'total still open → merge');
+  assert.deepEqual(p.dev, { days: 1.5, sources: ['status', 'review_rework'] });
+  // A commit before the first review is not review rework.
+  const pre = phasesFor({ commit_ts: [MON + 1 * D] }, { prs: [{ opened_at: MON + 0.5 * D, first_review_at: MON + 1.5 * D, merged_at: MON + 2.5 * D }] });
+  assert.equal(pre.review.rework, 0);
+  // No first review → in-review untracked, rework untracked (null, not 0).
+  const noRev = phasesFor({ commit_ts: [MON + 1.5 * D] }, { prs: [{ opened_at: MON, merged_at: MON + 2 * D }] });
+  assert.equal(noRev.review.in_review, null);
+  assert.equal(noRev.review.rework, null);
+  assert.ok(!noRev.dev.sources.includes('review_rework'));
 });
 
 test('qa / rework: no QA stage or no blame → null with a reason (never a fake 0)', () => {

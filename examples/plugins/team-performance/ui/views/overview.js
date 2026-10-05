@@ -6,29 +6,8 @@
   const { esc, M, fmtD, fmtPct, fmtNum, fmtX, info, badge, bandBadge, sparkline, section, notAvailable, isNum } = TP;
 
   // ---- shared helpers (also used by the other views at render time) -------
-
-  /**
-   * Guardrail for a metric, looked up by CANONICAL metric id — never by
-   * matching message text. Sources, in order: the per-metric badge map
-   * (guardrail_badges: {metricId: {severity, codes, reasons}}), then banner
-   * entries whose `metric` (or `id` = "code:metric") equals one of the ids.
-   * → {level:'bad'|'warn', msg, codes} or null.
-   */
-  function guardFor(o, ids) {
-    if (!o) return null;
-    const want = [].concat(ids || []).filter(Boolean);
-    if (!want.length) return null;
-    const badges = o.guardrail_badges || {};
-    for (const id of want) {
-      const b = badges[id];
-      if (b) return { level: b.severity === 'danger' ? 'bad' : 'warn', msg: (b.reasons || []).join(' '), codes: b.codes || [] };
-    }
-    const metricOf = (g) => g.metric || (typeof g.id === 'string' && g.id.includes(':') ? g.id.slice(g.id.indexOf(':') + 1) : null);
-    const hits = (Array.isArray(o.guardrails) ? o.guardrails : []).filter((g) => g && g.level !== 'ok' && want.includes(metricOf(g)));
-    if (!hits.length) return null;
-    return { level: hits.some((g) => g.level === 'bad') ? 'bad' : 'warn', msg: hits.map((g) => g.msg).filter(Boolean).join(' '), codes: hits.map((g) => g.code || g.id) };
-  }
-  const guardBadge = (g) => (g ? badge(g.level === 'bad' ? 'danger' : 'warning', g.level === 'bad' ? 'weak inputs' : 'check inputs', g.msg) : '');
+  // guardFor / guardBadge / tile live in components.js (TP.*).
+  const { guardFor, guardBadge, fmtShare, overGuard, mergeGuard, capContext } = TP;
 
   /** Below 600px a chart's data table is the primary reading — open it by default. */
   const narrow = () => {
@@ -40,10 +19,7 @@
   };
   const openTablesOnNarrow = (html) => (narrow() ? String(html).replace(/<details><summary>Show as table/g, '<details open><summary>Show as table') : html);
 
-  /** Share that may arrive as 0..1 or 0..100 → always 0..1 for fmtPct. */
-  const share01 = (v) => (isNum(v) ? (v > 1 ? v / 100 : v) : null);
-
-  Object.assign(TP, { guardFor, guardBadge, narrow, openTablesOnNarrow, share01 });
+  Object.assign(TP, { narrow, openTablesOnNarrow });
 
   const DEFAULT_PATTERNS = ['deployed', 'hf', 'hotfix'];
   const fmtHours = (h) => (!isNum(h) ? '—' : h < 48 ? `${fmtNum(h, 1)}h` : `${fmtNum(h / 24, 1)}d`);
@@ -72,10 +48,12 @@
       keys: ['change_failure_rate', 'cfr'],
       gids: ['changeFailureRate', 'dora.change_failure_rate'],
       title: 'Change failure rate',
-      fmt: (m) => fmtPct(share01(m.value)),
+      fmt: (m) => TP.shareHtml(m.value),
       ctx: (m) => (isNum(m.failed) && isNum(m.total) ? `${m.failed} of ${plural(m.total, 'deploy')} failed` : ''),
       definition: 'Share of deployments followed by a hotfix tag or a bug on the same code within the failure window.',
       formula: 'failed deployments ÷ deployments',
+      direction: 'Lower is better.',
+      share: true,
     },
     {
       keys: ['mttr', 'mttr_days', 'time_to_restore'],
@@ -94,14 +72,13 @@
     return null;
   };
 
-  function tile({ title, valueHtml, band, series, context, def, quality, guard }) {
-    return `<div class="tile">
-      <div class="label">${esc(title)} ${info({ title, ...def, quality: guard || quality })}</div>
-      <div class="row"><span class="value">${valueHtml}</span>${series ? sparkline(series, title) : ''}</div>
-      <div class="row">${band ? bandBadge(band) : guard ? guardBadge(guard) : '<span></span>'}${context ? `<span class="context">${context}</span>` : ''}</div>
-      ${band && guard ? `<div class="row">${guardBadge(guard)}</div>` : ''}
-    </div>`;
-  }
+  /** Overview tile → TP.tile with the metric's definition as its ⓘ. */
+  const tile = ({ def, ...rest }) => TP.tile({ ...rest, def: def ? { definition: def.definition, formula: def.formula, direction: def.direction } : null });
+  /** Ticket list behind a metric, when the payload carries one. */
+  const drillOf = (m, valueLabel) => {
+    const list = m && (m.tickets || m.items || m.evidence);
+    return Array.isArray(list) && list.length ? { tickets: list.map((t) => (typeof t === 'string' ? { key: t } : { key: t.key || t.ref || t.tag, summary: t.summary || t.title, value: t.value ?? t.days ?? t.hours, note: t.note || t.reason || t.kind })), valueLabel } : null;
+  };
 
   /** Deploy frequency with no matching tags: say why and where to fix it. Never a band. */
   function deployNotAvailable(d, m, app) {
@@ -129,12 +106,12 @@
     if (!d) return notAvailable('DORA metrics');
     return `<div class="tiles">${DORA.map((x, i) => {
       const m = pick(d, x.keys);
-      const guard = guardFor(o, x.gids);
+      const guard = mergeGuard(guardFor(o, x.gids, m), x.share && m ? overGuard(m.value, x.title) : null);
       if (i === 0 && (d.status === 'not_available' || (m && m.status === 'not_available'))) return deployNotAvailable(d, m, app);
       if (!m || !isNum(m.value)) {
         return tile({ title: x.title, valueHtml: '<span class="na">not available yet</span>', def: x, quality: m && m.quality, guard, context: m && m.reason ? esc(m.reason) : '' });
       }
-      return tile({ title: x.title, valueHtml: x.fmt(m), band: m.band, series: m.series, context: x.ctx(m), def: x, quality: m.quality, guard });
+      return tile({ title: x.title, valueHtml: x.fmt(m), band: m.band, series: m.series, context: x.ctx(m), def: x, quality: m.quality, guard, drill: drillOf(m, x.drillLabel) });
     }).join('')}</div>`;
   }
 
@@ -150,6 +127,159 @@
     return `${head}<ul class="guardrails">${g
       .map((x) => `<li>${badge(tone(x.level), label(x.level))}<span>${esc(x.msg)}${x.metric ? ` <span class="dim">· affects ${esc(x.metric)}</span>` : ''}</span></li>`)
       .join('')}</ul>`;
+  }
+
+  /** Estimates inflated more than 10% vs the reference period → the adjusted pace is the headline. */
+  const inflated = (est) => isNum(est.est_inflation) && est.est_inflation > 1.1 && isNum(est.pace_adjusted);
+
+  // ---- second-tier delivery signals (lib/flow, lib/prs, lib/dora) -------------
+  const fmtHrs = (h) => (!isNum(h) ? '—' : h < 48 ? `${fmtNum(h, 1)}h` : `${fmtNum(h / 24, 1)}d`);
+  const nCtx = (m, what) => (m && isNum(m.n) ? `n=${m.n} ${what}` : '');
+  /** [{title, src(o) → raw, fmt, share, ctx, definition, formula, direction, gids, cap}] */
+  const SIGNALS = [
+    {
+      title: 'Flow efficiency',
+      src: (o) => o.flow && (o.flow.flow_efficiency || o.flow.flowEfficiency),
+      share: true,
+      ctx: (m) => nCtx(m, 'tickets'),
+      definition: 'Share of a ticket’s cycle time spent actively worked (dev, in review) rather than waiting (review wait, QA wait, deploy wait).',
+      formula: 'Σ active phase days ÷ Σ cycle days',
+      direction: 'Higher is better; 15–40% is typical.',
+      gids: ['flowEfficiency', 'cycleTimeByPhase'],
+    },
+    {
+      title: 'Focus',
+      src: (o) => o.flow && (o.flow.focus_share || o.flow.focusShare || o.flow.focus),
+      share: true,
+      ctx: (m) => (m && isNum(m.focused_days) && isNum(m.n) ? `${m.focused_days} of ${m.n} person-days on one ticket` : nCtx(m, 'person-days')),
+      definition: 'Share of person-days with commits on a single ticket. Low focus means context switching between tickets.',
+      formula: 'person-days with 1 distinct key ÷ person-days with commits',
+      direction: 'Higher is better.',
+      gids: ['focusShare', 'contextSwitching'],
+    },
+    {
+      title: 'Escape rate',
+      src: (o) => o.flow && (o.flow.escape_rate || o.flow.escapeRate),
+      share: true,
+      ctx: (m) => (m && isNum(m.escaped) && isNum(m.n) ? `${m.escaped} of ${m.n} delivered tickets got a bug after delivery` : ''),
+      definition: 'Share of delivered tickets that a later bug was traced back to (Jira links, titles or git blame).',
+      formula: 'tickets with an escaped bug ÷ delivered tickets',
+      direction: 'Lower is better.',
+      gids: ['escapeRate', 'rework'],
+      drillLabel: 'Bugs',
+    },
+    {
+      title: 'Sprint plan accuracy',
+      src: (o) => {
+        const sp = o.flow && (o.flow.sprint_planning || o.flow.sprintPlanning);
+        return sp && sp.value && typeof sp.value === 'object' ? { ...sp, value: sp.value.accuracy, creep: sp.value.scope_creep } : sp;
+      },
+      share: true,
+      ctx: (m) => (m && isNum(m.creep) ? `scope creep ${TP.shareHtml(m.creep)} added after sprint start` : nCtx(m, 'sprints')),
+      definition: 'Share of tickets planned at sprint start that were done by sprint end. Scope creep = tickets added after the start ÷ planned.',
+      formula: 'planned & done ÷ planned at start',
+      direction: 'Higher is better; read with scope creep.',
+      gids: ['sprintPlanning'],
+    },
+    {
+      title: 'Review load spread',
+      src: (o) => {
+        const rl = o.pr_flow && (o.pr_flow.review_load || o.pr_flow.reviewLoad);
+        return rl ? { ...rl, value: rl.top_share ?? rl.value } : null;
+      },
+      share: true,
+      ctx: (m) => (m && isNum(m.reviewers_n) ? `top reviewer’s share of ${m.n} reviews, across ${m.reviewers_n} reviewers` : ''),
+      definition: 'How concentrated code review is: the share of all reviews done by the busiest reviewer. High = one person is a review bottleneck.',
+      formula: 'max(reviews by one person) ÷ all reviews',
+      direction: 'Lower is better (review work is spread).',
+      gids: ['reviewLoad', 'prReview'],
+    },
+    {
+      title: 'People in PRs',
+      src: (o) => {
+        const pp = o.pr_flow && (o.pr_flow.pr_people || o.pr_flow.people || o.pr_flow.by_person);
+        if (!pp) return null;
+        const rows = Object.values(pp);
+        return { value: rows.filter((r) => r && r.authored > 0).length, reviewers: rows.filter((r) => r && r.reviewed_given > 0).length, n: rows.length };
+      },
+      fmt: (m) => fmtNum(m.value, 0),
+      ctx: (m) => (m && isNum(m.reviewers) ? `${m.value} authored · ${m.reviewers} reviewed — see People for per-capacity-day rates` : ''),
+      definition: 'Distinct people who authored merged PRs and who reviewed or commented on others’ PRs. Per-person counts are divided by capacity days on the People tab.',
+      formula: 'count(distinct authors) · count(distinct reviewers)',
+      gids: ['prPeople', 'prReview'],
+    },
+    {
+      title: 'Hotfix rate',
+      src: (o) => o.dora && (o.dora.hotfix_rate || o.dora.hotfixRate),
+      share: true,
+      ctx: (m) => (m && isNum(m.hotfixes) && isNum(m.total) ? `${m.hotfixes} of ${m.total} deploys were hotfixes` : ''),
+      definition: 'Share of deployments whose tag marks a hotfix ("hf" / "hotfix"). Hotfixes count as deployments too.',
+      formula: 'hotfix deploys ÷ all deploys',
+      direction: 'Lower is better.',
+      gids: ['hotfixRate', 'deploymentFrequency'],
+    },
+    {
+      title: 'Batch size',
+      src: (o) => o.dora && (o.dora.batch_size || o.dora.batchSize),
+      fmt: (m) => `${fmtNum(m.value, 1)}<small> tickets / deploy</small>`,
+      ctx: (m) => nCtx(m, 'deploys'),
+      definition: 'Tickets shipped per deployment (median). Smaller batches mean less risk per release and faster feedback.',
+      formula: 'median(tickets first deployed by each deploy)',
+      direction: 'Lower is better.',
+      gids: ['batchSize', 'deploymentFrequency'],
+    },
+    {
+      title: 'Time to detect',
+      src: (o) => o.dora && (o.dora.time_to_detect || o.dora.detect),
+      fmt: (m) => fmtHrs(m.value),
+      ctx: (m) => nCtx(m, 'incidents'),
+      definition: 'Failed deploy → the first failure signal (bug filed or hotfix started), median wall-clock hours.',
+      formula: 'median(failure signal − deploy)',
+      direction: 'Lower is better.',
+      gids: ['timeToDetect', 'mttr'],
+    },
+    {
+      title: 'Time to restore',
+      src: (o) => o.dora && (o.dora.time_to_restore || o.dora.mttr),
+      fmt: (m) => fmtHrs(m.value),
+      ctx: (m) => nCtx(m, 'incidents'),
+      definition: 'Failure signal → the hotfix / fix deployment that restored service, median wall-clock hours.',
+      formula: 'median(restore deploy − failure signal)',
+      direction: 'Lower is better.',
+      gids: ['mttr'],
+      drillLabel: 'Hours',
+    },
+    {
+      title: 'Deploys per capacity day',
+      src: (o) => o.dora && (o.dora.deploys_per_capacity_day || o.dora.deploy_per_capacity || (o.dora.deploy_frequency && o.dora.deploy_frequency.per_capacity_day)),
+      fmt: (m) => fmtNum(m.value, 2),
+      cap: true,
+      ctx: () => 'capacity-normalised: holidays and time off do not read as fewer deploys',
+      definition: 'Deployments divided by the team’s capacity person-days, so a holiday-heavy period is comparable with a full one.',
+      formula: 'deploys ÷ capacity person-days',
+      direction: 'Higher is better.',
+      gids: ['deploymentFrequency'],
+    },
+  ];
+
+  function signalTiles(o) {
+    const cap = o.capacity && (o.capacity.team || o.capacity);
+    const tiles = SIGNALS.map((x) => {
+      const m = M(x.src(o));
+      const def = { definition: x.definition, formula: x.formula, direction: x.direction };
+      const guard = mergeGuard(guardFor(o, x.gids, m), x.share && m ? overGuard(m.value, x.title) : null);
+      if (!m || !isNum(m.value)) return tile({ title: x.title, valueHtml: '<span class="na">not available yet</span>', def, guard, context: m && m.reason ? esc(m.reason) : '' });
+      return tile({
+        title: x.title,
+        valueHtml: x.fmt ? x.fmt(m) : x.share ? TP.shareHtml(m.value) : fmtNum(m.value),
+        context: x.ctx(m),
+        capCtx: x.cap ? capContext(cap, 'capacity person-days') : '',
+        def,
+        guard,
+        drill: drillOf(m, x.drillLabel),
+      });
+    });
+    return `<div class="tiles">${tiles.join('')}</div>`;
   }
 
   function flowTiles(o) {
@@ -185,9 +315,11 @@
         guard: guardFor(o, ['throughputPerWeek']),
       }),
       tile({
-        title: 'Pace vs estimate',
-        valueHtml: fmtX(est.pace),
-        context: isNum(est.pace_adjusted) ? `inflation-adjusted ${fmtX(est.pace_adjusted)} (prev ${fmtX(est.pace_ref)})` : 'actual dev-days ÷ estimated days',
+        title: inflated(est) ? 'Pace vs estimate (inflation-adjusted)' : 'Pace vs estimate',
+        valueHtml: fmtX(inflated(est) ? est.pace_adjusted : est.pace),
+        context: inflated(est)
+          ? `estimates grew ${fmtX(est.est_inflation)} vs the previous period, so the adjusted pace is the headline · raw ${fmtX(est.pace)} · prev ${fmtX(est.pace_ref)}`
+          : isNum(est.pace_adjusted) ? `inflation-adjusted ${fmtX(est.pace_adjusted)} (prev ${fmtX(est.pace_ref)})` : 'actual dev-days ÷ estimated days',
         guard: guardFor(o, ['estimateAccuracy']),
         def: {
           definition: 'Elapsed working days per estimated ideal day. Above ×1 = slower than estimated. When estimates themselves drift between periods, trend the adjusted value.',
@@ -196,9 +328,9 @@
       }),
       tile({
         title: 'Fix rate',
-        valueHtml: fmtPct(sc.fix_rate),
+        valueHtml: TP.shareHtml(sc.fix_rate),
         context: 'tickets needing fix commits after done',
-        guard: guardFor(o, ['rework']),
+        guard: mergeGuard(guardFor(o, ['rework']), overGuard(sc.fix_rate, 'Fix rate')),
         def: { definition: 'Share of done tickets that got fix commits within the fix window after delivery.', formula: 'tickets with fixes ÷ done tickets' },
       }),
     ];
@@ -206,6 +338,8 @@
   }
 
   TP.views.overview = {
+    SIGNALS,
+    signalTiles,
     doraTiles,
     guardrailsHtml,
     flowTiles,
@@ -240,6 +374,11 @@
         sub: 'Ratios are never a productivity score on their own — each tile names the capacity it was earned in.',
         load: async () => flowTiles(o),
         after: () => {},
+      });
+      section(host, {
+        title: 'More delivery signals',
+        sub: 'Flow efficiency, focus, quality escapes, sprint planning, review load and deploy shape. Each ⓘ says which direction is better.',
+        load: async () => signalTiles(o),
       });
       host.insertAdjacentHTML(
         'beforeend',

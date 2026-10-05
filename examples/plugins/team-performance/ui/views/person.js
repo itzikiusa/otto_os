@@ -27,7 +27,7 @@
     const m = M(p);
     return m && isNum(m.value) ? m.value : undefined;
   };
-  const NT = '<span class="dim">not tracked</span>';
+  const NT = `${TP.NT}<span class="sr-only"> not tracked</span>`;
   const phaseCell = (t, k) => {
     const p = t.phases && t.phases[k === 'deploy' && t.phases && !('deploy' in t.phases) ? 'deployment' : k];
     if (p === null) return NT;
@@ -39,6 +39,19 @@
     if (k === 'deploy') return fmtD(t.deploy_wait_days);
     return '—';
   };
+
+  /** Review work this person gave, per capacity day (lib/prs by_person), never a bare count. */
+  function prTile(p, cap) {
+    if (!p || typeof p !== 'object' || !isNum(p.reviewed_given)) return '';
+    const rate = p.per_capacity_day && isNum(p.per_capacity_day.reviewed_given) ? p.per_capacity_day.reviewed_given : null;
+    return TP.tile({
+      title: 'PRs reviewed',
+      valueHtml: String(p.reviewed_given),
+      context: `${isNum(p.authored) ? `${p.authored} authored · ` : ''}${rate != null ? `${fmtNum(rate, 2)} reviews per capacity day` : 'per-day rate needs capacity'}`,
+      capCtx: TP.capContext(cap),
+      def: { definition: 'Pull requests this person reviewed or commented on (not their own). Review work is real work that ticket metrics miss.', formula: 'count(PRs reviewed); ÷ capacity days for the rate' },
+    });
+  }
 
   async function saveOverride(app, t, patch) {
     await put('/override', { account: app.account, project: t.project || t.key.split('-')[0], key: t.key, ...patch });
@@ -151,19 +164,20 @@
           const capDays = cap && isNum(cap.capacity_days) ? cap.capacity_days : null;
           const perDay = isNum(row.weighted_per_capacity_day) ? row.weighted_per_capacity_day : capDays && isNum(s.weighted_done) ? s.weighted_done / capDays : null;
           const guard = TP.views.people && TP.views.people.rowGuard ? TP.views.people.rowGuard(o || {}, { ...row, ...s, assignee_id: id, capacity: cap || undefined }) : null;
-          const t = (title, val, ctx, def) => `<div class="tile"><div class="label">${esc(title)}${def ? ' ' + info({ title, ...def }) : ''}</div><div class="value">${val}</div>${ctx ? `<div class="context">${ctx}</div>` : ''}</div>`;
+          const t = (title, val, ctx, def, ids) => TP.tile({ title, valueHtml: val, context: ctx, def, guard: ids ? TP.guardFor(o || {}, ids) : null });
           return `${guard ? `<div class="banner${guard.level === 'bad' ? ' danger' : ''}" role="note">${TP.icon('warn')}<span><b>Read with care:</b> ${esc(guard.msg)}</span></div>` : ''}<div class="tiles">
             ${t('Capacity days', capDays != null ? fmtNum(capDays, 0) : '<span class="na">not available yet</span>', cap && isNum(cap.business_days) ? `${fmtNum(cap.business_days, 0)} working days − ${fmtNum(cap.time_off_days || 0, 0)} off = ${fmtNum(capDays, 0)}` : 'enter time off in Settings → People', { definition: 'Business days minus holidays and this person’s time off. Every rate here is divided by it.', formula: 'business days − time off = capacity' })}
-            ${t('Delivered scope', isNum(s.weighted_done) ? `${fmtNum(s.weighted_done)}<small> est-d</small>` : '—', perDay != null ? `${fmtNum(perDay, 2)} est-d per capacity day (over ${fmtNum(capDays, 0)} d)` : 'per-day rate needs capacity', { definition: 'Estimated days delivered, credited by commit share. Not a productivity score: reviews, support, mentoring and design are not in it.', formula: 'Σ estimate × share; ÷ capacity days for the rate' })}
-            ${t('Pace vs estimate', fmtX(s.pace_vs_est), 'actual dev-days ÷ estimated days', { definition: 'Above ×1 = slower than estimated. Independent of capacity.', formula: 'Σ actual dev-days ÷ Σ estimated days' })}
-            ${t('Median cycle', fmtD(s.median_cycle), 'business days, first work → done')}
+            ${t('Delivered scope', isNum(s.weighted_done) ? `${fmtNum(s.weighted_done)}<small> est-d</small>` : '—', perDay != null ? `${fmtNum(perDay, 2)} est-d per capacity day (over ${fmtNum(capDays, 0)} d)` : 'per-day rate needs capacity', { definition: 'Estimated days delivered, credited by commit share. Not a productivity score: reviews, support, mentoring and design are not in it.', formula: 'Σ estimate × share; ÷ capacity days for the rate' }, ['throughputPerWeek'])}
+            ${t('Pace vs estimate', fmtX(s.pace_vs_est), 'actual dev-days ÷ estimated days', { definition: 'Above ×1 = slower than estimated. Independent of capacity.', formula: 'Σ actual dev-days ÷ Σ estimated days' }, ['estimateAccuracy'])}
+            ${t('Median cycle', isNum(s.median_cycle) ? fmtD(s.median_cycle) : TP.NT, 'business days, first work → done', null, ['cycleTimeByPhase'])}
             ${t('Estimate error', fmtPct(s.mape), 'median absolute % error', { definition: 'How far estimates were from actuals on this person’s tickets.', formula: 'median(|actual − est| ÷ est)' })}
-            ${t('Avg parallel tickets', isNum(s.avg_wip) ? fmtNum(s.avg_wip) : '—', '')}
+            ${t('Avg parallel tickets', isNum(s.avg_wip) ? fmtNum(s.avg_wip) : '—', '', null, ['wip'])}
+            ${prTile(d.pr_person || d.prs || (s.pr || null), cap)}
           </div><p class="dim small">Not a productivity score — compare only with the capacity beside each rate, and never rank people on it.</p>`;
         },
         after() {
           const b = host.querySelector('#ps-report');
-          if (b) b.onclick = () => TP.views.reports.newReport(app, { scope: 'dev', assignee: id });
+          if (b) b.onclick = () => TP.views.reports.newReport(app, { scope: 'dev', assignee: id, fromPerson: true });
         },
       });
 
@@ -173,7 +187,7 @@
         load: async () => {
           const d = await load();
           if (!(d.goals || []).length) return '<p class="dim">Goals appear once this person has enough completed tickets.</p>';
-          return `<div class="table-wrap"><table class="sticky-first"><caption>Goals for ${esc(name)}</caption><thead><tr><th scope="col">Goal</th><th scope="col" class="num">Now</th><th scope="col">Target</th><th scope="col">Status</th><th scope="col">History</th></tr></thead><tbody>${d.goals
+          return `<div class="table-wrap" tabindex="0" role="region" aria-label="Goals for ${esc(name)}"><table class="sticky-first"><caption>Goals for ${esc(name)}</caption><thead><tr><th scope="col">Goal</th><th scope="col" class="num">Now</th><th scope="col">Target</th><th scope="col">Status</th><th scope="col">History</th></tr></thead><tbody>${d.goals
             .map(
               (g, i) => `<tr data-metric="${esc(g.metric)}"><th scope="row">${esc(GOAL_LABEL[g.metric] || g.metric)} <span class="dim">${g.dir === 'up' ? '↑ higher is better' : '↓ lower is better'}</span>${g.suggested ? ' ' + badge('', 'suggested') : ''}</th>
               <td class="num">${g.metric === 'estimate_mape' ? fmtPct(g.current) : fmtNum(g.current)}</td>
@@ -181,7 +195,7 @@
               <td>${g.met ? badge('success', 'met') : badge('warning', 'not met')}</td>
               <td>${sparkline((g.history || []).map((h) => h.value), 'goal history') || '—'}</td></tr>`,
             )
-            .join('')}</tbody></table></div><p><button type="button" class="compact" id="goals-save">Save goals</button></p>`;
+            .join('')}</tbody></table></div><div class="form-actions"><button type="button" class="compact" id="goals-save">Save goals</button></div>`;
         },
         after(body) {
           const b = body.querySelector('#goals-save');
@@ -216,7 +230,7 @@
               cells: [
                 `${jiraLink(t.key)}${t.routine ? ' ' + badge('', 'routine') : ''}${t.outlier ? ' ' + badge('danger', 'outlier') : ''}${t.suspect_outlier ? ' ' + badge('warning', 'suspect') : ''}${t.est_overridden ? ' ' + badge('info', 'corrected') : ''}<div class="dim small">${esc((t.summary || '').slice(0, 60))}</div>`,
                 `${esc(t.type || '')}${t.points != null ? ` · ${t.points}pt` : ''} ${badge(t.timing_source === 'git' ? 'accent' : '', t.timing_source || 'jira')}`,
-                fmtD(t.est_days_ai),
+                isNum(t.est_days_ai) ? fmtD(t.est_days_ai) : TP.unestimated(),
                 `${fmtD(t.actual_days)}${t.manual_days != null ? ' ' + badge('info', 'manual') : ''}`,
                 ...PH.map(([k]) => phaseCell(t, k)),
                 verdict(t.verdicts && t.verdicts.total),
@@ -231,14 +245,15 @@
       });
 
       section(host, {
-        title: 'Credited sub-tasks',
-        sub: 'Sub-tasks with real work (own commits or dev time, under someone else’s story, or under a story with no timing) credited to this person.',
+        title: 'Sub-tasks with real work',
+        infoDef: { title: 'Sub-tasks with real work', definition: 'Most sub-tasks are checklists and roll into their story. These carried real work — own commits or dev time, under someone else’s story, or under a story with no timing of its own — so they are credited to this person.', formula: 'commits > 0 OR dev time > 0 OR owner ≠ story owner OR story untimed' },
+        sub: 'Each row says why it counts and links to Jira.',
         load: async () => {
           const d = await load();
           const all = d.subtasks || (o && o.subtasks);
           if (!all) return notAvailable('Sub-task attribution');
           const mine = all.filter((x) => (x.credited_to || x.assignee_id) === id);
-          if (!mine.length) return '<p class="dim">No sub-tasks with real work credited to this person in this period.</p>';
+          if (!mine.length) return `<p class="dim">No sub-tasks with real work credited to this person in this period — ${all.length} substantive sub-task${all.length === 1 ? '' : 's'} checked across the team.</p>`;
           return TP.creditedSubtasks ? TP.creditedSubtasks(o || {}, mine, { caption: `${mine.length} credited sub-tasks`, openable: false }) : '';
         },
       });

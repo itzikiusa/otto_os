@@ -35,6 +35,10 @@ const SAN = require('./lib/sanitize.js');
 const V = require('./lib/validate.js');
 const RM = require('./lib/reportmodel.js');
 const GS = require('./lib/gitscan.js');
+const SR = require('./lib/scope-rules.js');
+const RF = require('./lib/reportfeed.js');
+const zlib = require('zlib');
+const { acceptsGzip } = require('./lib/scopecache.js');
 
 const PORT = parseInt(process.env.OTTO_PLUGIN_PORT || '0', 10);
 const HOST_API = process.env.OTTO_HOST_API || '';
@@ -124,6 +128,7 @@ function buildIndexAsync(repos, config) {
           target_used: idx.target_used || {},
           fetched: idx.fetched || {},
           deploy_tags: idx.deploy_tags || [],
+          matched_tags: idx.matched_tags || {},
           target_ref_age_days: idx.target_ref_age_days || {},
           hasRepos: Boolean(idx.hasRepos),
         });
@@ -456,6 +461,7 @@ async function recomputeCorporaAsync(config) {
       corpus.issues[r.key] = A.reanalyzeRecord(r, {
         statusMap,
         workweek: config.workweek,
+        config, people: loadPeopleSafe(),
         hasDesignStatuses: hasDesign,
         hasRepos,
         staleDays: config.stale_days,
@@ -471,6 +477,11 @@ async function recomputeCorporaAsync(config) {
 function loadPeople() {
   const p = store.readJson(store.peoplePath(DATA_DIR), null);
   return p && p.people ? p : { people: {} };
+}
+
+/** Flat {id: person} map (time_off lives on each person) for the analytics time engine; never throws. */
+function loadPeopleSafe() {
+  try { return loadPeople().people || {}; } catch { return {}; }
 }
 
 async function loadPeopleAsync() {
@@ -658,6 +669,7 @@ async function scanProject(client, account, project, full, assignees, config, gi
     corpus.issues[raw.key] = A.analyzeIssue(raw, {
       statusMap,
       workweek: config.workweek,
+      config, people: loadPeopleSafe(),
       pointsField,
       gitIndex,
       hasDesignStatuses: true,
@@ -738,10 +750,12 @@ function gatherCorrections(account) {
   for (const p of store.listProjects(DATA_DIR, account)) {
     const ov = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
     const corpus = ov ? store.readJson(store.corpusPath(DATA_DIR, account, p), null) : null;
+    const ests = ov ? store.readJson(store.estimatesPath(DATA_DIR, account, p), null) || {} : {};
     for (const [k, o] of Object.entries((ov && ov.issues) || {})) {
       if (typeof o.est_days !== 'number') continue; // every lead correction calibrates the ruler
       const rec = corpus && corpus.issues ? corpus.issues[k] : null;
-      out.push({ key: k, corrected: o.est_days, summary: rec ? rec.summary : '', reason: o.est_reason || '', at: o.updated_at || 0 });
+      const ai = ests[k] && typeof ests[k].days === 'number' ? ests[k].days : null;
+      out.push({ key: k, corrected: o.est_days, ...(ai != null ? { original: ai } : {}), summary: rec ? rec.summary : '', reason: o.est_reason || '', at: o.updated_at || 0 });
     }
   }
   return out.sort((a, b) => b.at - a.at).slice(0, 20);
@@ -789,6 +803,7 @@ async function estimateScope(account, projects, config, job) {
       rubric: config.estimate_rubric,
       instructions: config.estimate_instructions,
       corrections,
+      persistTo: cacheFile,
       agentRun,
       onProgress: (done, total) => {
         job.fetched = done;
@@ -818,7 +833,7 @@ async function estimateScope(account, projects, config, job) {
     const cache = store.readJson(cacheFile, {}) || {};
     delete cache.schema;
     job.step = 'estimate features (epic level)';
-    await E.runFeatureEstimation({ epics, cache, agentRun, workers, rubric: config.estimate_rubric, instructions: config.estimate_instructions });
+    await E.runFeatureEstimation({ epics, cache, persistTo: cacheFile, agentRun, workers, rubric: config.estimate_rubric, instructions: config.estimate_instructions });
     store.writeJsonAtomic(cacheFile, cache);
   }
   // Git-only features share the same machinery under a synthetic project.
@@ -839,6 +854,7 @@ async function estimateScope(account, projects, config, job) {
       mode: config.estimate_mode,
       summarizer: config.estimate_summarizer,
       rubric: config.estimate_rubric,
+      persistTo: cacheFile,
       agentRun,
       onProgress: (done, total) => {
         job.fetched = done;
@@ -1131,7 +1147,7 @@ async function loadScopeRaw(account, projectsParam) {
     Object.assign(estimates, await loadEstimatesAsync(account, '__features__'));
     for (const f of featFile.features) {
       if ((f.jira_keys || []).length) continue;
-      const impl = Math.round(A.businessDays(f.first_commit_at, f.merged_at, config.workweek) * 100) / 100;
+      const impl = Math.round(A.businessDays(f.first_commit_at, f.merged_at, { config }) * 100) / 100;
       records.push({
         key: f.id, project: '__git__', type: 'GitFeature', feature: true,
         summary: `${f.repo}: ${f.summary}`, description_snippet: '',
@@ -1186,7 +1202,8 @@ async function loadScopeRaw(account, projectsParam) {
 const nowStatsRaw = (scope, sinceMs = 0, untilMs = 0) => {
   const base = A.baselines(scope.records);
   const sigCounts = A.routineSignatures(scope.records);
-  const stats = A.assigneeStats(scope.records, base, scope.config.workweek, Date.now(), {
+  const stats = A.assigneeStats(scope.records, base, { config: scope.config, people: scope.people }, Date.now(), {
+    config: scope.config, people: scope.people,
     estimates: scope.estimates,
     matcher: scope.matcher,
     sigCounts,
@@ -1217,8 +1234,14 @@ function unmatchedOf(scope, records = scope.records, tag = 'team') {
 function metricsFor(scope, window, { records = null, tag = 'team' } = {}) {
   return scopeMemo(scope, `met:${tag}:${windowKey(window.since, window.until)}`, () => {
     const sub = records ? { ...scope, records } : scope;
-    return M.computeMetrics(sub, window, { ...scope.side, unmatched_authors: unmatchedOf(scope, sub.records, tag), bug_window_days: scope.config.bug_window_days, timezone: scope.config.timezone, deploy_tag_patterns: scope.config.deploy_tag_patterns });
+    return M.computeMetrics(sub, window, { ...scope.side, unmatched_authors: unmatchedOf(scope, sub.records, tag), ...doraSide(scope) });
   });
+}
+
+/** DORA / flow pass-through config shared by every computeMetrics call. */
+function doraSide(scope) {
+  const c = scope.config || {};
+  return { bug_window_days: c.bug_window_days, timezone: c.timezone, deploy_tag_patterns: c.deploy_tag_patterns, hotfix_tag_patterns: c.hotfix_tag_patterns, branch: c.branch || c.main_branch, repos: c.repos };
 }
 
 // Legacy (v0.7) scope checks → canonical codes (lib/guardrails ids).
@@ -1263,7 +1286,7 @@ function weeklyThroughput(done, estimates) {
     const k = weekOf(doneAtOf(r));
     const e = (w[k] ||= { week: k, tickets: 0, estimated_days: 0 });
     e.tickets++;
-    if (!r.scope_excluded && estimates[r.key] && estimates[r.key].days > 0) e.estimated_days += estimates[r.key].days;
+    if (SR.isDeliveredScope(r) && estimates[r.key] && estimates[r.key].days > 0) e.estimated_days += estimates[r.key].days;
   }
   return Object.values(w).sort((a, b) => a.week.localeCompare(b.week)).map((e) => ({ ...e, estimated_days: r2(e.estimated_days) }));
 }
@@ -1320,7 +1343,7 @@ function personExtras(scope, met, done) {
     const e = P(id);
     const dev = rs.map((r) => (r.phases && r.phases.dev ? r.phases.dev.days : null)).filter((x) => x != null);
     e.dev_days = dev.length ? r2(dev.reduce((a, b) => a + b, 0)) : null;
-    e.estimate_ratio_median = r2(median(rs.map((r) => { const est = scope.estimates[r.key]; const act = A.actualDays(r); return est && est.days > 0 && act > 0 && !r.scope_excluded ? act / est.days : null; })));
+    e.estimate_ratio_median = r2(median(rs.map((r) => { const est = scope.estimates[r.key]; const act = A.actualDays(r); return est && est.days > 0 && act > 0 && SR.isDeliveredScope(r) ? act / est.days : null; })));
   }
   for (const r of scope.records) {
     if (!r.subtask || !r.substantive_subtask) continue;
@@ -1536,7 +1559,7 @@ function guardrails(scope) {
   const pq = q === 0 ? 3 : q - 1;
   const prev = { since: qStart(py, pq), until: cur.since, label: `${py} Q${pq + 1}` };
   const out = [];
-  const delivered = (w) => records.filter((r) => !r.subtask && !r.feature && String(r.type).toLowerCase() !== 'epic' && A.isDone(r) && (r.eff_done_at ?? r.done_at) >= w.since && (r.eff_done_at ?? r.done_at) < w.until && r.excluded_override !== true && !r.scope_excluded);
+  const delivered = (w) => records.filter((r) => SR.isDeliveredScope(r) && !r.subtask && A.isDone(r) && (r.eff_done_at ?? r.done_at) >= w.since && (r.eff_done_at ?? r.done_at) < w.until);
   const est = (r) => (estimates[r.key] && estimates[r.key].days) || 0;
   // Working days a person was available in [since, until): business days minus
   // their entered time off (per-person vacations from the People editor).
@@ -1724,10 +1747,16 @@ function overviewMetrics(scope, sinceMs, stats) {
   const fresh = scopeFreshness(scope);
   return {
     window,
-    dora,
+    dora: {
+      ...dora,
+      // UI aliases: detect/restore live under mttr; per-capacity-day from per-week.
+      time_to_detect: dora.time_to_detect ?? (dora.mttr && dora.mttr.time_to_detect) ?? null,
+      time_to_restore: dora.time_to_restore ?? (dora.mttr && dora.mttr.time_to_restore) ?? null,
+      deploys_per_capacity_day: typeof dora.deploys_per_capacity_week === 'number' ? r2(dora.deploys_per_capacity_week / 5) : null,
+    },
     flow: { ...met.flow, throughput_weekly: weeklyThroughput(done, scope.estimates) },
     phases: met.phases,
-    pr_flow: met.pr_flow,
+    pr_flow: met.pr_flow ? { ...met.pr_flow, review_load: met.pr_flow.review_load || met.review_load || null, by_person: met.pr_flow.by_person || met.pr_people || null } : met.pr_flow,
     capacity: met.capacity,
     rework: { ...met.rework, ...reworkLines(scope, keys), jira_excluded_estimate_days: r2(done.filter((r) => r.scope_excluded).reduce((a, r) => a + ((scope.estimates[r.key] && scope.estimates[r.key].rework_estimate_days) || 0), 0)) },
     investment: met.investment,
@@ -1874,7 +1903,7 @@ function personMetrics(scope, personId, window) {
   const prs = (scope.side.prs || []).filter((p) => personOf(scope, p.author, p.author_email) === personId);
   const met = scopeMemo(scope, `met:p:${personId}:${windowKey(window.since, window.until)}`, () => M.computeMetrics(
     { ...scope, records: recs }, window,
-    { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], bug_window_days: scope.config.bug_window_days, timezone: scope.config.timezone, deploy_tag_patterns: scope.config.deploy_tag_patterns },
+    { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], ...doraSide(scope) },
   ));
   const teamMet = metricsFor(scope, window);
   const done = deliveredIn(recs, window);
@@ -1909,7 +1938,7 @@ async function featuresView(account) {
         .filter((x) => x.id);
       const top = credits[0] ? credits[0].id : null;
       const factor = top && factors.has(top) ? factors.get(top).factor : 1.0;
-      const actual = Math.round(A.businessDays(f.first_commit_at, f.merged_at, config.workweek) * 100) / 100;
+      const actual = Math.round(A.businessDays(f.first_commit_at, f.merged_at, { config }) * 100) / 100;
       return {
         ...f,
         actual_days: actual,
@@ -1919,7 +1948,7 @@ async function featuresView(account) {
         people: credits.map((c) => (people[c.id] ? people[c.id].name : c.a.name)),
         deploy_wait_days:
           f.deployed_at && f.deployed_at > f.merged_at
-            ? Math.round(A.businessDays(f.merged_at, f.deployed_at, config.workweek) * 100) / 100
+            ? Math.round(A.businessDays(f.merged_at, f.deployed_at, { config }) * 100) / 100
             : null,
       };
     })
@@ -2120,7 +2149,7 @@ function reportInput(scope, start, end, personId) {
   const met = personId
     ? scopeMemo(scope, `met:rp:${personId}:${windowKey(start, end)}`, () => {
       const prs = (scope.side.prs || []).filter((p) => personOf(scope, p.author, p.author_email) === personId);
-      return M.computeMetrics({ ...scope, records: mineRecs }, window, { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], bug_window_days: scope.config.bug_window_days, timezone: scope.config.timezone, deploy_tag_patterns: scope.config.deploy_tag_patterns });
+      return M.computeMetrics({ ...scope, records: mineRecs }, window, { ...scope.side, prs: scope.side.prs ? prs : null, unmatched_authors: [], ...doraSide(scope) });
     })
     : teamMet;
   const { stats } = nowStats(scope, start, end);
@@ -2191,7 +2220,7 @@ function reportInput(scope, start, end, personId) {
   const rl = reworkLines(scope, keys);
   const pair = (k, other, lines) => ({ key: k, by_key: other, person: (scope.records.find((r) => r.key === k) || {}).assignee_name || '', lines, days: null });
   const credited = creditedSubtasksIn(scope, window);
-  return {
+  const out = {
     kpis: [
       { id: 'delivered', label: 'Delivered scope (estimated days)', value: delivered, unit: 'd', kind: 'points', better: 'up', capacity_days: teamCap, note: 'Rework tickets are excluded — their estimate is not new scope.' },
       { id: 'per_capacity', label: 'Delivered per capacity day', value: teamCap > 0 ? delivered / teamCap : null, kind: 'ratio', better: 'up', capacity_days: teamCap, note: 'Not productivity: depends on estimate calibration and capacity (time off subtracted).' },
@@ -2250,6 +2279,30 @@ function reportInput(scope, start, end, personId) {
     credited_subtasks: Object.entries(credited).filter(([id]) => !personId || id === personId).flatMap(([id, list]) => list.map((x) => ({ person: nameOf(id), key: x.key, parent_key: x.parent_key, title: x.summary || '', commits: x.commits, reason: x.reason || '' }))),
     guardrails: canonicalGuardrails(scope, met, { legacy: !personId }).map((g) => ({ id: g.id, level: g.severity === 'danger' ? 'error' : 'warn', metric: g.metric, message: g.msg })),
     people,
+  };
+  return out;
+}
+
+/** Merge lib/reportfeed extras (trend, outliers, PR items, rework days, narrative) into a report input. */
+function withReportExtras(scope, input, { start, end, label, prior = [], personId = null, masked = false }) {
+  const keys = new Set((input.phases && input.phases.tickets || []).map((t) => t.key));
+  const records = scope.records.filter((r) => A.isDone(r) && doneAtOf(r) >= start && doneAtOf(r) < end && (!personId || (r.assignee_id && scope.canonical(r.assignee_id) === personId)))
+    .map((r) => ({ key: r.key, summary: r.summary, title: r.summary, person: r.assignee_name || '', estimate_days: (scope.estimates[r.key] && scope.estimates[r.key].days) || null, actual_days: A.actualDays(r) || null, dev_days: r.phases ? r.phases.dev.days : r.dev_days ?? null, rework_days: r.rework_days ?? null, rework_of: r.rework_of || null }));
+  void keys;
+  let x;
+  try {
+    x = RF.buildReportExtras({ scope, metricsByPeriod: prior, current: { ...input, label, period: { start, end }, tags: scope.side.deploy_tags || scope.side.tags || [], records }, reworkResult: scope.side.rework || null, prs: input.pr_flow && input.pr_flow.items || [], guardrails: input.guardrails || [], masked });
+  } catch { return input; }
+  const days = new Map((x.rework_pairs || []).map((p) => [`${p.key}>${p.by_key}`, p.days]));
+  const fill = (list) => (list || []).map((p) => (p.days == null && days.has(`${p.key}>${p.by_key}`) ? { ...p, days: days.get(`${p.key}>${p.by_key}`) } : p));
+  const rework = input.rework ? { ...input.rework, in: fill(input.rework.in), out: fill(input.rework.out) } : input.rework;
+  return {
+    ...input, rework,
+    trend: x.trend, outliers: x.outliers, blind_spots: x.blind_spots, narrative_lines: x.narrative,
+    improved: x.improved, declined: x.declined,
+    phases: { ...(input.phases || {}), by_period: x.phases_by_period },
+    pr_flow: input.pr_flow && Object.keys(input.pr_flow).length ? { ...input.pr_flow, items: x.pr_flow_items, slow_prs: x.slow_prs } : input.pr_flow,
+    dora: { ...(input.dora || {}), deploy_tags: x.deploy_tags, failures: x.dora_failures && x.dora_failures.length ? x.dora_failures : (input.dora || {}).failures },
   };
 }
 
@@ -2384,7 +2437,7 @@ async function runReport(account, opts) {
       headline = `a ${label} performance report about developer "${maskName(name)}"${mask ? ' (name ANONYMIZED)' : ''}`;
       instructions = (cfg.report_instructions || '').trim() || DEFAULT_DEV_REPORT_INSTRUCTIONS;
       entryName = name;
-      fileHint = String(assignee);
+      fileHint = mask ? RF.assigneeFileHint(assignee) : String(assignee);
     }
 
     // Deterministic template: the numbers come from the report model; the agent
@@ -2392,9 +2445,9 @@ async function runReport(account, opts) {
     const id = `${Date.now().toString(36)}-${Math.floor((job.started_at || 0) % 1e6).toString(36)}`;
     job.step = 'building the report model';
     const personId = rscope === 'dev' ? assignee : null;
-    const input = reportInput(scope, start, end, personId);
     // Masked reports still compare: only the NUMERIC kpi values cross over.
     const prevInput = reportInput(scope, pb.start, pb.end, personId);
+    const input = withReportExtras(scope, reportInput(scope, start, end, personId), { start, end, label, prior: [{ ...prevInput, label: pb.label }], personId, masked: Boolean(mask) });
     let jiraBase = null;
     try {
       const accts = (await hostGet('/jira/accounts')) || [];
@@ -2493,6 +2546,17 @@ async function coach(account, projectsParam, assigneeId) {
 }
 
 // ---- routing ----------------------------------------------------------------
+
+/** 200 JSON view, gzipped when the client accepts it. */
+function sendView(req, res, obj) {
+  const json = JSON.stringify(obj);
+  if (acceptsGzip(req.headers['accept-encoding'])) {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' });
+    return res.end(zlib.gzipSync(json));
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  return res.end(json);
+}
 
 function send(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
@@ -2752,7 +2816,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'GET') return send(res, 200, view());
       const body = await readBody(req);
       const anchor = String(body.anchor ?? '');
-      if (!SAN.validAnchor(anchor)) return send(res, 400, { error: 'anchor must match ^[a-z0-9_-]+$' });
+      if (!SAN.validAnchor(anchor)) return send(res, 400, { error: 'anchor must be a section id (^[a-z0-9_-]+$), a tile id (section:metric) or a ticket id (t:key)' });
       let text = String(body.text || '').trim().slice(0, 4000);
       if (!text) return send(res, 400, { error: 'text required' });
       if (cur.comments.length >= REPORT_COMMENTS_MAX) return send(res, 409, { error: `comment limit (${REPORT_COMMENTS_MAX}) reached for this report` });
@@ -2772,12 +2836,12 @@ const server = http.createServer(async (req, res) => {
 
     if (u.pathname === '/overview' && req.method === 'GET') {
       const o = await overview(q.get('account') || '', q.get('projects') || q.get('project') || '', sinceParam());
-      return o ? send(res, 200, o) : send(res, 404, { error: 'no scan for this scope yet' });
+      return o ? sendView(req, res, o) : send(res, 404, { error: 'no scan for this scope yet' });
     }
 
     if (u.pathname === '/assignee' && req.method === 'GET') {
       const v = await assigneeView(q.get('account') || '', q.get('projects') || q.get('project') || '', q.get('assignee') || '', sinceParam());
-      return v ? send(res, 200, v) : send(res, 404, { error: 'unknown assignee or no scan yet' });
+      return v ? sendView(req, res, v) : send(res, 404, { error: 'unknown assignee or no scan yet' });
     }
 
     if (u.pathname === '/report' && req.method === 'POST') {

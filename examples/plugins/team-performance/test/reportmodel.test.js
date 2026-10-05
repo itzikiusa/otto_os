@@ -94,11 +94,12 @@ test('render: masked render of a re-hydrated (JSON) model still drops keys from 
   assert.deepEqual(RM.leakCheck(html, ['ABC-999']), []);
 });
 
-test('render: self-contained, a single nonce script, deterministic', () => {
+const NONCE_RE = /nonce(=|-)("?)[A-Za-z0-9]+/g;
+test('render: self-contained, a single nonce script, deterministic apart from the nonce', () => {
   const m = RM.buildReportModel(fixture());
   const a = RM.renderReport(m, NARR);
   const b = RM.renderReport(RM.buildReportModel(fixture()), NARR);
-  assert.equal(a, b);
+  assert.equal(a.replace(NONCE_RE, 'nonce$1$2N'), b.replace(NONCE_RE, 'nonce$1$2N'));
   const scripts = a.match(/<script\b[^>]*>/g);
   assert.equal(scripts.length, 1);
   const nonce = scripts[0].match(/nonce="([^"]+)"/)[1];
@@ -118,10 +119,18 @@ test('render: self-contained, a single nonce script, deterministic', () => {
 
 test('render: charts are accessible with title/desc and a table fallback', () => {
   const html = RM.renderReport(RM.buildReportModel(fixture()), {});
-  const svgs = html.match(/<svg viewBox[^>]*role="img"[^>]*>/g) || [];
-  assert.ok(svgs.length >= 3);
-  assert.equal((html.match(/<summary>Show as table<\/summary>/g) || []).length, svgs.length);
-  assert.equal((html.match(/<title id="ch-/g) || []).length, svgs.length);
+  const figs = html.match(/<figure class="chart[\s\S]*?<\/figure>/g) || [];
+  assert.ok(figs.length >= 3);
+  for (const f of figs) {
+    const imgs = f.match(/role="img" aria-labelledby="([^"]+)"/g) || [];
+    assert.equal(imgs.length, 1, 'exactly one accessible image per chart');
+    const [tid, did] = /aria-labelledby="([^" ]+) ([^"]+)"/.exec(f).slice(1);
+    assert.ok(f.includes(`id="${tid}"`) && f.includes(`id="${did}"`), 'name + description are in the figure');
+    assert.match(f, /<summary>Show as table<\/summary><div class="tbl-wrap"><table>/, 'table fallback is always present');
+  }
+  // horizontal charts: decorative row SVGs, label in HTML before its bar
+  const h = figs.find((f) => f.includes('hchart'));
+  assert.match(h, /<div class="hc-row"><div class="hc-l"[^>]*>[^<]+<\/div><div class="hc-track"><svg class="hc-svg"[^>]*aria-hidden="true"/);
 });
 
 test('render: script-breaking strings in data are neutralised', () => {
@@ -233,8 +242,8 @@ test('render: fixed phase colours, direct segment labels, data in <desc>', () =>
   for (const [cls] of [['s4'], ['s1'], ['s3'], ['s6'], ['s5']]) assert.match(fig, new RegExp(`<rect class="${cls}"`));
   assert.match(fig, /<span class="hc-seg"[^>]*>10<\/span>/, 'wide dev segment labelled in place');
   assert.doesNotMatch(fig, /<span class="hc-seg"[^>]*>0\.2<\/span>/, 'narrow rework segment not labelled');
-  assert.match(fig, /<desc id="ch-phases-d">[^<]*Q3: Design 1 d, Dev 10 d/);
-  assert.doesNotMatch(fig.slice(fig.indexOf('<svg'), fig.indexOf('</svg>')), /<text/, 'no text inside the stretched SVG');
+  assert.match(fig, /<span class="sr-only" id="ch-phases-d">[^<]*Q3: Design 1 d, Dev 10 d/);
+  for (const svg of fig.match(/<svg[\s\S]*?<\/svg>/g)) assert.doesNotMatch(svg, /<text/, 'no text inside a stretched SVG');
 });
 
 test('guardrails: section pills by prefix, info severity mapped, derived small-sample rules', () => {
@@ -337,9 +346,12 @@ test('comments: host-rendered with counts; at as epoch ms, numeric string or ISO
 test('palette: single source — no hex colour in report.css; light/dark/print generated', () => {
   const fs = require('fs');
   const path = require('path');
-  const css = fs.readFileSync(path.join(__dirname, '..', 'report', 'report.css'), 'utf8');
+  const raw = fs.readFileSync(path.join(__dirname, '..', 'report', 'report.css'), 'utf8');
+  assert.match(raw, /\/\* tp:fallback-start \*\/\s*:where\(:root\)/, 'fallback block is zero-specificity');
+  const css = raw.replace(/\/\* tp:fallback-start \*\/[\s\S]*?\/\* tp:fallback-end \*\//, '');
   assert.doesNotMatch(css, /#[0-9a-fA-F]{3,8}(?![\w-])/);
   assert.doesNotMatch(css, /rgba?\(/);
+  assert.deepEqual(RM.PALETTE.light, require('../lib/theme.js').light, 'palette is lib/theme.js');
   const pc = RM.paletteCss();
   for (const k of Object.keys(RM.PALETTE.light)) assert.ok(pc.includes(`--${k}: ${RM.PALETTE.light[k]}`), k);
   assert.match(pc, /prefers-color-scheme: dark\) \{ :root:not\(\[data-theme='light'\]\)/);
@@ -372,4 +384,185 @@ test('empty input still renders every always-on section without throwing', () =>
   const html = RM.renderReport(RM.buildReportModel({}), {});
   for (const id of ['kpis', 'trend', 'phases', 'outliers', 'dora', 'blind_spots']) assert.ok(sectionHtml(html, id), id);
   assert.match(sectionHtml(html, 'trend'), /no trend yet/);
+});
+
+// ---------------------------------------------------------------- round 3 extras
+test('changes: improved / declined derived from KPIs with a prior and a direction', () => {
+  const m = RM.buildReportModel(fixture({
+    compare: { label: 'Q2', kpis: { throughput: 40, lead: 5, flat: 10 } },
+    kpis: [
+      { id: 'throughput', label: 'Tickets delivered', value: 46, better: 'up' },
+      { id: 'lead', label: 'Lead time', value: 7, unit: 'd', better: 'down' },
+      { id: 'flat', label: 'Flat one', value: 10.1, better: 'up' },
+      { id: 'nodir', label: 'No direction', value: 3, prior: 1 },
+    ],
+  }));
+  assert.deepEqual(m.changes.improved.map((x) => x.label), ['Tickets delivered']);
+  assert.deepEqual(m.changes.declined.map((x) => x.label), ['Lead time']);
+  const html = sectionHtml(RM.renderReport(m, {}), 'changes');
+  assert.match(html, /<span class="delta better">\+6 \(\+15%\)<\/span>/);
+  assert.match(html, /<span class="delta worse">\+2 d \(\+40%\)<\/span>/);
+  assert.doesNotMatch(html, /Flat one|No direction/);
+  // explicit lists win
+  const ex = RM.buildReportModel(fixture({ changes: { improved: [{ label: 'Pickup', from: 10, to: 6, unit: 'h' }], declined: [] } }));
+  assert.deepEqual(ex.changes.improved.map((x) => x.to), [6]);
+  assert.equal(sectionHtml(RM.renderReport(RM.buildReportModel({}), {}), 'changes'), '', 'no comparison → no section');
+});
+
+test('DORA: deploy tag list (hotfix detected by name, newest first, tickets linked)', () => {
+  const m = RM.buildReportModel(fixture({ dora: { deployments: 3, deploy_tags: [
+    { name: 'release-deployed-1', repo: 'svc', ts: Date.parse('2026-08-01T10:00:00Z'), keys: ['ABC-1'] },
+    { name: 'HF-payments-2', repo: 'svc', ts: Date.parse('2026-08-03T10:00:00Z') },
+    { name: 'v1-hotfix', repo: 'web', ts: Date.parse('2026-08-02T10:00:00Z') },
+  ] } }));
+  assert.deepEqual(m.dora.deploy_tags.map((t) => [t.name, t.kind]), [['HF-payments-2', 'hotfix'], ['v1-hotfix', 'hotfix'], ['release-deployed-1', 'deploy']]);
+  const html = sectionHtml(RM.renderReport(m, {}), 'dora');
+  assert.match(html, /<summary>Deployment tags \(3, 2 hotfix\)<\/summary>/);
+  assert.match(html, /<code>release-deployed-1<\/code>/);
+  assert.match(html, /browse\/ABC-1/);
+});
+
+test('PR flow: merge row on the strip and a slow-PR table with ticket anchors', () => {
+  const items = [
+    { key: 'ABC-1', pr: 11, repo: 'svc', title: 'Speed up', person: 'Bob Sample', pickup_hours: 2, review_hours: 3, merge_hours: 30, size_lines: 120, comments: 4 },
+    { key: 'ABC-22', pr: 12, person: 'Alice Example', pickup_hours: 1, review_hours: 1, merge_hours: 5 },
+    { pr: 13, pickup_hours: 40, review_hours: 2 },
+  ];
+  const html = sectionHtml(RM.renderReport(RM.buildReportModel(fixture({ pr_flow: { prs: 3, items } })), {}), 'pr_flow');
+  assert.match(html, /<div class="hc-l" title="Open → merged">/);
+  const slow = html.slice(html.indexOf('Slowest pull requests'));
+  assert.ok(slow.indexOf('#11') < slow.indexOf('#12'), 'sorted by open → merged');
+  assert.match(slow, /<tr data-anchor="t:abc-1" data-anchor-label="ABC-1">/);
+  assert.match(slow, /data-for="t:abc-1"[^>]*>\+<\/button>/);
+});
+
+test('comment anchors: every tile is section:metric, ticket rows are t:key, counts shown', () => {
+  const m = RM.buildReportModel(rich());
+  const html = RM.renderReport(m, {}, { comments: [{ anchor: 'dora:lead-time-for-changes', text: 'why so slow?' }, { anchor: 't:abc-1', text: 'see' }] });
+  const tiles = html.match(/<div class="tile"[^>]*>/g);
+  assert.ok(tiles.length > 10);
+  for (const t of tiles) assert.match(t, /^<div class="tile" data-anchor="[a-z0-9_-]+:[a-z0-9_-]+" data-anchor-label="[^"]+">$/);
+  assert.doesNotMatch(html, /<!--tp:cbtn-->|data-tile=/);
+  assert.match(sectionHtml(html, 'dora'), /class="c-btn js-only mini has" data-for="dora:lead-time-for-changes" aria-label="Comment on Delivery \(DORA\) · Lead time for changes \(1\)"[^>]*>1</);
+  assert.match(html, /<tr data-anchor="t:abc-1"/);
+  assert.match(html, /data-goto="dora:lead-time-for-changes"/);
+  assert.match(html, /href="#dora" data-goto="dora:lead-time-for-changes"/);
+  // every anchor the page carries is one the comments API accepts
+  const S = require('../lib/sanitize.js');
+  for (const [, a] of html.replace(/<script[\s\S]*<\/script>/, '').matchAll(/data-anchor="([^"]+)"/g)) assert.ok(S.validAnchor(a), a);
+});
+
+test('masked: anchors scrubbed, free-text note shown, no real key in any attribute', () => {
+  const m = RM.buildReportModel(rich({ mask: true }));
+  const html = RM.renderReport(m, NARR);
+  const anchors = [...html.matchAll(/data-(?:anchor|for|goto)="([^"]+)"/g)].map((x) => x[1]);
+  assert.ok(anchors.some((a) => /^t:ticket-\d+$/.test(a)));
+  for (const a of anchors) assert.doesNotMatch(a, /abc-|xyz-/);
+  assert.match(html, /<li id="gr-\d+"><strong>mask\.free_text<\/strong> — Masking replaces known names/);
+  assert.match(sectionHtml(html, 'blind_spots'), /Free text is not masked beyond known names/);
+  assert.equal(sectionHtml(RM.renderReport(RM.buildReportModel(rich()), {}), 'blind_spots').includes('Free text is not masked'), false);
+});
+
+// ---------------------------------------------------------------- security
+test('security: </script><script> in the title cannot open a second script', () => {
+  const html = RM.renderReport(RM.buildReportModel(fixture({ meta: { title: '</script><script>alert(1)</script>' } })), {});
+  assert.equal((html.match(/<script\b/gi) || []).length, 1);
+  assert.equal((html.match(/<\/script>/gi) || []).length, 1);
+  assert.match(html, /<title>&lt;\/script&gt;&lt;script&gt;alert\(1\)/);
+});
+
+test('security: jira_base must be a credential-free https origin', () => {
+  for (const bad of ['javascript:alert(1)', 'https://u:p@x.example.com', 'https://u@x.example.com', 'data:text/html,x', 'HTTPS://x" onmouseover="1', '//x.example.com']) {
+    const m = RM.buildReportModel(fixture({ jiraBase: bad }));
+    assert.equal(m.meta.jira_base, null, bad);
+    assert.doesNotMatch(RM.renderReport(m, {}), /\/browse\//, bad);
+  }
+});
+
+test('security: a fresh nonce per render, matching the CSP and the only script tag', () => {
+  const m = RM.buildReportModel(fixture());
+  const nonces = new Set();
+  for (let i = 0; i < 5; i++) {
+    const html = RM.renderReport(m, {});
+    const tags = html.match(/<script\b[^>]*>/g);
+    assert.equal(tags.length, 1);
+    const n = /nonce="([A-Za-z0-9]{16,})"/.exec(tags[0])[1];
+    assert.ok(html.includes(`script-src 'nonce-${n}'`));
+    assert.equal(html.split(n).length - 1, 2, 'nonce appears exactly in CSP + script tag');
+    nonces.add(n);
+  }
+  assert.equal(nonces.size, 5);
+});
+
+test('security: <img src=x onerror=1> in EVERY string field reaches no unescaped sink', () => {
+  const X = '<img src=x onerror=1>';
+  // Every string leaf of the richest fixture → the payload (keys stay keys so links render).
+  const poison = (v, k) => {
+    if (typeof v === 'string') return /key$|^caused_by$|^key|by_key/.test(k || '') || k === 'jiraBase' || k === 'comments_endpoint' ? v : X;
+    if (Array.isArray(v)) return v.map((x) => poison(x, k));
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([kk, x]) => [kk, poison(x, kk)]));
+    return v;
+  };
+  const input = poison(rich({
+    changes: { improved: [{ label: 'a', from: 1, to: 2, note: 'n', unit: 'u' }], declined: [] },
+    dora: { deployments: 2, deploy_tags: [{ name: 'deployed-1', repo: 'r', ts: 1, keys: ['ABC-1'] }], failures: [{ key: 'ABC-1', kind: 'k', tag: 't' }] },
+    pr_flow: { prs: 1, items: [{ key: 'ABC-1', pr: 'p', repo: 'r', title: 't', person: 'p', merge_hours: 3 }], by_person: [{ person: 'p' }], coverage_note: 'c' },
+    glossary: [{ term: 't', definition: 'd' }],
+    goals: [{ goal: 'g', target: 't', actual: 'a', note: 'n' }],
+    report_kind: 'dev',
+  }), '');
+  input.report_kind = 'dev';
+  const html = RM.renderReport(RM.buildReportModel(input), { summary: X, strengths: [X], goals: [X] }, { comments: [{ anchor: X, label: X, text: X, author: X }] });
+  assert.doesNotMatch(html, /<img/i);
+  const [, script] = /<script[^>]*>([\s\S]*)<\/script>/.exec(html);
+  assert.doesNotMatch(html.replace(script, ''), /onerror=1(?!&)/, 'no live handler attribute outside escaped text');
+  assert.doesNotMatch(script, /<img|<\/script/i, 'embedded JSON escapes "<"');
+  assert.ok((html.match(/&lt;img src=x onerror=1&gt;/g) || []).length > 20, 'payload rendered as text');
+  assert.equal((html.match(/<script\b/g) || []).length, 1);
+});
+
+test('security: ids and anchors pass through esc()', () => {
+  const { sparkline, barChart } = require('../report/charts.js');
+  const chart = barChart({ id: 'x"><img src=x>', title: 't', rows: [{ label: '"><b>', value: 1 }] });
+  assert.doesNotMatch(chart, /<img|<b>/);
+  assert.match(chart, /id="x&quot;&gt;&lt;img src=x&gt;"/);
+  assert.doesNotMatch(sparkline({ values: [1, 2], label: '<b>x</b>' }), /<b>/);
+  const html = RM.renderReport(RM.buildReportModel(fixture({ kpis: [{ id: 'a"b', label: '"><img src=x>', value: 1 }] })), {});
+  assert.doesNotMatch(html, /<img/);
+});
+
+test('charts: a chart without its table fallback is refused', () => {
+  const { requireTable } = require('../report/charts.js');
+  assert.throws(() => requireTable('c', ''), /table fallback is required/);
+  assert.match(requireTable('c', '<div><table></table></div>'), /^<details class="as-table">/);
+});
+
+test('charts: sparkline is aria-hidden with an sr-only trend line', () => {
+  const { sparkline } = require('../report/charts.js');
+  const s = sparkline({ values: [1, null, 3], labels: ['Q1', 'Q2', 'Q3'], label: 'Lead time', unit: 'd' });
+  assert.match(s, /<svg class="spark-svg"[^>]*aria-hidden="true" focusable="false">/);
+  assert.match(s, /<span class="sr-only">Lead time: Q1 1 d, Q2 not tracked, Q3 3 d<\/span>/);
+  assert.equal(sparkline({ values: [1] }), '', 'one point is not a trend');
+});
+
+test('report.css: hchart stacks label over bar at 600px or below', () => {
+  const css = require('fs').readFileSync(require('path').join(__dirname, '..', 'report', 'report.css'), 'utf8');
+  const m = /@media \(max-width: 600px\) \{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(m, '600px block present');
+  assert.match(m[1], /\.hc-row \{ grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(m[1], /\.hc-l \{ text-align: start;/);
+});
+
+test('reportfeed shapes: phases_by_period rows, hotfix flag, PR size alias, top-level improved/declined', () => {
+  const m = RM.buildReportModel(fixture({
+    phases: { rows: [], by_period: [{ label: 'Q2', rows: [{ phase: 'dev', median_days: 4 }, { phase: 'review', median_days: 1 }] }] },
+    dora: { deploy_tags: [{ name: 'release-7', ts: '2026-08-01T00:00:00Z', hotfix: true }] },
+    pr_flow: { prs: 1, items: [{ id: 5, size: 300, merge_hours: 2 }] },
+    improved: [{ label: 'Pickup', from: 10, to: 6, unit: 'h' }],
+  }));
+  assert.deepEqual([m.phases.by_period[0].dev, m.phases.by_period[0].review, m.phases.by_period[0].design], [4, 1, null]);
+  assert.equal(m.dora.deploy_tags[0].kind, 'hotfix');
+  assert.equal(m.pr_flow.items[0].size_lines, 300);
+  assert.equal(m.pr_flow.items[0].pr, '5');
+  assert.deepEqual(m.changes.improved.map((x) => x.label), ['Pickup']);
 });

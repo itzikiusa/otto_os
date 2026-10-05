@@ -39,10 +39,13 @@
   // ---- theme ---------------------------------------------------------------
   // Otto sends the resolved scheme + its live token values; data-theme selects
   // the matching fallback set in app.css, the inline vars make it exact.
-  function applyTheme(theme, scheme) {
+  // Every host variable is copied (TP.themeVars), and a named Otto theme
+  // (pro-dark / warm) selects its fallback set via data-otto-theme.
+  function applyTheme(theme, scheme, name) {
     const root = document.documentElement;
     if (scheme === 'light' || scheme === 'dark') root.dataset.theme = scheme;
-    if (theme) for (const [k, v] of Object.entries(theme)) if (v && k.startsWith('--')) root.style.setProperty(k, v);
+    if (typeof name === 'string' && /^[a-z-]+$/.test(name)) root.dataset.ottoTheme = name;
+    for (const [k, v] of TP.themeVars(theme)) root.style.setProperty(k, v);
   }
 
   // ---- scope helpers -------------------------------------------------------
@@ -67,12 +70,12 @@
     if (ev.source !== window.parent) return; // only the hosting shell may talk to us
     const m = ev.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'otto:theme') return applyTheme(m.theme, m.scheme);
+    if (m.type === 'otto:theme') return applyTheme(m.theme, m.scheme, m.themeName);
     if (m.type !== 'otto:init') return;
     TP.state.apiBase = m.apiBase;
     TP.state.token = m.token || '';
     if (Array.isArray(m.providers) && m.providers.length) app.providers = m.providers;
-    applyTheme(m.theme, m.scheme);
+    applyTheme(m.theme, m.scheme, m.themeName);
     if (booted) return refresh();
     booted = true;
     await boot();
@@ -119,21 +122,64 @@
     const savedAcct = store.get('account');
     app.account = app.accounts.some((a) => a.id === savedAcct) ? savedAcct : app.accounts[0].id;
     $('account').value = app.account;
-    app.tab = TABS.some(([k]) => k === store.get('tab')) ? store.get('tab') : 'overview';
-    await loadAccount();
+    const h = TP.route.parse(location.hash);
+    const want = h.tab || store.get('tab');
+    app.tab = TABS.some(([k]) => k === want) ? want : 'overview';
+    await loadAccount(h);
   }
+
+  // ---- deep links ------------------------------------------------------------
+  // Tab, person and period live in location.hash (shareable, survive reload);
+  // localStorage (try/catch inside TP.store) remains the fallback.
+  let lastHash = '';
+  function writeHash() {
+    const next = TP.route.build({ tab: app.tab, person: app.person, period: app.period, since: app.periodDate });
+    lastHash = next;
+    try {
+      if (location.hash === next) return;
+      if (history && history.replaceState) history.replaceState(null, '', next);
+      else location.hash = next;
+    } catch {
+      /* sandboxed frame without history access: storage still holds the state */
+    }
+  }
+  window.addEventListener('hashchange', async () => {
+    if (!booted || location.hash === lastHash) return;
+    const h = TP.route.parse(location.hash);
+    let reload = false;
+    if (h.period != null && h.period !== app.period) {
+      app.period = h.period;
+      store.set(acctKey('period'), app.period);
+      reload = true;
+    }
+    if (h.since && h.since !== app.periodDate) {
+      app.periodDate = h.since;
+      store.set(acctKey('periodDate'), app.periodDate);
+      reload = true;
+    }
+    $('period').value = app.period;
+    $('period-date').hidden = app.period !== 'custom';
+    $('period-date').value = app.periodDate;
+    if (h.tab && TABS.some(([k]) => k === h.tab)) app.tab = h.tab;
+    app.person = h.person || null;
+    if (reload) await refresh();
+    else render();
+  });
 
   function fatal(msg, retry) {
     $('view').innerHTML = `<div class="inline-error" role="alert">${icon('warn')}<span>${esc(msg)}</span><button type="button" class="compact" id="fatal-retry">Retry</button></div>`;
     $('fatal-retry').onclick = retry;
   }
 
-  async function loadAccount() {
+  async function loadAccount(h = {}) {
     const acct = app.accounts.find((a) => a.id === app.account);
     TP.state.jiraBase = (acct && (acct.base_url || acct.url)) || '';
     const p = store.get(acctKey('period'));
     if (p !== null) app.period = p;
     app.periodDate = store.get(acctKey('periodDate'), '');
+    if (h.period != null) app.period = h.period;
+    if (h.since) app.periodDate = h.since;
+    if (h.person) app.person = h.person;
     $('period').value = app.period;
     $('period-date').hidden = app.period !== 'custom';
     $('period-date').value = app.periodDate;
@@ -180,6 +226,7 @@
     render();
   }
   app.refresh = refresh;
+  app.writeHash = writeHash;
 
   // ---- toolbar -------------------------------------------------------------
   function renderProjectLabel() {
@@ -487,6 +534,7 @@
   }
 
   function render() {
+    writeHash();
     renderTabs();
     renderCrumbs();
     const host = $('view');

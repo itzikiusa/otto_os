@@ -100,7 +100,10 @@ function maskedLeaks(text, { names = [], keys = [], summaries = [] } = {}) {
   }
 }
 
-const ANCHOR_RE = /^[a-z0-9_-]+$/;
+// Report comment anchors: a section id ("dora"), a tile ("dora:lead-time-for-changes")
+// or a ticket row ("t:abc-123" / masked "t:ticket-3"). Lower-case only, no quotes,
+// spaces or markup, so an anchor is safe in an attribute and a selector.
+const ANCHOR_RE = /^[a-z0-9_-]+(?::[a-z0-9_-]+)?$/;
 const validAnchor = (a) => typeof a === 'string' && a.length > 0 && a.length <= 120 && ANCHOR_RE.test(a);
 
 /** Comment text for a masked report: real names → aliases, keys → "ticket", control chars out. */

@@ -13,6 +13,8 @@
 
 const BATCH_SIZE = 15;
 const PACE_MS = 500; // between agent calls — the calls themselves are heavy
+const MAX_CORRECTIONS = 15; // lead corrections quoted in a batch prompt
+const SAVE_EVERY_MS = 5000; // debounce for incremental cache persistence
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -114,6 +116,61 @@ const DEFAULT_RUBRIC = [
   'A LARGE diff is NOT automatically big: code copied/scaffolded from an existing pattern is low effort despite the line count. Discount churn — reverts and repeated refactors of the same new code inflate lines without adding scope; count the net novel work once.',
 ];
 
+/** One correction line: summary, original → corrected days, optional reason.
+ *  Every free-text field is JSON-encoded so quotes/newlines cannot break the prompt. */
+function correctionLine(c) {
+  const label = JSON.stringify(String(c.summary || c.key || '').slice(0, 80));
+  const orig = typeof c.original === 'number' && Number.isFinite(c.original) ? `${c.original}d → ` : '';
+  const reason = c.reason ? ` (${JSON.stringify(String(c.reason).slice(0, 160))})` : '';
+  return `  • ${label}: ${orig}${c.corrected}d${reason}`;
+}
+
+/** Calibration block from the lead's corrections ('' when there are none). */
+function correctionsBlock(corrections, max = MAX_CORRECTIONS) {
+  const list = (corrections || []).filter((c) => c && typeof c.corrected === 'number' && Number.isFinite(c.corrected));
+  if (!list.length) return '';
+  return `\nThe team lead has CORRECTED past estimates (AI original → lead's value) — learn from these (match this calibration):\n${list
+    .slice(0, max)
+    .map(correctionLine)
+    .join('\n')}\n`;
+}
+
+/**
+ * Debounced persistence of a mutated cache object: touch() schedules a write
+ * at most every `intervalMs`; flush() writes now if anything is pending. A
+ * crash mid-job loses at most one interval of estimates, and a long job no
+ * longer rewrites the whole file after every batch. `write` defaults to
+ * store.writeJsonAtomicAsync; write errors are swallowed (next flush retries).
+ */
+function createDebouncedSaver(file, obj, { intervalMs = SAVE_EVERY_MS, write } = {}) {
+  const doWrite = write || require('./store.js').writeJsonAtomicAsync;
+  let dirty = false;
+  let timer = null;
+  let chain = Promise.resolve();
+  const run = () => {
+    timer = null;
+    if (!dirty) return chain;
+    dirty = false;
+    chain = chain.then(() => doWrite(file, obj)).catch(() => { dirty = true; });
+    return chain;
+  };
+  return {
+    touch() {
+      dirty = true;
+      if (!timer) {
+        timer = setTimeout(run, intervalMs);
+        if (timer.unref) timer.unref();
+      }
+    },
+    async flush() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      await run();
+      await chain;
+    },
+    pending: () => dirty,
+  };
+}
+
 function batchPrompt(records, rubric, corrections, instructions) {
   const lines = records.map((r) => {
     const desc = (r.description_snippet || '').slice(0, 1200);
@@ -122,12 +179,7 @@ function batchPrompt(records, rubric, corrections, instructions) {
   });
   const rules = (Array.isArray(rubric) && rubric.length ? rubric : DEFAULT_RUBRIC).map((r) => `  • ${r}`).join('\n');
   // The lead's own past corrections — the strongest signal for calibration.
-  const learned = (corrections || []).length
-    ? `\nThe team lead has CORRECTED past estimates — learn from these (match this calibration):\n${corrections
-        .slice(0, 15)
-        .map((c) => `  • ${JSON.stringify((c.summary || c.key).slice(0, 80))} → ${c.corrected}d${c.reason ? ` (${JSON.stringify(c.reason.slice(0, 160))})` : ''}`)
-        .join('\n')}\n`
-    : '';
+  const learned = correctionsBlock(corrections);
   return `You size engineering tasks for a delivery-analytics tool. For EACH task, estimate the IDEAL effort in engineering days (fractional; 0.25–60) for an AVERAGE developer familiar with this codebase. The estimate is developer-AGNOSTIC — ignore who did it, any story points, and any prior estimate; judge the work itself.
 
 Use the ACTUAL CODE CHANGE (the \`change=\` evidence: files touched, lines added/removed, which repos, commit subjects) as a strong signal, weighed against the ticket prose (tickets over- and under-describe). Do NOT inflate — most tasks are small; a large multi-file rewrite is large even if the ticket is terse.
@@ -190,6 +242,16 @@ function parseBatch(text, expectedKeys) {
  * → {estimated, failed_batches, remaining}
  */
 async function runEstimation(opts) {
+  // persistTo: debounce-write `cache` there (every SAVE_EVERY_MS, and at the end).
+  const saver = opts.persistTo ? createDebouncedSaver(opts.persistTo, opts.cache, { intervalMs: opts.saveEveryMs, write: opts.writeJson }) : null;
+  try {
+    return await estimationPass(opts, saver ? () => saver.touch() : () => {});
+  } finally {
+    if (saver) await saver.flush();
+  }
+}
+
+async function estimationPass(opts, touch) {
   const { records, cache, agentRun, rubric, corrections, instructions } = opts;
   const nowMs = opts.nowMs || Date.now();
   const ruler = rulerId(rubric, instructions);
@@ -212,6 +274,7 @@ async function runEstimation(opts) {
       const e = parsed[r.key];
       if (!e) continue;
       cache[r.key] = { hash: contentHash(r), days: e.days, routine: e.routine, v: PROMPT_V, ruler, at: nowMs, first_days: cache[r.key] && cache[r.key].ruler === ruler ? cache[r.key].first_days ?? cache[r.key].days : e.days };
+      touch();
       n++;
     }
     return n;
@@ -282,6 +345,7 @@ async function runEstimation(opts) {
         const e = reconciled[r.key];
         if (!e) continue;
         cache[r.key] = { hash: contentHash(r), days: e.days, routine: e.routine, v: PROMPT_V, ruler, at: nowMs, first_days: cache[r.key] && cache[r.key].ruler === ruler ? cache[r.key].first_days ?? cache[r.key].days : e.days };
+        touch();
         estimated++;
       }
       done += batch.length;
@@ -361,7 +425,16 @@ Answer with STRICT JSON only: {"key":"${epic.key}","days":<number>}`;
  * The view then scales the children so Σ children = feature — slicing a
  * feature into more stories can no longer inflate its total.
  */
-async function runFeatureEstimation({ epics, cache, agentRun, workers, rubric, instructions }) {
+async function runFeatureEstimation({ epics, cache, agentRun, workers, rubric, instructions, persistTo, saveEveryMs, writeJson, paceMs = PACE_MS }) {
+  const saver = persistTo ? createDebouncedSaver(persistTo, cache, { intervalMs: saveEveryMs, write: writeJson }) : null;
+  try {
+    return await featurePass({ epics, cache, agentRun, workers, rubric, instructions, paceMs, touch: saver ? () => saver.touch() : () => {} });
+  } finally {
+    if (saver) await saver.flush();
+  }
+}
+
+async function featurePass({ epics, cache, agentRun, workers, rubric, instructions, paceMs, touch }) {
   const ruler = rulerId(rubric, instructions);
   const ws = Array.isArray(workers) && workers.length ? workers : [{ provider: 'claude', model: '' }];
   let done = 0;
@@ -379,10 +452,11 @@ async function runFeatureEstimation({ epics, cache, agentRun, workers, rubric, i
     if (!vals.length) continue;
     vals.sort((a, b) => a - b);
     cache[epic.key] = { hash: h, days: vals[Math.floor(vals.length / 2)], samples: vals, kids: kids.map((k) => k.key), at: Date.now() };
+    touch();
     done++;
-    await sleep(PACE_MS);
+    if (paceMs > 0) await sleep(paceMs);
   }
   return { estimated: done };
 }
 
-module.exports = { featurePrompt, runFeatureEstimation, rulerId, sizeBucket, contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, medianReconcile, consensusPrompt, evidenceLine, DEFAULT_RUBRIC, BATCH_SIZE };
+module.exports = { createDebouncedSaver, correctionsBlock, MAX_CORRECTIONS, SAVE_EVERY_MS, featurePrompt, runFeatureEstimation, rulerId, sizeBucket, contentHash, selectTargets, batchPrompt, parseBatch, runEstimation, medianReconcile, consensusPrompt, evidenceLine, DEFAULT_RUBRIC, BATCH_SIZE };

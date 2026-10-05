@@ -126,14 +126,14 @@ const fixture = () => ({
   guardrails: [{ id: 'low_estimate_coverage:estimateAccuracy', code: 'low_estimate_coverage', metric: 'estimateAccuracy', level: 'warn', msg: 'Only 40% of delivered tickets have an estimate.' }],
   guardrail_badges: { throughputPerWeek: { severity: 'danger', codes: ['low_capacity'], reasons: ['Available on 8 of 20 working days.'] } },
   phases: {
-    design: { n: 2, p50: 1, coverage: 10 },
-    dev: { n: 20, p50: 3, coverage: 100 },
+    design: { n: 2, p50: 1, coverage: 0.1 },
+    dev: { n: 20, p50: 3, coverage: 1 },
     review_pickup: { n: 0, p50: null, coverage: 0 },
-    review_in_review: { n: 18, p50: 1, coverage: 90 },
-    qa_wait: { n: 12, p50: 0.5, coverage: 60 },
-    qa_rework: { n: 3, p50: 0.4, coverage: 15 },
-    deploy: { n: 10, p50: 1, coverage: 50 },
-    rework_in: { n: 6, p50: 0.5, coverage: 30 },
+    review_in_review: { n: 18, p50: 1, coverage: 0.9 },
+    qa_wait: { n: 12, p50: 0.5, coverage: 0.6 },
+    qa_rework: { n: 3, p50: 0.4, coverage: 0.15 },
+    deploy: { n: 10, p50: 1, coverage: 0.5 },
+    rework_in: { n: 6, p50: 0.5, coverage: 0.3 },
   },
   pr_flow: { total: 0 },
   flow: {},
@@ -191,9 +191,12 @@ test('flow phases: thin phases read "not tracked" (hatched) with design / QA cov
   assert.doesNotMatch(withPrs, /from Jira statuses/);
 });
 
-test('coverage is formatted with fmtPct whether it arrives as 0..1 or 0..100', () => {
+test('coverage is a 0..1 share; a value above 1 reads ">100%" with a warning, never rescaled', () => {
   assert.match(TP.views.flow.phasesHtml({ phases: { team: { dev: 2 }, coverage: 0.4 } }), /on 40% of tickets/);
-  assert.match(TP.views.flow.phasesHtml({ phases: { team: { dev: 2 }, coverage: 40 } }), /on 40% of tickets/);
+  const over = TP.views.flow.phasesHtml({ phases: { team: { dev: 2 }, coverage: 40 } });
+  assert.match(over, /on &gt;100% of tickets/);
+  assert.match(over, /overlapping inputs/);
+  assert.doesNotMatch(over, /on 40% of tickets/);
 });
 
 test('PR section: unavailable → reason + Settings; running → paced progress; idle → Scan now', () => {
@@ -303,4 +306,218 @@ test('below 600px charts open "Show as table" by default', () => {
     narrowScreen = false;
   }
   assert.doesNotMatch(TP.views.flow.phasesHtml(fixture()), /<details open>/);
+});
+
+// ---- P8: shares, guardrails, privacy, deep links, a11y ------------------------
+const P8_SRC = (f) => fs.readFileSync(path.join(UI, f), 'utf8');
+
+test('(1) no 0..100 guessing anywhere in ui/: share01 and "> 1 ? v / 100" are gone', () => {
+  for (const f of ['components.js', 'views/overview.js', 'views/flow.js', 'views/quality.js', 'views/investment.js', 'views/people.js', 'views/person.js', 'views/estimates.js']) {
+    const src = P8_SRC(f);
+    assert.doesNotMatch(src, /share01/, f);
+    assert.doesNotMatch(src, />\s*1\s*\?\s*[\w.]+\s*\/\s*100/, f);
+  }
+  assert.equal(TP.fmtShare(0.25), '25%');
+  assert.equal(TP.fmtShare(1), '100%');
+  assert.equal(TP.fmtShare(25), '>100%');
+  assert.equal(TP.fmtShare(null), '—');
+  assert.equal(TP.overGuard(0.5), null);
+  assert.equal(TP.overGuard(1.4, 'Rework rate').level, 'bad');
+});
+
+test('(1)+(2) a share above 1 renders ">100%" with a bad guardrail, dimmed + reason inline', async () => {
+  const o = fixture();
+  o.dora.change_failure_rate = { value: 3, failed: 3, total: 1 };
+  o.rework = { rate: 1.5, charged: [] };
+  const dora = TP.views.overview.doraTiles(o, app);
+  assert.match(dora, /&gt;100%/);
+  assert.match(dora, /class="tile weak"/);
+  assert.match(dora, /guard-reason/);
+  const q = TP.views.quality.tiles(o);
+  assert.match(q, /Rework rate[\s\S]*&gt;100%/);
+  assert.match(q, /weak inputs/);
+});
+
+test('(2) guardFor matches canonical ids, tiles[] and envelope weak_reasons; bad → hatched tile with reason', () => {
+  const o = { guardrails: [{ id: 'pr_no_data', code: 'no_pr_data', metric: '*', tiles: ['pr_pickup', 'pr_review'], level: 'bad', msg: 'No pull requests fetched.' }] };
+  assert.equal(TP.guardFor(o, ['prPickup']).level, 'bad');
+  assert.equal(TP.guardFor(o, ['dora_cfr']), null);
+  assert.equal(TP.guardFor({}, ['x'], { weak_reasons: ['low_n'] }).level, 'warn');
+  const html = TP.tile({ title: 'Pickup', valueHtml: '1d', guard: TP.guardFor(o, ['prPickup']) });
+  assert.match(html, /tile weak/);
+  assert.match(html, /<p class="guard-reason">.*No pull requests fetched/s);
+  assert.match(html, /weak inputs/);
+  const warn = TP.tile({ title: 'X', valueHtml: '1', guard: { level: 'warn', msg: 'm' } });
+  assert.doesNotMatch(warn, /tile weak|guard-reason/);
+  assert.match(warn, /check inputs/);
+});
+
+test('(2) Investment, PR and Quality sections carry guardrail badges', async () => {
+  const o = fixture();
+  o.guardrails.push({ id: 'capacity_investment', metric: 'investmentMix', level: 'bad', msg: 'No git evidence on most tickets.' });
+  const inv = await renderView('investment', o);
+  assert.match(inv, /weak inputs/);
+  assert.match(inv, /No git evidence on most tickets/);
+  const pr = TP.views.flow.prHtml({ ...o, guardrails: [{ id: 'pr_pickup', metric: 'prPickup', level: 'bad', msg: 'Only 1 PR.' }], pr_flow: { total: 1, pickup_days: { value: 1, n: 1 } } });
+  assert.match(pr, /stage weak/);
+  assert.match(pr, /Only 1 PR/);
+});
+
+test('(3) report masking: on by default for team/combined, off only for one person from their page', () => {
+  const R = TP.views.reports;
+  assert.equal(R.maskDefault('team', false), true);
+  assert.equal(R.maskDefault('combined', true), true);
+  assert.equal(R.maskDefault('dev', false), true);
+  assert.equal(R.maskDefault('dev', true), false);
+  assert.equal(R.namesLine(false), 'Names: visible to anyone you share with');
+  assert.match(R.namesLine(true), /masked/);
+  const src = P8_SRC('views/reports.js');
+  assert.match(src, /id="nr-names" role="status" aria-live="polite"/);
+  assert.match(P8_SRC('views/person.js'), /fromPerson: true/);
+});
+
+test('(4) calibration rows carry an info() each; inflation > 1.1 makes adjusted pace the headline', () => {
+  const html = TP.views.estimates.calibrationHtml({ calibration: { corrections: 4, factor: 1.1, ruler_version: 'r3' } }, { pace: 1.2, est_inflation: 1.3, pace_adjusted: 1.56, pace_ref: 1.4 });
+  assert.ok((html.match(/class="info-btn"/g) || []).length >= 6);
+  assert.match(html, /class="headline"><span class="value">×1\.56/);
+  assert.ok(html.indexOf('Pace, inflation-adjusted') < html.indexOf('>Pace <'), 'adjusted row comes first');
+  const flat = TP.views.estimates.calibrationHtml(null, { pace: 1.2, est_inflation: 1.05, pace_adjusted: 1.26 });
+  assert.doesNotMatch(flat, /class="headline"/);
+  const ov = TP.views.overview.flowTiles({ ...fixture(), est_basis: { pace: 1.2, est_inflation: 1.3, pace_adjusted: 1.56, pace_ref: 1.4 } });
+  assert.match(ov, /Pace vs estimate \(inflation-adjusted\)[\s\S]*×1\.56/);
+});
+
+test('(5) rework empty state names the sources that ran, or says "not checked yet", with Scan/Settings', () => {
+  const ran = TP.views.quality.chargedHtml({ rework: { charged: [], sources: { git_blame: { repos: 4 }, jira_links: { tickets: 120 } } } });
+  assert.match(ran, /git blame scanned 4 repos, Jira links checked 120 tickets — none found/);
+  assert.match(ran, /data-empty-act="scan"/);
+  assert.match(ran, /data-empty-act="settings"/);
+  assert.match(TP.views.quality.chargedHtml({}), /not checked yet/);
+});
+
+test('(5) hygiene flags get human labels and open a drawer of tickets', () => {
+  const html = TP.views.quality.flagsHtml({ flags: { late_merge: 3, no_code: 1 } });
+  assert.match(html, /Merged after done × 3/);
+  assert.match(html, /No code found × 1/);
+  assert.doesNotMatch(html, /late merge|late_merge ×/);
+  assert.match(html, /<button type="button" class="flag" data-drill="d\d+"/);
+});
+
+test('(6) People has a sub-task count column; person page section is "Sub-tasks with real work"', () => {
+  const o = fixture();
+  assert.ok(TP.views.people.COLS.some((c) => c.key === 'subs'));
+  assert.equal(TP.views.people.subCount(o, 'b'), 1);
+  assert.equal(TP.views.people.subCount(o, 'a'), 0);
+  assert.equal(TP.views.people.subCount({}, 'a'), null);
+  const rowB = TP.views.people.rowsHtml(o, o.assignees)[1].cells.join(' ');
+  assert.match(rowB, /1 sub-tasks with real work/);
+  assert.match(P8_SRC('views/person.js'), /title: 'Sub-tasks with real work'/);
+  const sub = TP.views.people.subtasksHtml(o);
+  assert.match(sub, /badge info/);
+});
+
+test('(7) deep links: route parses and builds tab/person/period; tile values with tickets are drawer buttons', () => {
+  assert.deepStrictEqual(TP.route.parse('#tab=people&person=a&period=3'), { tab: 'people', person: 'a', period: '3' });
+  assert.deepStrictEqual(TP.route.parse('#period=bogus&since=x'), {});
+  assert.equal(TP.route.build({ tab: 'flow', person: null, period: 'custom', since: '2026-01-01' }), '#tab=flow&period=custom&since=2026-01-01');
+  const html = TP.tile({ title: 'Escapes', valueHtml: '10%', drill: { tickets: [{ key: 'ABC-1', summary: 'S' }] } });
+  assert.match(html, /<button type="button" class="tile-value value" data-drill="d\d+" aria-haspopup="dialog"/);
+  assert.match(TP.drawerHtml({ tickets: [{ key: 'ABC-1', summary: 'Login', value: 2 }] }), /ABC-1[\s\S]*Login/);
+  assert.match(TP.drawerHtml({ tickets: [] }), /did not return the tickets/);
+  const app = P8_SRC('views/app.js');
+  assert.match(app, /TP\.route\.parse\(location\.hash\)/);
+  assert.match(app, /hashchange/);
+});
+
+test('(8) second-tier signal tiles render; capacity-normalised deploys show capacity context', () => {
+  const o = fixture();
+  o.flow = {
+    flow_efficiency: { value: 0.32, n: 18 },
+    focus_share: { value: 0.7, n: 40, focused_days: 28 },
+    escape_rate: { value: 0.1, n: 20, escaped: 2, items: [{ key: 'ABC-3', bugs: ['ABC-9'] }] },
+    sprint_planning: { value: { accuracy: 0.8, scope_creep: 0.2 }, n: 3 },
+  };
+  o.pr_flow = { total: 9, review_load: { n: 20, top_share: 0.6, reviewers_n: 3, reviewers: [] }, by_person: { x: { authored: 2, reviewed_given: 3 }, y: { authored: 1, reviewed_given: 0 } } };
+  o.dora.hotfix_rate = { value: 0.25, hotfixes: 1, total: 4 };
+  o.dora.batch_size = { value: 3, n: 4 };
+  o.dora.time_to_detect = { value: 5, n: 2 };
+  o.dora.deploys_per_capacity_day = { value: 0.04, n: 4 };
+  const html = TP.views.overview.signalTiles(o);
+  for (const t of ['Flow efficiency', 'Focus', 'Escape rate', 'Sprint plan accuracy', 'Review load spread', 'People in PRs', 'Hotfix rate', 'Batch size', 'Time to detect', 'Time to restore', 'Deploys per capacity day']) assert.match(html, new RegExp(t), t);
+  assert.match(html, /32%/);
+  assert.match(html, /scope creep 20%/);
+  assert.match(html, /2 authored · 1 reviewed/);
+  assert.match(html, /over 110 capacity person-days \(120 working − 10 off\)/);
+  assert.match(html, /data-drill=/); // escape rate items open a drawer
+  assert.match(TP.views.overview.signalTiles({}), /not available yet/);
+});
+
+test('(8) per-person rates carry capacity context (people rows + person PR tile)', () => {
+  const o = fixture();
+  const a = TP.views.people.rowsHtml(o, o.assignees)[0].cells.join(' ');
+  assert.match(a, /over 18 d/);
+  assert.match(a, /independent of capacity/);
+  assert.match(P8_SRC('views/person.js'), /reviews per capacity day/);
+});
+
+test('(10) a11y: sort glyphs aria-hidden, scrollable table region, sparkline sr text, NT + unestimated markers', () => {
+  const t = TP.table({ caption: 'Cap', cols: [{ key: 'a', label: 'A', sort: true }], rows: [['x']], sortKey: 'a', sortDir: 'asc' });
+  assert.match(t, /<span aria-hidden="true"> ▲<\/span>/);
+  assert.match(t, /<div class="table-wrap" tabindex="0" role="region" aria-label="Cap">/);
+  const sp = TP.sparkline([1, 2, 3], 'trend');
+  assert.match(sp, /<svg class="spark"[^>]*aria-hidden="true"/);
+  assert.match(sp, /<span class="sr-only">trend: 3 points, from 1 to 3<\/span>/);
+  assert.throws(() => TP.chartBlock({ svg: '<svg></svg>' }), /tableHtml is required/);
+  assert.match(TP.NT, /<abbr class="nt" title="Not tracked/);
+  assert.match(TP.unestimated(), /badge warning.*unestimated/);
+  const flowTbl = TP.views.flow.phasesHtml(fixture());
+  assert.match(flowTbl, /<abbr class="nt"/);
+});
+
+test('(10) a modal makes main + toolbar inert and restores them on close', () => {
+  const inert = {};
+  const mk = (n) => ({ setAttribute: (k) => (inert[n] = k === 'inert'), removeAttribute: () => (inert[n] = false) });
+  const els = { main: mk('main'), '.toolbar': mk('toolbar') };
+  const dlg = new El('div');
+  dlg.querySelectorAll = () => [];
+  dlg.querySelector = () => null;
+  const back = new El('div');
+  Object.defineProperty(back, 'firstElementChild', { get: () => dlg });
+  back.remove = () => {};
+  const prevQS = document.querySelector;
+  const prevCE = document.createElement;
+  const prevRm = document.removeEventListener;
+  document.querySelector = (s) => els[s] || null;
+  document.createElement = () => back;
+  document.removeEventListener = () => {};
+  try {
+    const m = TP.modal({ title: 'x', body: 'y' });
+    assert.deepStrictEqual(inert, { main: true, toolbar: true });
+    m.close();
+    assert.deepStrictEqual(inert, { main: false, toolbar: false });
+  } finally {
+    document.querySelector = prevQS;
+    document.createElement = prevCE;
+    document.removeEventListener = prevRm;
+  }
+});
+
+test('(9) applyTheme input: every host variable is copied and the missing surfaces are derived', () => {
+  const v = new Map(TP.themeVars({ '--bg': 'X', text: 'Y', '--surface-2': 'Z', '--cat-1': 'C', bad: 3, 'a;b': 'q' }));
+  assert.equal(v.get('--bg'), 'X');
+  assert.equal(v.get('--text'), 'Y');
+  assert.equal(v.get('--cat-1'), 'C');
+  assert.ok(!v.has('--bad') && !v.has('--a;b'));
+  for (const k of ['--surface-3', '--hover', '--border-strong', '--bg-sidebar']) assert.match(v.get(k), /color-mix/, k);
+  const app = P8_SRC('views/app.js');
+  assert.match(app, /TP\.themeVars\(theme\)/);
+  assert.doesNotMatch(app, /k\.startsWith\('--'\)\) root\.style/);
+});
+
+test('(9) layout: no inline layout styles in reports/settings; rv-* and form-actions classes exist', () => {
+  for (const f of ['views/reports.js', 'views/settings.js']) assert.doesNotMatch(P8_SRC(f), /style="[^"]*(display|flex|margin|grid)/, f);
+  assert.doesNotMatch(P8_SRC('views/reports.js'), /\.style\.(display|gridTemplateRows|minBlockSize)/);
+  const css = P8_SRC('app.css');
+  for (const c of ['.rv-head', '.rv-layout', '.rv-frame', '.form-actions']) assert.ok(css.includes(c + ' {') || css.includes(c + ',') || css.includes(c + ' '), c);
+  assert.match(css, /@media \(max-width: 600px\) \{\s*\.rv-layout \{\s*grid-template-columns: minmax\(0, 1fr\)/);
 });

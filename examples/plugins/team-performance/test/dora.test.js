@@ -97,16 +97,28 @@ test('two repos: by_repo and per_week', () => {
   assert.equal(m.deploy_frequency.per_week, 1.5);
 });
 
-test('same-day regular tags collapse; a same-day hotfix does not', () => {
+test('deploys dedupe by repo + tagged sha: same commit collapses, different commits same day do not', () => {
   const t = [
-    { repo: 'svc', name: 'v1-deployed', ts: T('2026-06-01T09:00:00Z') },
-    { repo: 'svc', name: 'v1b-deployed', ts: T('2026-06-01T12:00:00Z') },
-    { repo: 'svc', name: 'v1-hotfix', ts: T('2026-06-01T15:00:00Z') },
+    { repo: 'svc', name: 'v1-deployed', sha: 'aaa', ts: T('2026-06-01T09:00:00Z') },
+    { repo: 'svc', name: 'v1-prod-deployed', sha: 'aaa', ts: T('2026-06-01T09:30:00Z') },
+    { repo: 'svc', name: 'v1b-deployed', sha: 'bbb', ts: T('2026-06-01T12:00:00Z') },
+    { repo: 'svc', name: 'v1-hotfix', sha: 'ccc', ts: T('2026-06-01T15:00:00Z') },
   ];
   const m = doraMetrics([], t, cfg);
-  assert.equal(m.deploy_frequency.total, 2);
+  assert.equal(m.deploy_frequency.total, 3);
+  assert.deepEqual(m.deploy_frequency.by_kind, { regular: 2, hotfix: 1 });
   assert.equal(m.change_failure_rate.failed, 1);
-  assert.equal(m.mttr.p50, 6); // 09:00 deploy → 15:00 hotfix
+  assert.equal(m.mttr.p50, 3); // 12:00 deploy (latest before) → 15:00 hotfix
+});
+
+test('null repo / missing sha: each tag name is its own deploy', () => {
+  const t = [
+    { repo: null, name: 'a-deployed', sha: 'aaa', ts: T('2026-06-01T09:00:00Z') },
+    { repo: null, name: 'b-deployed', sha: 'aaa', ts: T('2026-06-01T10:00:00Z') },
+    { repo: 'svc', name: 'c-deployed', ts: T('2026-06-01T11:00:00Z') },
+    { repo: 'svc', name: 'd-deployed', ts: T('2026-06-01T12:00:00Z') },
+  ];
+  assert.equal(doraMetrics([], t, cfg).deploy_frequency.total, 4);
 });
 
 test('failure window edge: hotfix at exactly 7d counts, 7d+1ms does not', () => {
@@ -127,17 +139,6 @@ test('hotfix in another repo does not fail this repo', () => {
   const m = doraMetrics([], t, cfg);
   assert.equal(m.change_failure_rate.failed, 0);
   assert.equal(m.change_failure_rate.label, '0 of 2');
-});
-
-test('UTC+3 evening deploys bucket by local day', () => {
-  // 22:30 and 23:30 local (UTC+3) on Jun 1 = 19:30/20:30Z; 00:30 local Jun 2 = 21:30Z Jun 1.
-  const t = [
-    { repo: 'svc', name: 'a-deployed', ts: T('2026-06-01T19:30:00Z') },
-    { repo: 'svc', name: 'b-deployed', ts: T('2026-06-01T20:30:00Z') },
-    { repo: 'svc', name: 'c-deployed', ts: T('2026-06-01T21:30:00Z') },
-  ];
-  assert.equal(doraMetrics([], t, { ...cfg, timezone: 'Europe/Istanbul' }).deploy_frequency.total, 2);
-  assert.equal(doraMetrics([], t, { ...cfg, timezone: 'UTC' }).deploy_frequency.total, 1);
 });
 
 test('chained hotfixes collapse into one incident', () => {
@@ -207,4 +208,86 @@ test('zero deploys → not_available, no band, never 0/NaN', () => {
 test('legacy object form is still accepted', () => {
   const m = doraMetrics({ records, tags, window, cfg: { failure_window_days: 7 } });
   assert.equal(m.deploy_frequency.total, 3);
+});
+
+test('hotfix kind comes from hotfix_tag_patterns, or a tagKind callback', () => {
+  const t = [
+    { repo: 'svc', name: 'v1-deployed', sha: 'a', ts: T('2026-06-01T10:00:00Z') },
+    { repo: 'svc', name: 'v1-urgent-deployed', sha: 'b', ts: T('2026-06-02T10:00:00Z') },
+    { repo: 'svc', name: 'v1-hf', sha: 'c', ts: T('2026-06-03T10:00:00Z') },
+  ];
+  assert.deepEqual(doraMetrics([], t, cfg).deploy_frequency.by_kind, { regular: 2, hotfix: 1 });
+  const custom = doraMetrics([], t, { ...cfg, hotfix_tag_patterns: ['URGENT'] });
+  assert.deepEqual(custom.deploy_frequency.by_kind, { regular: 2, hotfix: 1 });
+  assert.equal(custom.change_failure_rate.evidence[0].signals[0].ref, 'v1-urgent-deployed');
+  const cb = doraMetrics([], t, { ...cfg, tagKind: (name) => (name === 'v1-deployed' ? 'hotfix' : 'deploy') });
+  assert.deepEqual(cb.deploy_frequency.by_kind, { regular: 2, hotfix: 1 });
+  assert.equal(cb.hotfix_rate.value, 0.33);
+});
+
+test('PR lead time: earliest tag containing the merge sha (O(1) index), repo-scoped, coverage reported', () => {
+  const t = [
+    { repo: 'svc', name: 'v1-deployed', sha: 's1', ts: T('2026-06-03T10:00:00Z'), contains: ['m1'] },
+    { repo: 'svc', name: 'v2-deployed', sha: 's2', ts: T('2026-06-05T10:00:00Z'), contains: ['m1', 'm2'] },
+    { repo: 'other', name: 'o1-deployed', sha: 'o1', ts: T('2026-06-02T10:00:00Z'), contains: ['m2'] },
+  ];
+  const prs = [
+    { repo: 'svc', merge_commit: 'm1', first_commit_at: '2026-06-01T10:00:00Z', merged_at: '2026-06-02T10:00:00Z' }, // → v1: 2 bd
+    { repo: 'svc', merge_commit: 'm2', first_commit_at: '2026-06-01T10:00:00Z', merged_at: '2026-06-01T12:00:00Z' }, // → v2 (not other repo): 4 bd
+    { repo: 'svc', merge_commit: 'zz', first_commit_at: '2026-06-01T10:00:00Z', merged_at: '2026-06-02T10:00:00Z' }, // no tag, no ticket
+  ];
+  const m = doraMetrics([], t, { ...cfg, prs });
+  assert.equal(m.lead_time.basis, 'pr');
+  assert.equal(m.lead_time.n, 2);
+  assert.equal(m.lead_time.p50, 3);
+  assert.equal(m.lead_time.sources.tag_contains_merge, 2);
+  assert.equal(m.lead_time.sources.considered, 3);
+  assert.equal(m.lead_time.sources.tag_contains_merge_coverage, 0.67);
+  // Fallback callback: binary-searched to the first tag at/after the merge.
+  const seen = [];
+  const cb = doraMetrics([], t.map(({ contains, ...x }) => x), { ...cfg, prs: [prs[0]], tagContains: (tag, sha) => { seen.push(tag.name); return sha === 'm1'; } });
+  assert.equal(cb.lead_time.n, 1);
+  assert.deepEqual(seen, ['v1-deployed']);
+});
+
+test('Fri/Sat weekend changes lead time vs Sat/Sun', () => {
+  // Thu 10:00 first commit → Sun 10:00 deploy.
+  const recs = [{ key: 'ABC-1', type: 'Story', first_commit_at: T('2026-06-04T10:00:00Z'), deployed_at: T('2026-06-07T10:00:00Z') }];
+  const tg = [{ repo: 'svc', name: 'v1-deployed', sha: 'a', ts: T('2026-06-07T10:00:00Z') }];
+  const satSun = doraMetrics(recs, tg, { ...cfg, weekend: [0, 6] }).lead_time.p50;
+  const friSat = doraMetrics(recs, tg, { ...cfg, weekend: [5, 6] }).lead_time.p50;
+  assert.notEqual(satSun, friSat);
+});
+
+test('new DORA metrics: hotfix rate, batch size, time to first commit, detect vs restore, open incidents, capacity weeks', () => {
+  const t = [
+    { repo: 'svc', name: 'v1-deployed', sha: 'a', ts: T('2026-06-01T10:00:00Z') },
+    { repo: 'svc', name: 'v2-deployed', sha: 'b', ts: T('2026-06-08T10:00:00Z') },
+    { repo: 'svc', name: 'v3-hotfix', sha: 'c', ts: T('2026-06-09T10:00:00Z') },
+    { repo: 'svc', name: 'v4-deployed', sha: 'd', ts: T('2026-06-12T10:00:00Z') },
+  ];
+  const recs = [
+    { key: 'ABC-1', type: 'Story', first_active_at: T('2026-05-27T10:00:00Z'), first_commit_at: T('2026-05-28T10:00:00Z'), deployed_at: T('2026-06-01T10:00:00Z'), deployed_tag: 'v1-deployed' },
+    { key: 'ABC-2', type: 'Story', first_active_at: T('2026-05-27T10:00:00Z'), first_commit_at: T('2026-05-29T10:00:00Z'), deployed_at: T('2026-06-01T10:00:00Z'), deployed_tag: 'v1-deployed' },
+    { key: 'ABC-3', type: 'Story', first_active_at: T('2026-06-03T10:00:00Z'), first_commit_at: T('2026-06-03T10:00:00Z'), deployed_at: T('2026-06-08T10:00:00Z'), deployed_tag: 'v2-deployed' },
+    // Bug detected 1 day after v2, restored by the v3 hotfix 1 day later.
+    { key: 'ABC-4', type: 'Bug', created: T('2026-06-08T22:00:00Z'), rework_of: 'ABC-3', deployed_at: T('2026-06-09T10:00:00Z'), deployed_tag: 'v3-hotfix' },
+    { key: 'ABC-6', type: 'Story', first_commit_at: T('2026-06-10T10:00:00Z'), deployed_at: T('2026-06-12T10:00:00Z'), deployed_tag: 'v4-deployed' },
+    // Bug on v4 never restored inside the window → open incident.
+    { key: 'ABC-5', type: 'Bug', created: T('2026-06-13T10:00:00Z'), rework_of: 'ABC-6' },
+  ];
+  const m = doraMetrics(recs, t, { ...cfg, capacity_days: 20 });
+  assert.equal(m.hotfix_rate.value, 0.25);
+  assert.equal(m.batch_size.p50, 1);
+  assert.equal(m.batch_size.p85, 1.55);
+  assert.equal(m.time_to_first_commit.n, 3);
+  assert.equal(m.time_to_first_commit.p50, 1);
+  assert.equal(m.mttr.time_to_detect.n, 2);
+  assert.equal(m.mttr.time_to_detect.p50, 18); // 12h and 24h
+  assert.equal(m.mttr.time_to_restore.n, 1);
+  assert.equal(m.mttr.time_to_restore.p50, 12);
+  assert.equal(m.open_incidents.n, 1);
+  assert.equal(m.open_incidents.oldest_age, 2.58); // Jun 12 10:00 → Jun 15 00:00
+  assert.equal(m.deploys_per_capacity_week, 1); // 4 deploys / (20 / 5) capacity weeks
+  assert.equal(m.mttr.from_deploy_share, 0);
 });

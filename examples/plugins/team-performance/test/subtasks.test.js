@@ -123,3 +123,37 @@ test('design vocabulary matches phases.js', () => {
   assert.ok(S.RE_DESIGN.test('Investigate timeouts'));
   assert.ok(!S.RE_DESIGN.test('Write unit tests'));
 });
+
+test('design sub-tasks use the shared phases.js vocabulary', () => {
+  assert.equal(S.RE_DESIGN, require('../lib/phases.js').RE_DESIGN);
+});
+
+test('substantive sub-task under an UNASSIGNED story is credited to the sub-task owner', () => {
+  const b = sub({ key: 'ABC-4', assignee_id: 'u-b', dev_days: 2, commit_ts: [T('2026-06-08T10:00:00Z'), T('2026-06-09T10:00:00Z')] });
+  const out = S.classifySubtasks([story({ assignee_id: null }), b]);
+  const r = by(out)['ABC-4'];
+  assert.equal(r.substantive_subtask, true);
+  assert.equal(r.credited_to, 'u-b');
+  const credit = S.creditedSubtasks(out);
+  assert.deepEqual(credit['u-b'].map((c) => c.key), ['ABC-4']);
+  assert.equal(credit['u-b'][0].counted_in_parent, false);
+});
+
+test('sub-task with story points is not double-counted', () => {
+  // Checklist with points rolls up: its points are not scope on their own and
+  // the story's own points/dev_days are left untouched.
+  const chk = sub({ key: 'ABC-5', points: 3, dev_days: 1, intervals: [iv('2026-06-02T00:00:00Z', '2026-06-03T00:00:00Z')] });
+  const out = by(S.classifySubtasks([story({ points: 5 }), chk]));
+  assert.equal(out['ABC-5'].rollup, true);
+  assert.equal(out['ABC-1'].points, 5);
+  assert.equal(out['ABC-1'].dev_days, 3);
+  assert.equal(out['ABC-1'].child_dev_days, 3, 'inside the story window → union, not 3 + 1');
+  // Standalone (other person) with points: credited once, kept out of the parent rollup.
+  const b = sub({ key: 'ABC-6', assignee_id: 'u-b', points: 2, dev_days: 2, commit_ts: [T('2026-06-08T10:00:00Z')], intervals: [iv('2026-06-08T00:00:00Z', '2026-06-10T00:00:00Z')] });
+  const out2 = S.classifySubtasks([story({ points: 5 }), b]);
+  const m = by(out2);
+  assert.equal(m['ABC-6'].rollup, false);
+  assert.equal(m['ABC-1'].points, 5);
+  assert.equal(m['ABC-1'].child_dev_days, undefined);
+  assert.equal(Object.values(S.creditedSubtasks(out2)).flat().filter((c) => c.key === 'ABC-6').length, 1);
+});

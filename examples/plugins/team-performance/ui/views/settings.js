@@ -79,7 +79,7 @@
               <p class="dim small">Unchecked people leave every chart. Time off removes days from that person’s capacity everywhere. Aliases match git commit authors.</p>
               ${sorted.length ? TP.table({ caption: `${sorted.length} people`, cols: [{ label: 'Name' }, { label: 'Included' }, { label: 'Role' }, { label: 'Git aliases' }, { label: 'Time off' }, { label: 'Merge' }], rows: peopleRows }) : '<p class="dim">No people yet — scan a project or load them from Jira.</p>'}
               ${unmatched ? `<h3>Unmatched git authors</h3><div class="chips">${unmatched}</div>` : ''}
-              <div class="form-grid" style="margin-block-start:var(--sp-4)">
+              <div class="form-grid spaced">
                 ${field('Roles (comma separated)', `<input type="text" id="cfg-roles" value="${esc((config.roles || []).join(', '))}">`)}
                 <span><button type="button" class="compact" id="pp-seed" ${first ? '' : 'disabled'}>Load people from Jira${first ? ` (${esc(first)})` : ''}</button></span>
               </div>
@@ -127,7 +127,7 @@
             <fieldset><legend>Status → phase${first ? ` (${esc(first)})` : ''}</legend>
               ${(statuses || []).length ? `<div class="form-grid">${statuses.map((st, i) => field(`${st.name}${st.category ? ` · ${st.category}` : ''}`, `<select class="st-map" id="st-${i}" data-status="${esc(st.name)}">${(config._phase_values || ['design', 'implementation', 'waiting', 'excluded']).map((p) => `<option ${(map[st.name] || st.mapped) === p ? 'selected' : ''}>${p}</option>`).join('')}</select>`)).join('')}</div>` : '<p class="dim">Couldn’t load the project’s statuses.</p>'}
             </fieldset>
-            <p style="margin-block-start:var(--sp-5)"><button type="button" class="primary" id="save-config">Save settings</button></p>`;
+            <div class="form-actions"><button type="button" class="primary" id="save-config">Save settings</button></div>`;
         },
         after(body, rerun) {
           // Deep link from another view (e.g. DORA "not available" → deploy tags).

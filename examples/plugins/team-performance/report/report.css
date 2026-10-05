@@ -1,22 +1,64 @@
-/* Team Performance report — Otto-equivalent tokens. Colours are NOT defined
-   here: lib/reportmodel.js generates the light / dark / print palette from its
-   PALETTE object (mirroring ui/src/lib/tokens.css) and prepends it. This file
-   only uses var(--…). Light + dark: prefers-color-scheme, overridden by
-   [data-theme] on <html>. */
-:root {
+/* Team Performance report — Otto tokens. Colours are NOT authored here:
+ lib/reportmodel.js prepends the light / dark / print palette generated from
+ lib/theme.js (scripts/gen-theme.js ← Otto ui/src/lib/tokens.css). The block
+ between the tp:fallback markers is the ONLY place literal values may live: a
+ zero-specificity (:where) light copy so this file still renders on its own,
+ always overridden by the generated palette. Everything below uses var(--…).
+ Light + dark: prefers-color-scheme, overridden by [data-theme] on <html>. */
+/* tp:fallback-start */
+:where(:root) {
   --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
-  --fs-xs: 11px; --fs-s: 12px; --fs-m: 13px; --fs-l: 15px; --fs-xl: 18px; --fs-2xl: 22px; --fs-hero: 28px;
-  --sp-1: 2px; --sp-2: 4px; --sp-3: 6px; --sp-4: 8px; --sp-5: 12px; --sp-6: 16px; --sp-7: 20px; --sp-8: 24px; --sp-9: 32px;
-  --radius-s: 5px; --radius-m: 8px; --radius-l: 12px;
-  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
-  --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
-  --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
-  --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
-  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
-  --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
-  --toolbar-h: 44px;
+  --fs-xs: 11px;
+  --fs-s: 12px;
+  --fs-m: 13px;
+  --fs-l: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+  --fs-hero: 28px;
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-9: 32px;
+  --radius-s: 5px;
+  --radius-m: 8px;
+  --radius-l: 12px;
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --surface-2: #f0f0f4;
+  --border: rgba(0, 0, 0, 0.1);
+  --text: #1d1d1f;
+  --text-dim: #636368;
+  --accent: #0a84ff;
+  --accent-solid: #086fd6;
+  --accent-contrast: #ffffff;
+  --accent-text: #115daa;
+  --accent-soft: rgba(10, 132, 255, 0.14);
+  --on-accent: #ffffff;
+  --on-cat: #ffffff;
+  --danger: #b3261e;
+  --danger-soft: rgba(179, 38, 30, 0.14);
+  --warning: #8a5100;
+  --warning-soft: rgba(138, 81, 0, 0.14);
+  --success: #17702f;
+  --success-soft: rgba(23, 112, 47, 0.14);
+  --info: #0858b8;
+  --info-soft: rgba(8, 88, 184, 0.14);
+  --cat-1: #1f6fd1;
+  --cat-2: #b26a00;
+  --cat-3: #178a4c;
+  --cat-4: #7a4fd6;
+  --cat-5: #c2417a;
+  --cat-6: #0f8a8a;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.05), 0 2px 8px rgba(0, 0, 0, 0.03);
 }
+/* tp:fallback-end */
+:root { --toolbar-h: 44px; }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -120,16 +162,19 @@ figure.chart svg { display: block; width: 100%; }
 .chart .tick { stroke: var(--cat-1); stroke-width: 2; opacity: 0.55; }
 .chart .tick.over { stroke: var(--cat-5); opacity: 0.9; }
 .chart .median { stroke: var(--text); stroke-width: 2.5; }
-.hc { display: grid; grid-template-columns: minmax(72px, 28%) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
-.hc-labels .hc-l { height: 26px; line-height: 26px; font-size: var(--fs-xs); color: var(--text-dim); text-align: end; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hc-track { position: relative; container-type: inline-size; padding-block-end: var(--sp-1); }
+.hc-rows { display: flex; flex-direction: column; }
+.hc-row { display: grid; grid-template-columns: minmax(72px, 28%) minmax(0, 1fr); gap: var(--sp-4); align-items: center; }
+.hc-l { height: 26px; line-height: 26px; font-size: var(--fs-xs); color: var(--text-dim); text-align: end; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hc-track { position: relative; container-type: inline-size; min-width: 0; }
+.hc-svg { display: block; width: 100%; height: 26px; }
 .hc-over { position: absolute; inset: 0; pointer-events: none; }
-.hc-v, .hc-seg { position: absolute; height: 26px; line-height: 26px; font-size: var(--fs-xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.hc-v, .hc-seg { position: absolute; top: 0; height: 26px; line-height: 26px; font-size: var(--fs-xs); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .hc-v { color: var(--text); font-weight: 600; }
 .hc-seg { color: var(--on-cat); text-align: center; overflow: hidden; font-weight: 600; }
 .hc-axis { position: relative; height: 18px; margin-block-start: var(--sp-2); }
 .hc-axis span { position: absolute; transform: translateX(-50%); font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
 .hc-axis span:first-child { transform: none; }
+.hc-axis-row .hc-l { height: auto; }
 @container (max-width: 360px) { .hc-seg { display: none; } }
 .legend { display: flex; flex-wrap: wrap; gap: var(--sp-5); font-size: var(--fs-xs); color: var(--text-dim); margin: var(--sp-2) 0; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-inline-end: var(--sp-2); vertical-align: -1px; }
@@ -187,9 +232,15 @@ html:not(.js) .print-only { display: block; }
 @media (max-width: 640px) {
   section.card { padding: var(--sp-5) var(--sp-6); }
   .top h1 { font-size: var(--fs-2xl); }
-  .hc { grid-template-columns: minmax(64px, 34%) minmax(0, 1fr); }
   ul.rflow li { grid-template-columns: 1fr; gap: var(--sp-1); }
   .rf-arrow { display: none; }
+}
+/* Narrow: each bar's label sits above it, full width, so neither is squeezed. */
+@media (max-width: 600px) {
+  .hc-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .hc-l { text-align: start; height: auto; line-height: 1.4; padding-block-start: var(--sp-2); }
+  .hc-axis-row .hc-l { display: none; }
+  .tile .c-btn.mini { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
 @media print {
@@ -201,3 +252,14 @@ html:not(.js) .print-only { display: block; }
   a { color: var(--text); text-decoration: none; }
   a[href^='http']::after { content: ' (' attr(href) ')'; font-size: var(--fs-xs); color: var(--text-dim); }
 }
+
+/* comment anchors on tiles and ticket rows: a quiet "+" that shows on hover /
+   focus (always visible on touch widths and once it has comments) */
+.tile { position: relative; }
+.c-btn.mini { min-width: 22px; padding: 0 var(--sp-2); line-height: 18px; opacity: 0; }
+.tile .c-btn.mini { position: absolute; inset-block-start: var(--sp-3); inset-inline-end: var(--sp-3); }
+td .c-btn.mini, li .c-btn.mini { margin-inline-start: var(--sp-3); }
+.tile:hover .c-btn.mini, tr:hover .c-btn.mini, li:hover .c-btn.mini, .c-btn.mini:focus-visible, .c-btn.mini.has { opacity: 1; }
+@media (hover: none) { .c-btn.mini { opacity: 1; } }
+.flash { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-s); }
+code { font: var(--fs-s) var(--font-mono); }

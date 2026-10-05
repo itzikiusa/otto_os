@@ -77,9 +77,26 @@
     return list.filter(function (c) { return c && typeof c.text === 'string' && c.text.trim(); })
       .map(function (c) { return { anchor: String(c.anchor || 'report'), label: c.label ? String(c.label) : '', text: String(c.text), author: c.author ? String(c.author) : '', at: c.at == null ? '' : c.at }; });
   }
+  // Anchors: "section", "section:metric" (a tile) or "t:key" (a ticket row).
+  function find(anchor) {
+    var safe = /^[a-z0-9_:-]+$/.test(anchor) ? anchor : '';
+    return safe ? document.querySelector('[data-anchor="' + safe + '"]') : null;
+  }
+  function hrefFor(anchor) { return anchor.indexOf('t:') === 0 ? '#main' : '#' + anchor.split(':')[0]; }
   function labelFor(anchor) {
-    var el = document.querySelector('[data-anchor="' + (window.CSS && CSS.escape ? CSS.escape(anchor) : anchor) + '"]');
+    var el = find(anchor);
     return (el && el.getAttribute('data-anchor-label')) || anchor;
+  }
+  function goTo(anchor) {
+    var el = find(anchor);
+    if (!el) return false;
+    var d = el.closest && el.closest('details');
+    if (d) d.open = true;
+    el.scrollIntoView({ block: 'center' });
+    el.classList.add('flash');
+    setTimeout(function () { el.classList.remove('flash'); }, 1600);
+    var b = el.querySelector('.c-btn'); if (b) b.focus({ preventScroll: true });
+    return true;
   }
   function render() {
     var count = $('#c-count'); if (count) count.textContent = String(comments.length);
@@ -87,8 +104,10 @@
     comments.forEach(function (c) { byAnchor[c.anchor] = (byAnchor[c.anchor] || 0) + 1; });
     document.querySelectorAll('.c-btn[data-for]').forEach(function (b) {
       var n = byAnchor[b.getAttribute('data-for')] || 0;
+      var mini = b.classList.contains('mini');
       b.classList.toggle('has', n > 0);
-      b.textContent = n ? 'Comments (' + n + ')' : 'Comment';
+      b.textContent = mini ? (n ? String(n) : '+') : n ? 'Comments (' + n + ')' : 'Comment';
+      if (mini) b.setAttribute('aria-label', 'Comment on ' + labelFor(b.getAttribute('data-for')) + (n ? ' (' + n + ')' : ''));
     });
     var list = $('#c-list'); if (!list) return;
     var items = comments.slice().sort(function (a, b) { return (stamp(b.at) || 0) - (stamp(a.at) || 0); });
@@ -97,7 +116,7 @@
       ? items.map(function (c) {
         var w = when(c.at);
         return '<div class="c-item"><div class="where">' + esc(c.label || labelFor(c.anchor)) + (c.author ? ' · ' + esc(c.author) : '') + (w ? ' · ' + esc(w) : '') +
-          '</div><div class="txt">' + esc(c.text) + '</div><a class="small" href="#' + esc(c.anchor) + '">Go to section</a></div>';
+          '</div><div class="txt">' + esc(c.text) + '</div><a class="small" href="' + esc(hrefFor(c.anchor)) + '" data-goto="' + esc(c.anchor) + '">Go to it</a></div>';
       }).join('')
       : '<p class="muted small">No comments yet.' + (writable ? ' Use the Comment button on any section.' : '') + '</p>';
   }
@@ -140,7 +159,17 @@
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     }
   });
-  if (panel) panel.addEventListener('click', function (e) { var a = e.target.closest && e.target.closest('a[href^="#"]'); if (a) { opener = null; closePanel(); } });
+  if (panel) panel.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a[href^="#"]');
+    if (!a) return;
+    opener = null; closePanel();
+    var g = a.getAttribute('data-goto');
+    if (g && goTo(g)) e.preventDefault();
+  });
+  // The print/no-JS comment list links the same way.
+  document.querySelectorAll('#comments a[data-goto]').forEach(function (a) {
+    a.addEventListener('click', function (e) { if (goTo(a.getAttribute('data-goto'))) e.preventDefault(); });
+  });
 
   var ex = $('#c-export');
   if (ex) ex.addEventListener('click', function () {

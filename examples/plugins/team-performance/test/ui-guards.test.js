@@ -184,6 +184,74 @@ test('app.css: local-only tokens are tp-prefixed and the type scale follows Otto
   assert.match(css, /h3 \{\s*font-size: var\(--fs-s\);\s*color: var\(--text\)/);
   const block = /\/\* tp:fallback-start \*\/([\s\S]*?)\/\* tp:fallback-end \*\//.exec(css)[1];
   for (const t of ['--surface-3', '--hover', '--accent-soft', '--accent-text', '--accent-solid']) {
-    assert.strictEqual(block.split(t + ':').length - 1, 3, `${t} defined in dark, light and auto-light sets`);
+    assert.ok(block.split(t + ':').length - 1 >= 3, `${t} defined in dark, light and auto-light sets`);
   }
+});
+
+// ---- P8: token parity with Otto's tokens.css ------------------------------
+const TOKENS = path.join(__dirname, '..', '..', '..', '..', 'ui', 'src', 'lib', 'tokens.css');
+const cssBlock = (src, selRe) => {
+  const m = selRe.exec(src);
+  if (!m) return null;
+  const out = {};
+  for (const d of m[1].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) out[d[1]] = d[2].trim().toLowerCase();
+  return out;
+};
+const fallback = () => /\/\* tp:fallback-start \*\/([\s\S]*?)\/\* tp:fallback-end \*\//.exec(files.find((x) => x.rel === 'app.css').src)[1];
+
+test('fallback tokens match Otto tokens.css (native dark/light, status tones, cat-1..6, solids, Pro Dark, Warm)', { skip: !fs.existsSync(TOKENS) && 'tokens.css not present (plugin installed outside the Otto repo)' }, () => {
+  const t = fs.readFileSync(TOKENS, 'utf8');
+  const root = cssBlock(t, /^:root \{([\s\S]*?)^\}/m);
+  const lightTones = cssBlock(t, /html\[data-scheme='light'\]:not\(\[data-theme='pro-dark'\]\) \{([\s\S]*?)\}/);
+  const nLight = cssBlock(t, /html\[data-theme='native'\]\[data-scheme='light'\] \{([\s\S]*?)\}/);
+  const nDark = cssBlock(t, /html\[data-theme='native'\]\[data-scheme='dark'\] \{([\s\S]*?)\}/);
+  const pro = cssBlock(t, /html\[data-theme='pro-dark'\]\[data-scheme='dark'\] \{([\s\S]*?)\}/);
+  const warmL = cssBlock(t, /html\[data-theme='warm'\]\[data-scheme='light'\] \{([\s\S]*?)\}/);
+  const warmD = cssBlock(t, /html\[data-theme='warm'\]\[data-scheme='dark'\] \{([\s\S]*?)\}/);
+  const fb = fallback();
+  const dark = cssBlock(fb, /:root,\s*:root\[data-theme='dark'\] \{([\s\S]*?)\}/);
+  const light = cssBlock(fb, /:root\[data-theme='light'\] \{([\s\S]*?)\}/);
+  const fbPro = cssBlock(fb, /:root\[data-otto-theme='pro-dark'\] \{([\s\S]*?)\}/);
+  const fbWarmL = cssBlock(fb, /:root\[data-otto-theme='warm'\]\[data-theme='light'\] \{([\s\S]*?)\}/);
+  const fbWarmD = cssBlock(fb, /:root\[data-otto-theme='warm'\]\[data-theme='dark'\] \{([\s\S]*?)\}/);
+  const SURF = ['--bg', '--bg-sidebar', '--surface', '--surface-2', '--surface-3', '--border', '--text', '--text-dim'];
+  const TONES = ['--danger', '--warning', '--success', '--info', '--cat-1', '--cat-2', '--cat-3', '--cat-4', '--cat-5', '--cat-6'];
+  const same = (want, got, keys, label) => {
+    for (const k of keys) if (want[k] != null && !/var\(|color-mix/.test(want[k])) assert.strictEqual(got[k], want[k], `${label} ${k}`);
+  };
+  same(nDark, dark, SURF, 'dark');
+  same(root, dark, [...TONES, '--accent', '--accent-contrast', '--danger-solid', '--danger-contrast'], 'dark');
+  same(nLight, light, SURF, 'light');
+  // Light --cat-2 is deliberately deepened (#9a5b00, test/contrast.test.js) so
+  // amber marks reach contrast on light surfaces; every other tone is exact.
+  same(lightTones, light, TONES.filter((k) => k !== '--cat-2'), 'light');
+  same(root, light, ['--accent', '--danger-solid', '--danger-contrast'], 'light');
+  same(pro, fbPro, [...SURF, '--accent'], 'pro-dark');
+  same(warmL, fbWarmL, [...SURF, '--accent'], 'warm light');
+  same(warmD, fbWarmD, [...SURF, '--accent', '--accent-contrast'], 'warm dark');
+  assert.strictEqual(light['--cat-2'], '#9a5b00', 'light cat-2 is the deepened amber');
+});
+
+test('app.css: KPI values use --fs-hero, only weights 500/600, and every token used in ui/ is defined', () => {
+  const css = files.find((x) => x.rel === 'app.css').src;
+  assert.match(css, /--fs-hero: 28px/);
+  assert.match(css, /\.tile \.value \{[^}]*font-size: var\(--fs-hero\)/);
+  const weights = [...css.matchAll(/font-weight:\s*(\d+)/g)].map((m) => m[1]);
+  assert.deepStrictEqual([...new Set(weights)].sort(), ['500', '600']);
+  const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+  const used = new Set();
+  for (const { src } of files) for (const m of src.matchAll(/var\((--[\w-]+)/g)) used.add(m[1]);
+  const missing = [...used].filter((v) => !defined.has(v) && v !== '--fade');
+  assert.deepStrictEqual(missing, []);
+});
+
+test('app.css: modal-time inert, drawer, guardrail hatch and prose-link underline rules exist', () => {
+  const css = files.find((x) => x.rel === 'app.css').src;
+  assert.match(css, /\.tile\.weak/);
+  assert.match(css, /\.guard-reason/);
+  assert.match(css, /\.modal\.drawer/);
+  assert.match(css, /p a,\s*li a[\s\S]*?text-decoration: underline/);
+  assert.match(css, /\.table-wrap:focus-visible/);
+  const comp = files.find((x) => x.rel === 'components.js').src;
+  assert.match(comp, /setAttribute\('inert', ''\)/);
 });

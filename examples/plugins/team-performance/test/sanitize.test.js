@@ -51,3 +51,14 @@ test('validAnchor allowlist and scrubComment', () => {
   const t = S.scrubComment('Carol Ames slipped on ABC-12\u0007', { nameMap: { 'Carol Ames': 'a person', Carol: 'a person' }, keys: ['ABC-12'] });
   assert.equal(t, 'a person slipped on ticket');
 });
+
+test('validAnchor: tile and ticket-row anchors (one colon), nothing selector-breaking', () => {
+  for (const ok of ['dora:lead-time-for-changes', 't:abc-123', 't:ticket-3', 'pr_flow:pickup-time']) assert.ok(S.validAnchor(ok), ok);
+  for (const bad of ['dora:', ':x', 'a:b:c', 't:ABC-123', 't:abc 1', 'x"]:y', 'a:b"onload', 'javascript:alert(1)']) assert.ok(!S.validAnchor(bad), bad);
+});
+
+test('newNonce: unique, base64-alphanumeric, long enough', () => {
+  const seen = new Set(Array.from({ length: 200 }, () => S.newNonce()));
+  assert.equal(seen.size, 200);
+  for (const n of seen) assert.match(n, /^[A-Za-z0-9]{16,}$/);
+});

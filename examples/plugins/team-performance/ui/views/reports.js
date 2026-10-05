@@ -75,20 +75,16 @@
   async function openReport(app, id) {
     const m = modal({
       wide: true,
-      body: `<div style="display:flex;flex-wrap:wrap;gap:var(--sp-3);align-items:center;margin-block-end:var(--sp-4)">
-          <h2 id="rv-title" style="margin-inline-end:auto">Report</h2>
+      body: `<div class="rv-head">
+          <h2 id="rv-title">Report</h2>
           <span id="rv-badge"></span>
           <button type="button" class="compact" id="rv-dl" disabled>${icon('download')}Download</button>
           <button type="button" class="compact icon" id="rv-close" aria-label="Close report" title="Close (Esc)">${icon('x')}</button>
         </div>
-        <div id="rv-content" style="min-block-size:0;display:flex;flex-wrap:wrap;gap:var(--sp-4)"></div>`,
+        <div id="rv-content" class="rv-layout"></div>`,
       labelledBy: 'rv-title',
     });
-    m.el.style.gridTemplateRows = '1fr';
-    const body = m.el.querySelector('.modal-body');
-    body.style.display = 'grid';
-    body.style.gridTemplateRows = 'auto 1fr';
-    body.style.minBlockSize = '0';
+    m.el.classList.add('rv-modal');
     const content = m.el.querySelector('#rv-content');
     m.el.querySelector('#rv-close').onclick = () => m.close();
     let r = null;
@@ -108,12 +104,12 @@
       m.el.querySelector('#rv-title').textContent = title;
       m.el.querySelector('#rv-badge').innerHTML = maskBadge(r);
       m.el.querySelector('#rv-dl').disabled = false;
-      content.innerHTML = `<iframe title="${esc(title)}" sandbox="allow-popups" style="flex:3 1 420px;min-block-size:60vh"></iframe>
-        <aside class="rv-aside" aria-label="Comments" style="flex:1 1 240px;min-inline-size:0;display:flex;flex-direction:column;gap:var(--sp-3)">
+      content.innerHTML = `<iframe class="rv-frame" title="${esc(title)}" sandbox="allow-popups"></iframe>
+        <aside class="rv-aside" aria-label="Comments">
           <h3>Comments</h3>
           <div class="rv-list"></div>
           <form><label class="field"><span>Add a comment</span><textarea rows="3" maxlength="4000"></textarea></label>
-            <button type="submit" class="compact">Post comment</button></form>
+            <div class="form-actions"><button type="submit" class="compact">Post comment</button></div></form>
         </aside>`;
       content.querySelector('iframe').srcdoc = r.html;
       mountComments(app, id, content.querySelector('aside'));
@@ -210,7 +206,15 @@
     }, 2000);
   }
 
-  /** The single New report modal. preset: {scope, assignee}. */
+  /**
+   * Masking default: ON for team and combined scopes (they name everyone);
+   * OFF only for a one-person report opened from that person's own page.
+   */
+  const maskDefault = (scope, fromPerson) => !(scope === 'dev' && fromPerson);
+  /** Live "who sees names" line for the New report modal. */
+  const namesLine = (masked) => (masked ? 'Names: masked — people appear as Person A, Person B…' : 'Names: visible to anyone you share with');
+
+  /** The single New report modal. preset: {scope, assignee, fromPerson}. */
   function newReport(app, preset = {}) {
     const people = Object.entries(app.people)
       .filter(([, p]) => !p.merged_into && p.included !== false)
@@ -233,8 +237,9 @@
           <label class="field"><span>Year</span><select id="nr-year">${years.map((y) => `<option ${y === pm.getUTCFullYear() ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
         </div>
         <fieldset><legend>Masking</legend>
-          <label class="check"><input type="checkbox" id="nr-mask"> Mask people’s names</label>
+          <label class="check"><input type="checkbox" id="nr-mask" ${maskDefault(scope, preset.fromPerson) ? 'checked' : ''}> Mask people’s names</label>
           <label class="check"><input type="checkbox" id="nr-mask-tasks"> Also mask ticket keys and titles</label>
+          <p class="names-line" id="nr-names" role="status" aria-live="polite">${esc(namesLine(maskDefault(scope, preset.fromPerson)))}</p>
         </fieldset>
         <fieldset><legend>Sections</legend><div class="form-grid">${SECTIONS.map(([k, l]) => `<label class="check"><input type="checkbox" name="nr-sec" value="${k}" checked> ${esc(l)}</label>`).join('')}</div></fieldset>
         <div class="banner info" role="note" id="nr-share">${icon('info')}<span></span></div>
@@ -244,13 +249,24 @@
     const el = m.el;
     const $ = (s) => el.querySelector(s);
     const gen = el.querySelector('footer .primary');
+    // Until the user touches the mask box, it follows the scope's default.
+    let maskTouched = false;
+    let lastScope = scope;
+    el.addEventListener('change', (e) => {
+      if (e.target && e.target.id === 'nr-mask') maskTouched = true;
+    }, true);
     const sync = () => {
       const sc = $('#nr-scope').value;
+      if (sc !== lastScope && !maskTouched) $('#nr-mask').checked = maskDefault(sc, preset.fromPerson && sc === 'dev');
+      lastScope = sc;
       const k = $('#nr-kind').value;
       $('#nr-person-wrap').hidden = sc !== 'dev';
       $('#nr-month-wrap').hidden = k !== 'month';
       $('#nr-q-wrap').hidden = k !== 'quarter';
       const masked = $('#nr-mask').checked;
+      const nl = $('#nr-names');
+      nl.textContent = namesLine(masked);
+      nl.classList.toggle('visible', !masked);
       const who = sc === 'dev' ? 'one person’s' : sc === 'combined' ? 'the team’s and every person’s' : 'the team’s';
       $('#nr-share span').textContent = `The report contains ${who} delivery metrics${masked ? ' with names masked' : ' with real names'}. It is saved in this plugin for anyone with access to this Otto workspace, and can be downloaded and forwarded.`;
       gen.disabled = !$('#nr-ack').checked || (sc === 'dev' && !$('#nr-person').value);
@@ -295,6 +311,8 @@
     newReport,
     openReport,
     maskBadge,
+    maskDefault,
+    namesLine,
     commentsHtml,
     render(host, { app }) {
       clearInterval(activeT);
