@@ -32,7 +32,7 @@
   import { STUDIOS, filterProjects, studioInfo, titleFromPrompt, type ProjectFilter } from './model';
   import { createDesign } from './create';
   import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
-  import { library } from './library.svelte';
+  import { library, LIBRARY_LIMIT } from './library.svelte';
 
   interface Props {
     view: 'grid' | 'spatial';
@@ -461,6 +461,11 @@
           {:else if projects.length === 0}
             <p class="dim">No projects match this filter. <button class="linkbtn" onclick={() => (pfilter = 'all')}>Show all</button></p>
           {:else}
+            {#if library.truncated}
+              <p class="dim" role="status" data-testid="lobby-truncated">
+                Counts and filters cover the newest {LIBRARY_LIMIT} designs; older ones are still in search.
+              </p>
+            {/if}
             <div class="projects">
               {#each projects as p, i (p.id)}
                 <ProjectCard project={p} artifacts={library.artifacts} epicLabel={epicLabel(p.epic_story_id)} live={i < 6} />
