@@ -6164,17 +6164,17 @@ async fn browser_proxy(
         // layer still stamps the sandbox CSP + nosniff on it).
         let ct_val = HeaderValue::from_str(&content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-        let bytes = match upstream.bytes().await {
+        let bytes = match read_capped(upstream, PROXY_BODY_CAP).await {
             Ok(b) => b,
-            Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
+            Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e),
         };
         return ([(axum::http::header::CONTENT_TYPE, ct_val)], bytes).into_response();
     }
 
     // --- HTML: read, transform, return ---
-    let html = match upstream.text().await {
-        Ok(t) => t,
-        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
+    let html = match read_capped(upstream, PROXY_BODY_CAP).await {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e),
     };
 
     (
@@ -6185,6 +6185,58 @@ async fn browser_proxy(
         proxy_transform_html(&html, &url),
     )
         .into_response()
+}
+
+/// Most bytes the take-over proxy buffers from one upstream response (S11-10).
+const PROXY_BODY_CAP: usize = 20 * 1024 * 1024;
+
+/// Read an upstream body chunk by chunk, refusing it once it passes `cap` —
+/// a ticketed take-over of a multi-GB URL must never be buffered whole in
+/// daemon memory (the 15 s timeout alone does not bound the size).
+async fn read_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+) -> Result<axum::body::Bytes, String> {
+    if resp.content_length().is_some_and(|n| n > cap as u64) {
+        return Err(format!("page too large (over {} MB)", cap / (1024 * 1024)));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len() + chunk.len() > cap {
+            return Err(format!("page too large (over {} MB)", cap / (1024 * 1024)));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.into())
+}
+
+#[cfg(test)]
+mod proxy_cap_tests {
+    /// S11-10: a body over the cap is refused (with or without a declared
+    /// length); one under it reads in full.
+    #[tokio::test]
+    async fn upstream_body_over_the_cap_is_refused() {
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route("/big", get(|| async { vec![b'x'; 4096] }))
+            .route(
+                "/chunked",
+                get(|| async {
+                    let parts = (0..8).map(|_| Ok::<_, std::io::Error>(vec![b'y'; 1024]));
+                    axum::body::Body::from_stream(futures_util::stream::iter(parts))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let get = |p: &str| reqwest::get(format!("http://{addr}{p}"));
+        assert!(super::read_capped(get("/big").await.unwrap(), 1024).await.is_err());
+        assert!(super::read_capped(get("/chunked").await.unwrap(), 1024).await.is_err());
+        assert_eq!(
+            super::read_capped(get("/big").await.unwrap(), 8192).await.unwrap().len(),
+            4096
+        );
+    }
 }
 
 #[cfg(test)]
