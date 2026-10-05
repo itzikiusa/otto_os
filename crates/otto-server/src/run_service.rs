@@ -38,6 +38,12 @@ pub async fn launch(
     req: LaunchRunReq,
 ) -> Result<OttoRun> {
     let (kind, source_ref, url) = determine_source(&req, origin, &origin_meta)?;
+    // An explicit repo must belong to THIS workspace (the caller's role was
+    // checked here, not on the repo's): refuse at launch, before any run row,
+    // worktree or agent exists. `resolve_repo` re-checks at the stage.
+    if let Some(rid) = req.repo_id.as_deref().filter(|s| !s.is_empty()) {
+        check_repo_in_workspace(ctx, workspace_id, rid).await?;
+    }
 
     // Channel runs seed their goal/body from the trigger message.
     let (goal, context_summary) = if kind == SourceKind::Channel {
@@ -254,6 +260,20 @@ async fn log_approval(ctx: &ServerCtx, run: &OttoRun, decision: &str, note: Opti
         .await;
 }
 
+/// `NotFound` unless repo `repo_id` exists AND belongs to `workspace_id` — a
+/// repo of another workspace is reported exactly like a missing one.
+pub(crate) async fn check_repo_in_workspace(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    repo_id: &str,
+) -> Result<()> {
+    match ctx.git_store.get_repo(&repo_id.to_string()).await {
+        Ok(r) if r.workspace_id == *workspace_id => Ok(()),
+        Ok(_) | Err(Error::NotFound(_)) => Err(Error::NotFound("repo".into())),
+        Err(e) => Err(e),
+    }
+}
+
 /// Cancel a non-terminal run. Forceful (not a CAS) — the engine's next CAS then
 /// no-ops, and the worktree is cleaned up.
 pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
@@ -273,10 +293,31 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
             detail: None,
         })
         .await;
-    if let Ok(fresh) = ctx.runs.get(run_id).await {
-        run_engine::project(ctx, &fresh).await;
-        crate::run_callback::deliver(&ctx.runs, &fresh).await;
+    // Stop the work, not just the status: drop the in-flight stage (kills the
+    // agent), cancel the review it started and stop its goal loop. The
+    // worktree goes only after the stage has stopped, so nothing is left
+    // running in a deleted directory.
+    ctx.runs_engine.cancel(run_id);
+    let fresh = ctx.runs.get(run_id).await.unwrap_or_else(|_| run.clone());
+    if let Some(review_id) = fresh.review_id.as_ref() {
+        if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
+            crate::modules::cancel_running_review(ctx, &review, &run.workspace_id).await;
+        }
     }
+    if let Some(loop_id) = fresh.goal_loop_id.as_ref() {
+        if let Err(e) = crate::goal_loop::stop_loop(ctx, loop_id).await {
+            tracing::warn!(run = %run_id, "stop goal loop on cancel: {e}");
+        }
+    }
+    if !ctx
+        .runs_engine
+        .wait_idle(run_id, std::time::Duration::from_secs(10))
+        .await
+    {
+        tracing::warn!(run = %run_id, "run stage still in flight 10s after cancel");
+    }
+    run_engine::project(ctx, &fresh).await;
+    crate::run_callback::deliver(&ctx.runs, &fresh).await;
     crate::run_workspace::remove_worktree(ctx, &run).await;
     ctx.runs.get(run_id).await
 }

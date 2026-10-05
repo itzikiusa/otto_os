@@ -1980,10 +1980,16 @@ pub struct CreatePrReq {
 }
 
 /// `POST /repos/{id}/pr/draft` — ask an agent to draft a PR title + description
-/// from the current branch's diff against `base`.
+/// from a branch's diff against `base`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DraftPrReq {
     pub base: String,
+    /// The PR's source branch. When set the draft describes
+    /// `merge-base(base, head)..head` — that branch's committed work — and
+    /// `DraftPrResp::source_branch` echoes it. Absent/empty ⇒ the checked-out
+    /// branch (plus its working tree), as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2071,6 +2077,12 @@ pub struct MergePrReq {
     /// Bitbucket: `close_source_branch`). Additive — absent means "keep it".
     #[serde(default)]
     pub delete_source_branch: bool,
+    /// The PR head the caller reviewed (`PrSummary::head_sha` at dialog load).
+    /// When set, a PR whose head has moved since is refused with 409 "PR
+    /// changed — re-check" (GitHub/GitLab: forwarded as the forge's `sha` pin;
+    /// Bitbucket: compared by prefix before merging). Absent ⇒ unpinned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head_sha: Option<String>,
 }
 
 fn default_merge_strategy() -> MergeStrategy {

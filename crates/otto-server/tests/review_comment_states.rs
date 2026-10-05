@@ -1,10 +1,10 @@
-//! Review-agent Retry is refused while the agent is live (S2-07): retrying a
-//! running/waiting/pending row used to archive its session and replace its
-//! cancel flag, leaving two loops on one index that neither Stop nor Cancel
-//! could reach. Only settled rows (done / error / skipped) are retried.
-use otto_core::domain::ReviewAgentState;
+//! Review-comment state machine over real HTTP (S15-07): a DECLINED comment is
+//! never approvable — a decline that lands while "Post all" walks its snapshot
+//! must not be posted anyway. Restoring it to draft is the way back.
+use otto_core::domain::CommentSeverity;
 use otto_server::ServerCtx;
 use otto_state::{DbPool, NewRepo};
+use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
 async fn mem_pool() -> DbPool {
@@ -23,17 +23,8 @@ async fn mem_pool() -> DbPool {
     pool.into()
 }
 
-fn agent(status: &str) -> ReviewAgentState {
-    serde_json::from_value(serde_json::json!({
-        "name": "correctness", "provider": "claude", "model": "",
-        "status": status, "note": "", "comment_count": 0,
-        "session_id": "sess-live",
-    }))
-    .unwrap()
-}
-
 #[tokio::test]
-async fn retrying_a_live_review_agent_is_a_conflict() {
+async fn approving_a_declined_comment_is_a_conflict_until_restored() {
     let tmp = tempfile::TempDir::new().unwrap();
     let pool = mem_pool().await;
     let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
@@ -48,7 +39,7 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
         .unwrap();
     let ws = ctx
         .workspaces
-        .create("Retry gate", tmp.path().to_str().unwrap(), &owner.id)
+        .create("Review states", tmp.path().to_str().unwrap(), &owner.id)
         .await
         .unwrap();
     let checkout = tmp.path().join("repo");
@@ -65,16 +56,17 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
         })
         .await
         .unwrap();
+    // A LOCAL review (pr #0): approving never calls a forge.
     let review = ctx.reviews_store.create_review(&repo.id, 0).await.unwrap();
-    // Row 0..2 are live, row 3 is the summarizer slot.
-    let rows = vec![
-        agent("running"),
-        agent("waiting"),
-        agent("pending"),
-        agent("pending"),
-    ];
-    ctx.reviews_store
-        .set_agents(&review.id, &rows)
+    let comment = ctx
+        .reviews_store
+        .add_comment(
+            &review.id,
+            Some("a.rs"),
+            Some(3),
+            CommentSeverity::Info,
+            "nit",
+        )
         .await
         .unwrap();
 
@@ -85,23 +77,44 @@ async fn retrying_a_live_review_agent_is_a_conflict() {
     let origin = format!("http://{}/api/v1", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let client = reqwest::Client::new();
-    for index in 0..3 {
-        let r = client
-            .post(format!(
-                "{origin}/reviews/{}/agents/{index}/retry",
-                review.id
-            ))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 409, "retry of a {} agent", rows[index].status);
-        let body: serde_json::Value = r.json().await.unwrap();
-        assert_eq!(body["code"], "conflict", "{body}");
-    }
-    // Nothing was reset: the live rows keep their status + session.
-    let after = ctx.reviews_store.get_review(&review.id).await.unwrap();
-    assert_eq!(after.agents[0].status, "running");
-    assert_eq!(after.agents[0].session_id.as_deref(), Some("sess-live"));
+    let url = |tail: &str| format!("{origin}/pr-review-comments/{}{tail}", comment.id);
+
+    let declined = client
+        .post(url("/decline"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(declined.status(), 200);
+
+    let approve = client
+        .post(url("/approve"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approve.status(), 409, "approving a declined comment");
+    let still = ctx.reviews_store.get_comment(&comment.id).await.unwrap();
+    assert_eq!(still.state, otto_core::domain::CommentState::Declined);
+    assert!(!still.posted);
+
+    let restored = client
+        .patch(url(""))
+        .bearer_auth(&token)
+        .json(&json!({"restore_draft": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(restored.status(), 200);
+    let approved: Value = client
+        .post(url("/approve"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(approved["state"], "approved");
     server.abort();
 }

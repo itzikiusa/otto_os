@@ -10,6 +10,14 @@ use sqlx::Row;
 
 use crate::convert::{dberr, fmt, ts};
 
+/// Where a review run read the code — see [`ReviewsRepo::set_run_context`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewRunContext {
+    pub source_branch: Option<String>,
+    pub cwd: Option<String>,
+    pub head_sha: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ReviewsRepo {
     pool: DbPool,
@@ -453,6 +461,43 @@ impl ReviewsRepo {
         Ok(row.map(|r| r.get("diff")))
     }
 
+    /// Record where this run reviews the code (`XXXX_git2_review_run_context`):
+    /// the source branch (scopes local finding resolution), the checkout path
+    /// and its head sha (what a Retry re-enters). Upsert; `None`s are stored
+    /// as NULL.
+    pub async fn set_run_context(&self, review_id: &Id, ctx: &ReviewRunContext) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO review_run_context (review_id, source_branch, cwd, head_sha)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (review_id) DO UPDATE SET source_branch = excluded.source_branch,
+               cwd = excluded.cwd, head_sha = excluded.head_sha",
+        )
+        .bind(review_id)
+        .bind(ctx.source_branch.as_deref())
+        .bind(ctx.cwd.as_deref())
+        .bind(ctx.head_sha.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("set review run context"))?;
+        Ok(())
+    }
+
+    /// Read back [`Self::set_run_context`] (None for reviews that predate it).
+    pub async fn get_run_context(&self, review_id: &Id) -> Result<Option<ReviewRunContext>> {
+        let row = sqlx::query(
+            "SELECT source_branch, cwd, head_sha FROM review_run_context WHERE review_id = ?",
+        )
+        .bind(review_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("get review run context"))?;
+        Ok(row.map(|r| ReviewRunContext {
+            source_branch: r.get("source_branch"),
+            cwd: r.get("cwd"),
+            head_sha: r.get("head_sha"),
+        }))
+    }
+
     /// Drop every durable retry artifact for a review (prompts + diff) — used
     /// by the cancel cleanup, mirroring its temp-file sweep.
     pub async fn delete_run_artifacts(&self, review_id: &Id) -> Result<()> {
@@ -512,6 +557,24 @@ mod tests {
             fallback: false,
             lens: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn run_context_round_trips_and_upserts() {
+        let pool = mem_pool().await;
+        let repo = ReviewsRepo::new(pool.clone());
+        let id = new_id();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), None);
+        let mut ctx = ReviewRunContext {
+            source_branch: Some("feature/a".into()),
+            cwd: Some("/tmp/wt".into()),
+            head_sha: None,
+        };
+        repo.set_run_context(&id, &ctx).await.unwrap();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx.clone()));
+        ctx.head_sha = Some("abc1234".into());
+        repo.set_run_context(&id, &ctx).await.unwrap();
+        assert_eq!(repo.get_run_context(&id).await.unwrap(), Some(ctx));
     }
 
     /// Regression for the "agents look capped/stuck at PENDING" bug: each agent

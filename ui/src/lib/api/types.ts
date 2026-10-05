@@ -3451,6 +3451,10 @@ export interface CreatePrReq {
 
 export interface DraftPrReq {
   base: string;
+  /** The PR's Source branch. When set the draft describes
+   *  `merge-base(base, head)..head` and `DraftPrResp.source_branch` echoes it;
+   *  absent ⇒ the checked-out branch (+ working tree). */
+  head?: string;
 }
 
 export interface DraftPrResp {
@@ -3505,6 +3509,23 @@ export interface MergePrReq {
   strategy: MergeStrategy;
   /** Ask the provider to delete the PR's source branch as part of the merge. */
   delete_source_branch?: boolean;
+  /** The `PrSummary.head_sha` the user reviewed. A PR whose head moved since
+   *  is refused with 409 "PR changed — re-check" instead of merging. */
+  expected_head_sha?: string;
+}
+
+/** `POST /repos/{id}/branch/delete` body. */
+export interface DeleteBranchReq {
+  name: string;
+  /** Also delete the branch on `remote_name` (default `origin`). */
+  remote?: boolean;
+  /** Delete the local branch (default true); `false` = remote-only. */
+  local?: boolean;
+  /** `-D` instead of the safe `-d` — only after the user's explicit confirm. */
+  force?: boolean;
+  /** Which remote a `remote:true` delete targets (default `origin`). A
+   *  remote-ref row like `upstream/x` must send `remote_name: 'upstream'`. */
+  remote_name?: string;
 }
 
 /** One CI check / job / commit-status row behind the PR's aggregate status

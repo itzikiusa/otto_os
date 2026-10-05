@@ -1685,6 +1685,8 @@ async fn run_review(
     {
         return;
     }
+    // The run is over (done or error): its temp artifacts are spent.
+    remove_review_temp_files(&review_id).await;
     match result {
         Ok(()) => {
             tracing::info!(review = %review_id, "review complete");
@@ -1725,6 +1727,33 @@ async fn run_review(
                 review_id: review_id.clone(),
                 status: ReviewStatus::Error.as_str().to_string(),
             });
+        }
+    }
+}
+
+/// Remove a review's `$TMPDIR/otto-review-<id>*` files (diff, per-agent
+/// prompts, findings JSON). A finished run's durable copies live in the DB
+/// (0100) and a retry re-materializes what it needs, so leaving them behind
+/// only grew the temp dir (100+ files per few days of reviews).
+pub(crate) async fn remove_review_temp_files(review_id: &str) {
+    let prefix = format!("otto-review-{review_id}");
+    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
+    let () = crate::offload::blocking(move || {
+        remove_review_temp_files_in(&std::env::temp_dir(), &prefix)
+    })
+    .await;
+}
+
+/// [`remove_review_temp_files`] over an explicit dir — FILES only, so the
+/// `otto-review-wt-<id>` worktree directory is never touched.
+pub(crate) fn remove_review_temp_files_in(dir: &std::path::Path, prefix: &str) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix)
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
         }
     }
 }
@@ -1858,7 +1887,11 @@ async fn run_review_core(
 
     // Pre-trust the repo folder for every provider we'll run (reviewers + the
     // claude summarizer) so no agent stalls on the interactive "trust this
-    // folder?" prompt and silently times out with zero findings.
+    // folder?" prompt and silently times out with zero findings. Trust does NOT
+    // hand the checkout's own config to the reviewer: every review session is
+    // `read_only` (forced Seatbelt, no shell) with `project_settings: false`
+    // (`--setting-sources user`, so a PR's `.claude/settings.json` hooks never
+    // load) — see `otto_review::session::review_session_meta`.
     {
         let mut trusted = std::collections::HashSet::<String>::new();
         for provider in agent_runs
@@ -1883,6 +1916,25 @@ async fn run_review_core(
     // retry after a reboot/temp-sweep re-materializes the file from this row.
     if let Err(e) = ctx.reviews_store.set_diff(review_id, &diff_text).await {
         tracing::warn!(review = %review_id, "could not persist review diff: {e}");
+    }
+    // Where this run reads the code: the source branch scopes local finding
+    // resolution (S2-05) and the checkout + head are what a Retry re-enters
+    // instead of the user's main checkout (S2-06).
+    let run_context = otto_state::ReviewRunContext {
+        source_branch: branches.map(|b| b.source.clone()).filter(|b| !b.is_empty()),
+        cwd: Some(repo_path.to_string()),
+        head_sha: otto_git::LocalGit::new(repo_path)
+            .rev_parse("HEAD")
+            .await
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
+    if let Err(e) = ctx
+        .reviews_store
+        .set_run_context(review_id, &run_context)
+        .await
+    {
+        tracing::warn!(review = %review_id, "could not persist review run context: {e}");
     }
     let diff_path_str = diff_path.to_string_lossy().to_string();
 
@@ -2613,7 +2665,23 @@ async fn summarize_and_persist(
         let scope_refs: Option<Vec<&str>> = local_scope
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect());
-        if let Err(e) = ctx
+        // Local runs share `pr_number = 0` across branches: only this run's
+        // source branch's findings are its to resolve (S2-05).
+        let branch = if pr_number == 0 {
+            ctx.reviews_store
+                .get_run_context(review_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|c| c.source_branch)
+        } else {
+            None
+        };
+        if pr_number == 0 && branch.is_none() {
+            // No recorded branch (detached HEAD, or a pre-context review):
+            // which branch's findings these are is unknown — resolve nothing.
+            tracing::info!(review = %review_id, "local review without a source branch — not resolving absent findings");
+        } else if let Err(e) = ctx
             .findings_store
             .resolve_absent_scoped(
                 &workspace.id,
@@ -2622,6 +2690,7 @@ async fn summarize_and_persist(
                 &seen_refs,
                 review_id,
                 scope_refs.as_deref(),
+                branch.as_deref(),
             )
             .await
         {
@@ -2859,6 +2928,60 @@ async fn pr_retry_worktree(
         suffix,
     )
     .await
+}
+
+/// The checkout a BRANCH review's (pr #0) retry runs in: the run's recorded
+/// checkout when it still exists at the recorded head, else a throwaway
+/// worktree at that head (returned so the caller tears it down), else — no
+/// context recorded (pre-context reviews) or the head is gone — the repo path,
+/// as before. Never returns a tear-down handle for a checkout Otto didn't make.
+async fn branch_retry_checkout(
+    ctx: &ServerCtx,
+    repo: &otto_core::domain::Repo,
+    review_id: &Id,
+    suffix: &str,
+) -> (String, Option<PrWorktree>) {
+    let Some(rc) = ctx
+        .reviews_store
+        .get_run_context(review_id)
+        .await
+        .ok()
+        .flatten()
+    else {
+        return (repo.path.clone(), None);
+    };
+    let head = rc.head_sha.as_deref().filter(|h| !h.is_empty());
+    if let Some(cwd) = rc
+        .cwd
+        .as_deref()
+        .filter(|c| std::path::Path::new(c).is_dir())
+    {
+        let at = otto_git::LocalGit::new(cwd).rev_parse("HEAD").await.ok();
+        let same = match (head, at.as_deref()) {
+            (None, _) => true,
+            (Some(h), Some(a)) => otto_review::worktree::sha_matches(a, h),
+            (Some(_), None) => false,
+        };
+        if same {
+            return (cwd.to_string(), None);
+        }
+    }
+    if let Some(h) = head {
+        let git = otto_git::LocalGit::new(&repo.path);
+        let path = std::env::temp_dir()
+            .join(format!("otto-review-wt-{review_id}{suffix}"))
+            .to_string_lossy()
+            .into_owned();
+        let branch = format!("otto-review-{review_id}{suffix}");
+        let _ = git.worktree_remove(&path).await;
+        match git.worktree_add(&path, &branch, h).await {
+            Ok(()) => return (path.clone(), Some(PrWorktree { path, branch })),
+            Err(e) => {
+                tracing::warn!(review = %review_id, "retry worktree at {h} failed: {e}; using repo path")
+            }
+        }
+    }
+    (repo.path.clone(), None)
 }
 
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
@@ -3628,7 +3751,16 @@ async fn draft_pr(
         .get(&repo.workspace_id)
         .await
         .map_err(crate::error::ApiError)?;
-    let resp = draft_pr_core(&ctx, &ws, &user, &repo.path, want)
+    // `head` = the branch the PR is FOR (the modal's Source). Absent ⇒ the
+    // checked-out branch, as before. A named head is diffed as
+    // merge-base(base, head)..head, so drafting a PR for a branch that isn't
+    // checked out describes THAT branch, not whatever HEAD is.
+    let head = body
+        .head
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -3648,6 +3780,19 @@ pub(crate) async fn draft_pr_core(
     repo_path: &str,
     base: Option<&str>,
 ) -> Result<otto_core::api::DraftPrResp> {
+    draft_pr_core_for(ctx, ws, user, repo_path, base, None).await
+}
+
+/// [`draft_pr_core`] for an explicit source branch `head` (`None` ⇒ the
+/// checkout's current branch). The reply's `source_branch` is `head`.
+pub(crate) async fn draft_pr_core_for(
+    ctx: &ServerCtx,
+    ws: &otto_core::domain::Workspace,
+    user: &otto_core::domain::User,
+    repo_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+) -> Result<otto_core::api::DraftPrResp> {
     // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
     // blocks a modal for as long as it takes, and the old headless PTY gave the
     // user nothing to look at — no way to tell "thinking" from "wedged". As a
@@ -3661,7 +3806,7 @@ pub(crate) async fn draft_pr_core(
     //
     // The workflow git_pr node uses `pr_draft_prompt` + `run_node_agent` instead
     // so it can honor the node's chosen Provider/Model.
-    let (prompt, source, base_branch) = pr_draft_prompt(ctx, repo_path, base).await?;
+    let (prompt, source, base_branch) = pr_draft_prompt_for(ctx, repo_path, base, head).await?;
     let model = pr_draft_model(ctx).await;
     let meta = serde_json::json!({
         "source": "pr-draft",
@@ -3725,8 +3870,24 @@ pub(crate) async fn pr_draft_prompt(
     repo_path: &str,
     base: Option<&str>,
 ) -> Result<(String, String, String)> {
+    pr_draft_prompt_for(ctx, repo_path, base, None).await
+}
+
+/// [`pr_draft_prompt`] for an explicit source branch `head`: the diff is
+/// `merge-base(base, head)..head` (committed work on that branch only), and
+/// the prompt/`source` name `head`. `None` ⇒ the checked-out branch + its
+/// working tree, exactly as before.
+pub(crate) async fn pr_draft_prompt_for(
+    ctx: &ServerCtx,
+    repo_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+) -> Result<(String, String, String)> {
     let git = otto_git::LocalGit::new(repo_path);
-    let source = git.current_branch().await?;
+    let source = match head {
+        Some(h) => h.to_string(),
+        None => git.current_branch().await?,
+    };
     let resolved = git.resolve_base(base).await?;
     let base = resolved.branch.as_str();
     // Cap the diff fed to the drafting agent — a title/description doesn't need
@@ -3734,9 +3895,16 @@ pub(crate) async fn pr_draft_prompt(
     // stopped at twice the cap (enough to know it was cut) instead of the whole
     // patch being buffered just to keep 40 KB of it.
     const MAX_DIFF: usize = 40_000;
-    let (diff, _) = git
-        .diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
-        .await?;
+    let (diff, _) = match head {
+        Some(h) => {
+            git.range_diff_text_capped(&resolved.diff_ref, h, 2 * MAX_DIFF)
+                .await?
+        }
+        None => {
+            git.diff_text_capped(Some(&resolved.diff_ref), 2 * MAX_DIFF)
+                .await?
+        }
+    };
     if diff.trim().is_empty() {
         return Err(Error::Invalid(format!(
             "no changes between '{source}' and '{base}'"
@@ -3824,8 +3992,38 @@ pub(crate) async fn run_review_for_branch(
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool)> {
+    run_review_for_branch_sized(
+        ctx,
+        repo_id,
+        worktree_path,
+        base,
+        cfg_override,
+        jira_context,
+        run_context,
+        mode_override,
+    )
+    .await
+    .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
+}
+
+/// [`run_review_for_branch`] that also returns the reviewed diff's byte
+/// length — the caller's wait budget is sized off it, and recomputing the
+/// whole review diff (one git spawn per untracked file) just for its length
+/// doubled the stage's git work.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_review_for_branch_sized(
+    ctx: &ServerCtx,
+    repo_id: &Id,
+    worktree_path: &str,
+    base: Option<&str>,
+    cfg_override: Option<ReviewConfig>,
+    jira_context: Option<String>,
+    run_context: Option<String>,
+    mode_override: Option<otto_core::domain::ReviewMode>,
+) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
+    review_budget_gate(ctx, &repo.workspace_id).await?;
     let git = otto_git::LocalGit::new(worktree_path);
     let resolved = git.resolve_base(base).await?;
     let diff_text = git.review_diff_text(&resolved.diff_ref).await?;
@@ -3835,6 +4033,7 @@ pub(crate) async fn run_review_for_branch(
         .await?;
     let review_id = review.id.clone();
     let no_changes = diff_text.trim().is_empty();
+    let diff_len = diff_text.len();
 
     if no_changes {
         // No changes vs base — complete immediately with no findings. Loud,
@@ -3895,7 +4094,7 @@ pub(crate) async fn run_review_for_branch(
             .await;
         });
     }
-    Ok((review_id, resolved, no_changes))
+    Ok((review_id, resolved, no_changes, diff_len))
 }
 
 /// Tolerantly extract a commit message from an agent reply. The agent is asked
@@ -4061,6 +4260,12 @@ async fn draft_commit_message(
     }))
 }
 
+/// Agent rows a Retry may restart: settled ones only (`pending` / `running` /
+/// `waiting` still belong to a live recovery loop).
+pub(crate) fn agent_retryable(status: &str) -> bool {
+    matches!(status, "done" | "error" | "skipped")
+}
+
 /// Re-run a single review agent (e.g. one that never received its prompt). Uses
 /// the prompt persisted when the review started, kills the agent's old (stuck)
 /// session, and spawns a fresh one in the background.
@@ -4097,6 +4302,19 @@ async fn retry_review_agent(
             "no review agent at index {index}"
         ))));
     }
+    // Only a SETTLED agent is retried. Retrying a live one archived its session
+    // and replaced its cancel flag: the original recovery loop then respawned
+    // into the same index + findings file, and its orphaned flag left neither
+    // Stop nor Cancel able to reach it. A stuck agent is Stopped first.
+    if !agent_retryable(&review.agents[index].status) {
+        return Err(crate::error::ApiError(Error::Conflict(format!(
+            "agent {index} is still {} — stop it before retrying",
+            review.agents[index].status
+        ))));
+    }
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
     // DB-first (durable across reboot / temp-sweep / redeploy); the temp file
     // is the legacy fallback for reviews that predate migration 0100.
     let prompt = match ctx.reviews_store.get_agent_prompt(&review_id, index).await {
@@ -4197,15 +4415,19 @@ async fn retry_review_agent(
                                                       // A PR reviewer must verify against the PR head, not the user's
                                                       // checkout (the original run's worktree is gone) — rebuild one, unique
                                                       // per retry so concurrent retries never tear down each other's tree.
-        let pr_wt = if pr_number != 0 {
-            let suffix = format!("-a{index}-{}", chrono::Utc::now().timestamp_millis());
-            pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, &suffix).await
+        let suffix = format!("-a{index}-{}", chrono::Utc::now().timestamp_millis());
+        let (cwd, pr_wt) = if pr_number != 0 {
+            let wt =
+                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, &suffix).await;
+            let cwd = wt
+                .as_ref()
+                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
+            (cwd, wt)
         } else {
-            None
+            // A branch review re-enters the checkout it ran in (S2-06), not
+            // the user's main checkout on whatever branch it is on now.
+            branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, &suffix).await
         };
-        let cwd = pr_wt
-            .as_ref()
-            .map_or_else(|| repo.path.clone(), |w| w.path.clone());
         crate::review_session::run_agent_session_with_recovery(
             &manager,
             &reviews,
@@ -4277,6 +4499,9 @@ async fn retry_summarizer(
             "this review has no summarizer stage to retry".into(),
         )));
     }
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
 
     // The reviewers' findings are durable on the agent rows — the summarizer is
     // always the last row and contributes none.
@@ -4335,14 +4560,18 @@ async fn retry_summarizer(
         // Fingerprints anchor on the flagged line's TEXT; a PR review's lines
         // are in the PR head, not the user's checkout. Rebuild a head worktree
         // for anchoring so the retry re-keys onto the original findings.
-        let pr_wt = if pr_number != 0 {
-            pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, "-sum").await
+        let (repo_path, pr_wt) = if pr_number != 0 {
+            let wt =
+                pr_retry_worktree(&ctx_bg, &user, &repo, &review_id_bg, pr_number, "-sum").await;
+            let path = wt
+                .as_ref()
+                .map_or_else(|| repo.path.clone(), |w| w.path.clone());
+            (path, wt)
         } else {
-            None
+            // Anchor on the branch review's own checkout/head (S2-06): the
+            // user's checkout holds other line text and would re-key nothing.
+            branch_retry_checkout(&ctx_bg, &repo, &review_id_bg, "-sum").await
         };
-        let repo_path = pr_wt
-            .as_ref()
-            .map_or_else(|| repo.path.clone(), |w| w.path.clone());
         // The summarizer follows the repo's EFFECTIVE config (per-repo binding
         // resolution included), same as a fresh run would.
         let cfg = load_review_config_for_repo(&ctx_bg, &repo_id).await;
@@ -4511,6 +4740,22 @@ async fn stop_review_agent(
     ))
 }
 
+/// Point-of-action budget gate for EVERY path that spawns reviewer sessions —
+/// PR and local reviews, agent/summarizer retries and branch reviews (Run with
+/// Otto, workflow `review_run`); it used to guard the PR path only. Checks
+/// the workspace-level cap (the provider isn't known yet). A blocked budget is
+/// `Invalid` (400) like every other budget gate in the daemon.
+pub(crate) async fn review_budget_gate(ctx: &ServerCtx, workspace_id: &str) -> Result<()> {
+    let verdict = crate::routes::usage::check_budget(ctx, workspace_id, "").await;
+    if verdict.blocked {
+        return Err(Error::Invalid(format!(
+            "Budget exceeded — review blocked: {}",
+            verdict.reason.unwrap_or_else(|| "cap reached".to_string())
+        )));
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 struct RepoPrPath {
     id: Id,
@@ -4536,23 +4781,10 @@ async fn start_review(
 
     let req = body.map(|b| b.0).unwrap_or_default();
 
-    // Point-of-action budget gate (A1/A2): check the workspace budget before
-    // spawning any agent sessions. If enforcement is on and the cap is exceeded,
-    // reject with 402 before touching the DB.
-    {
-        let verdict = crate::routes::usage::check_budget(
-            &ctx,
-            &repo.workspace_id,
-            "", // provider not yet known at start — check workspace-level cap
-        )
-        .await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — review blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
+    // Point-of-action budget gate (A1/A2), before touching the DB.
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(ApiError)?;
 
     // Create the review row (status=running) and return it immediately.
     let review = ctx
@@ -4737,18 +4969,7 @@ pub(crate) async fn cancel_running_review(ctx: &ServerCtx, review: &Review, work
     // 4. Best-effort cleanup: temp files (diff + per-agent prompt/json) AND the
     //    durable prompt/diff rows (0100) — same lifecycle, cancelled runs are
     //    not retryable.
-    let prefix = format!("otto-review-{review_id}");
-    #[allow(clippy::disallowed_methods)] // runs on the blocking pool via offload::blocking
-    let () = crate::offload::blocking(move || {
-        if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
-            for entry in rd.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
-    })
-    .await;
+    remove_review_temp_files(&review_id).await;
     let _ = ctx.reviews_store.delete_run_artifacts(&review_id).await;
 
     // 5. Broadcast the terminal status to subscribers.
@@ -4851,6 +5072,15 @@ async fn approve_comment(
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
 
+    // A DECLINED comment is not approvable: a decline that lands while a
+    // "Post all" loop is still walking its snapshot must not be posted anyway.
+    // Restoring it to draft (`PATCH … {restore_draft:true}`) is the way back.
+    if comment.state == CommentState::Declined {
+        return Err(crate::error::ApiError(Error::Conflict(
+            "comment was declined — restore it to draft before approving".into(),
+        )));
+    }
+
     // Post the comment to the PR provider — at most once.
     // - A LOCAL review (pr #0 sentinel) has no PR: approving it is a local
     //   decision; calling the forge only 404'd against "PR #0".
@@ -4870,6 +5100,14 @@ async fn approve_comment(
         // Another request holds (or completed) the post.
         true
     } else {
+        // Re-read under the claim: a decline that raced the check above wins.
+        let fresh = ctx.reviews_store.get_comment(&cid).await;
+        if matches!(&fresh, Ok(c) if c.state == CommentState::Declined) {
+            let _ = ctx.reviews_store.release_comment_post(&cid).await;
+            return Err(crate::error::ApiError(Error::Conflict(
+                "comment was declined — restore it to draft before approving".into(),
+            )));
+        }
         let posted = post_review_comment(&ctx, &user, &repo, review.pr_number, &comment).await;
         if !posted {
             let _ = ctx.reviews_store.release_comment_post(&cid).await;
@@ -5059,6 +5297,9 @@ async fn start_local_review(
         .await
         .map_err(crate::error::ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &repo.workspace_id, WorkspaceRole::Editor).await?;
+    review_budget_gate(&ctx, &repo.workspace_id)
+        .await
+        .map_err(crate::error::ApiError)?;
 
     let git = otto_git::LocalGit::new(&repo.path);
     // Resolve the user-picked base first: a ref that doesn't exist locally
@@ -6185,6 +6426,48 @@ async fn browser_proxy(
         proxy_transform_html(&html, &url),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod review_cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn finished_review_temp_files_are_removed_but_not_the_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        for f in [
+            "otto-review-R1.diff",
+            "otto-review-R1-0.json",
+            "otto-review-R1-0.prompt",
+        ] {
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        std::fs::write(d.join("otto-review-R2.diff"), "other").unwrap();
+        std::fs::create_dir(d.join("otto-review-R1-wt")).unwrap();
+        remove_review_temp_files_in(d, "otto-review-R1");
+        assert!(!d.join("otto-review-R1.diff").exists());
+        assert!(!d.join("otto-review-R1-0.json").exists());
+        assert!(!d.join("otto-review-R1-0.prompt").exists());
+        assert!(
+            d.join("otto-review-R2.diff").exists(),
+            "another review's files stay"
+        );
+        assert!(
+            d.join("otto-review-R1-wt").is_dir(),
+            "directories are never removed"
+        );
+    }
+
+    #[test]
+    fn only_settled_review_agents_are_retryable() {
+        for s in ["done", "error", "skipped"] {
+            assert!(agent_retryable(s), "{s}");
+        }
+        for s in ["pending", "running", "waiting", ""] {
+            assert!(!agent_retryable(s), "{s}");
+        }
+    }
 }
 
 #[cfg(test)]
