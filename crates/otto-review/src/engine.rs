@@ -1670,6 +1670,74 @@ pub fn general_comment_body(comment: &ReviewComment) -> String {
     }
 }
 
+/// Add `/.otto/` to the repo's `info/exclude` (idempotent). Resolves a linked
+/// worktree's `.git` FILE to its common dir (where `info/exclude` lives) by
+/// reading files only — no git process runs over the user's config here.
+pub fn exclude_otto_dir(repo: &std::path::Path) -> std::io::Result<()> {
+    let dot_git = repo.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let text = std::fs::read_to_string(&dot_git)?;
+        let Some(dir) = text.trim().strip_prefix("gitdir:") else {
+            return Ok(());
+        };
+        let dir = repo.join(dir.trim());
+        match std::fs::read_to_string(dir.join("commondir")) {
+            Ok(common) => dir.join(common.trim()),
+            Err(_) => dir,
+        }
+    };
+    let info = git_dir.join("info");
+    std::fs::create_dir_all(&info)?;
+    let exclude = info.join("exclude");
+    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    if current
+        .lines()
+        .any(|l| matches!(l.trim(), "/.otto/" | ".otto/" | "/.otto" | ".otto"))
+    {
+        return Ok(());
+    }
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str("# Otto review notes (local only)\n/.otto/\n");
+    std::fs::write(&exclude, next)
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::*;
+
+    #[test]
+    fn otto_dir_is_excluded_once_in_main_and_linked_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("r");
+        std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "*.log").unwrap();
+        exclude_otto_dir(&repo).unwrap();
+        exclude_otto_dir(&repo).unwrap();
+        let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert!(ex.starts_with("*.log\n"));
+        assert_eq!(ex.matches("/.otto/").count(), 1);
+        // A linked worktree: `.git` is a file → gitdir → commondir.
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(repo.join(".git/worktrees/wt")).unwrap();
+        std::fs::write(repo.join(".git/worktrees/wt/commondir"), "../..").unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}", repo.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        std::fs::write(repo.join(".git/info/exclude"), "").unwrap();
+        exclude_otto_dir(&wt).unwrap();
+        let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(ex.matches("/.otto/").count(), 1);
+    }
+}
+
 /// Append an approved review comment as a markdown bullet to
 /// `<repo_path>/.otto/pr-<n>-review.md`, creating the file and header if needed.
 pub async fn append_to_review_file(
@@ -1681,6 +1749,12 @@ pub async fn append_to_review_file(
 
     let otto_dir = std::path::Path::new(repo_path).join(".otto");
     tokio::fs::create_dir_all(&otto_dir).await?;
+    // Keep the notes out of git: un-excluded, `.otto/` showed up as an
+    // untracked file ("stage all" committed it) and every later LOCAL review
+    // reviewed the review notes as new code. Best-effort.
+    if let Err(e) = exclude_otto_dir(std::path::Path::new(repo_path)) {
+        tracing::warn!("could not add .otto/ to .git/info/exclude: {e}");
+    }
     let file_path = otto_dir.join(format!("pr-{pr_number}-review.md"));
 
     let file_exists = tokio::fs::metadata(&file_path).await.is_ok();
