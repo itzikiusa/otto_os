@@ -17,7 +17,9 @@ in audits.
 - Build from tokens and you mostly pass by construction. The measured table is
   in [foundations.md §1.4](./foundations.md#14-contrast-measured-values). The
   traps:
-  - `--text-dim` on `--surface-3` fails (4.2–4.4:1): use `--text` there.
+  - Text tokens are measured on every surface and on the accent tints
+    (`tokenContrast.test.ts`). A tint you mix yourself is not: measure it,
+    or use `--text` on it.
   - `--accent` as text fails in several themes: use `--accent-text`.
   - Anything on `--accent-solid` must be `--accent-contrast`, which is dark
     text in Warm dark.

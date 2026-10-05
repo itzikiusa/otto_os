@@ -162,9 +162,11 @@ UI graphics.
 | Pair | Native light | Native dark | Pro Dark | Warm light | Warm dark |
 |---|---|---|---|---|---|
 | `--text` on `--bg` | 15.5 | 14.9 | 14.8 | 10.8 | 13.0 |
-| `--text-dim` on `--surface-2` | 5.26 | 5.64 | 5.40 | 5.69 | 5.44 |
-| `--text-dim` on `--surface-3` | 4.81 | 5.00 | 4.83 | 5.19 | 4.88 |
-| `--accent-text` on `--bg` | 6.09 | 7.08 | 6.56 | 5.22 | 8.15 |
+| `--text-dim` on `--surface-2` | 6.42 | 6.52 | 6.38 | 6.34 | 7.17 |
+| `--text-dim` on `--surface-3` | 5.87 | 5.78 | 5.71 | 5.79 | 6.44 |
+| `--text-dim` on `--accent-soft-strong` over `--surface-3` | 4.62 | 4.63 | 4.65 | 4.64 | 4.63 |
+| `--accent-text` on `--bg` | 6.74 | 8.51 | 7.67 | 7.02 | 9.03 |
+| `--accent-text` on `--accent-soft-strong` over `--surface-3` | 4.65 | 4.64 | 4.66 | 4.63 | 4.61 |
 | `--accent-contrast` on `--accent-solid` | 4.94 | 4.94 | 6.38 | 4.76 | 6.83 |
 | `--danger` on `--surface-2` | 5.75 | 5.58 | 6.57 | 5.60 | 5.70 |
 | `--warning` on `--surface-2` | 5.67 | 6.54 | 7.70 | 5.52 | 6.68 |
@@ -174,6 +176,15 @@ UI graphics.
 
 Rules that follow from the table:
 
+- **Every text token clears AA on every ground and every accent tint.**
+  `--text`, `--text-dim` and `--accent-text` are ≥ 4.5:1 on `--bg`,
+  `--bg-sidebar`, `--surface…-3` and on `--accent-soft` / `--accent-soft-strong`
+  over each — a selected (and hovered) row on `--surface-3` was the worst case
+  at 3.5–4.0:1, so `--text-dim` moved toward `--text` (Native light `#56565b`,
+  Native dark `#b9b9bf`, Pro Dark `#a8a8b5`, Warm light `#59554f`, Warm dark
+  `#c5c0b5`) and each theme sets its own `--accent-text` mix.
+  `ui/unit/tokenContrast.test.ts` measures the whole matrix; a custom accent's
+  `--accent-text` is chosen against the same tints (`lib/accent.ts`).
 - **`--text-dim` clears AA on `--surface-3` in every theme.** Native dark
   (`#9f9fa6` → `#acacb3`), Warm light (`#6b6760` → `#605c56`) and Warm dark
   (`#a09a8e` → `#ada79b`) were nudged for it; it stays far dimmer than `--text`
