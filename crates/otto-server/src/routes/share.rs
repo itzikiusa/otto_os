@@ -557,6 +557,43 @@ pub async fn list_shares(
     Ok(Json(ListSharesResp { shares }))
 }
 
+/// One row of `GET /api/v1/auth/shares`: a live link plus its session's
+/// title (None when the session is gone), so the table reads as sessions.
+#[derive(Debug, serde::Serialize)]
+pub struct MyShare {
+    #[serde(flatten)]
+    pub share: otto_core::api::ShareInfo,
+    pub session_title: Option<String>,
+}
+
+/// `GET /api/v1/auth/shares`
+///
+/// List ALL of the caller's live (non-revoked, non-expired) share links across
+/// sessions, newest first — Settings → Sharing's "Active links". Self-owned
+/// (Exempt in policy, like `/auth/tokens`): only the caller's own links.
+pub async fn list_my_shares(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<Vec<MyShare>>> {
+    let shares = AuthRepo::new(ctx.pool.clone())
+        .list_shares_for_user(&user.id)
+        .await?;
+    let mut out = Vec::with_capacity(shares.len());
+    for share in shares {
+        let session_title = ctx
+            .manager
+            .get(&share.session_id)
+            .await
+            .ok()
+            .map(|s| s.title);
+        out.push(MyShare {
+            share,
+            session_title,
+        });
+    }
+    Ok(Json(out))
+}
+
 /// `DELETE /api/v1/auth/shares/{share_id}`
 ///
 /// Revoke one of the caller's share tokens by id. After revocation, calls

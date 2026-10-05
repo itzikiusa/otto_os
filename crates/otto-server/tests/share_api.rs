@@ -3,6 +3,7 @@
 //!   GET    /api/v1/sessions/{id}/shares
 //!   DELETE /api/v1/auth/shares/{share_id}
 //!   POST   /api/v1/auth/shares/revoke-all
+//!   GET    /api/v1/auth/shares
 //!
 //! Uses the same minimal-router harness as `grants_api.rs` / `share_scope_guard.rs`:
 //! a lightweight test state (pool + SessionManager), the feature-guard middleware
@@ -108,6 +109,11 @@ fn share_routes_have_correct_policy() {
         policy_for(&Method::DELETE, "/api/v1/auth/shares/{share_id}"),
         PolicyDecision::Exempt,
         "DELETE /auth/shares/{{id}} must be Exempt (self-owned)"
+    );
+    assert_eq!(
+        policy_for(&Method::GET, "/api/v1/auth/shares"),
+        PolicyDecision::Exempt,
+        "GET /auth/shares must be Exempt (self-owned)"
     );
     assert_eq!(
         policy_for(&Method::POST, "/api/v1/auth/shares/revoke-all"),
@@ -333,6 +339,80 @@ async fn list_shares_returns_live_shares_for_session() {
     assert_eq!(listed.len(), 1, "only the live S1 share is listed");
     assert_eq!(listed[0].id, info1.id);
     assert_eq!(listed[0].role, WorkspaceRole::Viewer);
+}
+
+/// list_shares_for_user returns the caller's live links across sessions —
+/// never a revoked one, never another user's.
+#[tokio::test]
+async fn list_shares_for_user_spans_sessions_and_is_owner_scoped() {
+    let pool = mk_pool().await;
+    let repo = AuthRepo::new(pool.clone());
+    let owner = seed_user(&pool, "owner", false).await;
+    let other = seed_user(&pool, "other", false).await;
+
+    let (_, a) = repo
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S1"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, b) = repo
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S2"),
+            WorkspaceRole::Editor,
+            3600,
+            Some("pair".into()),
+        )
+        .await
+        .unwrap();
+    let (_, gone) = repo
+        .issue_share_token(
+            &owner.id,
+            &Id::from("S3"),
+            WorkspaceRole::Viewer,
+            3600,
+            None,
+        )
+        .await
+        .unwrap();
+    repo.revoke_share(&owner.id, &gone.id).await.unwrap();
+    repo.issue_share_token(
+        &other.id,
+        &Id::from("S1"),
+        WorkspaceRole::Viewer,
+        3600,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let mut ids: Vec<String> = repo
+        .list_shares_for_user(&owner.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    ids.sort();
+    let mut want = vec![a.id.clone(), b.id.clone()];
+    want.sort();
+    assert_eq!(
+        ids, want,
+        "both live links across sessions; revoked + other user's excluded"
+    );
+
+    repo.revoke_all_shares_for_user(&owner.id).await.unwrap();
+    assert!(repo
+        .list_shares_for_user(&owner.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(repo.list_shares_for_user(&other.id).await.unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

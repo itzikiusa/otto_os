@@ -173,6 +173,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/auth/tokens/{id}", delete(auth_routes::revoke_token))
         // --- Share-link management (mobile plan Task 1.9) ----------------
+        .route("/auth/shares", get(share::list_my_shares))
         .route("/auth/shares/{share_id}", delete(share::revoke_share))
         .route("/auth/shares/revoke-all", post(share::revoke_all_shares))
         // --- Per-user email sender (Gmail App Password → Keychain; mobile
