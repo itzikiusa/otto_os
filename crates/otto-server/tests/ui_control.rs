@@ -663,3 +663,29 @@ async fn events_socket_closes_when_its_token_is_revoked() {
         "a still-valid socket must stay open"
     );
 }
+
+/// S8-05: the notification settings are one daemon-wide row — a non-root
+/// member gets 403 on the write; root may still read and write it.
+#[tokio::test]
+async fn notification_settings_write_is_root_only() {
+    let d = boot().await;
+    let current: Value = d
+        .http
+        .get(format!("{}/api/v1/notifications/settings", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let put = |token: String| {
+        d.http
+            .put(format!("{}/api/v1/notifications/settings", d.base))
+            .bearer_auth(token)
+            .json(&current)
+            .send()
+    };
+    assert_eq!(put(d.bob.clone()).await.unwrap().status().as_u16(), 403);
+    assert_eq!(put(d.human.clone()).await.unwrap().status().as_u16(), 200);
+}

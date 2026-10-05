@@ -2460,7 +2460,7 @@ way — it never falls back to a direct, unguarded egress.
 | GET /notifications | member | — | `Notice[]` — global/system notices + the caller's own (root sees all) |
 | DELETE /notifications | member | — | clears the caller's own notices (root clears all; global/system notices remain for non-root) |
 | GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
-| PUT /notifications/settings | member | NotificationSettings | settings |
+| PUT /notifications/settings | root | NotificationSettings | settings (403 for non-root: one daemon-wide row) |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
 | POST /notifications/read | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — mark a batch read in ONE statement with ONE `notifications_changed` (only when `changed > 0`); same ownership rule as the single-row call (foreign / global-for-non-root / unknown / already-read ids are skipped); > 500 ids → 400 |
 | POST /notifications/dismiss | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — dismiss a batch in ONE statement with ONE `notifications_changed`; same ownership rule as `DELETE /notifications/{id}` |
