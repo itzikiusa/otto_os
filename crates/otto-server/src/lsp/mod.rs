@@ -223,9 +223,19 @@ async fn lsp_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<LspWsQuery>,
     State(st): State<LspWsState>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    // 1. Token auth before upgrade (mirrors term_ws).
-    let token = match q.token {
+    // 1. Token auth before upgrade (mirrors term_ws). The `otto-bearer`
+    //    subprotocol is preferred — it keeps the token out of the URL (and so
+    //    out of trace spans and tunnel/proxy access logs, S11-11); `?token=`
+    //    stays as a fallback for older clients.
+    let subprotocol_token = crate::ws_events::token_from_subprotocol(&headers);
+    let ws = if subprotocol_token.is_some() {
+        ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL])
+    } else {
+        ws
+    };
+    let token = match subprotocol_token.or(q.token) {
         Some(t) => t,
         None => {
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");

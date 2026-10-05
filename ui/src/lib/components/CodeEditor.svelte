@@ -44,7 +44,7 @@
   // manages the WS transport) is imported in attachLsp, only once the daemon
   // reports an available server for the doc's language.
 
-  import { api, baseUrl } from '../api/client';
+  import { api, baseUrl, getToken, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { LspCapabilities } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
   import { ui } from '../stores/ui.svelte';
@@ -498,13 +498,14 @@
     return EXT_TO_LSP_LANG[ext] ?? null;
   }
 
-  // Build a WSS/WS URL for the LSP relay.
-  // Path: /ws/lsp?lang=<lang>&root=<root>&token=<token>
+  // Build a WSS/WS URL for the LSP relay: /ws/lsp?lang=<lang>&root=<root>.
+  // The bearer is NOT in the URL — it travels in the otto-bearer subprotocol
+  // (S11-11), and it is the ACTIVE credential (`getToken`), so a share or an
+  // impersonation never falls back to the stored owner login.
   function lspWsUrl(lang: string, rootPath: string): string {
     const base = new URL(baseUrl());
     const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-    const token = localStorage.getItem('otto_token') ?? '';
-    const params = new URLSearchParams({ lang, root: rootPath, token });
+    const params = new URLSearchParams({ lang, root: rootPath });
     return `${proto}//${base.host}/ws/lsp?${params.toString()}`;
   }
 
@@ -536,16 +537,24 @@
       if (!lspLang) return;
       const server = caps.servers.find((s) => s.lang === lspLang && s.available);
       if (!server) return;
-      const { languageServer } = await import('@marimo-team/codemirror-languageserver');
+      const { languageServerWithClient, LanguageServerClient, WebSocketTransport } = await import(
+        '@marimo-team/codemirror-languageserver'
+      );
       // The view may have been rebuilt / destroyed while the client loaded.
       if (view !== editorView) return;
 
       const wsUri = lspWsUrl(lspLang, rootPath);
-      // `languageServer` from marimo accepts serverUri and creates the WS transport
-      const lspExtensions: Extension[] = languageServer({
-        serverUri: wsUri as `ws://${string}` | `wss://${string}`,
-        rootUri: `file://${rootPath}`,
-        workspaceFolders: [{ name: 'workspace', uri: `file://${rootPath}` }],
+      const token = getToken();
+      // Same as marimo's `languageServer({serverUri})`, but with our own
+      // transport so the bearer rides in Sec-WebSocket-Protocol.
+      const rootUri = `file://${rootPath}`;
+      const workspaceFolders = [{ name: 'workspace', uri: rootUri }];
+      const lspExtensions: Extension[] = languageServerWithClient({
+        client: new LanguageServerClient({
+          rootUri,
+          workspaceFolders,
+          transport: new WebSocketTransport(wsUri, token ? [WS_BEARER_SUBPROTOCOL, token] : undefined),
+        }),
         documentUri: `file://${filePath}`,
         languageId: lspLang,
       });

@@ -221,7 +221,7 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
-  import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
+  import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
@@ -832,17 +832,16 @@
     resyncPending = false;
     viewAttach = opts.view ?? !resumeOnOpen;
     dormantView = false;
-    // When a shareToken is supplied (guest share view) use the otto-bearer
-    // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
-    // the URL query string (keeps it out of access logs). The stored owner
-    // login token path (wsUrl) is unchanged for all normal sessions.
+    // Every bearer — the guest's share token AND the owner's login token —
+    // travels in the otto-bearer subprotocol (Sec-WebSocket-Protocol), never
+    // the URL query string, so it stays out of tunnel/proxy access logs (S1-13).
     if (socketFactory) {
       sock = socketFactory();
     } else if (shareToken) {
       const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
       sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
-      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`) + (viewAttach ? '&view=1' : ''));
+      sock = wsConnect(`/ws/term/${sessionId}${viewAttach ? '?view=1' : ''}`);
     }
     sock.binaryType = 'arraybuffer';
     wireSocket(sock);
