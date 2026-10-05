@@ -15,6 +15,9 @@ use otto_core::{new_id, Error, Result};
 
 use crate::convert::{dberr, dberr_unique, fmt};
 
+/// How long a soft-forget's undo token stays valid (from `forgotten_at`).
+pub const UNDO_FORGET_WINDOW_SECS: i64 = 30 * 24 * 3600;
+
 // ---------------------------------------------------------------------------
 // DTOs
 // ---------------------------------------------------------------------------
@@ -713,19 +716,25 @@ impl MemoriesRepo {
         Ok(())
     }
 
+    /// Count a recall of each hit. ONE statement for the whole hit list (it
+    /// used to be one autocommit UPDATE per hit — a `recall_brief` took the
+    /// write lock up to ~48 times). An id listed twice counts once.
     pub async fn bump_access(&self, ws: &str, ids: &[String]) -> Result<()> {
-        let now = fmt(Utc::now());
-        for id in ids {
-            let _ = sqlx::query(
-                "UPDATE memories SET access_count=access_count+1, last_accessed_at=? \
-                 WHERE id=? AND workspace_id=?",
-            )
-            .bind(&now)
-            .bind(id)
-            .bind(ws)
-            .execute(&self.pool)
-            .await;
+        if ids.is_empty() {
+            return Ok(());
         }
+        let ids_json = serde_json::to_string(ids)
+            .map_err(|e| Error::Internal(format!("memory.bump_access: {e}")))?;
+        sqlx::query(
+            "UPDATE memories SET access_count=access_count+1, last_accessed_at=? \
+             WHERE workspace_id=? AND id IN (SELECT value FROM json_each(?))",
+        )
+        .bind(fmt(Utc::now()))
+        .bind(ws)
+        .bind(ids_json)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("memory.bump_access"))?;
         Ok(())
     }
 
@@ -860,37 +869,22 @@ impl MemoriesRepo {
 
     /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
     /// `undo_token`. Returns the token so the caller can hand it to the client.
+    /// An unguessable single-use undo token: SHA-256 over three ULIDs (each
+    /// carrying 80 bits from the thread CSPRNG — 240 random bits in all). It
+    /// used to hash only (id, ws, epoch, nanos), which an observer of the
+    /// forget could reconstruct (S7-06).
+    fn mint_undo_token() -> String {
+        use sha2::{Digest, Sha256};
+        let seed = format!("{}{}{}", new_id(), new_id(), new_id());
+        hex::encode(Sha256::digest(seed.as_bytes()))
+    }
+
     pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<String> {
         // Verify the row exists in this workspace first (returns NotFound if absent).
         let _ = self.get(ws, id).await?;
         let now = fmt(Utc::now());
         let epoch = Utc::now().timestamp();
-        // Random 32-byte hex token — sufficient entropy, no external crate needed.
-        let token = {
-            use std::fmt::Write as _;
-            let mut raw = [0u8; 32];
-            // Use the standard library's available entropy source on stable Rust.
-            // Deterministic-safe: SHA-256 over (id + workspace + epoch nanos).
-            let seed = format!(
-                "{}{}{}{}",
-                id,
-                ws,
-                epoch,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos())
-                    .unwrap_or(42)
-            );
-            // SHA-256 via sha2 (already a workspace dep).
-            use sha2::{Digest, Sha256};
-            let hash = Sha256::digest(seed.as_bytes());
-            raw.copy_from_slice(&hash);
-            let mut s = String::with_capacity(64);
-            for b in &raw {
-                let _ = write!(s, "{:02x}", b);
-            }
-            s
-        };
+        let token = Self::mint_undo_token();
         sqlx::query(
             "UPDATE memories SET active=0, forgotten_at=?, undo_token=?, \
              state='stale', updated_at=? WHERE id=? AND workspace_id=?",
@@ -910,13 +904,19 @@ impl MemoriesRepo {
     /// `undo_token`, set state back to `accepted`. Returns the restored memory.
     pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
         // Locate the row by its undo token, scoped to the workspace.
-        let row = sqlx::query("SELECT id FROM memories WHERE undo_token=? AND workspace_id=?")
-            .bind(undo_token)
-            .bind(ws)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(dberr("memory.undo_forget.find"))?
-            .ok_or_else(|| Error::NotFound("undo token not found or already used".into()))?;
+        // Tokens expire with the undo window (measured from `forgotten_at`).
+        let oldest = Utc::now().timestamp() - UNDO_FORGET_WINDOW_SECS;
+        let row = sqlx::query(
+            "SELECT id FROM memories WHERE undo_token=? AND workspace_id=? \
+             AND forgotten_at IS NOT NULL AND forgotten_at >= ?",
+        )
+        .bind(undo_token)
+        .bind(ws)
+        .bind(oldest)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("memory.undo_forget.find"))?
+        .ok_or_else(|| Error::NotFound("undo token not found, expired or already used".into()))?;
         let id: String = row.get("id");
         let now = fmt(Utc::now());
         sqlx::query(
