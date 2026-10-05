@@ -55,6 +55,7 @@ import {
   type VarSpec,
 } from '../../modules/database/sql-util';
 import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../../modules/database/filter-chips';
+import { obviousWriteVerb } from '../../modules/database/sql-dialect';
 export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../../modules/database/filter-chips';
 export type { FilterCond, FilterVal } from '../../modules/database/filter-chips';
 import { normalizeDbError } from '../../modules/database/error-normalize';
@@ -299,6 +300,16 @@ export function engineGlyph(kind: string): IconName {
     default:
       return 'db';
   }
+}
+
+/** Dashboard widgets re-run unattended on every refresh, so they must be
+ *  read-only queries. An obvious write is refused at save time with the
+ *  reason; the daemon runs every widget read-only regardless (the gate). */
+function widgetStatementOk(statement: string): boolean {
+  const verb = obviousWriteVerb(statement);
+  if (!verb) return true;
+  toasts.error('Widgets must be read-only queries', `${verb} changes data — a widget re-runs it on every refresh.`);
+  return false;
 }
 
 // ── Result view mode ──────────────────────────────────────────────────────────
@@ -4233,6 +4244,7 @@ class DatabaseStore {
       toasts.error('No connection selected');
       return null;
     }
+    if (!widgetStatementOk(input.statement)) return null;
     try {
       const w = await api.post<DbWidget>(`${base}/widgets`, {
         connection_id: connId,
@@ -4253,6 +4265,7 @@ class DatabaseStore {
   }
 
   async updateWidget(id: Id, patch: Partial<Pick<DbWidget, 'title' | 'statement' | 'viz' | 'mapping' | 'options' | 'dashboard_id'>>): Promise<void> {
+    if (patch.statement !== undefined && !widgetStatementOk(patch.statement)) return;
     try {
       const w = await api.patch<DbWidget>(`/db/widgets/${id}`, patch);
       this.widgets = this.widgets.map((x) => (x.id === id ? w : x));

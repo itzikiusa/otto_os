@@ -129,3 +129,20 @@ export function pgSpanEnd(sql: string, i: number): number {
   }
   return -1;
 }
+
+// ── Write detection (UI hint only) ───────────────────────────────────────────
+
+const WRITE_LEAD = /^(insert|update|delete|replace|merge|upsert|truncate|drop|alter|create|rename|grant|revoke|optimize|attach|detach|exchange|set|del|unlink|flushall|flushdb|hset|hdel|lpush|rpush|lset|lrem|sadd|srem|zadd|zrem|expire|persist|incr|decr|incrby|decrby|append|mset|getdel|rpop|lpop)\b/i;
+
+/** The leading write verb of a statement (`'UPDATE'`, `'DEL'`…) when it is
+ *  OBVIOUSLY a write, else null. A fast UI hint (dashboard widgets refuse
+ *  these at save time) — never the gate: the daemon classifies every widget
+ *  run read-only and refuses anything it deems a write. */
+export function obviousWriteVerb(statement: string): string | null {
+  const s = statement.replace(/^(\s|--[^\n]*\n|\/\*[\s\S]*?\*\/)+/, '');
+  const m = WRITE_LEAD.exec(s);
+  if (m) return m[1].toUpperCase();
+  // `WITH … UPDATE / DELETE / INSERT` (Postgres data-modifying CTEs).
+  const w = /^with\b[\s\S]*?\b(insert|update|delete)\b/i.exec(s);
+  return w ? w[1].toUpperCase() : null;
+}

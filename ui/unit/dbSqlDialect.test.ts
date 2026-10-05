@@ -85,3 +85,15 @@ test('Postgres splitter: dollar quotes, # operator, standard strings (S16-14)', 
   // Variables inside a dollar-quoted body are not variables.
   assert.deepEqual(extractVars('SELECT $$ :nope $$, :yes', 'pg'), ['yes']);
 });
+
+test('widgets: obvious writes are flagged at save time (S16-08 UI hint)', async () => {
+  const { obviousWriteVerb } = await import('../src/modules/database/sql-dialect.ts');
+  assert.equal(obviousWriteVerb('UPDATE counters SET n=n+1'), 'UPDATE');
+  assert.equal(obviousWriteVerb('-- tick\n  delete from sessions'), 'DELETE');
+  assert.equal(obviousWriteVerb('/* x */ DROP TABLE t'), 'DROP');
+  assert.equal(obviousWriteVerb('WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d'), 'DELETE');
+  assert.equal(obviousWriteVerb('DEL k'), 'DEL');
+  assert.equal(obviousWriteVerb('SELECT count(*) FROM orders'), null);
+  assert.equal(obviousWriteVerb('GET k'), null);
+  assert.equal(obviousWriteVerb('db.c.find({})'), null);
+});

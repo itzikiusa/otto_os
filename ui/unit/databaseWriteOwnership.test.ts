@@ -62,7 +62,7 @@ function setup() {
       if (path.endsWith('/db-result-budget')) return resultBudget;
       if (path.endsWith('/grid-tab-state')) return { parkedEditCount: () => 0 };
       // Reachable only from flows this file doesn't drive: any use throws.
-      return strictRequire(['/api/types', '/components/exporters', '/mongo-format', '/sql-util', '/bson', '/filter-chips', '/error-normalize',
+      return strictRequire(['/api/types', '/components/exporters', '/mongo-format', '/sql-util', '/bson', '/filter-chips', '/sql-dialect', '/error-normalize',
         '/clipboard', '/poll', '/editor-history', '/loadError', '/toastError'].map((p) => [p, unused(p)] as const))(path);
     },
   };
