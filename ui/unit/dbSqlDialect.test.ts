@@ -25,7 +25,7 @@ test('identifiers, strings and booleans per engine', () => {
   assert.equal(boolLiteral('postgres', true), 'TRUE');
   assert.equal(boolLiteral('mysql', false), '0');
   assert.equal(backslashEscapes('postgres'), false);
-  assert.deepEqual(['postgres', 'mysql', 'clickhouse', 'mongodb', 'redis', null].map(splitModeFor), ['pg', 'sql', 'sql', 'sql', 'line', 'sql']);
+  assert.deepEqual((['postgres', 'mysql', 'clickhouse', 'mongodb', 'redis', null] as const).map((e) => splitModeFor(e)), ['pg', 'sql', 'sql', 'sql', 'line', 'sql']);
 });
 
 test('quick-filter chips render per engine (S16-05)', () => {
