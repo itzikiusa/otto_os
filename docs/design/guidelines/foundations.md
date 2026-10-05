@@ -327,6 +327,14 @@ Gaps: 6 px between toolbar controls, 8 px between related controls, 12 px
 between groups, 16–24 px between sections. Line things up to a shared left
 edge instead of adding more space.
 
+Control-state and size tokens (`tokens.css`):
+
+| Token | Value | Use |
+|---|---|---|
+| `--disabled-opacity` | 0.45 | Every disabled control or disabled row (`.btn`, `.icon-btn`, `.input`, `.segmented`, `.pill-toggle`, chips, local controls). `ui-guards` ratchets other `opacity` literals in a disabled rule set (`disabled-opacity`); `scripts/codemods/disabled-opacity.mjs` rewrites them. |
+| `--hit-min` | 36 px | Minimum touch hit size on phone. The shared controls already grow their hit area under `(pointer: coarse)` (app.css); a module control that needs a bigger box uses `min-block-size: var(--hit-min)` instead of its own 32/34/38 px. Don't add `min-height` to a `.btn` for touch — the global rule covers it. |
+| `--prose-readable` | 820 px | The readable column of chat / prose surfaces (Assistant tabs, composer). Whole pages use `PageBody width="readable"` (`--page-readable`, 1200 px). |
+
 ---
 
 ## 4. Radius
@@ -541,6 +549,11 @@ Rules:
 
   Examples in the tree: `shell/Drawer.svelte`,
   `run-with-otto/RunStageRail.svelte`.
+- **Motion started from script.** The global reduced-motion override only
+  reaches CSS. A JS scroll uses `behavior: scrollBehavior()` and a Svelte
+  transition `duration: motionMs(160)` (`lib/motion.ts`; `reducedMotion()` is
+  the shared check). `ui-guards` ratchets a literal `behavior: 'smooth'`
+  (`smooth-scroll`).
 - **Shared primitives.** `app.css` owns `@keyframes otto-spin` and
   `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`); a
   component never spins its own ring (`local-spinner` ratchet). Use them
@@ -583,12 +596,17 @@ Rules:
 
   | px | Where |
   |---|---|
-  | 12 | inside `.btn.small` and chips |
+  | 12 | inside `.btn.small`, chips, inline with `--fs-xs`/`--fs-s` text, and the caret of a split button or disclosure (no smaller caret) |
   | 13–14 | inside `.btn`, `.icon-btn` and toolbars (14 is the toolbar minimum) |
   | 16 | nav rows, the `PageHeader` icon, standalone |
-  | 24–26 | empty-state tiles only |
+  | 20 | **phone touch chrome only**: `BottomNav`, `MobileActionBar` and the mobile top bar (`shell/App.svelte`) |
+  | 24–26 | empty-state / placeholder tiles only |
 
-  Don't use other sizes.
+  Don't use other sizes. `ui-guards` enforces this (`icon-size`, numeric
+  literals in `<Icon size={…}>`, ternaries included);
+  `node scripts/codemods/icon-sizes.mjs` snaps a tree onto the scale
+  (≤ 11 → 12, 15 → 14, 17–18 → 16, 19–23 → 24 or 20 in touch chrome,
+  ≥ 27 → 26).
 - **Adding an icon:** add a path to `paths` in `Icon.svelte`'s module script. It
   should be drawn for 16×16 as strokes in the same visual weight, with a
   one-line comment if the metaphor isn't obvious. Check it at 12 px and at
