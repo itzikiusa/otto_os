@@ -66,12 +66,18 @@ async fn resaving_a_forgotten_memory_reactivates_it() {
         .save(
             &ws,
             &user,
-            vec![nm("A", "the deploy needs cmake"), nm("B", "fresh second fact")],
+            vec![
+                nm("A", "the deploy needs cmake"),
+                nm("B", "fresh second fact"),
+            ],
         )
         .await
         .expect("a duplicate of a forgotten memory must not fail the batch");
     assert_eq!(batch.len(), 2, "the whole batch applied");
-    assert_eq!(batch[0].id, a.id, "the forgotten row is revived, not cloned");
+    assert_eq!(
+        batch[0].id, a.id,
+        "the forgotten row is revived, not cloned"
+    );
     assert!(batch[0].active);
     assert_eq!(batch[0].state, "accepted");
     assert!(batch[0].undo_token.is_none());
@@ -84,7 +90,11 @@ async fn update_into_a_duplicate_body_is_a_conflict() {
     let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
     let svc = MemoryService::with_defaults(pool);
     let saved = svc
-        .save(&ws, &user, vec![nm("A", "alpha body"), nm("B", "beta body")])
+        .save(
+            &ws,
+            &user,
+            vec![nm("A", "alpha body"), nm("B", "beta body")],
+        )
         .await
         .unwrap();
     let err = svc
@@ -101,7 +111,10 @@ async fn update_into_a_duplicate_body_is_a_conflict() {
     assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
     // The failed edit rolled back whole: B is unchanged and still indexed.
     assert_eq!(svc.get(&ws, &saved[1].id).await.unwrap().body, "beta body");
-    assert_eq!(search_ids(&svc, &ws, "beta").await, vec![saved[1].id.clone()]);
+    assert_eq!(
+        search_ids(&svc, &ws, "beta").await,
+        vec![saved[1].id.clone()]
+    );
 }
 
 /// The FTS row is written in the memory's own transaction, and drift left by
@@ -150,7 +163,11 @@ async fn fts_is_written_with_the_row_and_drift_is_reconciled_on_start() {
     let svc = MemoryService::with_defaults(pool.clone());
     assert_eq!(search_ids(&svc, &ws, "kafka").await, vec![a.clone()]);
     assert_eq!(search_ids(&svc, &ws, "eviction").await, vec![b.clone()]);
-    assert_eq!(fts_mids(&svc).await, ids, "orphan dropped, missing row back");
+    assert_eq!(
+        fts_mids(&svc).await,
+        ids,
+        "orphan dropped, missing row back"
+    );
     let map: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories_fts_ids")
         .fetch_one(&pool)
         .await
@@ -242,7 +259,9 @@ async fn concurrent_saves_on_a_file_database_all_succeed() {
         }));
     }
     for t in tasks {
-        t.await.unwrap().expect("no SQLITE_BUSY under concurrent saves");
+        t.await
+            .unwrap()
+            .expect("no SQLITE_BUSY under concurrent saves");
     }
     let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories_fts_ids")
         .fetch_one(svc.pool())

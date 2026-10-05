@@ -98,6 +98,8 @@ impl DesignService {
         }
         let provenance = bound_json(provenance, MAX_PROVENANCE_BYTES, "provenance")?;
         let message: String = message.trim().chars().take(2_000).collect();
+        // GC fence: held until the side version referencing the blob commits.
+        let _blob_ref = self.blobs().reference_guard().await?;
         let sha = self.blobs().put(&bytes).await?;
         self.store()
             .insert_side_version(
