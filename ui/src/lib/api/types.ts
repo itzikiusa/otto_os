@@ -4322,6 +4322,9 @@ export interface Integration {
   channel: Channel;
   enabled: boolean;
   allowed_users: string;     // comma-separated
+  /** Explicit opt-in: a BLANK `allowed_users` admits every sender. Off ⇒ a
+   *  blank list admits nobody (fail closed). Webhooks ignore it. */
+  open_to_all: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;
@@ -4364,6 +4367,8 @@ export interface UpsertIntegrationReq {
   bot_token?: string | null;   // omit/null to keep existing
   app_token?: string | null;   // slack only
   allowed_users: string;
+  /** Omit to keep the stored value. */
+  open_to_all?: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;

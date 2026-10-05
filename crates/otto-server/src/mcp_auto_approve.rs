@@ -118,8 +118,9 @@ pub(crate) fn rules_covering_tool(rules: &[McpAutoApproveRule], short: &str) -> 
 }
 
 /// The rule that auto-approves this governed call, if any. Scope facts: the
-/// call's resolved `workspace_id` argument (else the calling session's
-/// workspace) and the credential's bound agent session. A DB failure resolves
+/// call's server-established workspace (else the calling session's
+/// workspace; none at all for a global-row tool) and the credential's bound
+/// agent session. A DB failure resolves
 /// to `None` — the call stays approval-gated (fail closed).
 pub(crate) async fn resolve_for_call(
     ctx: &ServerCtx,
@@ -134,8 +135,13 @@ pub(crate) async fn resolve_for_call(
         .managed_session_id
         .as_deref()
         .or(auth.mcp_session_id.as_deref());
+    // A global-row tool (K8s cluster, AWS account, issue account…) lands in
+    // no workspace: workspace-scoped rules never apply to it — neither via a
+    // caller-sent `workspace_id` (dropped upstream) nor via the calling
+    // session's workspace. Only global and session rules do.
     let ws = match call_ws {
         Some(w) => Some(w.to_string()),
+        None if crate::mcp_outward::pin_global(short) => None,
         None => crate::agent_refs::caller_session_ws(ctx, auth).await,
     };
     let rules = match repo(ctx).list_applicable(ws.as_deref(), session).await {

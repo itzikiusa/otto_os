@@ -222,6 +222,21 @@ pub const IRREVERSIBLE: &[&str] = &[
     "assistant_forget",
 ];
 
+/// The IRREVERSIBLE writers an agent session's in-session stdio bridge
+/// (`ottod mcp-tools`) serves under its own native names. The bridge routes
+/// them through the governed invoke (approval + guardrail + audit) rather
+/// than straight to their daemon routes — which skipped the approval every
+/// governed caller gets. Since the bridge always offered them, a session-bound
+/// credential may call these through the governed path even when the operator
+/// has not ticked them in the Otto-server catalog (they are still gated).
+pub const NATIVE_SESSION_WRITERS: &[&str] = &[
+    "k8s_action",
+    "k8s_pod_http",
+    "aws_sqs_send",
+    "api_execute",
+    "api_run_automation",
+];
+
 /// True iff the bare tool is mutating + approval-gated ([`DANGEROUS`]).
 pub fn tool_is_dangerous(bare: &str) -> bool {
     DANGEROUS.contains(&bare)

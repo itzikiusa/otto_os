@@ -55,6 +55,9 @@
   let fChannelId = $state('');
   let fAllowedUsers = $state('');
   let fAgentReply = $state(false);
+  /** Explicit "open to everyone" opt-in for a blank allow-list (otherwise a
+   *  blank list admits nobody — the daemon fails closed). */
+  let fOpenToAll = $state(false);
   let fReplyInstructions = $state('');
   let fPreferredCli = $state('');
 
@@ -167,6 +170,7 @@
     fChannelId = existing?.channel_id ?? '';
     fAllowedUsers = existing?.allowed_users ?? '';
     fAgentReply = existing?.agent_reply ?? false;
+    fOpenToAll = existing?.open_to_all ?? false;
     fReplyInstructions = existing?.reply_instructions ?? '';
     fPreferredCli = existing?.preferred_cli ?? '';
     editOpen = true;
@@ -178,11 +182,29 @@
 
   async function save(): Promise<void> {
     if (!wsId) return;
+    const blank = fAllowedUsers.trim() === '';
+    const listened = editChannel !== 'webhook';
+    if (listened && blank && fEnabled && !fOpenToAll) {
+      toasts.error(
+        `Add an allowed user before enabling ${channelLabel(editChannel)}`,
+        'A blank list admits nobody. Add user IDs, or explicitly open the bot to everyone.',
+      );
+      return;
+    }
+    const wasOpen = integrations.find((i) => i.channel === editChannel)?.open_to_all ?? false;
+    if (listened && blank && fOpenToAll && !wasOpen) {
+      const ok = await confirmer.ask(
+        `Anyone who can message this ${channelLabel(editChannel)} bot will be able to run an agent on this Mac as you — reading code and running commands — and receive its output.`,
+        { title: 'Open the bot to everyone?', confirmLabel: 'Open to everyone', danger: true },
+      );
+      if (!ok) return;
+    }
     editBusy = true;
     try {
       const body: UpsertIntegrationReq = {
         enabled: fEnabled,
         allowed_users: fAllowedUsers.trim(),
+        open_to_all: listened && blank && fOpenToAll,
         agent_reply: fAgentReply,
         reply_instructions: fReplyInstructions.trim(),
         channel_id: fChannelId.trim(),
@@ -219,10 +241,20 @@
 
   async function toggleEnabled(intg: Integration): Promise<void> {
     if (!wsId) return;
+    if (!intg.enabled && intg.channel !== 'webhook' && intg.allowed_users.trim() === '' && !intg.open_to_all) {
+      // Fail closed: enabling needs an allow-list (or the explicit opt-in).
+      toasts.error(
+        `Add an allowed user before enabling ${channelLabel(intg.channel)}`,
+        'A blank list admits nobody.',
+      );
+      openEdit(intg.channel);
+      return;
+    }
     try {
       const body: UpsertIntegrationReq = {
         enabled: !intg.enabled,
         allowed_users: intg.allowed_users,
+        open_to_all: intg.open_to_all,
         agent_reply: intg.agent_reply,
         reply_instructions: intg.reply_instructions,
         channel_id: intg.channel_id,
@@ -341,10 +373,16 @@
     }
   }
 
-  /** Blank allowed users = anyone who can message the bot drives an agent on
-   *  this Mac. Webhooks are key-protected, so a blank caller list is fine. */
+  /** Blank allowed users under the explicit opt-in = anyone who can message
+   *  the bot drives an agent on this Mac. Webhooks are key-protected, so a
+   *  blank caller list is fine. */
   function openToEveryone(intg: Integration | null, channel: Channel): boolean {
-    return !!intg?.enabled && channel !== 'webhook' && intg.allowed_users.trim() === '';
+    return !!intg?.enabled && channel !== 'webhook' && intg.open_to_all && intg.allowed_users.trim() === '';
+  }
+
+  /** Blank allowed users WITHOUT the opt-in: the daemon admits nobody. */
+  function admitsNobody(intg: Integration | null, channel: Channel): boolean {
+    return !!intg?.enabled && channel !== 'webhook' && !intg.open_to_all && intg.allowed_users.trim() === '';
   }
 
   function statusLine(intg: Integration | null, channel: Channel): string {
@@ -405,6 +443,9 @@
               {#if openToEveryone(intg, channel)}
                 <StatusBadge tone="warning" label="Open to everyone" dot={false}
                   title="No allowed users set: anyone who can message the bot can run an agent on this Mac. Edit to restrict it." />
+              {:else if admitsNobody(intg, channel)}
+                <StatusBadge tone="warning" label="No allowed users" dot={false}
+                  title="The allow-list is blank, so every message is ignored. Edit to add user IDs." />
               {/if}
             </div>
             <div class="ch-status" title={statusLine(intg, channel)}>{statusLine(intg, channel)}</div>
@@ -602,13 +643,19 @@
           Leave blank to allow everyone.
         {:else}
           Comma-separated {channelLabel(editChannel)} user IDs{editChannel === 'slack' ? ' (Profile → ⋯ → Copy member ID)' : ''}.
-          Leave blank to allow everyone.
+          Required: a blank list admits nobody.
         {/if}
       </span>
       {#if editChannel !== 'webhook' && fAllowedUsers.trim() === ''}
-        <span class="hint warn" role="note">
-          Blank means anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
-        </span>
+        <label class="checkbox-row modal-check">
+          <input id="ch-open" type="checkbox" bind:checked={fOpenToAll} />
+          Open to everyone
+        </label>
+        {#if fOpenToAll}
+          <span class="hint warn" role="note">
+            Anyone who can message the bot — in any {editChannel === 'slack' ? 'channel it’s in, or by DM' : 'chat it’s in'} — can run an agent on this Mac.
+          </span>
+        {/if}
       {/if}
     </div>
 

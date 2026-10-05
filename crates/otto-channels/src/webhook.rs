@@ -104,6 +104,25 @@ impl Adapter for WebhookAdapter {
         Ok(String::new())
     }
 
+    /// A bridge-side failure (delivery / session creation): POSTed as
+    /// `{kind:"error", conversation, thread, text}` so the caller learns its
+    /// message never reached an agent.
+    async fn send_notice(
+        &self,
+        chat: &str,
+        thread: Option<&str>,
+        text: &str,
+    ) -> anyhow::Result<String> {
+        self.post(serde_json::json!({
+            "kind": "error",
+            "conversation": chat,
+            "thread": thread,
+            "text": text,
+        }))
+        .await?;
+        Ok(String::new())
+    }
+
     /// Activity-feed edit — suppressed (see `send`).
     async fn edit(&self, _chat: &str, _message_id: &str, _text: &str) -> anyhow::Result<()> {
         Ok(())
@@ -167,6 +186,13 @@ mod tests {
         // A key-holder must not be able to aim the callback at internal hosts.
         let a = WebhookAdapter::new(Some("http://127.0.0.1/collect".to_string()));
         let err = a.send_formatted("c", None, "hi").await.unwrap_err();
+        assert!(err.to_string().contains("blocked"), "got: {err}");
+        // A failure notice is POSTed too (S5-19: `send` is a no-op, so the
+        // bridge's notices used to vanish) — here it reaches the same guard.
+        let err = a
+            .send_notice("c", None, "couldn't deliver")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("blocked"), "got: {err}");
     }
 }

@@ -1624,7 +1624,7 @@ configured Jira/Confluence account.
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
-| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount |
+| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
@@ -1668,6 +1668,15 @@ channel-agnostic. For `webhook`, the reused fields carry webhook meanings:
 `bot_token` = the inbound secret **key** (set manually or generate one client-side),
 `channel_id` = the optional default **reply callback URL**, `allowed_users` = the
 optional allowed caller ids (matched against the request's `user`).
+
+**Allow-list (Slack / Telegram) fails closed.** A blank `allowed_users` admits
+**nobody** unless the integration carries the explicit `open_to_all: true` opt-in
+(`Integration.open_to_all`; `UpsertIntegrationReq.open_to_all` — omitted ⇒ the stored
+value is kept, a new integration starts `false`). Integrations created before the flag
+existed with a blank list were migrated to `open_to_all: true` so they keep working; the
+daemon logs a `channel OPEN TO EVERYONE` warning for each on every listener start, and
+Settings → Channels badges them. A webhook (authenticated by its secret key) treats a
+blank caller list as everyone and ignores the flag.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -1740,7 +1749,9 @@ in the 202 body — pass it back as `conversation` to deliberately continue that
 Errors: 404 (no enabled webhook), 401 (bad/missing key), 400 (empty `text`), 503 (no
 root user yet). The callback URL passes through the SSRF guard before each POST. The
 callback body is `{kind:"reply", conversation, thread, text}` or, for attachments /
-long replies, `{kind:"file", conversation, thread, filename, content_base64}`.
+long replies, `{kind:"file", conversation, thread, filename, content_base64}`. A message
+that never reached an agent (delivery or session creation failed) is reported as
+`{kind:"error", conversation, thread, text}`.
 
 ## Self-improvement engine
 
