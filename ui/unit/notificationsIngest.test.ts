@@ -7,7 +7,7 @@ function store() {
   const { notifications } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
     svelte: { untrack: (fn: () => unknown) => fn() },
     '../api/client': { api: { get: async () => [], post: async () => ({}), del: async () => ({}) } },
-    '../toast.svelte': { toasts: { warn() {}, info() {} } },
+    '../toast.svelte': { toasts: { warn() {}, info() {} } }, '../toastError': { toastError() {} },
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [], getSession: () => null } },
     '../desktop': { isEmbedded: false },
@@ -61,7 +61,7 @@ function storeWith(active: string | null) {
   const { notifications } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
     svelte: { untrack: (fn: () => unknown) => fn() },
     '../api/client': { api: { get: async () => [], post: async () => ({}), del: async () => ({}) } },
-    '../toast.svelte': { toasts: { warn() {}, info() {} } },
+    '../toast.svelte': { toasts: { warn() {}, info() {} } }, '../toastError': { toastError() {} },
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [], getSession: () => null, activeSessionId: active } },
     '../desktop': { isEmbedded: false },
@@ -89,7 +89,7 @@ test('canceling a workspace switch prevents a notification from navigating in th
   const routes: string[]=[];
   const {notifications}=loadSource(new URL('../src/lib/stores/notifications.svelte.ts',import.meta.url),{
     svelte:{untrack:(fn:()=>unknown)=>fn()},
-    '../api/client':{api:{}},'../toast.svelte':{toasts:{warn(){},error(){}}},
+    '../api/client':{api:{}},'../toast.svelte':{toasts:{warn(){},error(){}}},'../toastError':{toastError(){}},
     '../external':{openExternal:async()=>{}},'../desktop':{isEmbedded:false},
     './workspace.svelte':{ws:{sessions:[],currentId:'A',workspaces:[{id:'A'},{id:'B'}],select:async()=>false}},
     '../router.svelte':{router:{go:(route:string)=>routes.push(route)}},

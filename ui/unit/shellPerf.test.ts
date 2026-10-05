@@ -89,7 +89,7 @@ function notificationsModule() {
   return loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
     svelte: { untrack: (fn: () => unknown) => fn() },
     '../api/client': { api: { get: async () => [], post: async () => ({}), del: async () => ({}) } },
-    '../toast.svelte': { toasts: { warn() {}, info() {} } },
+    '../toast.svelte': { toasts: { warn() {}, info() {} } }, '../toastError': { toastError() {} },
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [] } },
     '../desktop': { isEmbedded: false },

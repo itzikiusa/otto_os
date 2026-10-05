@@ -10,7 +10,7 @@ import { loadSource } from './sourceHarness.ts';
 function store() {
   const mod = loadSource(new URL('../src/lib/stores/canvas.svelte.ts', import.meta.url), {
     '../api/client': { api: {}, getToken: () => 'tok' },
-    './workspace.svelte': { ws: { currentId: 'w1' } },
+    './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
     '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
