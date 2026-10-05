@@ -31,6 +31,7 @@
   import McpPill from './McpPill.svelte';
   import AutoApproveForm from './AutoApproveForm.svelte';
   import { mcpCpExtraApi } from './cp-api';
+  import NeedsYouLink from '../home/NeedsYouLink.svelte';
 
   let approvals = $state<McpApproval[]>([]);
   const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
@@ -158,6 +159,8 @@
     <h2>Approvals</h2>
     <span class="count chip" class:warn={!showAll && approvals.length > 0}>{approvals.length} {showAll ? 'total' : 'pending'}</span>
     <span class="grow"></span>
+    <!-- MCP approvals are one source; the canonical inbox joins all — S20-07. -->
+    <NeedsYouLink />
     <label class="check">
       <input type="checkbox" bind:checked={showAll} />
       <span>Show decided too</span>

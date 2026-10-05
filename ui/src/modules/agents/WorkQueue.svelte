@@ -1,5 +1,6 @@
 <script lang="ts">
-  // Mission Control — 6-bucket work-queue view (B4).
+  // Agents → Work Queue — 6-bucket work-queue view (B4). Named WorkQueue (not
+  // MissionControl) so it is not confused with the Mission Control module.
   //
   // Surfaces: needs_you | working | review_ready | waiting | failed | budget_warn
   // Live updates: driven off existing WS buses (reviewBus, workflowRunBus,
@@ -24,6 +25,7 @@
   import { winKey } from '../../lib/win';
   import { matchesSavedView } from './viewFilters';
   import { agentProviders } from '../../lib/providers';
+  import NeedsYouLink from '../home/NeedsYouLink.svelte';
 
   // ---------------------------------------------------------------------------
   // Types (module-local; mirroring the Rust DTOs without touching api/types.ts)
@@ -405,6 +407,8 @@
          is the separate sidebar module (the work graph). -->
     <h2>Work queue</h2>
     <div class="header-actions">
+      <!-- The canonical inbox (every source, not just this queue) — S20-07. -->
+      <NeedsYouLink />
       <button class="btn small" onclick={() => router.go('history')} title="Browse past conversations" data-testid="mission-history-btn">
         <Icon name="clock" size={12} /> History
       </button>

@@ -6,7 +6,7 @@ import { deferred } from './sourceHarness.ts';
 
 // Actual component methods with deferred HTTP: asynchronous ownership, not DOM.
 function setup() {
-  const source = readFileSync(new URL('../src/modules/agents/MissionControl.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
+  const source = readFileSync(new URL('../src/modules/agents/WorkQueue.svelte', import.meta.url), 'utf8').split('<script lang="ts">')[1].split('</script>')[0];
   const parsed = ts.createSourceFile('mission.ts', source, ts.ScriptTarget.Latest, true);
   const methods = parsed.statements.filter((node) => ts.isFunctionDeclaration(node) && ['load', 'createView'].includes(node.name?.text ?? '')).map((node) => source.slice(node.getStart(parsed), node.end)).join('\n');
   const requests: { path: string; result: ReturnType<typeof deferred<any>> }[] = [];

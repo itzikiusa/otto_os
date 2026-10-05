@@ -169,8 +169,8 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await expect(page.getByRole('tab', { name: 'Graph', exact: true })).toHaveAttribute('aria-selected', 'true');
       await shot('mission-control');
       await page.goto('/#/personal-agents/rooms');
-      await expect(page.getByRole('log', { name: 'Room messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
-      await page.getByLabel('Message to the room').fill('Draft kept while reading the discussion');
+      await expect(page.getByRole('log', { name: 'Channel messages' }).getByText('Decision 8:', { exact: false })).toBeVisible();
+      await page.getByLabel('Message to the channel').fill('Draft kept while reading the discussion');
       await shot('rooms');
       await page.goto('/#/personal-agents');
       await expect(page.locator('.pa-card').first()).toBeVisible();
@@ -244,13 +244,13 @@ test('rooms: phone conversation keeps its header and composer in view', async ({
   await ctx.dispose();
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto('/#/personal-agents/rooms');
-  await page.getByRole('button', { name: 'Back to rooms' }).click();
+  await page.getByRole('button', { name: 'Back to channels' }).click();
   await page.getByRole('button', { name: 'Long discussion 0 agents' }).click();
-  await page.getByLabel('Message to the room').fill('Follow-up draft');
+  await page.getByLabel('Message to the channel').fill('Follow-up draft');
   await expectFullyInViewport(page, page.locator('.detail-title'));
-  await expectFullyInViewport(page, page.getByLabel('Message to the room'));
+  await expectFullyInViewport(page, page.getByLabel('Message to the channel'));
   await expectFullyInViewport(page, page.getByRole('button', { name: 'Send', exact: true }));
-  await expect.poll(() => page.getByRole('log', { name: 'Room messages' }).evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
+  await expect.poll(() => page.getByRole('log', { name: 'Channel messages' }).evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
 });
 
 test('goal research flow: draft, edit, launch and inspect within a phone viewport', async ({ page }) => {
