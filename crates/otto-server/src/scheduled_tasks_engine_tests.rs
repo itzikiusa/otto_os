@@ -343,6 +343,11 @@ async fn workflow_task_overlap_is_recorded_skipped_not_error() {
     let tmp = tempfile::TempDir::new().unwrap();
     let pool = mem_pool().await;
     seed_workspace(&pool, "wf-ws").await;
+    sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('u','u','x','U',0,?)")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
     let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
     let wfs = otto_state::WorkflowsRepo::new(ctx.pool.clone());
     let wf = wfs
