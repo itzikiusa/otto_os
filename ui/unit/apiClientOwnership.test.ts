@@ -4,12 +4,14 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
+import { deferred } from './sourceHarness.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
   const ws = {currentId: 'A'};
+  const notices: string[] = [];
   const api: Record<string, any> = {get: async () => [], patch: async () => ({}), post: async () => ({}), ...overrides};
   // The API client's "Send" rides the long lane (`api.long.post`).
   api.long = {post: (...args: unknown[]) => api.post(...args), get: (...args: unknown[]) => api.get(...args)};
@@ -19,7 +21,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
     localStorage: {getItem() {return null;},setItem() {}},
     require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
       : p.includes('workspace.svelte') ? {ws}
-      : p.includes('toast') ? {toasts: {error() {},success() {},info() {}}}
+      : p.includes('toast') ? {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}
       : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
       : p.endsWith('/apiSecretShapes') ? secretShapes
       : p.endsWith('/scriptRunner') ? {runScript}
@@ -30,7 +32,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
     {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
-  return {v: context.exports.apiClient, ws, extras: context.exports.draftToExtras};
+  return {v: context.exports.apiClient, ws, notices, extras: context.exports.draftToExtras};
 }
 
 test('save completion belongs to the initiating tab, never the newly active tab', async () => {
@@ -416,3 +418,123 @@ for (const code of ["console.log('done')", "pm.variables.set('a','one')", "pm.va
     if(code.includes("set('a'")) assert.equal(v.runtimeVars.a,'one');
   });
 }
+
+// Iteration 4: late publication belongs to one workspace visit, including an
+// A -> B -> A round trip. The real restore/load methods advance ownership.
+const workspaceLists = [
+  { field: 'collections', route: 'collections', load: 'loadCollections', save: 'saveCollection', del: 'deleteCollection' },
+  { field: 'environments', route: 'environments', load: 'loadEnvironments', save: 'saveEnvironment', del: 'deleteEnvironment' },
+  { field: 'automations', route: 'automations', load: 'loadAutomations', save: 'saveAutomation', del: 'deleteAutomation' },
+];
+function ownedRow(workspace: string, suffix = '') {
+  return { id: `${workspace}${suffix}`, workspace_id: workspace, name: `${workspace}${suffix}`, variables: {}, secret_keys: [], is_active: true, position: 0, steps: [] };
+}
+
+for (const list of workspaceLists) {
+  for (const roundtrip of [false, true]) {
+    test(`${list.load}: late response cannot overwrite ${roundtrip ? 'a new A visit' : 'workspace B'}`, async () => {
+      const delayed = deferred<any>(); let intercept = false;
+      const { v, ws } = setup({ get: async (url: string) => {
+        if (intercept && url === `/workspaces/A/api-client/${list.route}`) { intercept = false; return delayed.promise; }
+        if (url.endsWith(`/${list.route}`)) return [ownedRow(ws.currentId, '-current')];
+        return [];
+      } });
+      await v.loadAll(); intercept = true;
+      const old = v[list.load]({ force: true });
+      ws.currentId = 'B'; await v.loadAll(); await v.loadAutomations({ force: true });
+      if (roundtrip) { ws.currentId = 'A'; await v.loadAll({ force: true }); await v.loadAutomations({ force: true }); }
+      delayed.resolve([ownedRow('A', '-stale')]); await old;
+      assert.equal(v[list.field][0]?.id, `${ws.currentId}-current`);
+    });
+
+    test(`${list.save}: completed write returns to caller but cannot publish into ${roundtrip ? 'a new A visit' : 'workspace B'}`, async () => {
+      const delayed = deferred<any>();
+      const { v, ws } = setup({
+        post: () => delayed.promise,
+        get: async (url: string) => url.endsWith(`/${list.route}`) ? [ownedRow(ws.currentId, '-current')] : [],
+      });
+      await v.loadAll();
+      const old = v[list.save]({ name: 'new' });
+      ws.currentId = 'B'; await v.loadAll(); await v.loadAutomations({ force: true });
+      if (roundtrip) { ws.currentId = 'A'; await v.loadAll({ force: true }); await v.loadAutomations({ force: true }); }
+      const saved = ownedRow('A', '-saved');
+      delayed.resolve(saved); assert.equal(await old, saved, 'server result still belongs to its caller');
+      assert.equal(JSON.stringify(v[list.field].map((row: any) => row.id)), JSON.stringify([`${ws.currentId}-current`]));
+    });
+  }
+
+  test(`${list.save}: stale failure does not toast over the new workspace`, async () => {
+    const delayed = deferred<any>();
+    const { v, ws, notices } = setup({ post: () => delayed.promise });
+    await v.loadAll(); const old = v[list.save]({ name: 'new' });
+    ws.currentId = 'B'; await v.loadAll();
+    delayed.reject(Error('A mutation failed')); await old;
+    assert.deepEqual(notices, []);
+  });
+}
+
+for (const [method, route, errorField] of [
+  ['loadCollections', 'collections', 'requestsLoadError'],
+  ['loadRequests', 'requests/summaries', 'requestsLoadError'],
+  ['loadEnvironments', 'environments', 'envLoadError'],
+]) {
+  test(`${method}: stale error cannot mark a successfully loaded empty workspace as failed`, async () => {
+    const delayed = deferred<any>(); let intercept = false;
+    const { v, ws, notices } = setup({ get: async (url: string) => {
+      if (intercept && url.endsWith(`/${route}`)) { intercept = false; return delayed.promise; }
+      return [];
+    } });
+    await v.loadAll(); intercept = true; const old = v[method]();
+    ws.currentId = 'B'; await v.loadAll();
+    delayed.reject(Error('A refresh failed')); await old;
+    assert.equal(v[errorField], null); assert.deepEqual(notices, []);
+  });
+}
+
+test('late activation cannot clear the new workspace active environment or change its next Send', async () => {
+  const delayed = deferred<any>(); const sent: any[] = [];
+  const { v, ws } = setup({
+    get: async (url: string) => url.endsWith('/environments') ? [ownedRow(ws.currentId)] : [],
+    post: async (url: string, body: any) => {
+      if (url.endsWith('/activate')) return delayed.promise;
+      sent.push({ url, body }); return okResp(200);
+    },
+  });
+  // Identity-rune harness: preserve the production derived selection semantics.
+  Object.defineProperty(v, 'activeEnv', { get: () => v.environments.find((e: any) => e.is_active) ?? null });
+  await v.loadAll(); const old = v.activateEnvironment('A');
+  ws.currentId = 'B'; await v.loadAll(); delayed.resolve({}); await old;
+  assert.equal(v.activeEnv?.id, 'B');
+  v.draft = { ...v.draft, url: 'https://example.test' }; await v.execute();
+  assert.equal(sent[0].body.environment_id, 'B');
+  assert.ok(sent[0].url.startsWith('/workspaces/B/'));
+});
+
+test('loadAll: old A success cannot overwrite the fresh A visit after A-B-A', async () => {
+  const delayed = deferred<any>(); let intercept = true;
+  const { v, ws } = setup({ get: async (url: string) => {
+    if (intercept && url.endsWith('/environments')) { intercept = false; return delayed.promise; }
+    return url.endsWith('/environments') ? [ownedRow(ws.currentId, '-current')] : [];
+  } });
+  const old = v.loadAll(); ws.currentId = 'B'; await v.loadAll();
+  ws.currentId = 'A'; await v.loadAll({ force: true });
+  delayed.resolve([ownedRow('A', '-stale')]); await old;
+  assert.equal(v.environments[0]?.id, 'A-current');
+});
+
+test('loadAll: obsolete A failure cannot clear the loading state of a newer A visit', async () => {
+  const oldResponse = deferred<any>(), currentResponse = deferred<any>(); let generation = 0;
+  const { v, ws } = setup({ get: async (url: string) => {
+    if (url === '/workspaces/A/api-client/environments') return ++generation === 1 ? oldResponse.promise : currentResponse.promise;
+    return [];
+  } });
+  const old = v.loadAll(); ws.currentId = 'B'; await v.loadAll();
+  ws.currentId = 'A'; const current = v.loadAll({ force: true });
+  oldResponse.reject(Error('old visit failed')); await old;
+  try {
+    assert.equal(v.loading, true); assert.equal(v.envLoadError, null); assert.equal(v.requestsLoadError, null);
+  } finally {
+    currentResponse.resolve([ownedRow('A', '-current')]); await current;
+  }
+  assert.equal(v.loading, false); assert.equal(v.environments[0]?.id, 'A-current');
+});

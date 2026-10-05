@@ -27,6 +27,10 @@
   /** The walk stopped at MAX_MATCHES — the label reads "N+". */
   let truncated = $state(false);
   let inputEl: HTMLInputElement | null = $state(null);
+  let searching = $state(false);
+  let searchError = $state('');
+  let searchSequence = 0;
+  let searchAbort: AbortController | null = null;
 
   /** Matches past this aren't collected: a one-letter query on a 100k-line
    *  diff would otherwise build (and highlight) hundreds of thousands. */
@@ -55,6 +59,11 @@
   let currentRange: AbstractRange | null = null;
 
   function dropRanges(): void {
+    navSeq++;
+    searchSequence++;
+    searchAbort?.abort();
+    searching = false;
+    searchError = '';
     clearHighlights();
     ranges = [];
     rowMatches = [];
@@ -187,7 +196,14 @@
   }
 
   // ---- core search ----
-  function runSearch(): void {
+  async function runSearch(): Promise<void> {
+    navSeq++;
+    const sequence = ++searchSequence;
+    searchAbort?.abort();
+    const controller = new AbortController();
+    searchAbort = controller;
+    searchError = '';
+    searching = false;
     clearHighlights();
     truncated = false;
     currentRange = null;
@@ -205,17 +221,41 @@
 
     // 1) Windowed views: search their whole row models.
     const active = activeFindProviders();
+    const current = () => sequence === searchSequence && !controller.signal.aborted && query.toLowerCase() === lower && findInPage.open;
+    const sameProviders = () => {
+      const now = activeFindProviders();
+      return now.length === active.length && now.every((entry, i) => entry.provider === active[i].provider && entry.root === active[i].root);
+    };
     const rows: RowMatch[] = [];
-    outer: for (const { provider } of active) {
-      const n = provider.count();
-      for (let i = 0; i < n; i++) {
-        const hits = countOccurrences(provider.text(i), lower, MAX_MATCHES - rows.length, provider.lowered);
-        for (let k = 0; k < hits; k++) rows.push({ p: provider, row: i, nth: k });
-        if (rows.length >= MAX_MATCHES) {
-          truncated = true;
-          break outer;
+    searching = active.some(({ provider }) => !!provider.search);
+    if (searching) { rowMatches = []; ranges = []; totalCount = 0; currentIdx = -1; }
+    try {
+      outer: for (const { provider } of active) {
+        if (provider.search) {
+          const matches = await provider.search(lower, MAX_MATCHES - rows.length, controller.signal);
+          if (!current()) return;
+          if (!sameProviders()) { void runSearch(); return; }
+          for (const match of matches) {
+            for (let nth = 0; nth < match.count && rows.length < MAX_MATCHES; nth++) rows.push({ p: provider, row: match.row, nth });
+            if (rows.length >= MAX_MATCHES) { truncated = true; break outer; }
+          }
+        } else {
+          const n = provider.count();
+          for (let i = 0; i < n; i++) {
+            const hits = countOccurrences(provider.text(i), lower, MAX_MATCHES - rows.length, provider.lowered);
+            for (let k = 0; k < hits; k++) rows.push({ p: provider, row: i, nth: k });
+            if (rows.length >= MAX_MATCHES) { truncated = true; break outer; }
+          }
         }
       }
+    } catch (e) {
+      if (current()) {
+        if (!sameProviders()) { void runSearch(); return; }
+        searchError = e instanceof Error ? e.message : String(e);
+      }
+      return;
+    } finally {
+      if (sequence === searchSequence) searching = false;
     }
 
     // 2) The rest of the DOM, minus the provider roots (already counted).
@@ -289,20 +329,24 @@
    *  don't follow DOM edits) re-searches and lands as close as possible. */
   async function goTo(idx: number): Promise<void> {
     const seq = ++navSeq;
+    const search = searchSequence, controller = searchAbort;
+    const current = () => seq === navSeq && search === searchSequence && !controller?.signal.aborted && findInPage.open;
     if (idx < rowMatches.length) {
       const m = rowMatches[idx];
       if (m.row >= m.p.count()) {
-        runSearch(); // the model shrank under the match list
+        await runSearch(); // the model shrank under the match list
         return;
       }
       currentIdx = idx;
       let el = m.p.rowElement(m.row);
       if (!el) {
-        await m.p.reveal(m.row);
+        await m.p.reveal(m.row, controller?.signal);
+        if (!current()) return;
         await nextFrame();
-        if (seq !== navSeq) return;
+        if (!current()) return;
         el = m.p.rowElement(m.row);
       }
+      if (!current()) return;
       const loc = el ? locateInElement(el, searched, m.nth) : null;
       currentRange = loc ? makeRange(loc.node, loc.offset, loc.offset + searched.length) : null;
       // The window moved: repaint what is mounted now, then the current one.
@@ -315,7 +359,7 @@
     }
     let k = idx - rowMatches.length;
     if (!ranges[k]?.startContainer.isConnected) {
-      runSearch();
+      await runSearch();
       if (totalCount === 0 || ranges.length === 0) return;
       k = Math.min(Math.max(0, k), ranges.length - 1);
     }
@@ -360,7 +404,7 @@
 
   // ---- display label ----
   const countLabel = $derived(
-    totalCount === 0
+    searching ? 'Searching…' : searchError ? 'Search unavailable' : totalCount === 0
       ? query
         ? '0 results'
         : ''
@@ -384,7 +428,8 @@
     />
 
     {#if query}
-      <span class="find-count" aria-live="polite" aria-atomic="true">{countLabel}</span>
+      <span class="find-count" aria-live="polite" aria-atomic="true" title={searchError || undefined}>{countLabel}</span>
+      {#if searchError}<button class="btn small" onclick={() => void runSearch()}>Retry</button>{/if}
     {/if}
 
     <button

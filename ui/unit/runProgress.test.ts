@@ -85,3 +85,30 @@ test('a contiguous live node summary applies in place; anything else refetches (
   assert.equal(applyLiveNode({...mk(),checkpoint_rev:3},ev()),false,'checkpointed run');
   assert.equal(applyLiveNode({...mk(),summary:false},ev()),false,'full-body view');
 });
+
+test('shared completed node bodies obey a 16 MiB estimated byte budget', async () => {
+  const {SharedNodeBodies}=helpers(); const cache=new SharedNodeBodies();
+  const body={output:'x'.repeat(1024*1024)};
+  const visible=await cache.fetch('run','n0',async()=>({detail_version:'v',body}));
+  for(let i=1;i<12;i++) await cache.fetch('run',`n${i}`,async()=>({detail_version:'v',body}));
+  let estimated=0;
+  for(let i=0;i<12;i++) {const kept=cache.peek('run',`n${i}`,'v');if(kept) estimated+=2*JSON.stringify(kept).length;}
+  assert.ok(estimated<=16*1024*1024,`retained estimate ${estimated} exceeds 16 MiB`);
+  assert.equal(visible.body.output.length,1024*1024,'eviction never changes an already displayed body');
+});
+test('oversized shared bodies reach every joined consumer but are not cached', async () => {
+  const {SharedNodeBodies}=helpers(); const cache=new SharedNodeBodies(); let calls=0;
+  let release!:()=>void; const wait=new Promise<void>(r=>release=r);
+  const body={output:'x'.repeat(9*1024*1024)};
+  const load=async()=>{calls++;await wait;return {detail_version:'v',body};};
+  const a=cache.fetch('run','huge',load), b=cache.fetch('run','huge',load); release();
+  const [first,second]=await Promise.all([a,b]); assert.equal(calls,1);assert.equal(first,second);assert.equal(first.body,body);
+  assert.ok(cache.peek('run','huge','v') === null,'oversized inactive body is not retained');
+});
+test('shared completed body eviction uses last access rather than insertion order', async () => {
+  const {SharedNodeBodies}=helpers(); const cache=new SharedNodeBodies(2);
+  for(const node of ['a','b']) await cache.fetch('r',node,async()=>({detail_version:'v',body:node}));
+  assert.equal(cache.peek('r','a','v'),'a');
+  await cache.fetch('r','c',async()=>({detail_version:'v',body:'c'}));
+  assert.equal(cache.peek('r','a','v'),'a');assert.equal(cache.peek('r','b','v'),null);
+});

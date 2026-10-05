@@ -23,6 +23,23 @@
   // intentionally left out of the destructure so it isn't flagged as unused.
   let { before, after, mode = 'line', ignoreWhitespace = false, contextLines }: Props =
     $props();
+  const PAGE_ROWS = 500;
+  let pageIndex = $state(0);
+  $effect(() => { before; after; mode; ignoreWhitespace; contextLines; pageIndex = 0; });
+
+  function changePage(delta: number): void {
+    pageIndex = Math.max(0, Math.min(pageCount - 1, pageIndex + delta));
+  }
+
+  function downloadSource(side: 'before' | 'after'): void {
+    const blob = new Blob([side === 'before' ? before : after], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${side}.txt`;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
 
   type Tag = 'eq' | 'del' | 'add';
   interface Op {
@@ -41,50 +58,112 @@
 
   // Generic LCS over an array of comparable keys → backtracked op stream.
   function lcsOps<T>(a: T[], b: T[], key: (x: T) => string): Array<{ tag: Tag; i: number; j: number }> {
-    const n = a.length;
-    const m = b.length;
     const out: Array<{ tag: Tag; i: number; j: number }> = [];
-    // Size cap: beyond this the O(n·m) table is too big — degrade to del-all/add-all.
-    if (n * m > 4_000_000) {
-      for (let i = 0; i < n; i++) out.push({ tag: 'del', i, j: -1 });
-      for (let j = 0; j < m; j++) out.push({ tag: 'add', i: -1, j });
-      return out;
-    }
-    const w = m + 1;
-    const dp = new Int32Array((n + 1) * (m + 1));
     const ka = a.map(key);
     const kb = b.map(key);
-    for (let i = n - 1; i >= 0; i--) {
-      for (let j = m - 1; j >= 0; j--) {
-        dp[i * w + j] =
-          ka[i] === kb[j]
-            ? dp[(i + 1) * w + (j + 1)] + 1
-            : Math.max(dp[(i + 1) * w + j], dp[i * w + (j + 1)]);
+    let cellsLeft = 4_000_000;
+    let comparisonsLeft = 4_000_000;
+    // Small edit distance, including repeated lines with no unique anchors.
+    // Frontier snapshots have a fixed distance ceiling and share the total
+    // allocation budget; snakes also spend an explicit comparison budget.
+    function repeatedRun(a0: number, a1: number, b0: number, b1: number): typeof out | null {
+      const n = a1 - a0, m = b1 - b0;
+      const distance = Math.min(n + m, 256), offset = distance + 1, width = 2 * distance + 3;
+      if (Math.abs(n - m) > distance || cellsLeft < width) return null;
+      cellsLeft -= width;
+      const frontier = new Int32Array(width).fill(-1);
+      frontier[offset + 1] = 0;
+      const trace: Int32Array[] = [];
+      for (let d = 0; d <= distance; d++) {
+        if (cellsLeft < width) return null;
+        cellsLeft -= width;
+        trace.push(frontier.slice());
+        for (let k = -d; k <= d; k += 2) {
+          if (--comparisonsLeft < 0) return null;
+          const at = offset + k;
+          let x = k === -d || (k !== d && frontier[at - 1] < frontier[at + 1]) ? frontier[at + 1] : frontier[at - 1] + 1;
+          let y = x - k;
+          while (x < n && y < m) {
+            if (--comparisonsLeft < 0) return null;
+            if (ka[a0 + x] !== kb[b0 + y]) break;
+            x++; y++;
+          }
+          frontier[at] = x;
+          if (x < n || y < m) continue;
+          const result: typeof out = [];
+          for (let depth = d; depth >= 0; depth--) {
+            const previous = trace[depth], diagonal = x - y;
+            const previousDiagonal = diagonal === -depth || (diagonal !== depth && previous[offset + diagonal - 1] < previous[offset + diagonal + 1]) ? diagonal + 1 : diagonal - 1;
+            const previousX = previous[offset + previousDiagonal], previousY = previousX - previousDiagonal;
+            while (x > previousX && y > previousY) result.push({ tag: 'eq', i: a0 + --x, j: b0 + --y });
+            if (depth === 0) break;
+            if (x === previousX) result.push({ tag: 'add', i: -1, j: b0 + --y });
+            else result.push({ tag: 'del', i: a0 + --x, j: -1 });
+          }
+          return result.reverse();
+        }
       }
+      return null;
     }
-    let i = 0;
-    let j = 0;
-    while (i < n && j < m) {
-      if (ka[i] === kb[j]) {
-        out.push({ tag: 'eq', i, j });
-        i++;
-        j++;
-      } else if (dp[(i + 1) * w + j] >= dp[i * w + (j + 1)]) {
-        out.push({ tag: 'del', i, j: -1 });
-        i++;
+    // Prefix/suffix cost is linear. For a large middle, unique matching lines
+    // supply ordered anchors; no recursive quadratic tables or deep recursion.
+    function region(a0: number, a1: number, b0: number, b1: number, anchorsAllowed: boolean): void {
+      while (a0 < a1 && b0 < b1 && ka[a0] === kb[b0]) out.push({ tag: 'eq', i: a0++, j: b0++ });
+      let suffix = 0;
+      while (a0 < a1 && b0 < b1 && ka[a1 - 1] === kb[b1 - 1]) { a1--; b1--; suffix++; }
+      const n = a1 - a0, m = b1 - b0;
+      const cells = (n + 1) * (m + 1);
+      if (n && m && cells <= cellsLeft) {
+        cellsLeft -= cells;
+        const w = m + 1, dp = new Int32Array(cells);
+        for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+          dp[i * w + j] = ka[a0 + i] === kb[b0 + j]
+            ? dp[(i + 1) * w + j + 1] + 1
+            : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+        }
+        let i = 0, j = 0;
+        while (i < n && j < m) {
+          if (ka[a0 + i] === kb[b0 + j]) out.push({ tag: 'eq', i: a0 + i++, j: b0 + j++ });
+          else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) out.push({ tag: 'del', i: a0 + i++, j: -1 });
+          else out.push({ tag: 'add', i: -1, j: b0 + j++ });
+        }
+        while (i < n) out.push({ tag: 'del', i: a0 + i++, j: -1 });
+        while (j < m) out.push({ tag: 'add', i: -1, j: b0 + j++ });
+      } else if (n && m && anchorsAllowed) {
+        const left = new Map<string, number>(), right = new Map<string, number>();
+        for (let i = a0; i < a1; i++) left.set(ka[i], left.has(ka[i]) ? -1 : i);
+        for (let j = b0; j < b1; j++) right.set(kb[j], right.has(kb[j]) ? -1 : j);
+        const candidates: { i: number; j: number; prev: number }[] = [];
+        const tails: number[] = [];
+        for (const [text, i] of left) {
+          const j = right.get(text);
+          if (i < 0 || j === undefined || j < 0) continue;
+          let lo = 0, hi = tails.length;
+          while (lo < hi) { const mid = (lo + hi) >>> 1; if (candidates[tails[mid]].j < j) lo = mid + 1; else hi = mid; }
+          candidates.push({ i, j, prev: lo ? tails[lo - 1] : -1 });
+          tails[lo] = candidates.length - 1;
+        }
+        const anchors: { i: number; j: number }[] = [];
+        for (let at = tails.at(-1) ?? -1; at >= 0; at = candidates[at].prev) anchors.push(candidates[at]);
+        anchors.reverse();
+        let i = a0, j = b0;
+        for (const anchor of anchors) {
+          region(i, anchor.i, j, anchor.j, false);
+          out.push({ tag: 'eq', i: anchor.i, j: anchor.j });
+          i = anchor.i + 1; j = anchor.j + 1;
+        }
+        region(i, a1, j, b1, false);
       } else {
-        out.push({ tag: 'add', i: -1, j });
-        j++;
+        const common = n && m ? repeatedRun(a0, a1, b0, b1) : null;
+        if (common) for (const op of common) out.push(op);
+        else {
+          for (let i = a0; i < a1; i++) out.push({ tag: 'del', i, j: -1 });
+          for (let j = b0; j < b1; j++) out.push({ tag: 'add', i: -1, j });
+        }
       }
+      for (let k = 0; k < suffix; k++) out.push({ tag: 'eq', i: a1 + k, j: b1 + k });
     }
-    while (i < n) {
-      out.push({ tag: 'del', i, j: -1 });
-      i++;
-    }
-    while (j < m) {
-      out.push({ tag: 'add', i: -1, j });
-      j++;
-    }
+    region(0, a.length, 0, b.length, true);
     return out;
   }
 
@@ -99,6 +178,7 @@
 
   // Intra-line word diff: tokenize into whitespace/word runs, LCS on tokens.
   function diffWords(a: string, b: string): { left: Seg[]; right: Seg[] } {
+    if (a.length + b.length > 16_000) return { left: [{ t: 'del', s: a }], right: [{ t: 'add', s: b }] };
     const at = a.match(/\s+|\S+/g) ?? [];
     const bt = b.match(/\s+|\S+/g) ?? [];
     const ops = lcsOps(at, bt, (x) => x);
@@ -131,6 +211,7 @@
     let aNo = 1;
     let bNo = 1;
     let k = 0;
+    let wordCellsLeft = 4_000_000;
     while (k < ops.length) {
       const op = ops[k];
       if (op.tag === 'eq') {
@@ -178,7 +259,12 @@
       const pairCount = mode === 'word' ? Math.min(dels.length, adds.length) : 0;
       // One word diff per replaced pair, shared by both sides (it used to run
       // twice — once for the left segments, once for the right).
-      const pairs = Array.from({ length: pairCount }, (_, p) => diffWords(dels[p], adds[p]));
+      const pairs = Array.from({ length: pairCount }, (_, p) => {
+        const cells = ((dels[p].match(/\s+|\S+/g)?.length ?? 0) + 1) * ((adds[p].match(/\s+|\S+/g)?.length ?? 0) + 1);
+        if (cells > wordCellsLeft) return { left: [{ t: 'del' as const, s: dels[p] }], right: [{ t: 'add' as const, s: adds[p] }] };
+        wordCellsLeft -= cells;
+        return diffWords(dels[p], adds[p]);
+      });
       for (let p = 0; p < dels.length; p++) {
         if (p < pairCount) {
           out.push({ kind: 'del', segs: pairs[p].left, aNo: aNo++ });
@@ -237,11 +323,25 @@
     }
     return out;
   });
+  const pageCount = $derived(Math.max(1, Math.ceil((mode === 'split' ? splitRows.length : rows.length) / PAGE_ROWS)));
+  const visibleRows = $derived(rows.slice(pageIndex * PAGE_ROWS, (pageIndex + 1) * PAGE_ROWS));
+  const visibleSplitRows = $derived(splitRows.slice(pageIndex * PAGE_ROWS, (pageIndex + 1) * PAGE_ROWS));
 </script>
 
 <div class="dv" class:split={mode === 'split'}>
+  {#if pageCount > 1}
+    <div class="dv-gap" data-find-skip>
+      <button class="btn small" onclick={() => changePage(-1)} disabled={pageIndex === 0}>Previous changes</button>
+      <span>Page {pageIndex + 1} of {pageCount}</span>
+      <button class="btn small" onclick={() => changePage(1)} disabled={pageIndex + 1 >= pageCount}>Next changes</button>
+    </div>
+  {/if}
+  <div class="dv-gap" data-find-skip>
+    <button class="btn small" onclick={() => downloadSource('before')}>Download before</button>
+    <button class="btn small" onclick={() => downloadSource('after')}>Download after</button>
+  </div>
   {#if mode === 'split'}
-    {#each splitRows as row, ri (ri)}
+    {#each visibleSplitRows as row, ri (ri)}
       {#if row.gap !== undefined}
         <div class="dv-gap">⋯ {row.gap} unchanged line{row.gap === 1 ? '' : 's'}</div>
       {:else}
@@ -262,7 +362,7 @@
       {/if}
     {/each}
   {:else}
-    {#each rows as row, ri (ri)}
+    {#each visibleRows as row, ri (ri)}
       {#if row.kind === 'gap'}
         <div class="dv-gap">⋯ {row.count} unchanged line{row.count === 1 ? '' : 's'}</div>
       {:else if row.kind === 'eq'}

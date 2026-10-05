@@ -2521,6 +2521,9 @@ pub struct ScheduledTask {
     pub notify_on_change: bool,
     /// Build a proof pack (report + run metadata) for each run.
     pub attach_proof: bool,
+    /// Internal dispatch/settlement ownership; never accepted from API clients.
+    #[serde(skip)]
+    pub schedule_generation: i64,
     pub last_run_at: Option<String>,
     pub last_status: Option<String>,
     pub next_run_at: Option<String>,

@@ -75,6 +75,13 @@ pub struct RecapMetadata {
     pub summary_error: Option<String>,
     pub summary_through_seq: Option<u64>,
 }
+/// Body-free owner-local archive revision. Tokens are opaque file/state stamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecapRevision {
+    pub metadata: RecapMetadata,
+    pub events_revision: String,
+    pub draft_revision: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecapSpeechSegment {
     pub start_ms: u64,

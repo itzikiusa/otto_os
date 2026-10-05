@@ -267,15 +267,15 @@
   }
 
   /** Ask the agent to edit this scene's .mermaid source. */
-  export async function generate(prompt: string): Promise<void> {
+  export async function generate(prompt: string): Promise<boolean> {
     const p = prompt.trim();
-    if (!p || generating) return;
+    if (!p || generating) return false;
     generating = true;
     userAdjusted = false;
     // The result belongs to THIS scene even if the user switches away while
     // the agent works (the server commits it there).
     const sceneId = canvas.currentId;
-  const saveContext = canvas.saveContext;
+    const saveContext = canvas.saveContext;
     canvas.pushConvo('user', p, sceneId);
     try {
       const res = await canvas.assist(p, 'flow');
@@ -283,19 +283,21 @@
       if (!src.trim()) {
         canvas.pushConvo('assistant', res.note || 'No diagram was produced.', sceneId);
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
-        return;
+        return false;
       }
-      if (canvas.currentId !== sceneId) {
+      if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
         toasts.success('Ask Otto finished', 'The diagram was saved to the scene you asked from.');
-        return;
+        return true;
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'mermaid', source: src }, sceneId);
       canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
+      return true;
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
       toastError('Couldn’t ask Otto', e);
+      return false;
     } finally {
       generating = false;
     }

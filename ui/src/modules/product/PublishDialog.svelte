@@ -8,7 +8,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import type { IssueAccount, IssueProject } from '../../lib/api/types';
-  import type { ConfluenceSpace, ProductStoryVersion } from './types';
+  import type { ConfluenceSpace, ProductStoryVersion, ProductStoryDetail, ReviewedContent } from './types';
 
   interface Props {
     mode: 'story' | 'rfc';
@@ -25,15 +25,20 @@
   let projects: IssueProject[] = $state([]);
   let projectsLoading = $state(false);
   let projectKey = $state('');
+  let projectsError = $state('');
+  let projectsSequence = 0;
 
   let issueTypes: string[] = $state([]);
   let issueTypesLoading = $state(false);
   let issueType = $state('Story');
+  let issueTypesSequence = 0;
 
   // ── RFC-mode: spaces + optional parent + optional title ──────────────────
   let spaces: ConfluenceSpace[] = $state([]);
   let spacesLoading = $state(false);
   let spaceKey = $state('');
+  let spacesError = $state('');
+  let spacesSequence = 0;
   let parentId = $state('');
   let rfcTitle = $state('');
 
@@ -60,7 +65,8 @@
 
   // ── Preview: WHAT is sent (the same version the daemon publishes — newest
   // suggested, else draft, else source; mirrors `best_content_version`). ─────
-  const storyTitle = $derived(product.detail?.story.title ?? '');
+  let reviewedContent = $state<ReviewedContent | null>(null);
+  const storyTitle = $derived(reviewedContent?.title ?? '');
   const isDraft = $derived(product.detail?.story.source_kind === 'draft');
   let previewError = $state('');
   let previewStoryId = $state<string | null>(null);
@@ -70,26 +76,32 @@
   // reference line to the Jira description (`publish_as_story`), so the
   // preview shows it too — the confirm must match what is actually sent.
   const rfcRef = $derived.by(() => {
-    const s = product.detail?.story;
+    const s = reviewedContent;
     return mode === 'story' && s?.source_kind === 'confluence' && s.url ? `> RFC: ${s.url}` : '';
   });
   const PREVIEW_LINES = 6;
   const previewLines = $derived.by(() => {
     const body = rfcRef ? `${rfcRef}\n\n${previewBody ?? ''}` : (previewBody ?? '');
-    const lines = body.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
-    return { head: lines.slice(0, PREVIEW_LINES), more: Math.max(0, lines.length - PREVIEW_LINES) };
+    const lines = body ? body.split('\n') : [];
+    return { body, head: lines.slice(0, PREVIEW_LINES), more: Math.max(0, lines.length - PREVIEW_LINES) };
   });
 
   async function loadPreview(sid: string | null): Promise<void> {
     const seq = ++previewSequence;
-    previewBody = null; previewError = ''; previewStoryId = null;
+    previewBody = null; previewError = ''; previewStoryId = null; reviewedContent = null;
     if (!sid) { previewError = 'Select a story before publishing.'; return; }
     const current = () => seq === previewSequence && product.selectedId === sid;
     try {
+      const { story } = await api.get<ProductStoryDetail>(`/product/stories/${sid}`);
       const vs = await api.get<ProductStoryVersion[]>(`/product/stories/${sid}/versions`);
       const pick = vs.find((v) => v.kind === 'suggested') ?? vs.find((v) => v.kind === 'draft') ?? vs.find((v) => v.kind === 'source');
       const body = pick ? (pick.body_md || (await product.getVersion(pick.id)).body_md) : '';
-      if (current()) { previewBody = body; previewStoryId = sid; }
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+      const body_sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+      if (current()) {
+        reviewedContent = { version_id: pick?.id ?? null, body_sha256, title: story.title, source_kind: story.source_kind, url: story.url };
+        previewBody = body; previewStoryId = sid;
+      }
     } catch (e) {
       if (current()) previewError = `Couldn’t load the content preview. ${e instanceof Error ? e.message : String(e)}`;
     }
@@ -140,57 +152,75 @@
   }
 
   async function loadProjects(): Promise<void> {
+    const account = accountId, sequence = ++projectsSequence;
+    const current = () => sequence === projectsSequence && accountId === account && mode === 'story';
     projectsLoading = true;
+    projectsError = ''; projects = [];
+    issueTypesSequence++; issueTypesLoading = false;
     projectKey = '';
     issueTypes = [];
     issueType = 'Story';
     try {
-      projects = await api.get<IssueProject[]>(`/issue/projects?account_id=${accountId}`);
+      const next = await api.get<IssueProject[]>(`/issue/projects?account_id=${account}`);
+      if (!current()) return;
+      projects = next;
       if (projects.length > 0) {
         projectKey = projects[0].key;
         await loadIssueTypes();
       }
     } catch (e) {
-      setError("Couldn't load Jira projects", e);
+      if (!current()) return;
+      projectsError = `Couldn’t load Jira projects. ${e instanceof Error ? e.message : String(e)}`;
     } finally {
-      projectsLoading = false;
+      if (current()) projectsLoading = false;
     }
   }
 
   async function loadIssueTypes(): Promise<void> {
     if (!accountId || !projectKey) return;
+    const account = accountId, project = projectKey, sequence = ++issueTypesSequence;
+    const current = () => sequence === issueTypesSequence && accountId === account && projectKey === project && mode === 'story';
     issueTypesLoading = true;
     try {
-      issueTypes = await api.get<string[]>(`/issue/${accountId}/${projectKey}/issue-types`);
+      const next = await api.get<string[]>(`/issue/${account}/${project}/issue-types`);
+      if (!current()) return;
+      issueTypes = next;
       issueType = issueTypes.includes('Story')
         ? 'Story'
         : issueTypes[0] ?? 'Story';
     } catch {
+      if (!current()) return;
       // Non-fatal — default to 'Story'.
       issueTypes = [];
       issueType = 'Story';
     } finally {
-      issueTypesLoading = false;
+      if (current()) issueTypesLoading = false;
     }
   }
 
   async function loadSpaces(): Promise<void> {
+    const account = accountId, sequence = ++spacesSequence;
+    const current = () => sequence === spacesSequence && accountId === account && mode === 'rfc';
     spacesLoading = true;
+    spacesError = ''; spaces = [];
     spaceKey = '';
     try {
-      spaces = await api.get<ConfluenceSpace[]>(
-        `/issue/confluence/spaces?account_id=${accountId}`,
+      const next = await api.get<ConfluenceSpace[]>(
+        `/issue/confluence/spaces?account_id=${account}`,
       );
+      if (!current()) return;
+      spaces = next;
       if (spaces.length > 0) spaceKey = spaces[0].key;
     } catch (e) {
-      setError("Couldn't load Confluence spaces", e);
+      if (!current()) return;
+      spacesError = `Couldn’t load Confluence spaces. ${e instanceof Error ? e.message : String(e)}`;
     } finally {
-      spacesLoading = false;
+      if (current()) spacesLoading = false;
     }
   }
 
   async function submit(): Promise<void> {
-    if (submitting || previewBody === null || previewError || previewStoryId !== product.selectedId) return;
+    if (submitting || previewBody === null || !reviewedContent || previewError || previewStoryId !== product.selectedId) return;
     formError = '';
     formErrorDetail = '';
     if (!accountId) { formError = 'Select an account.'; return; }
@@ -200,6 +230,7 @@
       if (mode === 'story') {
         if (!projectKey) { formError = 'Select a project.'; submitting = false; return; }
         const detail = await product.publishAsStory({
+          reviewed_content: reviewedContent,
           account_id: accountId,
           project_key: projectKey,
           issue_type: issueType || 'Story',
@@ -212,6 +243,7 @@
       } else {
         if (!spaceKey) { formError = 'Select a Confluence space.'; submitting = false; return; }
         const detail = await product.publishAsRfc({
+          reviewed_content: reviewedContent,
           account_id: accountId,
           space_key: spaceKey,
           parent_id: parentId.trim() || null,
@@ -222,6 +254,10 @@
       onclose();
     } catch (e) {
       setError(mode === 'story' ? "Couldn't publish to Jira" : "Couldn't publish to Confluence", e);
+      if (e instanceof ApiError && e.status === 409) {
+        reviewedContent = null;
+        previewError = 'The content changed. Reload the preview and review it before publishing again.';
+      }
     } finally {
       submitting = false;
     }
@@ -267,6 +303,9 @@
           <label class="label" for="pd-project">Project</label>
           {#if projectsLoading}
             <div class="loading-inline">Loading projects…</div>
+          {:else if projectsError}
+            <div role="alert" class="field-error">{projectsError}</div>
+            <button class="btn small" onclick={loadProjects}>Retry projects</button>
           {:else}
             <select
               id="pd-project"
@@ -315,6 +354,9 @@
           <label class="label" for="pd-space">Space</label>
           {#if spacesLoading}
             <div class="loading-inline">Loading spaces…</div>
+          {:else if spacesError}
+            <div role="alert" class="field-error">{spacesError}</div>
+            <button class="btn small" onclick={loadSpaces}>Retry spaces</button>
           {:else}
             <select
               id="pd-space"
@@ -374,7 +416,10 @@
         {:else}
           <pre class="pd-preview-body">{previewLines.head.join('\n')}</pre>
           {#if previewLines.more > 0}
-            <div class="pd-preview-more">+{previewLines.more} more line{previewLines.more === 1 ? '' : 's'}</div>
+            <details>
+              <summary class="pd-preview-more">Review all {previewLines.head.length + previewLines.more} lines</summary>
+              <pre class="pd-preview-body">{previewLines.body}</pre>
+            </details>
           {/if}
         {/if}
         {#if visibility}
@@ -399,7 +444,7 @@
     <button
       class="btn primary"
       onclick={submit}
-      disabled={submitting || accountsLoading || accounts.length === 0 || previewBody === null || !!previewError || previewStoryId !== product.selectedId}
+      disabled={submitting || accountsLoading || accounts.length === 0 || previewBody === null || !reviewedContent || !!previewError || previewStoryId !== product.selectedId}
     >
       {submitting ? 'Publishing…' : (mode === 'story' ? 'Publish story' : 'Publish RFC')}
     </button>

@@ -299,8 +299,24 @@ pub struct NewTranscriptReq {
     pub body: String,
 }
 
-#[derive(Debug, Deserialize)]
+/// Exact source snapshot reviewed before an outward publication. The digest
+/// binds mutable draft versions and the no-version empty-body fallback too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedContent {
+    pub version_id: Option<String>,
+    pub body_sha256: String,
+    pub title: String,
+    pub source_kind: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PublishAsRfcReq {
+    /// Optional binding for a workflow's frozen account destination.
+    #[serde(default)]
+    pub reviewed_account_url: Option<String>,
+    #[serde(default)]
+    pub reviewed_content: Option<ReviewedContent>,
     pub account_id: String,
     pub space_key: String,
     #[serde(default)]
@@ -309,8 +325,13 @@ pub struct PublishAsRfcReq {
     pub title: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PublishAsStoryReq {
+    /// Optional binding for a workflow's frozen account destination.
+    #[serde(default)]
+    pub reviewed_account_url: Option<String>,
+    #[serde(default)]
+    pub reviewed_content: Option<ReviewedContent>,
     pub account_id: String,
     pub project_key: String,
     pub issue_type: String,

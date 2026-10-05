@@ -673,3 +673,115 @@ async fn image_assets_roundtrip_and_reject_non_images() {
     .await;
     assert!(r.status.is_client_error(), "got {}", r.status);
 }
+
+/// Real route + isolated SQLite fixture: all revisions share the existing tiny
+/// content blob, so lifetime metadata growth is tested without large bodies.
+async fn many_revision_fixture(count: i64) -> (Router, DbPool, User, String) {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    let app = workbench_router(test_ctx(&pool).await);
+    let alice = user("alice", false);
+    let id = create_doc(&app, &alice, "lifetime.txt", "original content").await;
+    sqlx::query(
+        "WITH RECURSIVE seq(n) AS (SELECT 2 UNION ALL SELECT n+1 FROM seq WHERE n < ?) \
+         INSERT INTO workbench_revisions (doc_id,seq,kind,content_hash,size,created_at,updated_at,saves) \
+         SELECT r.doc_id,seq.n,'checkpoint',r.content_hash,r.size,r.created_at,r.updated_at,1 \
+         FROM seq CROSS JOIN workbench_revisions r WHERE r.doc_id=? AND r.seq=1",
+    ).bind(count).bind(&id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE workbench_docs SET rev=? WHERE id=?")
+        .bind(count)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    (app, pool, alice, id)
+}
+
+#[tokio::test]
+#[ignore = "50k lifetime-metadata scale gate; run explicitly"]
+async fn revision_history_default_and_maximum_page_are_bounded_at_50k_revisions() {
+    let (app, pool, alice, id) = many_revision_fixture(50_000).await;
+    let uri = format!("{DOCS}/{id}/revisions");
+    let page = get(&app, &alice, &uri).await;
+    assert_eq!(page.status, StatusCode::OK);
+    let rows = page.json();
+    assert_eq!(
+        rows.as_array().unwrap().len(),
+        100,
+        "initial history must not serialize its whole lifetime"
+    );
+    assert_eq!(rows[0]["seq"], 50_000);
+    assert_eq!(rows[99]["seq"], 49_901);
+    assert!(
+        page.body.len() < 100 * 512,
+        "bounded metadata, never revision bodies"
+    );
+    let oversized = get(&app, &alice, &format!("{uri}?limit=999999")).await;
+    assert_eq!(oversized.status, StatusCode::OK);
+    assert_eq!(oversized.json().as_array().unwrap().len(), 200);
+    let retained: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workbench_revisions WHERE doc_id=?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, 50_000, "paging is not retention/deletion");
+}
+
+#[tokio::test]
+async fn revision_history_exclusive_cursor_survives_new_save_and_reaches_oldest_restore() {
+    let (app, pool, alice, id) = many_revision_fixture(205).await;
+    let doc_uri = format!("{DOCS}/{id}");
+    let uri = format!("{doc_uri}/revisions");
+    let first = get(&app, &alice, &format!("{uri}?limit=7&before_seq=206")).await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first = first.json();
+    assert_eq!(first.as_array().unwrap().len(), 7);
+    assert_eq!(first[0]["seq"], 205);
+    assert_eq!(first[6]["seq"], 199);
+    let changed = patch(
+        &app,
+        &alice,
+        &doc_uri,
+        json!({"content":"new head", "checkpoint":true}),
+    )
+    .await;
+    assert_eq!(changed.status, StatusCode::OK);
+    assert_eq!(changed.json()["rev"], 206);
+    let next = get(&app, &alice, &format!("{uri}?limit=7&before_seq=199"))
+        .await
+        .json();
+    assert_eq!(next.as_array().unwrap().len(), 7);
+    assert_eq!(next[0]["seq"], 198);
+    assert_eq!(next[6]["seq"], 192);
+    let oldest = get(&app, &alice, &format!("{uri}?limit=7&before_seq=2"))
+        .await
+        .json();
+    assert_eq!(oldest.as_array().unwrap().len(), 1);
+    assert_eq!(oldest[0]["seq"], 1);
+    let exhausted = get(&app, &alice, &format!("{uri}?limit=7&before_seq=1"))
+        .await
+        .json();
+    assert!(exhausted.as_array().unwrap().is_empty());
+    let detail = get(&app, &alice, &format!("{uri}/1")).await.json();
+    assert_eq!(detail["content"], "original content");
+    let diff = get(&app, &alice, &format!("{doc_uri}/diff?from=1&to=206")).await;
+    assert_eq!(
+        diff.status,
+        StatusCode::OK,
+        "oldest revisions remain valid comparison targets"
+    );
+    let restored = post(&app, &alice, &format!("{uri}/1/restore"), json!({})).await;
+    assert_eq!(restored.status, StatusCode::OK);
+    assert_eq!(restored.json()["content"], "original content");
+    assert_eq!(restored.json()["rev"], 207);
+    let retained: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM workbench_revisions WHERE doc_id=?")
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, 207);
+}

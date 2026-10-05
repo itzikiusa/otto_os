@@ -16,7 +16,7 @@
   import { toasts } from '../../lib/toast.svelte';
 
   interface Props {
-    editor: { generate: (p: string) => Promise<void>; isGenerating: () => boolean } | undefined;
+    editor: { generate: (p: string) => Promise<boolean>; isGenerating: () => boolean } | undefined;
     onclose: () => void;
   }
   let { editor, onclose }: Props = $props();
@@ -49,10 +49,14 @@
   async function send(): Promise<void> {
     const p = draft.trim();
     if (!p || busy || !editor) return;
+    const submitted = draft, owner = editor;
+    const scene = canvas.currentId, context = canvas.saveContext;
     busy = true;
-    draft = '';
     try {
-      await editor.generate(p);
+      const accepted = await owner.generate(p);
+      if (accepted && editor === owner && canvas.currentId === scene && canvas.saveContext === context && draft === submitted) draft = '';
+    } catch (e) {
+      toastError('Couldn’t ask Otto', e);
     } finally {
       busy = false;
     }

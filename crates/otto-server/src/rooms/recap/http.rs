@@ -183,6 +183,20 @@ pub struct Page {
 fn limit() -> usize {
     200
 }
+pub async fn revision(
+    State(ctx): State<ServerCtx>,
+    CurrentAuthContext(auth): CurrentAuthContext,
+    Path(id): Path<String>,
+) -> ApiResult<Json<RecapRevision>> {
+    owner_auth(&auth)?;
+    let store = store(&ctx).await?;
+    let owner = auth.effective_user.id.to_string();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || store.revision(&id, &owner))
+            .await
+            .map_err(|e| Error::Internal(e.to_string()))??,
+    ))
+}
 pub async fn detail(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,

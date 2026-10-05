@@ -47,22 +47,25 @@ class LoopsStore {
   private lastDetailJson = '';
 
   private listWs = '';
+  private listGeneration = 0;
+  private workspaceGeneration = 0;
 
   async loadList(workspaceId: string): Promise<void> {
     // Another workspace's loops are not "stale data" for this one.
-    if (this.listWs !== workspaceId) this.list = [];
+    if (this.listWs !== workspaceId) { this.list = []; this.listError = null; this.workspaceGeneration++; }
+    const generation = ++this.listGeneration;
     this.listWs = workspaceId;
     this.loadingList = true;
     try {
       const list = await api.get<GoalLoop[]>(`/workspaces/${workspaceId}/goal-loops`);
       // A slower load for a workspace we've since left must not land here.
-      if (this.listWs !== workspaceId) return;
+      if (this.listWs !== workspaceId || generation !== this.listGeneration) return;
       this.list = list;
       this.listError = null;
     } catch (e) {
-      if (this.listWs === workspaceId) this.listError = loadErrorText(e);
+      if (this.listWs === workspaceId && generation === this.listGeneration) this.listError = loadErrorText(e);
     } finally {
-      if (this.listWs === workspaceId) this.loadingList = false;
+      if (this.listWs === workspaceId && generation === this.listGeneration) this.loadingList = false;
     }
   }
 
@@ -142,8 +145,9 @@ class LoopsStore {
   }
 
   async create(workspaceId: string, req: CreateGoalLoopReq): Promise<GoalLoop> {
+    const generation = this.workspaceGeneration;
     const loop = await api.post<GoalLoop>(`/workspaces/${workspaceId}/goal-loops`, req);
-    await this.loadList(workspaceId);
+    if (this.listWs === workspaceId && generation === this.workspaceGeneration) await this.loadList(workspaceId);
     return loop;
   }
 

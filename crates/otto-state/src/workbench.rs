@@ -666,20 +666,41 @@ impl WorkbenchRepo {
         Ok(())
     }
 
-    /// Newest first.
+    /// First bounded metadata page, newest first. Content remains available
+    /// by explicit revision lookup regardless of this listing window.
     pub async fn list_revisions(
         &self,
         ws: &Id,
         owner: &Id,
         id: &Id,
     ) -> Result<Vec<WorkbenchRevision>> {
+        self.list_revisions_page(ws, owner, id, 100, None).await
+    }
+
+    /// Keyset metadata page over the existing (doc_id, seq) primary key.
+    pub async fn list_revisions_page(
+        &self,
+        ws: &Id,
+        owner: &Id,
+        id: &Id,
+        limit: i64,
+        before_seq: Option<i64>,
+    ) -> Result<Vec<WorkbenchRevision>> {
         self.get_meta(ws, owner, id).await?;
-        let rows =
-            sqlx::query("SELECT * FROM workbench_revisions WHERE doc_id = ? ORDER BY seq DESC")
-                .bind(id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(dberr("list workbench revisions"))?;
+        let sql = if before_seq.is_some() {
+            "SELECT * FROM workbench_revisions WHERE doc_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?"
+        } else {
+            "SELECT * FROM workbench_revisions WHERE doc_id = ? ORDER BY seq DESC LIMIT ?"
+        };
+        let mut query = sqlx::query(sql).bind(id);
+        if let Some(before) = before_seq {
+            query = query.bind(before);
+        }
+        let rows = query
+            .bind(limit.clamp(1, 200))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("list workbench revisions"))?;
         rows.iter().map(row_to_rev).collect()
     }
 

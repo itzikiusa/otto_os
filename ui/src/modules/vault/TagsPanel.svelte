@@ -11,11 +11,15 @@
 
 <div class="tags">
   <input type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
-  {#if vault.tags.length === 0 && vault.loading}
+  {#if vault.tagsError}
+    <div role="alert">Couldn’t refresh tags. {vault.tags.length ? 'Showing the last loaded tags.' : ''} {vault.tagsError}</div>
+    <button class="btn small" onclick={() => void vault.loadTags()} disabled={vault.tagsLoading}>Retry</button>
+  {/if}
+  {#if vault.tags.length === 0 && vault.tagsLoading}
     <Skeleton rows={4} height={24} label="tags" />
-  {:else if vault.tags.length === 0}
+  {:else if vault.tags.length === 0 && !vault.tagsError}
     <div class="dim">No tags yet. Add #tags in a note, or tags: in its frontmatter.</div>
-  {:else if shown.length === 0}
+  {:else if vault.tags.length > 0 && shown.length === 0}
     <div class="dim">No tags match “{filter}”.</div>
   {/if}
   <div class="list">

@@ -120,7 +120,11 @@ async fn stamp_source(
     updated_at: &str,
     sha: &str,
 ) -> Result<()> {
-    let mut next = a.clone();
+    let lock = crate::service::commit_lock(svc.root(), &a.id).await?;
+    let _publication = lock.lock().await;
+    // Import inspected its source before this boundary. Preserve all edits
+    // acknowledged since that snapshot, including nested import metadata.
+    let mut next = svc.store().require_artifact(&a.id).await?;
     if !next.meta.is_object() {
         next.meta = json!({});
     }
@@ -613,6 +617,62 @@ mod tests {
         assert_eq!(title_from_filename("AI screen.html"), "AI screen");
         assert_eq!(title_from_filename(".html"), ".html");
         assert_eq!(title_from_filename(""), "Untitled");
+    }
+
+    #[tokio::test]
+    async fn stamp_source_preserves_metadata_approved_after_its_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::db::test_pool().await;
+        let svc = DesignService::new(pool.clone(), dir.path(), None);
+        assert!(svc.store().ensure_fts().await);
+        seed_scene(&pool, "scene-stamp", None, &json!({
+            "type":"otto-canvas", "version":1, "format":"mermaid", "source":"flowchart TD\n A --> B\n"
+        }).to_string()).await;
+        run(&svc).await.unwrap();
+        let stale = svc
+            .store()
+            .find_by_source(SOURCE_SCENE, "scene-stamp")
+            .await
+            .unwrap()
+            .unwrap();
+        // The importer already read `stale`; a human commits acknowledged
+        // metadata, approval and thumbnail before the import stamps its hash.
+        svc.update_meta(
+            &stale.id,
+            crate::types::UpdateArtifactReq {
+                title: Some("Human title".into()),
+                tags: Some(vec!["human-tag".into()]),
+                meta: Some(
+                    json!({"human":true,"imported_from":{"id":"scene-stamp","custom":"preserve"}}),
+                ),
+                ..Default::default()
+            },
+            &Author::user("u1"),
+        )
+        .await
+        .unwrap();
+        svc.approve(&stale.id, None, &Author::user("u1"))
+            .await
+            .unwrap();
+        let fresh = svc
+            .set_thumbnail(&stale, b"\x89PNG\r\n\x1a\nstamp-thumb")
+            .await
+            .unwrap();
+        stamp_source(&svc, &stale, "2026-10-05T00:00:00Z", "new-source-hash")
+            .await
+            .unwrap();
+        let saved = svc.store().require_artifact(&stale.id).await.unwrap();
+        assert_eq!(saved.title, "Human title");
+        assert_eq!(saved.tags, vec!["human-tag"]);
+        assert_eq!(saved.status, "approved");
+        assert_eq!(saved.approved_version_id, fresh.approved_version_id);
+        assert_eq!(saved.thumb_blob, fresh.thumb_blob);
+        assert_eq!(saved.meta["human"], true);
+        assert_eq!(saved.meta["imported_from"]["custom"], "preserve");
+        assert_eq!(
+            saved.meta["imported_from"]["source_sha256"],
+            "new-source-hash"
+        );
     }
 
     #[tokio::test]

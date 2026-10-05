@@ -1658,7 +1658,7 @@ fn output_schema_for(kind: &str) -> Option<Value> {
         "product_plan" => obj(&[("story_id", "string"), ("plan_md", "string")]),
         "product_publish" => obj(&[
             ("story_id", "string"),
-            ("url", "string"),
+            ("kind", "string"),
             ("dry_run", "boolean"),
         ]),
         "git_pr" => obj(&[
@@ -4354,6 +4354,7 @@ async fn execute_node(
         // node errors. If the deadline expires the node errors with
         // "approval timed out".
         "human_approval" => {
+            product_publication::expose_pending(ctx, run_id, node, &input).await?;
             let prompt = p
                 .get("prompt")
                 .and_then(Value::as_str)
@@ -4466,15 +4467,13 @@ async fn execute_node(
                             )));
                         }
                         Some(by) => {
-                            break Ok((
-                                json!({
-                                    "approved": true,
-                                    "approved_by": by,
-                                    "note": note,
-                                    "prompt": prompt,
-                                }),
-                                vec![format!("human_approval: approved by {by}")],
-                            ));
+                            let mut output = json!({"approved":true,"approved_by":by,"note":note,"prompt":prompt});
+                            if let Some(preview) = input.get("publication_preview") {
+                                output["publication_preview"] = preview.clone();
+                                output["approval_node_id"] = json!(node.id);
+                                output["approval_run_id"] = json!(run_id);
+                            }
+                            break Ok((output, vec![format!("human_approval: approved by {by}")]));
                         }
                     }
                 }
@@ -5834,74 +5833,7 @@ async fn execute_node(
         }
 
         // --- Product Publish (RFC / Jira; dry-run by default) ----------------
-        "product_publish" => {
-            let story_id = p
-                .get("story_id")
-                .and_then(Value::as_str)
-                .or_else(|| input.get("story_id").and_then(Value::as_str))
-                .ok_or_else(|| {
-                    otto_core::Error::Invalid("product_publish: missing story_id".into())
-                })?
-                .to_string();
-            let kind = p
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("rfc")
-                .to_string();
-            let dry_run = p.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
-            if dry_run {
-                return Ok((
-                    json!({ "story_id": story_id, "kind": kind, "dry_run": true,
-                            "note": "dry run — set dry_run=false with an account_id to publish" }),
-                    vec![format!("product_publish: dry run ({kind})")],
-                ));
-            }
-            let account_id = p
-                .get("account_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    otto_core::Error::Invalid(
-                        "product_publish: account_id required to publish".into(),
-                    )
-                })?
-                .to_string();
-            if kind == "jira" {
-                let project = p
-                    .get("project_key")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        otto_core::Error::Invalid("product_publish: project_key required".into())
-                    })?;
-                let issue_type = p
-                    .get("issue_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Story");
-                let detail = ctx
-                    .product
-                    .publish_as_story(&story_id, &account_id, project, issue_type, &user.id)
-                    .await?;
-                Ok((
-                    json!({ "story_id": story_id, "kind": "jira", "dry_run": false,
-                            "detail": serde_json::to_value(&detail).ok() }),
-                    vec!["product_publish: published to Jira".into()],
-                ))
-            } else {
-                let space = p.get("space_key").and_then(Value::as_str).ok_or_else(|| {
-                    otto_core::Error::Invalid("product_publish: space_key required".into())
-                })?;
-                let parent = p.get("parent_id").and_then(Value::as_str);
-                let title = p.get("title").and_then(Value::as_str);
-                let detail = ctx
-                    .product
-                    .publish_as_rfc(&story_id, &account_id, space, parent, title, &user.id)
-                    .await?;
-                Ok((
-                    json!({ "story_id": story_id, "kind": "rfc", "dry_run": false,
-                            "detail": serde_json::to_value(&detail).ok() }),
-                    vec!["product_publish: published RFC to Confluence".into()],
-                ))
-            }
-        }
+        "product_publish" => product_publication::execute(ctx, ws, user, node, input, run_id).await,
 
         // --- Canvas (generate a mermaid/excalidraw diagram artifact) ---------
         "canvas" => {
@@ -10110,3 +10042,10 @@ mod tests {
             .all(|s| s.params_schema.is_none()));
     }
 }
+
+#[cfg(test)]
+#[path = "workflow_product_publish_tests.rs"]
+mod product_publish_tests;
+
+#[path = "workflow_product_publish.rs"]
+mod product_publication;

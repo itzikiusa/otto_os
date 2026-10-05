@@ -643,7 +643,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Agents, View);
     }
     if p.starts_with("/sessions/") {
-        // restart / archive / unarchive / input / handover / handover-brief /
+        // restart / resume / archive / unarchive / input / handover / handover-brief /
         // attach-product — all session-control writes.
         return Require(Agents, Edit);
     }
@@ -1425,6 +1425,16 @@ mod tests {
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.
     fn pol(m: Method, path: &str) -> PolicyDecision {
         policy_for(&m, path)
+    }
+
+    #[test]
+    fn recap_revision_requires_the_same_feature_permission_as_owner_detail() {
+        for path in [
+            "/api/v1/room-recaps/{id}",
+            "/api/v1/room-recaps/{id}/revision",
+        ] {
+            assert_eq!(pol(Method::GET, path), Require(Agents, Edit));
+        }
     }
 
     // ---- AWS S3 --------------------------------------------------------------
@@ -2460,6 +2470,10 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/sessions/{id}/restart"),
+            Require(Agents, Edit)
+        );
+        assert_eq!(
+            pol(Method::POST, "/api/v1/sessions/{id}/resume"),
             Require(Agents, Edit)
         );
         assert_eq!(

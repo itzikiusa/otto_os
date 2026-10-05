@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { webcrypto } from 'node:crypto';
 import { deferred } from './sourceHarness.ts';
 
 function functions(path: string, names: string[], state: Record<string, any>) {
@@ -82,8 +83,8 @@ test('close waits for the newest annotation while a previous upload is pending',
 test('failed publishing preview remains unavailable until a successful retry', async () => {
   let fail = true;
   const s = functions('../src/modules/product/PublishDialog.svelte', ['loadPreview','submit'], {
-    previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, submitting: false,
-    product: { selectedId: 'A' }, api: { get: async () => { if (fail) throw new Error('offline'); return []; } },
+    previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, reviewedContent: null, submitting: false, crypto: webcrypto, TextEncoder,
+    product: { selectedId: 'A' }, api: { get: async (path: string) => { if (fail) throw new Error('offline'); return path.endsWith('/versions') ? [] : {story:{title:'Draft',source_kind:'draft',url:''}}; } },
   });
   await s.loadPreview('A'); assert.match(s.previewError, /offline/); assert.equal(s.previewBody, null);
   await s.submit(); // Must return before touching any publishing dependency.

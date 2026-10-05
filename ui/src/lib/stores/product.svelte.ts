@@ -36,6 +36,9 @@ import type {
   GeneratePlanReq,
   InjectSessionReq,
   ProductTranscript,
+  ProductTranscriptSummary,
+  ProductTranscriptPage,
+  ProductTranscriptSearchPage,
   NewDraftReq,
   UpdateDraftReq,
   NewTranscriptReq,
@@ -168,7 +171,20 @@ class ProductStore {
   events: ProductEvent[] = $state([]);
   testcaseRuns: ProductTestcaseRunDetail[] = $state([]);
   learnings: ProductLearning[] = $state([]);
-  transcripts: ProductTranscript[] = $state([]);
+  transcripts: ProductTranscriptSummary[] = $state([]);
+  transcriptNextCursor: string | null = $state(null);
+  transcriptPreviousCursors: (string | null)[] = $state([]);
+  transcriptsError = $state('');
+  transcriptBodies: Record<string, string> = $state({});
+  transcriptBodyErrors: Record<string, string> = $state({});
+  transcriptBodyLoading: Record<string, boolean> = $state({});
+  transcriptSearchRows: ProductTranscriptSummary[] = $state([]);
+  private transcriptCursor: string | null = null;
+  /** Search may temporarily pin an off-page hit; ordinary paging keeps its
+   * complete boundary row and matching cursor until search is released. */
+  private transcriptPageBeforeSearch: ProductTranscriptSummary[] | null = null;
+  private transcriptBodyOrder: string[] = [];
+  private transcriptBodyRequests = new Map<string, Promise<void>>();
 
   // ── UI state ───────────────────────────────────────────────────────────────
   view: 'stories' | 'learnings' = $state('stories');
@@ -254,6 +270,10 @@ class ProductStore {
     this.detail = null; this.detailError = null;
     this.versions = []; this.analyses = []; this.questions = []; this.notes = [];
     this.events = []; this.testcaseRuns = []; this.transcripts = [];
+    this.transcriptNextCursor = null; this.transcriptPreviousCursors = []; this.transcriptCursor = null;
+    this.transcriptPageBeforeSearch = null;
+    this.transcriptsError = ''; this.transcriptBodies = {}; this.transcriptBodyErrors = {}; this.transcriptBodyLoading = {};
+    this.transcriptBodyOrder = []; this.transcriptBodyRequests.clear(); this.transcriptSearchRows = [];
     this.loadingDetail = false; this.loadingVersions = false; this.loadingAnalyses = false;
     this.loadingQuestions = false; this.loadingNotes = false; this.loadingEvents = false;
     this.loadingTestcases = false; this.loadingTranscripts = false;
@@ -440,17 +460,119 @@ class ProductStore {
 
   // ── Transcripts ────────────────────────────────────────────────────────────
 
-  async loadTranscripts(): Promise<void> {
+  async loadTranscripts(cursor: string | null = null, back = false): Promise<void> {
     const id = this.storyId();
     const current = this.owner('loadTranscripts', false);
     this.loadingTranscripts = true;
+    this.transcriptsError = '';
     try {
-      const rows = await api.get<ProductTranscript[]>(
-        `/product/stories/${id}/transcripts`,
+      const page = await api.get<ProductTranscriptPage>(
+        `/product/stories/${id}/transcripts?summary=true&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
       );
-      if (current()) this.transcripts = rows;
+      if (current()) {
+        if (!cursor) this.transcriptPreviousCursors = [];
+        else if (!back) this.transcriptPreviousCursors = [...this.transcriptPreviousCursors, this.transcriptCursor];
+        this.transcriptCursor = cursor;
+        this.transcriptPageBeforeSearch = null;
+        this.transcripts = page.items;
+        this.transcriptNextCursor = page.next_cursor;
+      }
+    } catch (e) {
+      if (current()) this.transcriptsError = errMsg(e);
     } finally {
       if (current()) this.loadingTranscripts = false;
+    }
+  }
+
+  async previousTranscriptPage(): Promise<void> {
+    if (!this.transcriptPreviousCursors.length) return;
+    const current = this.owner();
+    const previous = this.transcriptPreviousCursors.at(-1) ?? null;
+    const history = this.transcriptPreviousCursors.slice(0, -1);
+    await this.loadTranscripts(previous, true);
+    if (current() && !this.transcriptsError) this.transcriptPreviousCursors = history;
+  }
+
+  getTranscript(id: string): Promise<ProductTranscript> {
+    return api.get<ProductTranscript>(`/product/transcripts/${id}`);
+  }
+
+  /** At most four bodies and 4 MiB of UTF-16 string storage. Oversized legacy
+   * imports remain available through Download without retaining their body. */
+  private cacheTranscriptBody(id: string, body: string): void {
+    const bytes = body.length * 2;
+    if (bytes > 4 * 1024 * 1024) throw new Error('This transcript is too large to display. Download it to read the full text.');
+    const bodies = { ...this.transcriptBodies, [id]: body };
+    const order = [...this.transcriptBodyOrder.filter(key => key !== id), id];
+    let total = Object.values(bodies).reduce((sum, value) => sum + value.length * 2, 0);
+    while (order.length > 4 || total > 4 * 1024 * 1024) {
+      const oldest = order.shift()!;
+      total -= bodies[oldest].length * 2; delete bodies[oldest];
+    }
+    this.transcriptBodyOrder = order;
+    this.transcriptBodies = bodies;
+  }
+
+  async loadTranscriptBody(id: string): Promise<void> {
+    if (this.transcriptBodies[id] !== undefined) {
+      this.transcriptBodyOrder = [...this.transcriptBodyOrder.filter(key => key !== id), id];
+      return;
+    }
+    const pending = this.transcriptBodyRequests.get(id);
+    if (pending) return pending;
+    const current = this.owner();
+    this.transcriptBodyLoading = { ...this.transcriptBodyLoading, [id]: true };
+    this.transcriptBodyErrors = { ...this.transcriptBodyErrors, [id]: '' };
+    const request = (async () => {
+      try {
+        const transcript = await this.getTranscript(id);
+        if (current()) this.cacheTranscriptBody(id, transcript.body);
+      } catch (e) {
+        if (current()) this.transcriptBodyErrors = { ...this.transcriptBodyErrors, [id]: errMsg(e) };
+      } finally {
+        if (current()) this.transcriptBodyLoading = { ...this.transcriptBodyLoading, [id]: false };
+      }
+    })();
+    this.transcriptBodyRequests.set(id, request);
+    await request;
+    if (this.transcriptBodyRequests.get(id) === request) this.transcriptBodyRequests.delete(id);
+  }
+
+  async searchTranscripts(query: string, limit: number, signal: AbortSignal): Promise<{ row: number; count: number }[]> {
+    this.releaseTranscriptSearch();
+    const story = this.storyId(), current = this.owner('searchTranscripts');
+    const summaries: ProductTranscriptSummary[] = [], matches: { row: number; count: number }[] = [];
+    let cursor: string | null = null, count = 0;
+    do {
+      if (signal.aborted || !current()) return [];
+      const page: ProductTranscriptSearchPage = await api.get(
+        `/product/stories/${story}/transcripts/search?q=${encodeURIComponent(query)}&limit=100&max_matches=${limit - count}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, signal);
+      if (signal.aborted || !current()) return [];
+      for (const { match_count, ...summary } of page.items) {
+        const hits = Math.min(match_count, limit - count);
+        if (hits <= 0) continue;
+        matches.push({ row: summaries.length, count: hits }); summaries.push(summary); count += hits;
+      }
+      cursor = page.next_cursor;
+    } while (cursor && count < limit);
+    if (!signal.aborted && current()) this.transcriptSearchRows = summaries;
+    return matches;
+  }
+
+  async revealTranscript(summary: ProductTranscriptSummary): Promise<void> {
+    if (!this.transcripts.some(row => row.id === summary.id)) {
+      this.transcriptPageBeforeSearch ??= this.transcripts;
+      this.transcripts = [summary, ...this.transcripts.slice(0, 49)];
+    }
+    await this.loadTranscriptBody(summary.id);
+  }
+
+  releaseTranscriptSearch(): void {
+    this.requests.set('searchTranscripts', (this.requests.get('searchTranscripts') ?? 0) + 1);
+    this.transcriptSearchRows = [];
+    if (this.transcriptPageBeforeSearch) {
+      this.transcripts = this.transcriptPageBeforeSearch;
+      this.transcriptPageBeforeSearch = null;
     }
   }
 
@@ -461,14 +583,22 @@ class ProductStore {
       `/product/stories/${id}/transcripts`,
       req,
     );
-    if (current()) this.transcripts = [...this.transcripts, t];
+    // A local prepend/slice would drop the old boundary item while retaining
+    // a cursor after it. Reload a coherent first page and invalidate any
+    // in-flight pre-import page through loadTranscripts' request sequence.
+    if (current()) await this.loadTranscripts();
     return t;
   }
 
   async deleteTranscript(trid: string): Promise<void> {
     const current = this.owner();
     await api.del(`/product/transcripts/${trid}`);
-    if (current()) this.transcripts = this.transcripts.filter((t) => t.id !== trid);
+    if (current()) {
+      this.transcripts = this.transcripts.filter((t) => t.id !== trid);
+      if (this.transcriptPageBeforeSearch) this.transcriptPageBeforeSearch = this.transcriptPageBeforeSearch.filter(t => t.id !== trid);
+      const bodies = { ...this.transcriptBodies }; delete bodies[trid]; this.transcriptBodies = bodies;
+      this.transcriptBodyOrder = this.transcriptBodyOrder.filter(id => id !== trid);
+    }
   }
 
   // ── Publish ────────────────────────────────────────────────────────────────

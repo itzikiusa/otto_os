@@ -29,8 +29,14 @@ export interface FindProvider {
   count(): number;
   /** The searchable text of row `i` (case is ignored). */
   text(i: number): string;
+  /** Optional unloaded-history search. `query` is the lower-cased literal
+   * substring used by countOccurrences (no regex). Return at most `limit`
+   * non-overlapping occurrences as row/count pairs; keep that row mapping
+   * stable until the next search/release. Abort must stop further page reads.
+   * Rows may be outside the currently rendered/loaded history window. */
+  search?(query: string, limit: number, signal: AbortSignal): Promise<{ row: number; count: number }[]>;
   /** Bring row `i` into the mounted window; resolve once it is rendered. */
-  reveal(i: number): Promise<void> | void;
+  reveal(i: number, signal?: AbortSignal): Promise<void> | void;
   /** The mounted element of row `i`, or null when it is not mounted. */
   rowElement(i: number): Element | null;
   /** Optional gate: `false` → the view isn't windowing right now (everything
@@ -49,7 +55,7 @@ const providers = new Set<FindProvider>();
 export function registerFindProvider(p: FindProvider): () => void {
   providers.add(p);
   return () => {
-    providers.delete(p);
+    if (providers.delete(p)) p.release?.();
   };
 }
 

@@ -16,7 +16,10 @@ use otto_state::{
 };
 use tracing;
 
-use crate::types::{ImportStoryReq, InjectBundle, InjectSection, ProductStoryDetail, StoryCounts};
+use crate::types::{
+    ImportStoryReq, InjectBundle, InjectSection, ProductStoryDetail, PublishAsRfcReq,
+    PublishAsStoryReq, ReviewedContent, StoryCounts,
+};
 
 /// High-level service for product story analysis workflows.
 ///
@@ -1311,7 +1314,10 @@ impl ProductService {
 
     /// Pick the best content version for publishing or agent context.
     /// Priority: newest `suggested` > newest `draft` > newest `source`.
-    async fn best_content_version(&self, story_id: &Id) -> Result<Option<String>> {
+    async fn best_content_version(
+        &self,
+        story_id: &Id,
+    ) -> Result<Option<otto_state::ProductStoryVersion>> {
         let all_versions = self.repo.list_versions(story_id).await?;
         // list_versions returns DESC by version_no, so .find() gives the newest.
         let preferred = all_versions
@@ -1322,10 +1328,48 @@ impl ProductService {
         match preferred {
             Some(v) => {
                 let full = self.repo.get_version(&v.id).await?;
-                Ok(Some(full.body_md))
+                Ok(Some(full))
             }
             None => Ok(None),
         }
+    }
+
+    /// Capture the exact source used by publication. Callers must authorize the
+    /// story before requesting a preview; acquiring a snapshot does not approve it.
+    pub async fn publication_snapshot(
+        &self,
+        story_id: &Id,
+    ) -> Result<(otto_state::ProductStory, String, ReviewedContent)> {
+        let story = self.repo.get_story(story_id).await?;
+        let version = self.best_content_version(story_id).await?;
+        let version_id = version.as_ref().map(|version| version.id.clone());
+        let body = version.map(|version| version.body_md).unwrap_or_default();
+        let reviewed = ReviewedContent {
+            version_id,
+            body_sha256: otto_core::proof::content_sha256(&body),
+            title: story.title.clone(),
+            source_kind: story.source_kind.clone(),
+            url: story.url.clone(),
+        };
+        Ok((story, body, reviewed))
+    }
+
+    /// Compare once and publish the captured bytes, even if an edit arrives
+    /// while authentication or the remote call is in flight.
+    async fn reviewed_publication(
+        &self,
+        story_id: &Id,
+        reviewed: Option<&ReviewedContent>,
+    ) -> Result<(otto_state::ProductStory, String)> {
+        let stale = || {
+            Error::Conflict("The publication preview is missing or has changed. Reload the preview and review it before publishing.".into())
+        };
+        let reviewed = reviewed.ok_or_else(stale)?;
+        let (story, body, actual) = self.publication_snapshot(story_id).await?;
+        if reviewed != &actual {
+            return Err(stale());
+        }
+        Ok((story, body))
     }
 
     // ---------------------------------------------------------------------------
@@ -1549,21 +1593,25 @@ impl ProductService {
     pub async fn publish_as_rfc(
         &self,
         story_id: &Id,
-        account_id: &Id,
-        space_key: &str,
-        parent_id: Option<&str>,
-        title: Option<&str>,
+        req: &PublishAsRfcReq,
         by: &Id,
     ) -> Result<ProductStoryDetail> {
-        let story = self.repo.get_story(story_id).await?;
+        let (story, content_md) = self
+            .reviewed_publication(story_id, req.reviewed_content.as_ref())
+            .await?;
+        let account_id = &req.account_id;
+        let space_key = &req.space_key;
+        let parent_id = req.parent_id.as_deref();
+        let title = req.title.as_deref();
         let account = self.issues.get_account(account_id).await?;
+        if req
+            .reviewed_account_url
+            .as_ref()
+            .is_some_and(|url| url != &account.base_url)
+        {
+            return Err(Error::Conflict("The reviewed account destination changed. Create and review a new publication preview.".into()));
+        }
         let token = self.account_token(&account).await?;
-
-        // Best content to publish.
-        let content_md = self
-            .best_content_version(story_id)
-            .await?
-            .unwrap_or_default();
 
         let page_title = title.unwrap_or(&story.title);
         let conf_client = ConfluenceClient::new(&account.base_url, &account.email, &token);
@@ -1636,20 +1684,24 @@ impl ProductService {
     pub async fn publish_as_story(
         &self,
         story_id: &Id,
-        account_id: &Id,
-        project_key: &str,
-        issue_type: &str,
+        req: &PublishAsStoryReq,
         by: &Id,
     ) -> Result<ProductStoryDetail> {
-        let story = self.repo.get_story(story_id).await?;
+        let (story, content_md) = self
+            .reviewed_publication(story_id, req.reviewed_content.as_ref())
+            .await?;
+        let account_id = &req.account_id;
+        let project_key = req.project_key.as_str();
+        let issue_type = req.issue_type.as_str();
         let account = self.issues.get_account(account_id).await?;
+        if req
+            .reviewed_account_url
+            .as_ref()
+            .is_some_and(|url| url != &account.base_url)
+        {
+            return Err(Error::Conflict("The reviewed account destination changed. Create and review a new publication preview.".into()));
+        }
         let token = self.account_token(&account).await?;
-
-        // Best content to publish.
-        let content_md = self
-            .best_content_version(story_id)
-            .await?
-            .unwrap_or_default();
 
         // If original is a Confluence RFC, prepend a reference line.
         let description = if story.source_kind == "confluence" && !story.url.is_empty() {
@@ -3027,7 +3079,28 @@ mod tests {
         assert_eq!(detail.story.source_kind, "draft");
 
         let result = svc
-            .publish_as_story(&story_id, &account.id, "NEW", "Story", &user_id)
+            .publish_as_story(
+                &story_id,
+                &PublishAsStoryReq {
+                    reviewed_account_url: None,
+                    account_id: account.id.clone(),
+                    project_key: "NEW".into(),
+                    issue_type: "Story".into(),
+                    reviewed_content: Some(ReviewedContent {
+                        version_id: detail.source.as_ref().map(|version| version.id.clone()),
+                        body_sha256: otto_core::proof::content_sha256(
+                            detail
+                                .source
+                                .as_ref()
+                                .map_or("", |version| &version.body_md),
+                        ),
+                        title: detail.story.title.clone(),
+                        source_kind: detail.story.source_kind.clone(),
+                        url: detail.story.url.clone(),
+                    }),
+                },
+                &user_id,
+            )
             .await
             .unwrap();
 

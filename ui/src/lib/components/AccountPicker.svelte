@@ -14,13 +14,30 @@
   let error = $state('');
   let status = $state('');
   let loginSession = $state<Session | null>(null);
-  $effect(() => {
+  let listLoading = $state(false);
+  let listError = $state('');
+  let accountLoadSeq = 0;
+  function cancelAccountLoad(): void { ++accountLoadSeq; }
+  async function loadAccounts(): Promise<void> {
     const currentProvider = provider;
-    let alive = true;
-    void api.get<ProviderAccount[]>('/auth/provider-accounts').then((all) => {
-      if (alive) accounts = all.filter((a) => a.provider === currentProvider);
-    }).catch(() => { if (alive) error = 'Could not load accounts. Reopen this form to retry.'; });
-    return () => { alive = false; };
+    const seq = ++accountLoadSeq;
+    listLoading = true;
+    listError = '';
+    try {
+      const all = await api.get<ProviderAccount[]>('/auth/provider-accounts');
+      if (seq !== accountLoadSeq || provider !== currentProvider) return;
+      accounts = all.filter((a) => a.provider === currentProvider);
+    } catch (e) {
+      if (seq === accountLoadSeq && provider === currentProvider) listError = loadErrorText(e);
+    } finally {
+      if (seq === accountLoadSeq) listLoading = false;
+    }
+  }
+  $effect(() => {
+    void provider;
+    accounts = [];
+    void loadAccounts();
+    return cancelAccountLoad;
   });
   async function add() {
     busy = true; error = '';
@@ -57,6 +74,7 @@
       <span>{provider} account</span>
       <select class="input" value={value} disabled={busy} onchange={(e) => { onchange(e.currentTarget.value); status = ''; loginSession = null; }}>
         <option value="">Default CLI account</option>
+        {#if value && !accounts.some((account) => account.id === value)}<option value={value}>Selected account</option>{/if}
         {#each accounts as account (account.id)}<option value={account.id}>{account.label}</option>{/each}
       </select>
     </label>
@@ -66,6 +84,8 @@
       <button class="btn small" type="button" disabled={busy} onclick={check}>Check sign-in</button>
     {/if}
   </div>
+  {#if listLoading}<p role="status">Loading accounts…</p>{/if}
+  {#if listError}<p class="error" role="alert">{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
   {#if adding}
     <div class="actions">
       <input class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />

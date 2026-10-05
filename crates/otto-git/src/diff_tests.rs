@@ -559,3 +559,273 @@ async fn submodule_change_stays_its_own_file_under_diff_submodule_log() {
         "no submodule summary folded into a.txt"
     );
 }
+
+/// The aggregate display budget must constrain raw patch collection, not just
+/// discard content after every untracked git child has already been buffered.
+#[tokio::test]
+async fn working_diff_stops_untracked_patch_spawns_after_aggregate_budget() {
+    let (tmp, dir) = init();
+    write(&dir, "tracked.txt", b"baseline\n");
+    sh_git(&dir, &["add", "tracked.txt"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    const FILES: usize = 32;
+    let content = format!("{}\n", "x".repeat(16 * 1024));
+    for n in 0..FILES {
+        write(&dir, &format!("untracked-{n:02}.txt"), content.as_bytes());
+    }
+    let log = tmp.path().join("diff-spawns.log");
+    let shim = tmp.path().join("git-count.sh");
+    // Temp paths originate from tempfile, never from a repository filename.
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec git \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let git = LocalGit::new(&dir).with_git_bin(&shim);
+    let response = git
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                caps: Some(DiffCaps {
+                    file_lines: usize::MAX,
+                    file_bytes: usize::MAX,
+                    total_lines: usize::MAX,
+                    total_bytes: 4096,
+                }),
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let patches = calls
+        .lines()
+        .filter(|line| line.contains("--no-index"))
+        .count();
+    assert!(patches <= 16, "4 KiB aggregate response must stop patch work early (allow bounded in-flight read-ahead); launched {patches}/{FILES}");
+    assert_eq!(
+        response.files.len(),
+        FILES,
+        "omitted patch bodies must retain every file's metadata"
+    );
+    assert_eq!(response.truncated, Some(true));
+    for file in &response.files {
+        assert_eq!(file.status, Some(FileChangeStatus::Added));
+        assert_eq!(file.added, Some(1));
+        assert!(file.hunks.is_empty());
+        assert_eq!(file.hunks_omitted, Some(true));
+    }
+    // Neither summary nor ordinary internal/per-file consumers may silently
+    // mistake a capped result for a complete patch.
+    let full = git
+        .diff(DiffTarget::Working, Some("untracked-31.txt"))
+        .await
+        .unwrap();
+    assert_eq!(full.files.len(), 1);
+    assert_eq!(full.truncated, None);
+    assert!(!full.files[0].hunks.is_empty());
+    let summary = git
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                summary: true,
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(summary.files.len(), FILES);
+}
+
+#[tokio::test]
+async fn working_diff_streaming_budget_is_shared_by_tracked_and_untracked_files() {
+    let (_tmp, dir) = init();
+    write(&dir, "tracked.txt", b"old\n");
+    sh_git(&dir, &["add", "tracked.txt"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    write(&dir, "tracked.txt", b"new\n");
+    write(&dir, "untracked.txt", b"extra\n");
+    let git = LocalGit::new(&dir);
+    let response = git
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                caps: Some(DiffCaps {
+                    file_lines: 100,
+                    file_bytes: 100,
+                    total_lines: 100,
+                    total_bytes: 10,
+                }),
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.files.len(), 2);
+    assert!(!response.files[0].hunks.is_empty());
+    assert_eq!(response.files[1].hunks_omitted, Some(true));
+    assert_eq!(response.files[1].added, Some(1));
+    assert_eq!(response.truncated, Some(true));
+    let complete = git.diff(DiffTarget::Working, None).await.unwrap();
+    assert_eq!(complete.truncated, None);
+    assert!(complete.files.iter().all(|f| !f.hunks.is_empty()));
+}
+
+#[tokio::test]
+async fn working_diff_streaming_large_file_keeps_later_small_file_and_exact_counts() {
+    let (_tmp, dir) = init();
+    write(&dir, "baseline", b"base\n");
+    sh_git(&dir, &["add", "baseline"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    write(
+        &dir,
+        "a-large.txt",
+        format!("{}\n", "x".repeat(256 * 1024)).as_bytes(),
+    );
+    write(&dir, "z-small.txt", b"small\n");
+    let git = LocalGit::new(&dir);
+    let response = git
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                caps: Some(DiffCaps {
+                    file_lines: 100,
+                    file_bytes: 1024,
+                    total_lines: 100,
+                    total_bytes: 4096,
+                }),
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.files.len(), 2);
+    assert_eq!(response.files[0].too_large, Some(true));
+    assert!(response.files[0].hunks.is_empty());
+    assert_eq!(response.files[0].added, Some(1));
+    assert!(
+        !response.files[1].hunks.is_empty(),
+        "per-file safety ceiling must not consume the remaining response budget"
+    );
+    assert_eq!(response.truncated, None);
+}
+
+#[tokio::test]
+async fn working_diff_many_cut_files_stop_aggregate_raw_work() {
+    let (tmp, dir) = init();
+    write(&dir, "baseline", b"base\n");
+    sh_git(&dir, &["add", "baseline"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    const FILES: usize = 32;
+    let content = format!("{}\n", "x".repeat(256 * 1024));
+    for n in 0..FILES {
+        write(&dir, &format!("cut-{n:02}.txt"), content.as_bytes());
+    }
+    let log = tmp.path().join("cut-spawns.log");
+    let shim = tmp.path().join("git-count-cuts.sh");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexec git \"$@\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let response = LocalGit::new(&dir)
+        .with_git_bin(&shim)
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                caps: Some(DiffCaps {
+                    file_lines: 100,
+                    file_bytes: 1024,
+                    total_lines: 100,
+                    total_bytes: 4096,
+                }),
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let patches = calls
+        .lines()
+        .filter(|line| line.contains("--no-index"))
+        .count();
+    assert!(patches <= 16, "discarded oversized bodies still consume aggregate collection work; launched {patches}/{FILES}");
+    assert_eq!(response.files.len(), FILES);
+    assert_eq!(
+        response.truncated,
+        Some(true),
+        "raw-work exhaustion must be explicit"
+    );
+    for file in &response.files {
+        assert!(file.hunks.is_empty());
+        assert_eq!(file.hunks_omitted, Some(true));
+        assert_eq!(file.added, Some(1));
+        assert_eq!(file.status, Some(FileChangeStatus::Added));
+    }
+}
+
+#[tokio::test]
+async fn working_diff_small_total_bounds_child_capture_with_unlimited_file_cap() {
+    let (tmp, dir) = init();
+    write(&dir, "baseline", b"base\n");
+    sh_git(&dir, &["add", "baseline"]);
+    sh_git(&dir, &["commit", "-q", "-m", "base"]);
+    write(
+        &dir,
+        "large.txt",
+        format!("{}\n", "x".repeat(2 * 1024 * 1024)).as_bytes(),
+    );
+    let completed = tmp.path().join("patch-completed.log");
+    let shim = tmp.path().join("git-observe-capture.sh");
+    // A completed marker proves the parent drained the entire multi-MiB patch.
+    // Under a 4KiB aggregate allowance the LocalRead collector must terminate
+    // this process group at its bounded capture ceiling before that marker.
+    std::fs::write(&shim, format!(
+        "#!/bin/sh\ncase \" $* \" in\n*\" --no-index \"*)\n git \"$@\"\n result=$?\n printf 'completed\\n' >> '{}'\n exit \"$result\"\n ;;\nesac\nexec git \"$@\"\n", completed.display()
+    )).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let response = LocalGit::new(&dir)
+        .with_git_bin(&shim)
+        .diff_with(
+            &DiffTarget::Working,
+            &DiffOpts {
+                caps: Some(DiffCaps {
+                    file_lines: usize::MAX,
+                    file_bytes: usize::MAX,
+                    total_lines: usize::MAX,
+                    total_bytes: 4096,
+                }),
+                ..DiffOpts::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!completed.exists(), "small total allowance must cap collection itself, not parse after fully draining the child");
+    assert_eq!(response.files.len(), 1);
+    assert!(response.files[0].hunks.is_empty());
+    assert_eq!(response.files[0].hunks_omitted, Some(true));
+    assert_eq!(response.files[0].added, Some(1));
+    assert_eq!(response.truncated, Some(true));
+    // The same complete internal request still returns all content.
+    let full = LocalGit::new(&dir)
+        .diff(DiffTarget::Working, Some("large.txt"))
+        .await
+        .unwrap();
+    assert_eq!(full.truncated, None);
+    assert!(full.files[0]
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|line| line.content.len() == 2 * 1024 * 1024));
+}

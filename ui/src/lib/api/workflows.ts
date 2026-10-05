@@ -4,7 +4,7 @@
 // crates/otto-server/src/routes/workflows.rs.)
 
 import { api } from './client';
-import type { ActiveWorkflowRun, Workflow, WorkflowRun, WorkflowVersion } from './types';
+import type { ActiveWorkflowRun, Workflow, WorkflowRun, WorkflowVersion, WorkflowVersionSummary } from './types';
 
 /** In-flight workflow runs (pending|running) across a workspace, newest first.
  *  Backs the "Running" sidebar list. */
@@ -28,9 +28,14 @@ export function retryRunNode(
   });
 }
 
-/** Version history for a workflow (newest first). */
-export function listWorkflowVersions(id: string): Promise<WorkflowVersion[]> {
-  return api.get<WorkflowVersion[]>(`/workflows/${id}/versions`);
+/** One metadata-only history page, newest first; beforeVersion is exclusive.
+ * A full page may have an older page; an empty next page marks the end. */
+export function listWorkflowVersions(id: string, options: {limit?: number; beforeVersion?: number} = {}): Promise<WorkflowVersionSummary[]> {
+  const requested = options.limit ?? 50;
+  const limit = Number.isFinite(requested) ? Math.min(100, Math.max(1, Math.trunc(requested))) : 50;
+  const query = new URLSearchParams({summary: 'true', limit: String(limit)});
+  if (options.beforeVersion !== undefined) query.set('before_version', String(options.beforeVersion));
+  return api.get<WorkflowVersionSummary[]>(`/workflows/${encodeURIComponent(id)}/versions?${query}`);
 }
 
 /** A single version snapshot. */

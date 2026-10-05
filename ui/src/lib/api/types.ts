@@ -5813,6 +5813,8 @@ export interface UpdateTriggerReq {
 // with the Run-with-Otto `ApproveRunReq` below — same per-module-vs-flat-file
 // reason as WorkflowRunStatus.
 export interface WorkflowApproveRunReq {
+  /** Required for Product gates: version of the full pending node body actually displayed. */
+  expected_detail_version?: string | null;
   node_id: string;
   approved: boolean;
   note?: string | null;
@@ -5846,6 +5848,10 @@ export interface WorkflowVersion {
   created_by: string;
   created_at: string;
 }
+
+/** Metadata returned by a bounded workflow history request with summary=true. */
+export type WorkflowVersionSummary = Pick<WorkflowVersion,
+  'id' | 'workflow_id' | 'version' | 'note' | 'created_by' | 'created_at'>;
 
 export interface CreateWorkflowReq {
   name: string;
@@ -9491,7 +9497,7 @@ export type Block =
   | { kind: 'artifact'; artifact: Artifact }
   | { kind: 'notice'; note: SystemNote };
 
-export type HistoryStatus = 'running' | 'idle' | 'exited' | 'reconnectable' | 'on_disk';
+export type HistoryStatus = 'running' | 'working' | 'idle' | 'exited' | 'reconnectable' | 'on_disk';
 
 /** Bounded metadata page; a non-null cursor can accompany an empty result. */
 export interface HistoryPage {
@@ -11689,3 +11695,9 @@ export interface BrokerSchemaVersionDetail {
   schema_type: string;
   schema: string;
 }
+
+// Product publication and paged transcript contracts (definitions owned by Product).
+export type {
+  ReviewedContent, PublishAsRfcReq, PublishAsStoryReq, ProductPublicationPreview,
+  ProductTranscriptSummary, ProductTranscriptPage, ProductTranscriptSearchPage,
+} from '../../modules/product/types';

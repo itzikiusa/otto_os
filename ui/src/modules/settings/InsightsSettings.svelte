@@ -57,14 +57,20 @@
   // (merged) and sent right after — it used to be dropped while the picker
   // kept showing it, so the reports ran on the old model.
   let queuedAgent: Partial<InsightsConfig> | null = null;
+  let failedAgent: Partial<InsightsConfig> | null = $state(null);
+  let agentSaveError = $state('');
   // Local model draft — the picker's free-text path fires per keystroke, so we
   // debounce the PUT instead of racing saveAgent's `saving` guard.
   let modelDraft = $state('');
-  let modelSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let modelSaveTimer: ReturnType<typeof setTimeout> | null = $state(null);
   function onModelChange(m: string): void {
+    // The draft belongs to the picker that produced it, even if a pending
+    // provider write later rolls cfg back to the last acknowledged pair.
+    const provider = failedAgent?.provider ?? cfg?.provider ?? '';
     modelDraft = m;
+    savedIn = null;
     if (modelSaveTimer) clearTimeout(modelSaveTimer);
-    modelSaveTimer = setTimeout(() => void saveAgent({ model: m }), 500);
+    modelSaveTimer = setTimeout(() => { modelSaveTimer = null; void saveAgent({ provider, model: m }, true); }, 500);
   }
 
   // ---------------------------------------------------------------------------
@@ -97,8 +103,13 @@
   // ---------------------------------------------------------------------------
 
   /** Persist a provider/model change (which agent generates the reports). */
-  async function saveAgent(patch: Partial<InsightsConfig>): Promise<void> {
+  async function saveAgent(patch: Partial<InsightsConfig>, preserveDraft = false): Promise<void> {
     if (!cfg) return;
+    if ('provider' in patch && !preserveDraft) {
+      if (modelSaveTimer) clearTimeout(modelSaveTimer);
+      modelSaveTimer = null;
+      modelDraft = patch.model ?? '';
+    }
     if (saving) {
       queuedAgent = { ...(queuedAgent ?? {}), ...patch };
       return;
@@ -106,22 +117,38 @@
     const next: InsightsConfig = { ...cfg, ...patch };
     const prev = cfg;
     cfg = next;
+    failedAgent = null;
     saving = true;
     try {
       cfg = await insightsApi.putConfig(next);
-      flashSaved('agent');
+      failedAgent = null;
+      agentSaveError = '';
+      if (!queuedAgent && !modelSaveTimer) flashSaved('agent');
     } catch (e) {
       cfg = prev;
-      modelDraft = prev.model || '';
+      // Keep the newest coherent pair for explicit Retry. Do not drain a
+      // provider's queued model into the provider restored by rollback.
+      failedAgent = { provider: next.provider, ...queuedAgent, model: modelDraft };
+      queuedAgent = null;
+      if (modelSaveTimer) clearTimeout(modelSaveTimer);
+      modelSaveTimer = null;
+      agentSaveError = loadErrorText(e);
       toastError('Couldn’t save the report agent', e);
     } finally {
       saving = false;
     }
-    if (queuedAgent) {
-      const q = queuedAgent;
-      queuedAgent = null;
-      await saveAgent(q);
-    }
+    await drainQueuedAgent();
+  }
+
+  async function drainQueuedAgent(): Promise<void> {
+    if (!queuedAgent) return;
+    const patch = queuedAgent;
+    queuedAgent = null;
+    await saveAgent(patch, true);
+  }
+
+  async function retryAgent(): Promise<void> {
+    if (failedAgent && !saving && !modelSaveTimer) await saveAgent(failedAgent, true);
   }
 
   async function toggle(key: keyof InsightsConfig): Promise<void> {
@@ -139,6 +166,7 @@
     } finally {
       saving = false;
     }
+    await drainQueuedAgent();
   }
 </script>
 
@@ -165,13 +193,16 @@
     </div>
 
     <h2 class="section-title">Report agent {#if savedIn === 'agent'}<span class="saved" role="status">Saved</span>{/if}</h2>
+    {#if agentSaveError}
+      <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button></p>
+    {/if}
     <div class="card agent-row">
       <div class="field agent-fld">
         <label for="ins-provider">Provider</label>
         <select
           id="ins-provider"
           class="input"
-          value={cfg.provider || ''}
+          value={(failedAgent?.provider ?? cfg.provider) || ''}
           disabled={saving}
           onchange={(e) => {
             // A model belongs to its provider — drop it rather than send a
@@ -188,7 +219,7 @@
            template. Empty provider = default → resolve for the model list. -->
       <div class="agent-fld model">
         <ModelPicker
-          provider={cfg.provider || defaultAgentProvider()}
+          provider={(failedAgent?.provider ?? cfg.provider) || defaultAgentProvider()}
           value={modelDraft}
           hint="Model the report agent runs with (blank = the provider's default)."
           onchange={onModelChange}

@@ -16,7 +16,16 @@ pub struct Store {
     pub queued: Arc<tokio::sync::Semaphore>,
     pub inference: Arc<tokio::sync::Semaphore>,
 }
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ArchiveIo {
+    event_opens: usize,
+    draft_reads: usize,
+    index_builds: usize,
+}
 pub struct Archive {
+    #[cfg(test)]
+    io: Mutex<ArchiveIo>,
     pub control: std::sync::atomic::AtomicU64,
     pub path: PathBuf,
     pub state: Mutex<ArchiveState>,
@@ -51,6 +60,44 @@ fn regular(path: &Path) -> Result<()> {
         ));
     }
     Ok(())
+}
+/// Read filesystem metadata only: no event/draft open, parse, hash or indexing.
+/// File identity catches same-size atomic replacement even with restored mtime;
+/// Unix change time also catches in-place writes that restore that timestamp.
+fn file_revision(path: &Path) -> Result<Option<String>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(value) => value,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(disk(e)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(Error::Forbidden(
+            "Archive files must be regular files".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Some(format!(
+            "{}:{}:{}:{}:{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )))
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(Some(format!(
+            "{}:{:?}:{:?}",
+            metadata.len(),
+            metadata.modified().map_err(disk)?,
+            metadata.created().ok()
+        )))
+    }
 }
 impl Store {
     #[allow(clippy::disallowed_methods)] // sync store: rooms::recap opens it via spawn_blocking
@@ -112,6 +159,8 @@ impl Store {
             return Err(Error::Unauthorized);
         }
         let a = Arc::new(Archive {
+            #[cfg(test)]
+            io: Mutex::new(ArchiveIo::default()),
             control: std::sync::atomic::AtomicU64::new(
                 (metadata.capture_epoch << 1) | u64::from(metadata.status == RecapState::Capturing),
             ),
@@ -129,6 +178,26 @@ impl Store {
         });
         all.insert(id.into(), a.clone());
         Ok(a)
+    }
+    /// Deliberately bypass get/ensure_index: polling a cold archive must remain
+    /// independent of its transcript size and must not read the draft body.
+    pub fn revision(&self, id: &str, owner: &str) -> Result<RecapRevision> {
+        let archive = self.load(id)?;
+        let state = archive.state.lock().unwrap();
+        if state.metadata.owner_id != owner {
+            return Err(Error::Forbidden(
+                "This recap belongs to another owner".into(),
+            ));
+        }
+        let events = file_revision(&archive.path.join("events.jsonl"))?
+            .ok_or_else(|| Error::Internal("Recap archive: missing event journal".into()))?;
+        Ok(RecapRevision {
+            metadata: state.metadata.clone(),
+            // last_seq includes a lazily discovered recovery-gap projection;
+            // id prevents equal empty archives sharing a body identity.
+            events_revision: format!("{id}:{}:{events}", state.metadata.last_seq),
+            draft_revision: file_revision(&archive.path.join("draft.json"))?,
+        })
     }
     pub fn get(&self, id: &str, owner: &str) -> Result<Arc<Archive>> {
         let a = self.load(id)?;
@@ -177,6 +246,8 @@ impl Store {
         fs::create_dir(path.join("images")).map_err(disk)?;
         private_dir(&path.join("images"))?;
         let a = Arc::new(Archive {
+            #[cfg(test)]
+            io: Mutex::new(ArchiveIo::default()),
             control: std::sync::atomic::AtomicU64::new(
                 (metadata.capture_epoch << 1) | u64::from(metadata.status == RecapState::Capturing),
             ),
@@ -214,6 +285,12 @@ impl Archive {
         }
         regular(&self.path.join("events.jsonl"))?;
         let file = fs::File::open(self.path.join("events.jsonl")).map_err(disk)?;
+        #[cfg(test)]
+        {
+            let mut io = self.io.lock().unwrap();
+            io.event_opens += 1;
+            io.index_builds += 1;
+        }
         let total = file.metadata().map_err(disk)?.len();
         let mut reader = BufReader::new(file);
         let mut line = Vec::new();
@@ -392,6 +469,10 @@ impl Archive {
         };
         regular(&self.path.join("events.jsonl"))?;
         let mut file = fs::File::open(self.path.join("events.jsonl")).map_err(disk)?;
+        #[cfg(test)]
+        {
+            self.io.lock().unwrap().event_opens += 1;
+        }
         file.seek(SeekFrom::Start(offset)).map_err(disk)?;
         let mut events = vec![];
         for line in BufReader::new(file.take(extent.saturating_sub(offset))).lines() {
@@ -415,6 +496,10 @@ impl Archive {
             .map(|e| e.seq);
         let draft = if self.path.join("draft.json").exists() {
             regular(&self.path.join("draft.json"))?;
+            #[cfg(test)]
+            {
+                self.io.lock().unwrap().draft_reads += 1;
+            }
             Some(
                 serde_json::from_slice(&fs::read(self.path.join("draft.json")).map_err(disk)?)
                     .map_err(disk)?,
@@ -582,6 +667,243 @@ mod tests {
             reason: "Recognizer unavailable".into(),
         }
     }
+    #[test]
+    fn full_detail_polling_cost_reads_unchanged_bodies_on_every_tick() {
+        for event_count in [1, 100] {
+            for payload_bytes in [2048, 20480] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = Store::open(dir.path().join("archives")).unwrap();
+                let archive = store.create(metadata("alice")).unwrap();
+                for _ in 0..event_count {
+                    archive
+                        .append(
+                            2,
+                            RecapEventData::Terminal {
+                                data_base64: "e".repeat(payload_bytes),
+                            },
+                        )
+                        .unwrap();
+                }
+                let draft = serde_json::json!({"overview":"Finished draft", "decisions":[], "actions":[], "open_questions":[], "coverage":[], "source_event_ids":[]});
+                fs::write(
+                    archive.path.join("draft.json"),
+                    serde_json::to_vec(&draft).unwrap(),
+                )
+                .unwrap();
+                *archive.io.lock().unwrap() = ArchiveIo::default();
+                let mut transferred = 0;
+                for _ in 0..15 {
+                    let body = archive.detail(0, 100).unwrap();
+                    assert_eq!(body.events.len(), event_count);
+                    transferred += serde_json::to_vec(&body).unwrap().len();
+                }
+                assert_eq!(
+                    *archive.io.lock().unwrap(),
+                    ArchiveIo {
+                        event_opens: 15,
+                        draft_reads: 15,
+                        index_builds: 0
+                    }
+                );
+                assert!(transferred >= 15 * event_count * payload_bytes);
+                eprintln!("recap full-detail baseline: events={event_count}, payload={payload_bytes}, ticks=15, bytes={transferred}, io={:?}", *archive.io.lock().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn recap_revision_cold_polling_reads_no_bodies_or_index_at_small_and_large_extents() {
+        for event_count in [1, 100] {
+            for payload_bytes in [2048, 20480] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("archives");
+                let store = Store::open(root.clone()).unwrap();
+                let archive = store.create(metadata("alice")).unwrap();
+                let id = archive.metadata().id;
+                for _ in 0..event_count {
+                    archive
+                        .append(
+                            2,
+                            RecapEventData::Terminal {
+                                data_base64: "e".repeat(payload_bytes),
+                            },
+                        )
+                        .unwrap();
+                }
+                let draft = RecapDraft {
+                    overview: "draft".repeat(25_000),
+                    decisions: vec![],
+                    actions: vec![],
+                    open_questions: vec![],
+                    coverage: vec![],
+                    source_event_ids: vec![],
+                };
+                {
+                    let mut state = archive.state.lock().unwrap();
+                    archive.draft(&draft, &mut state).unwrap();
+                    state.metadata.status = RecapState::Stopped;
+                    archive.save(&state).unwrap();
+                }
+                drop(archive);
+                drop(store);
+                let cold = Store::open(root).unwrap();
+                let archive = cold.load(&id).unwrap();
+                assert!(!archive.state.lock().unwrap().indexed);
+                assert!(matches!(
+                    cold.revision(&id, "bob"),
+                    Err(Error::Forbidden(_))
+                ));
+                let initial = cold.revision(&id, "alice").unwrap();
+                assert_eq!(initial.metadata.last_seq, event_count);
+                let encoded = serde_json::to_vec(&initial).unwrap();
+                assert!(encoded.len() < 4096, "revision carries no event/draft body");
+                assert!(!String::from_utf8_lossy(&encoded).contains(&"draft".repeat(100)));
+                for _ in 0..15 {
+                    assert_eq!(
+                        serde_json::to_vec(&cold.revision(&id, "alice").unwrap()).unwrap(),
+                        encoded
+                    );
+                }
+                assert_eq!(*archive.io.lock().unwrap(), ArchiveIo::default());
+                let state = archive.state.lock().unwrap();
+                assert!(!state.indexed);
+                assert!(state.offsets.is_empty());
+                drop(state);
+                eprintln!("recap revision: events={event_count}, payload={payload_bytes}, ticks=15, bytes={}, event_opens=0, draft_reads=0, index_builds=0", encoded.len() * 15);
+                // Positive control proves the same counters observe the actual
+                // I/O when the real detail path finally builds/reads the body.
+                let page = cold.get(&id, "alice").unwrap().detail(0, 100).unwrap();
+                assert_eq!(page.events.len() as u64, event_count);
+                assert_eq!(page.draft.unwrap().overview, draft.overview);
+                assert_eq!(
+                    *archive.io.lock().unwrap(),
+                    ArchiveIo {
+                        event_opens: 2,
+                        draft_reads: 1,
+                        index_builds: 1
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recap_revision_detects_in_place_draft_change_with_restored_mtime() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("archives")).unwrap();
+        let archive = store.create(metadata("alice")).unwrap();
+        let id = archive.metadata().id;
+        let path = archive.path.join("draft.json");
+        fs::write(&path, b"original").unwrap();
+        let before = fs::metadata(&path).unwrap();
+        let revision = store.revision(&id, "alice").unwrap();
+        // Isolate ctime: keep the file identity, byte length and exact mtime.
+        // The brief delay separates filesystem timestamp ticks on this host.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        fs::write(&path, b"modified").unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(before.modified().unwrap()))
+            .unwrap();
+        let after = fs::metadata(&path).unwrap();
+        assert_eq!(
+            (before.dev(), before.ino(), before.len()),
+            (after.dev(), after.ino(), after.len())
+        );
+        assert_eq!(
+            (before.mtime(), before.mtime_nsec()),
+            (after.mtime(), after.mtime_nsec())
+        );
+        assert_ne!(
+            (before.ctime(), before.ctime_nsec()),
+            (after.ctime(), after.ctime_nsec())
+        );
+        let changed = store.revision(&id, "alice").unwrap();
+        assert_ne!(revision.draft_revision, changed.draft_revision);
+        assert_eq!(revision.events_revision, changed.events_revision);
+        assert_eq!(*archive.io.lock().unwrap(), ArchiveIo::default());
+    }
+
+    #[test]
+    fn recap_revision_observes_external_draft_replacement_rewrite_removal_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("archives")).unwrap();
+        let archive = store.create(metadata("alice")).unwrap();
+        let id = archive.metadata().id;
+        archive.append(2, event()).unwrap();
+        let draft_path = archive.path.join("draft.json");
+        let encoded = |text: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "overview":text, "decisions":[], "actions":[], "open_questions":[],
+                "coverage":[], "source_event_ids":[]
+            }))
+            .unwrap()
+        };
+        fs::write(&draft_path, encoded("original")).unwrap();
+        let initial = store.revision(&id, "alice").unwrap();
+        let original_time = fs::metadata(&draft_path).unwrap().modified().unwrap();
+        let replacement = archive.path.join("replacement.json");
+        fs::write(&replacement, encoded("replaced")).unwrap();
+        fs::File::open(&replacement)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_time))
+            .unwrap();
+        fs::rename(replacement, &draft_path).unwrap();
+        let replaced = store.revision(&id, "alice").unwrap();
+        assert_ne!(initial.draft_revision, replaced.draft_revision);
+        assert_eq!(initial.events_revision, replaced.events_revision);
+        fs::write(&draft_path, encoded("rewritte")).unwrap();
+        fs::File::open(&draft_path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(original_time + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        let rewritten = store.revision(&id, "alice").unwrap();
+        assert_ne!(replaced.draft_revision, rewritten.draft_revision);
+        fs::remove_file(&draft_path).unwrap();
+        let removed = store.revision(&id, "alice").unwrap();
+        assert!(removed.draft_revision.is_none());
+        assert_eq!(initial.events_revision, removed.events_revision);
+        {
+            let mut state = archive.state.lock().unwrap();
+            state.metadata.summary_status = RecapSummaryStatus::Running;
+            state.metadata.summary_error = Some("Retained diagnostic".into());
+            archive.save(&state).unwrap();
+        }
+        let status = store.revision(&id, "alice").unwrap();
+        assert_eq!(status.metadata.summary_status, RecapSummaryStatus::Running);
+        assert_eq!(
+            status.metadata.summary_error.as_deref(),
+            Some("Retained diagnostic")
+        );
+        assert_eq!(status.events_revision, initial.events_revision);
+        archive.append(2, event()).unwrap();
+        let appended = store.revision(&id, "alice").unwrap();
+        assert_ne!(appended.events_revision, initial.events_revision);
+        assert_eq!(appended.metadata.last_seq, 2);
+        assert_eq!(*archive.io.lock().unwrap(), ArchiveIo::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recap_revision_rejects_draft_symlinks_without_reading_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("archives")).unwrap();
+        let archive = store.create(metadata("alice")).unwrap();
+        let target = dir.path().join("outside.json");
+        fs::write(&target, b"private unrelated contents").unwrap();
+        std::os::unix::fs::symlink(target, archive.path.join("draft.json")).unwrap();
+        assert!(matches!(
+            store.revision(&archive.metadata().id, "alice"),
+            Err(Error::Forbidden(_))
+        ));
+        assert_eq!(*archive.io.lock().unwrap(), ArchiveIo::default());
+    }
+
     #[test]
     fn owner_isolation_restart_and_pagination() {
         let dir = tempfile::tempdir().unwrap();

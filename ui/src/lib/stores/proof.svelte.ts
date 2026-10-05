@@ -22,7 +22,11 @@ class ProofStore {
   /** Per-work-item roll-up keyed "<kind>:<work_item_id>" — sidebar chips. */
   summaryByWorkItem: Record<string, ProofSummaryRow> = $state({});
   /** Whether the list/detail is loading. */
-  loading = $state(false);
+  private listLoading = $state(false);
+  private detailLoading = $state(false);
+  get loading(): boolean { return this.listLoading || this.detailLoading; }
+  private listSeq = 0;
+  private moreSeq = 0;
   /** Last failed list load (human text) — inline with Retry, never "no packs". */
   error: string | null = $state(null);
   /** Last failed detail load (human text) — inline with Retry in the right pane. */
@@ -46,42 +50,47 @@ class ProofStore {
 
   /** Load the workspace's packs (optionally filtered) into `packs`. */
   async loadPacks(wsId: string, filter?: ProofPackFilter): Promise<void> {
-    // Another workspace's packs are never "stale data" for this one.
-    if (this.wsId !== wsId) this.packs = [];
+    const seq = ++this.listSeq;
+    ++this.moreSeq;
+    if (this.wsId !== wsId || JSON.stringify(this.lastFilter) !== JSON.stringify(filter)) this.packs = [];
     this.wsId = wsId;
     this.lastFilter = filter;
-    this.loading = true;
+    this.nextCursor = null;
+    this.loadingMore = false;
+    this.listLoading = true;
+    this.error = null;
     try {
-      // First page only (keyset): a workspace with thousands of session packs
-      // no longer ships them all on every open/event.
       const page = await listProofPacksPage(wsId, filter, PAGE);
-      if (this.wsId !== wsId) return; // a newer workspace switch won the race
+      if (this.wsId !== wsId || this.listSeq !== seq) return;
       this.packs = page.packs;
       this.nextCursor = page.next;
       this.error = null;
     } catch (e) {
-      if (this.wsId === wsId) this.error = loadErrorText(e);
+      if (this.wsId === wsId && this.listSeq === seq) this.error = loadErrorText(e);
     } finally {
-      this.loading = false;
+      if (this.listSeq === seq) this.listLoading = false;
     }
   }
 
-  /** Append the next keyset page to `packs`. */
+  /** Append only to the list generation that owns this cursor. */
   async loadMore(): Promise<void> {
     const wsId = this.wsId;
     const cursor = this.nextCursor;
-    if (!wsId || !cursor || this.loadingMore) return;
+    if (!wsId || !cursor || this.loadingMore || this.listLoading) return;
+    const seq = this.listSeq;
+    const request = ++this.moreSeq;
     this.loadingMore = true;
     try {
       const page = await listProofPacksPage(wsId, this.lastFilter, PAGE, cursor);
-      if (this.wsId !== wsId || this.nextCursor !== cursor) return;
+      if (this.wsId !== wsId || this.listSeq !== seq || this.moreSeq !== request) return;
       const have = new Set(this.packs.map((p) => p.id));
       this.packs = [...this.packs, ...page.packs.filter((p) => !have.has(p.id))];
       this.nextCursor = page.next;
+      this.error = null;
     } catch (e) {
-      this.error = loadErrorText(e);
+      if (this.listSeq === seq && this.moreSeq === request) this.error = loadErrorText(e);
     } finally {
-      this.loadingMore = false;
+      if (this.listSeq === seq && this.moreSeq === request) this.loadingMore = false;
     }
   }
 
@@ -192,7 +201,7 @@ class ProofStore {
   /** Open one pack's detail into the right pane. */
   async open(id: string): Promise<void> {
     const seq = ++this.openSeq;
-    this.loading = true;
+    this.detailLoading = true;
     try {
       const d = await getProofPack(id);
       if (seq !== this.openSeq) return;
@@ -205,7 +214,7 @@ class ProofStore {
       if (this.detail?.pack.id !== id) this.detail = null;
       this.detailError = loadErrorText(e);
     } finally {
-      if (seq === this.openSeq) this.loading = false;
+      if (seq === this.openSeq) this.detailLoading = false;
     }
   }
 
@@ -264,6 +273,8 @@ class ProofStore {
   }
 
   closeDetail(): void {
+    ++this.openSeq;
+    this.detailLoading = false;
     this.detail = null;
     this.detailError = null;
   }

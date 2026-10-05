@@ -18,22 +18,25 @@ class ScheduledTasksStore {
   /** task_id → why its run history failed to load (absent = ok). */
   runsError: Record<string, string> = $state({});
   private wsId = '';
+  private listGeneration = 0;
+  private workspaceGeneration = 0;
 
   async loadList(workspaceId: string): Promise<void> {
     // Another workspace's tasks are not "stale data" for this one.
-    if (this.wsId !== workspaceId) this.list = [];
+    if (this.wsId !== workspaceId) { this.list = []; this.listError = null; this.workspaceGeneration++; }
+    const generation = ++this.listGeneration;
     this.wsId = workspaceId;
     this.loadingList = true;
     try {
       const list = await scheduledTasksApi.list(workspaceId);
       // A slower load for a workspace we've since left must not land here.
-      if (this.wsId !== workspaceId) return;
+      if (this.wsId !== workspaceId || generation !== this.listGeneration) return;
       this.list = list;
       this.listError = null;
     } catch (e) {
-      if (this.wsId === workspaceId) this.listError = loadErrorText(e);
+      if (this.wsId === workspaceId && generation === this.listGeneration) this.listError = loadErrorText(e);
     } finally {
-      if (this.wsId === workspaceId) this.loadingList = false;
+      if (this.wsId === workspaceId && generation === this.listGeneration) this.loadingList = false;
     }
   }
 
@@ -57,14 +60,16 @@ class ScheduledTasksStore {
   }
 
   async create(workspaceId: string, body: ScheduledTaskInput): Promise<ScheduledTask> {
+    const generation = this.workspaceGeneration;
     const t = await scheduledTasksApi.create(workspaceId, body);
-    await this.loadList(workspaceId);
+    if (this.wsId === workspaceId && generation === this.workspaceGeneration) await this.loadList(workspaceId);
     return t;
   }
 
   async update(id: string, body: Partial<ScheduledTaskInput>): Promise<void> {
+    const workspaceId = this.wsId, generation = this.workspaceGeneration;
     await scheduledTasksApi.update(id, body);
-    if (this.wsId) await this.loadList(this.wsId);
+    if (workspaceId && this.wsId === workspaceId && generation === this.workspaceGeneration) await this.loadList(workspaceId);
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {

@@ -2,7 +2,8 @@
 //! (interval / daily / weekly) and starts a workflow run in the background.
 //!
 //! Modeled on [`crate::swarm_scheduler`]: 60-second tick (one timer, woken by `CancelSignal`),
-//! DB-cursor idempotency via `last_run` stored in the trigger's `spec_json`.
+//! Cursor/eligibility claim and queued run are committed together; a captured
+//! tick cannot admit after retiming or disabling its trigger.
 //!
 //! Schedule spec keys (mirrors the swarm-scheduler format):
 //!   `cadence`    — "interval" | "daily" | "weekly" (default "interval")
@@ -93,17 +94,6 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             }
         }
 
-        // Advance the cursor first (idempotency: a slow/failing run can't
-        // double-fire on the next tick). Only the cursor — never a whole-spec
-        // write-back of this tick's copy, which undid a concurrent config edit.
-        if let Err(e) = triggers_repo
-            .set_last_run(&trigger.id, &now.to_rfc3339())
-            .await
-        {
-            warn!(trigger_id = %trigger.id, "workflow scheduler: advance cursor: {e}");
-            continue;
-        }
-
         // Build the run input once, shared by `create_run` and the spawned
         // `run_workflow` call. `spec.prompt` (if set) threads a fixed prompt
         // through to the engine's `normalize_prompt`, same as a chat-started run.
@@ -124,14 +114,13 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         copy_result_destinations(&trigger.spec, &mut input);
         let input = Value::Object(input);
 
-        // Create the run row, then execute in a background task.
-        let run = match workflows_repo
-            .create_run(&wf.id, &wf.workspace_id, &input, None)
-            .await
-        {
-            Ok(r) => r,
+        // Revalidate eligibility and the overlap guard while atomically claiming
+        // the cursor and creating the run, then execute in a background task.
+        let run = match admit_schedule_run(ctx, &trigger, &wf.workspace_id, &input, now).await {
+            Ok(Some(run)) => run,
+            Ok(None) => continue,
             Err(e) => {
-                warn!(workflow_id = %wf.id, "workflow scheduler: create run: {e}");
+                warn!(workflow_id = %wf.id, "workflow scheduler: admit run: {e}");
                 continue;
             }
         };
@@ -153,6 +142,20 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         );
     }
     Ok(())
+}
+
+/// The scheduler's durable admission boundary, separated from background engine
+/// execution so stale captured ticks can be exercised against the real database.
+async fn admit_schedule_run(
+    ctx: &ServerCtx,
+    trigger: &otto_state::WorkflowTrigger,
+    workspace_id: &otto_core::Id,
+    input: &Value,
+    now: DateTime<Utc>,
+) -> otto_core::Result<Option<otto_core::workflows::WorkflowRun>> {
+    TriggersRepo::new(ctx.pool.clone())
+        .claim_scheduled_run(trigger, workspace_id, input, &now.to_rfc3339())
+        .await
 }
 
 /// Copy a trigger spec's result-delivery destinations into a run input map.
@@ -424,6 +427,284 @@ pub fn spawn_workflow_event_trigger_listener(ctx: ServerCtx) -> Arc<AtomicBool> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn admission_fixture() -> (
+        tempfile::TempDir,
+        ServerCtx,
+        otto_state::WorkflowTrigger,
+        otto_core::Id,
+    ) {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "admission-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('admission-user','admission-user','x','User',1,?)")
+            .bind(Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let wf = WorkflowsRepo::new(pool.clone())
+            .create(
+                &"admission-ws".into(),
+                "Scheduled",
+                "",
+                "standing instruction",
+                &otto_core::workflows::WorkflowGraph::default(),
+                &"admission-user".into(),
+            )
+            .await
+            .unwrap();
+        let trigger=TriggersRepo::new(pool).create(otto_state::NewWorkflowTrigger {
+            workflow_id:wf.id,kind:"schedule".into(),enabled:true,
+            spec:json!({"cadence":"once","run_at":"2099-10-05T10:00:00Z","prompt":"original prompt"}),
+        }).await.unwrap();
+        (tmp, ctx, trigger, wf.workspace_id)
+    }
+
+    async fn stale_admission_after_edit(change: &str) {
+        let (_tmp, ctx, captured, workspace) = admission_fixture().await;
+        let now = "2099-10-05T10:01:00Z".parse().unwrap();
+        assert!(is_due_armed(
+            &captured.spec,
+            Some(captured.created_at),
+            captured.armed_at,
+            now
+        ));
+        let repo = TriggersRepo::new(ctx.pool.clone());
+        match change {
+            "retime" | "retime-away-back" => {
+                let mut future = captured.spec.clone();
+                future["run_at"] = json!("2099-10-05T11:00:00Z");
+                repo.update(&captured.id, Some(future), None).await.unwrap();
+                if change == "retime-away-back" {
+                    repo.update(&captured.id, Some(captured.spec.clone()), None)
+                        .await
+                        .unwrap();
+                }
+            }
+            "disable" | "disable-enable" => {
+                repo.update(&captured.id, None, Some(false)).await.unwrap();
+                if change == "disable-enable" {
+                    repo.update(&captured.id, None, Some(true)).await.unwrap();
+                }
+            }
+            _ => panic!("unknown fixture edit"),
+        }
+        let edited = repo.get(&captured.id).await.unwrap();
+        // This is the production boundary reached after the tick's workflow,
+        // workspace and active-run awaits, carrying its already captured row.
+        let admitted = admit_schedule_run(
+            &ctx,
+            &captured,
+            &workspace,
+            &json!({"trigger":"schedule"}),
+            now,
+        )
+        .await
+        .unwrap();
+        assert!(
+            admitted.is_none(),
+            "stale {change} tick must not create a queued run"
+        );
+        assert!(WorkflowsRepo::new(ctx.pool.clone())
+            .list_runs(&captured.workflow_id)
+            .await
+            .unwrap()
+            .is_empty());
+        let after = repo.get(&captured.id).await.unwrap();
+        assert_eq!(after.spec, edited.spec);
+        assert_eq!(after.enabled, edited.enabled);
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_admission_rejects_retime() {
+        stale_admission_after_edit("retime").await;
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_admission_rejects_disable() {
+        stale_admission_after_edit("disable").await;
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_admission_rejects_retime_away_back() {
+        stale_admission_after_edit("retime-away-back").await;
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_admission_rejects_disable_enable() {
+        stale_admission_after_edit("disable-enable").await;
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_admission_failure_does_not_consume_occurrence() {
+        let (_tmp, ctx, captured, workspace) = admission_fixture().await;
+        sqlx::query("CREATE TRIGGER reject_scheduled_queue BEFORE INSERT ON workflow_runs BEGIN SELECT RAISE(ABORT,'injected queue failure'); END;").execute(&ctx.pool).await.unwrap();
+        assert!(admit_schedule_run(
+            &ctx,
+            &captured,
+            &workspace,
+            &json!({"trigger":"schedule"}),
+            "2099-10-05T10:01:00Z".parse().unwrap()
+        )
+        .await
+        .is_err());
+        let current = TriggersRepo::new(ctx.pool.clone())
+            .get(&captured.id)
+            .await
+            .unwrap();
+        assert!(
+            current.spec.get("last_run").is_none(),
+            "failed queue insertion must roll back claiming the occurrence"
+        );
+        assert!(WorkflowsRepo::new(ctx.pool.clone())
+            .list_runs(&captured.workflow_id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_same_snapshot_concurrent_admission_queues_once() {
+        let (_tmp, ctx, captured, workspace) = admission_fixture().await;
+        let input = json!({"trigger":"schedule"});
+        let now = "2099-10-05T10:01:00Z".parse().unwrap();
+        let (a, b) = tokio::join!(
+            admit_schedule_run(&ctx, &captured, &workspace, &input, now),
+            admit_schedule_run(&ctx, &captured, &workspace, &input, now)
+        );
+        let count = usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some());
+        assert_eq!(count, 1, "one captured occurrence admits exactly one run");
+        assert_eq!(
+            WorkflowsRepo::new(ctx.pool.clone())
+                .list_runs(&captured.workflow_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_current_due_admission_preserves_pinned_definition() {
+        let (_tmp, ctx, captured, workspace) = admission_fixture().await;
+        let now = "2099-10-05T10:01:00Z".parse().unwrap();
+        assert!(is_due_armed(
+            &captured.spec,
+            Some(captured.created_at),
+            captured.armed_at,
+            now
+        ));
+        let run = admit_schedule_run(
+            &ctx,
+            &captured,
+            &workspace,
+            &json!({"trigger":"schedule"}),
+            now,
+        )
+        .await
+        .unwrap()
+        .expect("current due tick admitted");
+        assert_eq!(run.workflow_version, Some(1));
+        let definition = WorkflowsRepo::new(ctx.pool.clone())
+            .definition_for_run(&run)
+            .await
+            .unwrap();
+        assert_eq!(definition.instructions, "standing instruction");
+        let claimed = TriggersRepo::new(ctx.pool.clone())
+            .get(&captured.id)
+            .await
+            .unwrap();
+        assert!(!is_due_armed(
+            &claimed.spec,
+            Some(claimed.created_at),
+            claimed.armed_at,
+            now
+        ));
+        assert_eq!(
+            WorkflowsRepo::new(ctx.pool.clone())
+                .list_runs(&captured.workflow_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_overlap_is_checked_inside_admission_transaction() {
+        let (_tmp, ctx, first, workspace) = admission_fixture().await;
+        let repo = TriggersRepo::new(ctx.pool.clone());
+        let second = repo
+            .create(otto_state::NewWorkflowTrigger {
+                workflow_id: first.workflow_id.clone(),
+                kind: "schedule".into(),
+                enabled: true,
+                spec: first.spec.clone(),
+            })
+            .await
+            .unwrap();
+        let input = json!({"trigger":"schedule"});
+        let now = "2099-10-05T10:01:00Z".parse().unwrap();
+        let (a, b) = tokio::join!(
+            admit_schedule_run(&ctx, &first, &workspace, &input, now),
+            admit_schedule_run(&ctx, &second, &workspace, &input, now)
+        );
+        assert_eq!(
+            usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
+            1
+        );
+        let a = repo.get(&first.id).await.unwrap();
+        let b = repo.get(&second.id).await.unwrap();
+        assert_eq!(
+            usize::from(a.spec.get("last_run").is_some())
+                + usize::from(b.spec.get("last_run").is_some()),
+            1,
+            "skipped overlapping trigger must remain due"
+        );
+        assert_eq!(
+            WorkflowsRepo::new(ctx.pool.clone())
+                .list_runs(&first.workflow_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review4_trigger_captured_cursor_stays_stale_after_run_finishes() {
+        let (_tmp, ctx, captured, workspace) = admission_fixture().await;
+        let input = json!({"trigger":"schedule"});
+        let now = "2099-10-05T10:01:00Z".parse().unwrap();
+        let run = admit_schedule_run(&ctx, &captured, &workspace, &input, now)
+            .await
+            .unwrap()
+            .unwrap();
+        WorkflowsRepo::new(ctx.pool.clone())
+            .update_run(
+                &run.id,
+                otto_core::workflows::RunStatus::Success,
+                &[],
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            admit_schedule_run(&ctx, &captured, &workspace, &input, now)
+                .await
+                .unwrap()
+                .is_none(),
+            "cursor comparison must reject an old tick even when no run remains active"
+        );
+        assert_eq!(
+            WorkflowsRepo::new(ctx.pool.clone())
+                .list_runs(&captured.workflow_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 
     #[test]
     fn workflow_run_updated_is_not_a_fireable_event_kind() {

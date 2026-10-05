@@ -103,6 +103,8 @@ otto-keychain.workspace = true
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5.3", features = ["util"] }
 http-body-util = "0.1.5"
+# Isolated Jira/Confluence captures for the actual workflow publication path.
+wiremock = "0.6.5"
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true

@@ -519,6 +519,17 @@ pub struct WorkflowVersion {
     pub created_at: DateTime<Utc>,
 }
 
+/// Metadata-only keyset history row; full definitions are fetched by version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowVersionSummary {
+    pub id: Id,
+    pub workflow_id: Id,
+    pub version: i64,
+    pub note: String,
+    pub created_by: Id,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Request body for `POST /workflows/{id}/versions/{v}/restore`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RestoreVersionReq {

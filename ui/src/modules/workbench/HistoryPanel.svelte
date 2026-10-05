@@ -3,6 +3,7 @@
   // forever" from the trash removes it). Pick a revision to see it, diff it
   // against the current text or another revision, and restore it (restoring
   // adds a new revision; the current text stays in history).
+  import { onDestroy, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -39,6 +40,42 @@
   let detailError: string | null = $state(null);
   let view: 'diff' | 'text' = $state('diff');
   let restoring = $state(false);
+  const PAGE_SIZE = 100;
+  let pageCursor: number | undefined = $state(undefined);
+  let pageTrail: (number | undefined)[] = $state([]);
+  let compareInput = $state('');
+  let compareError: string | null = $state(null);
+  let alive = true;
+  let loadGeneration = 0;
+  let visit = 0;
+  let ownerKey = '';
+
+  function syncDocument(): void {
+    const key = `${ws}\0${docId}`;
+    if (key === ownerKey) return;
+    ownerKey = key;
+    visit++;
+    selected = null;
+    compareTo = 'current';
+    compareInput = '';
+    compareError = null;
+    revs = [];
+    pageCursor = undefined;
+    pageTrail = [];
+    restoring = false;
+  }
+
+  function invalidate(): void {
+    alive = false;
+    visit++;
+    loadGeneration++;
+  }
+  onDestroy(invalidate);
+  function close(): void {
+    invalidate();
+    onclose();
+  }
+
 
   const KIND_LABEL: Record<string, string> = {
     create: 'Created',
@@ -47,31 +84,59 @@
     restore: 'Restored',
   };
 
-  async function load(): Promise<void> {
+  async function load(before?: number, trail: (number | undefined)[] = []): Promise<void> {
+    syncDocument();
+    if (!alive) return;
+    const generation = ++loadGeneration;
+    const workspace = ws, id = docId, originVisit = visit;
+    const owns = () => alive && generation === loadGeneration && visit === originVisit && ws === workspace && docId === id;
+    pageCursor = before;
+    pageTrail = trail;
     loading = true;
     try {
-      const list = await listWorkbenchRevisions(ws, docId);
-      revs = [...list].sort((a, b) => b.seq - a.seq);
+      const list = await listWorkbenchRevisions(workspace, id, { limit: PAGE_SIZE, before_seq: before });
+      if (!owns()) return;
+      revs = [...list].sort((a, b) => b.seq - a.seq).slice(0, PAGE_SIZE);
       error = null;
     } catch (e) {
-      error = loadErrorText(e);
+      if (owns()) error = loadErrorText(e);
     } finally {
-      loading = false;
+      if (owns()) loading = false;
     }
   }
 
-  // Reload on doc switch and whenever a save moved the head revision.
+  async function older(): Promise<void> {
+    if (loading || revs.length < PAGE_SIZE) return;
+    return load(revs[revs.length - 1].seq, [...pageTrail, pageCursor]);
+  }
+
+  async function newer(): Promise<void> {
+    if (loading || pageTrail.length === 0) return;
+    return load(pageTrail[pageTrail.length - 1], pageTrail.slice(0, -1));
+  }
+
+  function compareRevision(): void {
+    const seq = Number(compareInput);
+    if (!Number.isSafeInteger(seq) || seq < 1) {
+      compareError = 'Enter a positive revision number.';
+      return;
+    }
+    compareError = null;
+    compareTo = seq;
+  }
+
+  // Track document visits before asynchronous completions; a save refreshes
+  // the newest page without retaining previously rendered metadata pages.
+  $effect.pre(() => {
+    void ws;
+    void docId;
+    untrack(syncDocument);
+  });
   $effect(() => {
+    void ws;
     void docId;
     void rev;
-    void load();
-  });
-
-  // Reset the selection on doc switch.
-  $effect(() => {
-    void docId;
-    selected = null;
-    compareTo = 'current';
+    untrack(() => void load());
   });
 
   $effect(() => {
@@ -97,14 +162,15 @@
     const seq = compareTo;
     const id = docId;
     other = null;
+    compareError = null;
     if (seq === 'current') return;
     let gone = false;
     getWorkbenchRevision(ws, id, seq)
       .then((d) => {
         if (!gone) other = d;
       })
-      .catch(() => {
-        /* surfaced by the empty diff side */
+      .catch((e) => {
+        if (!gone) compareError = loadErrorText(e);
       });
     return () => {
       gone = true;
@@ -118,23 +184,27 @@
   }
 
   async function restore(): Promise<void> {
-    if (selected == null) return;
-    const ok = await confirmer.ask(
-      `The file's content becomes revision ${selected}. Your current text is kept in history, so you can come back to it.`,
-      { title: `Restore revision ${selected}?`, confirmLabel: 'Restore', danger: false },
-    );
-    if (!ok) return;
+    syncDocument();
+    if (selected == null || restoring || !alive) return;
+    const seq = selected, workspace = ws, id = docId, originVisit = visit;
+    const owns = () => alive && visit === originVisit && ws === workspace && docId === id;
     restoring = true;
     try {
-      const doc = await restoreWorkbenchRevision(ws, docId, selected);
+      const ok = await confirmer.ask(
+        `The file's content becomes revision ${seq}. Your current text is kept in history, so you can come back to it.`,
+        { title: `Restore revision ${seq}?`, confirmLabel: 'Restore', danger: false },
+      );
+      if (!ok || !owns()) return;
+      const doc = await restoreWorkbenchRevision(workspace, id, seq);
+      if (!owns()) return;
       onrestored(doc);
-      toasts.success(`Restored revision ${selected}`, 'Saved as a new revision.');
+      toasts.success(`Restored revision ${seq}`, 'Saved as a new revision.');
       selected = null;
       await load();
     } catch (e) {
-      toasts.error("Couldn't restore", loadErrorText(e));
+      if (owns()) toasts.error("Couldn't restore", loadErrorText(e));
     } finally {
-      restoring = false;
+      if (owns()) restoring = false;
     }
   }
 
@@ -156,13 +226,13 @@
     <button class="icon-btn" onclick={() => void load()} aria-label="Refresh history" title="Refresh history">
       <Icon name="refresh" size={12} />
     </button>
-    <button class="icon-btn" onclick={onclose} aria-label="Close history" title="Close history">
+    <button class="icon-btn" onclick={close} aria-label="Close history" title="Close history">
       <Icon name="x" size={12} />
     </button>
   </header>
   <p class="wb-hist-note">Every save is kept. Autosaves within a minute fold into one revision.</p>
 
-  <LoadState what="history" variant="compact" {loading} {error} empty={revs.length === 0} onretry={() => void load()}>
+  <LoadState what="history" variant="compact" {loading} {error} empty={revs.length === 0} onretry={() => void load(pageCursor, pageTrail)}>
     {#snippet emptyView()}
       <p class="wb-hist-note">No revisions yet — start typing; the first save creates one.</p>
     {/snippet}
@@ -191,6 +261,11 @@
     </ol>
   </LoadState>
 
+  <div class="wb-rev-actions" aria-label="History pages">
+    <button class="btn small" disabled={loading || pageTrail.length === 0} onclick={newer}>Newer revisions</button>
+    <button class="btn small" disabled={loading || revs.length < PAGE_SIZE} onclick={older}>Older revisions</button>
+  </div>
+
   {#if selected != null}
     <section class="wb-rev-detail" aria-label={`Revision ${selected}`}>
       <div class="wb-rev-actions">
@@ -203,11 +278,20 @@
             <span>vs</span>
             <select bind:value={compareTo} aria-label="Compare with">
               <option value="current">Current</option>
+              {#if compareTo !== 'current' && !revs.some((r) => r.seq === compareTo && r.seq !== selected)}
+                <option value={compareTo}>Rev {compareTo}</option>
+              {/if}
               {#each revs.filter((r) => r.seq !== selected) as r (r.seq)}
                 <option value={r.seq}>Rev {r.seq}</option>
               {/each}
             </select>
           </label>
+          <label class="wb-cmp">
+            <span>Revision</span>
+            <input type="text" inputmode="numeric" size="6" bind:value={compareInput} aria-label="Compare revision"
+              onkeydown={(event) => { if (event.key === 'Enter') compareRevision(); }} />
+          </label>
+          <button class="btn small" onclick={compareRevision}>Compare</button>
         {/if}
         <button
           class="btn small"
@@ -219,6 +303,9 @@
           <Icon name="undo" size={12} /> Restore this version
         </button>
       </div>
+      {#if compareError}
+        <p class="wb-err" role="alert">Couldn't compare revision: {compareError}</p>
+      {/if}
       {#if detailError}
         <p class="wb-err" role="alert">Couldn't load revision {selected}: {detailError}
           <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>

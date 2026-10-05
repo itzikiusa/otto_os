@@ -530,6 +530,18 @@ export interface ProductTranscript {
   created_at: string;
 }
 
+export interface ProductTranscriptSummary extends Omit<ProductTranscript, 'body'> {
+  body_bytes: number;
+}
+export interface ProductTranscriptPage {
+  items: ProductTranscriptSummary[];
+  next_cursor: string | null;
+}
+export interface ProductTranscriptSearchPage {
+  items: (ProductTranscriptSummary & { match_count: number })[];
+  next_cursor: string | null;
+}
+
 export interface NewDraftReq {
   title?: string | null;
 }
@@ -544,7 +556,19 @@ export interface NewTranscriptReq {
   body: string;
 }
 
+/** The source bytes/metadata displayed in the publication confirmation.
+ * SHA-256 is lowercase hex over the exact UTF-8 body, including whitespace. */
+export interface ReviewedContent {
+  version_id: string | null;
+  body_sha256: string;
+  title: string;
+  source_kind: string;
+  url: string;
+}
+
 export interface PublishAsRfcReq {
+  reviewed_account_url?: string | null;
+  reviewed_content: ReviewedContent;
   account_id: string;
   space_key: string;
   parent_id?: string | null;
@@ -552,6 +576,8 @@ export interface PublishAsRfcReq {
 }
 
 export interface PublishAsStoryReq {
+  reviewed_account_url?: string | null;
+  reviewed_content: ReviewedContent;
   account_id: string;
   project_key: string;
   issue_type: string;
@@ -806,3 +832,11 @@ export interface StorySwarmLink {
   /** Accumulated cost in USD across all runs. */
   cost_usd: number;
 }
+
+/** Frozen dry-run workflow output, forwarded unchanged through human approval. */
+export type ProductPublicationPreview = {
+  story_id: string;
+  body_md: string;
+  account_label: string;
+  account_url: string;
+} & ({ kind: 'jira'; request: PublishAsStoryReq } | { kind: 'rfc'; request: PublishAsRfcReq });

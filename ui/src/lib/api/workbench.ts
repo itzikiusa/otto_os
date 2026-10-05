@@ -48,8 +48,13 @@ export function restoreWorkbenchDoc(ws: string, id: string) {
   return api.post<WorkbenchDoc>(`${doc(ws, id)}/restore`, {});
 }
 
-export function listWorkbenchRevisions(ws: string, id: string) {
-  return api.get<WorkbenchRevision[]>(`${doc(ws, id)}/revisions`);
+/** Newest-first metadata page; before_seq is exclusive. History is retained. */
+export function listWorkbenchRevisions(ws: string, id: string, opts: { limit?: number; before_seq?: number } = {}) {
+  const query = new URLSearchParams();
+  if (opts.limit !== undefined) query.set('limit', String(opts.limit));
+  if (opts.before_seq !== undefined) query.set('before_seq', String(opts.before_seq));
+  const suffix = query.size ? `?${query}` : '';
+  return api.get<WorkbenchRevision[]>(`${doc(ws, id)}/revisions${suffix}`);
 }
 
 export function getWorkbenchRevision(ws: string, id: string, seq: number) {

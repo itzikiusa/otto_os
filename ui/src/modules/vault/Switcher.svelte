@@ -10,6 +10,9 @@
   let sel = $state(0);
   let input = $state<HTMLInputElement | undefined>();
   let seq = 0;
+  let loading = $state(false);
+  let lookupError = $state('');
+  let resolvedQuery = $state<string | null>(null);
 
   $effect(() => {
     if (vault.switcherOpen) {
@@ -23,10 +26,16 @@
 
   async function refresh(q: string): Promise<void> {
     const my = ++seq;
-    const got = await vault.switcherQuery(q);
-    if (my === seq) {
-      hits = got;
-      sel = 0;
+    const id = vault.current?.id, workspace = vault.wsId, generation = vault.lookupGeneration;
+    const current = () => my === seq && query === q && vault.switcherOpen && vault.current?.id === id && vault.wsId === workspace && vault.lookupGeneration === generation;
+    loading = true; lookupError = ''; resolvedQuery = null; hits = []; sel = 0;
+    try {
+      const got = await vault.switcherQuery(q);
+      if (current()) { hits = got; sel = 0; resolvedQuery = q; }
+    } catch (e) {
+      if (current()) lookupError = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (current()) loading = false;
     }
   }
 
@@ -40,9 +49,10 @@
     void vault.open(h.path);
   }
 
-  function createFromQuery(): void {
+  function createFromQuery(explicit = false): void {
     const name = query.trim();
     if (!name) return;
+    if (!explicit && (loading || lookupError || resolvedQuery !== query || hits.length > 0)) return;
     close();
     void vault.createNote(name.endsWith('.md') ? name : `${name}.md`, `# ${name}\n\n`);
   }
@@ -53,13 +63,15 @@
       close();
     } else if (e.key === 'ArrowDown') {
       e.preventDefault();
-      sel = Math.min(sel + 1, hits.length - 1);
+      sel = Math.max(0, Math.min(sel + 1, hits.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       sel = Math.max(sel - 1, 0);
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      if (e.shiftKey || hits.length === 0) createFromQuery();
+      if (e.shiftKey) createFromQuery(true);
+      else if (loading || lookupError || resolvedQuery !== query) return;
+      else if (hits.length === 0) createFromQuery();
       else pick(hits[sel]);
     }
   }
@@ -78,6 +90,12 @@
         onkeydown={onKey}
       />
       <div class="hits">
+        {#if loading}
+          <div role="status">Searching notes…</div>
+        {:else if lookupError}
+          <div role="alert">Couldn’t search notes. {lookupError}</div>
+          <button class="btn small" onclick={() => void refresh(query)}>Retry</button>
+        {/if}
         {#each hits.slice(0, 30) as h, i (h.path + (h.alias ?? ''))}
           <button class="hit" class:sel={i === sel} onclick={() => pick(h)}>
             <span class="t">{h.alias ?? h.title}</span>
@@ -85,8 +103,8 @@
             <span class="p" title={h.path}>{h.path}</span>
           </button>
         {/each}
-        {#if hits.length === 0 && query.trim()}
-          <button class="hit create-btn" onclick={createFromQuery}>
+        {#if !loading && !lookupError && resolvedQuery === query && hits.length === 0 && query.trim()}
+          <button class="hit create-btn" onclick={() => createFromQuery()}>
             <span class="t">Create “{query.trim()}”</span>
             <span class="p">New note · Enter</span>
           </button>

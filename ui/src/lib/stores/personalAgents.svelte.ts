@@ -46,6 +46,8 @@ class PersonalAgentsStore {
   messagesLoading: Record<string, boolean> = $state({});
   messagesError: Record<string, string> = $state({});
   private messageRequests = new Map<string, number>();
+  private scheduleRequests = new Map<string, number>();
+  private runRequests = new Map<string, number>();
   /** Rooms whose held feed may have a hole (a WS gap, or events skipped while
    *  the Rooms page was closed): the next {@link loadMessages} re-reads the
    *  TAIL and replaces, instead of paging forward from a stale cursor. */
@@ -87,24 +89,31 @@ class PersonalAgentsStore {
   }
 
   async loadSchedules(agentId: string): Promise<void> {
+    const request = (this.scheduleRequests.get(agentId) ?? 0) + 1;
+    this.scheduleRequests.set(agentId, request);
     try {
-      this.schedulesByAgent = {
-        ...this.schedulesByAgent,
-        [agentId]: await personalAgentsApi.schedules(agentId),
-      };
+      const schedules = await personalAgentsApi.schedules(agentId);
+      if (this.scheduleRequests.get(agentId) !== request) return;
+      this.schedulesByAgent = { ...this.schedulesByAgent, [agentId]: schedules };
     } catch {
+      if (this.scheduleRequests.get(agentId) !== request) return;
       this.schedulesByAgent = { ...this.schedulesByAgent, [agentId]: [] };
     }
   }
 
   async loadRuns(agentId: string): Promise<void> {
+    const request = (this.runRequests.get(agentId) ?? 0) + 1;
+    this.runRequests.set(agentId, request);
     try {
-      this.runsByAgent = { ...this.runsByAgent, [agentId]: await personalAgentsApi.runs(agentId) };
+      const runs = await personalAgentsApi.runs(agentId);
+      if (this.runRequests.get(agentId) !== request) return;
+      this.runsByAgent = { ...this.runsByAgent, [agentId]: runs };
       if (agentId in this.runsError) {
         const { [agentId]: _cleared, ...rest } = this.runsError;
         this.runsError = rest;
       }
     } catch (e) {
+      if (this.runRequests.get(agentId) !== request) return;
       this.runsError = { ...this.runsError, [agentId]: loadErrorText(e) };
     }
   }

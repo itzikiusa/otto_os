@@ -4,7 +4,7 @@ use crate::DbPool;
 use chrono::Utc;
 use otto_core::workflows::{
     ActiveWorkflowRun, NodeRunState, NodeStatus, RunStatus, Workflow, WorkflowCheckpoint,
-    WorkflowGraph, WorkflowRun, WorkflowVersion,
+    WorkflowGraph, WorkflowRun, WorkflowVersion, WorkflowVersionSummary,
 };
 use otto_core::{new_id, Error, Id, Result};
 use sqlx::Row;
@@ -283,6 +283,11 @@ impl WorkflowsRepo {
         let now = fmt(Utc::now());
         let graph_json =
             serde_json::to_string(graph).map_err(|e| Error::Internal(e.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin create workflow"))?;
         sqlx::query(
             "INSERT INTO workflows (id, workspace_id, name, description, instructions, graph_json,
                                     created_by, created_at, updated_at)
@@ -297,23 +302,18 @@ impl WorkflowsRepo {
         .bind(created_by)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("create workflow"))?;
-        // Snapshot the initial version so every workflow has a v1 in history.
-        self.snapshot_version(
-            &id,
-            1,
-            name,
-            description,
-            instructions,
-            graph,
-            "initial",
-            &otto_core::workflows::default_on_restart(),
-            created_by,
-        )
-        .await?;
-        self.get(&id).await
+        Self::snapshot_live(&mut tx, &id, "initial", Some(created_by), None).await?;
+        let row = sqlx::query("SELECT * FROM workflows WHERE id=?")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("created workflow"))?;
+        let wf = row_to_workflow(&row)?;
+        tx.commit().await.map_err(dberr("commit create workflow"))?;
+        Ok(wf)
     }
 
     pub async fn get(&self, id: &Id) -> Result<Workflow> {
@@ -362,56 +362,75 @@ impl WorkflowsRepo {
         graph: Option<&WorkflowGraph>,
         on_restart: Option<&str>,
     ) -> Result<Workflow> {
-        let now = fmt(Utc::now());
-        if let Some(v) = name {
-            sqlx::query("UPDATE workflows SET name = ?, updated_at = ? WHERE id = ?")
-                .bind(v)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workflow"))?;
+        self.publish(
+            id,
+            name,
+            description,
+            instructions,
+            graph,
+            on_restart,
+            "edited",
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Publish a patch and its immutable definition together. Name/description
+    /// edits alone keep the existing version, matching the API's prior behavior.
+    /// Restore may record historical labels while preserving the live labels.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn publish(
+        &self,
+        id: &Id,
+        name: Option<&str>,
+        description: Option<&str>,
+        instructions: Option<&str>,
+        graph: Option<&WorkflowGraph>,
+        on_restart: Option<&str>,
+        note: &str,
+        actor: Option<&Id>,
+        snapshot_labels: Option<(&str, &str)>,
+    ) -> Result<Workflow> {
+        let versioned = instructions.is_some() || graph.is_some() || on_restart.is_some();
+        let graph_json = graph
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("begin workflow publication"))?;
+        // UPDATE is the first statement, acquiring the write lock before any
+        // row/version read. A competing save or run sees only committed pairs.
+        let row = sqlx::query("UPDATE workflows SET name=COALESCE(?,name), description=COALESCE(?,description), instructions=COALESCE(?,instructions), graph_json=COALESCE(?,graph_json), on_restart=COALESCE(?,on_restart), version=version+?, updated_at=? WHERE id=? RETURNING *")
+            .bind(name).bind(description).bind(instructions).bind(graph_json).bind(on_restart)
+            .bind(i64::from(versioned)).bind(fmt(Utc::now())).bind(id)
+            .fetch_one(&mut *tx).await.map_err(dberr("publish workflow"))?;
+        let wf = row_to_workflow(&row)?;
+        if versioned {
+            Self::snapshot_live(&mut tx, id, note, actor, snapshot_labels).await?;
         }
-        if let Some(v) = description {
-            sqlx::query("UPDATE workflows SET description = ?, updated_at = ? WHERE id = ?")
-                .bind(v)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workflow"))?;
-        }
-        if let Some(v) = instructions {
-            sqlx::query("UPDATE workflows SET instructions = ?, updated_at = ? WHERE id = ?")
-                .bind(v)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workflow"))?;
-        }
-        if let Some(g) = graph {
-            let graph_json =
-                serde_json::to_string(g).map_err(|e| Error::Internal(e.to_string()))?;
-            sqlx::query("UPDATE workflows SET graph_json = ?, updated_at = ? WHERE id = ?")
-                .bind(&graph_json)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workflow"))?;
-        }
-        if let Some(v) = on_restart {
-            // The route validates the value; the column's CHECK is the backstop.
-            sqlx::query("UPDATE workflows SET on_restart = ?, updated_at = ? WHERE id = ?")
-                .bind(v)
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await
-                .map_err(dberr("update workflow"))?;
-        }
-        self.get(id).await
+        tx.commit()
+            .await
+            .map_err(dberr("commit workflow publication"))?;
+        Ok(wf)
+    }
+
+    async fn snapshot_live(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &Id,
+        note: &str,
+        actor: Option<&Id>,
+        labels: Option<(&str, &str)>,
+    ) -> Result<()> {
+        // No conflict-ignore: an existing version is an invariant violation and
+        // must roll the entire publication back, not silently lose this edit.
+        sqlx::query("INSERT INTO workflow_versions(id,workflow_id,version,name,description,instructions,graph_json,note,on_restart,created_by,created_at) SELECT ?,id,version,COALESCE(?,name),COALESCE(?,description),instructions,graph_json,?,on_restart,COALESCE(?,created_by),? FROM workflows WHERE id=?")
+            .bind(new_id()).bind(labels.map(|v|v.0)).bind(labels.map(|v|v.1)).bind(note).bind(actor).bind(fmt(Utc::now())).bind(id)
+            .execute(&mut **tx).await.map_err(dberr("snapshot published workflow"))?;
+        Ok(())
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
@@ -434,13 +453,27 @@ impl WorkflowsRepo {
         input: &serde_json::Value,
         created_by: Option<&Id>,
     ) -> Result<WorkflowRun> {
-        let id = new_id();
-        let now = fmt(Utc::now());
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(dberr("begin workflow run"))?;
+        let run = Self::insert_run(&mut tx, workflow_id, workspace_id, input, created_by).await?;
+        tx.commit().await.map_err(dberr("commit workflow run"))?;
+        Ok(run)
+    }
+
+    /// Shared transactional insertion for ordinary run admission and atomic
+    /// trigger claims. The caller commits its own surrounding transaction.
+    pub(crate) async fn insert_run(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        workflow_id: &Id,
+        workspace_id: &Id,
+        input: &serde_json::Value,
+        created_by: Option<&Id>,
+    ) -> Result<WorkflowRun> {
+        let id = new_id();
+        let now = fmt(Utc::now());
         sqlx::query(
             "INSERT INTO workflow_runs (id, workflow_id, workspace_id, status, input_json,
                                         nodes_json, started_at, created_by, workflow_version)
@@ -453,12 +486,16 @@ impl WorkflowsRepo {
         .bind(&now)
         .bind(created_by)
         .bind(workflow_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(dberr("create run"))?;
-        crate::workflow_progress::publish_nodes(&mut tx, &id, "[]").await?;
-        tx.commit().await.map_err(dberr("commit workflow run"))?;
-        self.get_run(&id).await
+        crate::workflow_progress::publish_nodes(tx, &id, "[]").await?;
+        let row = sqlx::query("SELECT * FROM workflow_runs WHERE id=?")
+            .bind(&id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(dberr("created workflow run"))?;
+        row_to_run(&row)
     }
 
     pub async fn get_run(&self, id: &Id) -> Result<WorkflowRun> {
@@ -772,9 +809,8 @@ impl WorkflowsRepo {
 
     // --- versioning -------------------------------------------------------
 
-    /// Insert a version-history snapshot of a workflow's graph. Idempotent on the
-    /// `(workflow_id, version)` unique key (re-snapshotting the same version is a
-    /// no-op rather than an error).
+    /// Import an explicit history row. Duplicate version keys fail rather than
+    /// hiding conflicting definitions. Live edits must use `publish` instead.
     #[allow(clippy::too_many_arguments)]
     pub async fn snapshot_version(
         &self,
@@ -796,8 +832,7 @@ impl WorkflowsRepo {
             "INSERT INTO workflow_versions
                  (id, workflow_id, version, name, description, instructions, graph_json, note,
                   on_restart, created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(workflow_id, version) DO NOTHING",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(workflow_id)
@@ -828,6 +863,42 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_version).collect()
     }
 
+    /// Bounded history pages. Summary queries never select/parse definition bodies.
+    pub async fn version_summaries(
+        &self,
+        workflow_id: &Id,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<WorkflowVersionSummary>> {
+        let rows = sqlx::query("SELECT id,workflow_id,version,note,created_by,created_at FROM workflow_versions WHERE workflow_id=? AND version<? ORDER BY version DESC LIMIT ?")
+            .bind(workflow_id).bind(before.unwrap_or(i64::MAX)).bind(limit.clamp(1,100))
+            .fetch_all(&self.pool).await.map_err(dberr("workflow version summaries"))?;
+        rows.iter()
+            .map(|r| {
+                Ok(WorkflowVersionSummary {
+                    id: r.get("id"),
+                    workflow_id: r.get("workflow_id"),
+                    version: r.get("version"),
+                    note: r.get("note"),
+                    created_by: r.get("created_by"),
+                    created_at: ts(&r.get::<String, _>("created_at"))?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn version_page(
+        &self,
+        workflow_id: &Id,
+        before: Option<i64>,
+        limit: i64,
+    ) -> Result<Vec<WorkflowVersion>> {
+        let rows = sqlx::query("SELECT * FROM workflow_versions WHERE workflow_id=? AND version<? ORDER BY version DESC LIMIT ?")
+            .bind(workflow_id).bind(before.unwrap_or(i64::MAX)).bind(limit.clamp(1,100))
+            .fetch_all(&self.pool).await.map_err(dberr("workflow version page"))?;
+        rows.iter().map(row_to_version).collect()
+    }
+
     /// A single version of a workflow, or `None` if it does not exist.
     pub async fn get_version(
         &self,
@@ -852,16 +923,6 @@ impl WorkflowsRepo {
             .await
             .map_err(dberr("current version"))?;
         Ok(row.try_get("version").unwrap_or(1))
-    }
-
-    /// Atomically bump the workflow's version counter, returning the new value.
-    pub async fn bump_version(&self, workflow_id: &Id) -> Result<i64> {
-        sqlx::query("UPDATE workflows SET version = version + 1 WHERE id = ?")
-            .bind(workflow_id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("bump version"))?;
-        self.current_version(workflow_id).await
     }
 
     /// Load the immutable definition this run started with. Legacy rows without
@@ -1130,6 +1191,89 @@ impl WorkflowsRepo {
         Ok(())
     }
 
+    /// Record a decision only for the pending run/gate snapshot read here.
+    /// Product gates require the full node-body version actually displayed by
+    /// the client. A revision CAS binds the subsequent write to that exact
+    /// read, so a reject/retry or gate replacement cannot reuse an old click.
+    pub async fn record_approval(
+        &self,
+        id: &Id,
+        node_id: &str,
+        approved_by: Option<&Id>,
+        note: &str,
+        expected_detail_version: Option<&str>,
+    ) -> Result<i64> {
+        let row = sqlx::query(
+            "SELECT rev, status, waiting_approval, approval_node_id,
+                (SELECT value FROM json_each(nodes_json)
+                 WHERE json_extract(value, '$.node_id') = ? LIMIT 1) AS node_json
+             FROM workflow_runs WHERE id = ?",
+        )
+        .bind(node_id)
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(dberr("read pending approval"))?;
+        if row.get::<String, _>("status") != "running" {
+            return Err(Error::Conflict(
+                "only a running run can be approved or rejected".into(),
+            ));
+        }
+        if row.get::<i64, _>("waiting_approval") == 0 {
+            return Err(Error::Invalid(
+                "run is not currently waiting for approval".into(),
+            ));
+        }
+        if row.get::<Option<String>, _>("approval_node_id").as_deref() != Some(node_id) {
+            return Err(Error::Invalid(
+                "approval node_id does not match the pending gate".into(),
+            ));
+        }
+        let node = row
+            .get::<Option<String>, _>("node_json")
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()
+            .map_err(|e| Error::Internal(format!("approval node JSON: {e}")))?;
+        let product_preview = node
+            .as_ref()
+            .and_then(|node| node.pointer("/output/publication_preview"))
+            .is_some_and(|preview| !preview.is_null());
+        if product_preview || expected_detail_version.is_some() {
+            // Same Value serialization and SHA-256 as workflow_progress::detail.
+            let version = node
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| Error::Internal(format!("approval node version: {e}")))?
+                .map(|json| otto_core::proof::content_sha256(&json));
+            if expected_detail_version.is_none() || expected_detail_version != version.as_deref() {
+                return Err(Error::Conflict("The publication preview changed or was not reviewed. Reload and review it before deciding.".into()));
+            }
+        }
+        let revision: i64 = row.get("rev");
+        sqlx::query_scalar(
+            "UPDATE workflow_runs SET waiting_approval = 0, approved_by = ?,
+                approval_note = ?, approved_at = ?, rev = rev + 1
+             WHERE id = ? AND rev = ? AND status = 'running'
+                AND waiting_approval = 1 AND approval_node_id = ?
+             RETURNING rev",
+        )
+        .bind(approved_by)
+        .bind(note)
+        .bind(fmt(Utc::now()))
+        .bind(id)
+        .bind(revision)
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("record approval"))?
+        .ok_or_else(|| {
+            Error::Conflict(
+                "The pending approval changed. Reload and review it before deciding.".into(),
+            )
+        })
+    }
+
     /// Persist per-node progress WITHOUT touching the run's lifecycle `status`
     /// or `finished_at`. The engine calls this for its routine in-loop progress
     /// writes so a concurrent Cancel (the API flips `status` to Canceled) is
@@ -1290,6 +1434,123 @@ mod tests {
         pool.into()
     }
 
+    /// Competing real publications and run admission share the SQLite boundary.
+    #[tokio::test]
+    async fn review4_interleaved_publication_matches_live_and_run_definition() {
+        for second in ["saved Y", "initial restored"] {
+            let repo = WorkflowsRepo::new(mem_pool().await);
+            let wf = repo
+                .create(
+                    &"ws".into(),
+                    "WF",
+                    "description",
+                    "initial restored",
+                    &WorkflowGraph::default(),
+                    &"u".into(),
+                )
+                .await
+                .unwrap();
+            let (a, b, run) = tokio::join!(
+                repo.publish(
+                    &wf.id,
+                    None,
+                    None,
+                    Some("saved X"),
+                    None,
+                    Some("fail"),
+                    "save",
+                    None,
+                    None
+                ),
+                repo.publish(
+                    &wf.id,
+                    None,
+                    None,
+                    Some(second),
+                    None,
+                    Some("resume"),
+                    "save or restore",
+                    None,
+                    None
+                ),
+                repo.create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None),
+            );
+            let (a, b, run) = (a.unwrap(), b.unwrap(), run.unwrap());
+            assert_ne!(a.version, b.version);
+            for saved in [a, b, repo.get(&wf.id).await.unwrap()] {
+                let snapshot = repo
+                    .get_version(&wf.id, saved.version)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.instructions, snapshot.instructions);
+                assert_eq!(saved.on_restart, snapshot.on_restart);
+                assert_eq!(
+                    serde_json::to_value(saved.graph).unwrap(),
+                    serde_json::to_value(snapshot.graph).unwrap()
+                );
+            }
+            let pinned = repo.definition_for_run(&run).await.unwrap();
+            assert_eq!(pinned.version, run.workflow_version.unwrap());
+            assert_eq!(repo.list_versions(&wf.id).await.unwrap().len(), 3);
+            let next = repo
+                .create_run(&wf.id, &wf.workspace_id, &serde_json::Value::Null, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                repo.definition_for_run(&next).await.unwrap().instructions,
+                repo.get(&wf.id).await.unwrap().instructions
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review4_snapshot_conflict_rolls_back_the_complete_publication() {
+        let repo = WorkflowsRepo::new(mem_pool().await);
+        let wf = repo
+            .create(
+                &"ws".into(),
+                "WF",
+                "",
+                "original",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        repo.snapshot_version(
+            &wf.id,
+            2,
+            "imported",
+            "",
+            "imported",
+            &wf.graph,
+            "import",
+            "resume",
+            &"u".into(),
+        )
+        .await
+        .unwrap();
+        assert!(repo
+            .publish(
+                &wf.id,
+                Some("lost name"),
+                None,
+                Some("lost instructions"),
+                None,
+                None,
+                "conflict",
+                None,
+                None
+            )
+            .await
+            .is_err());
+        let live = repo.get(&wf.id).await.unwrap();
+        assert_eq!(live.version, 1);
+        assert_eq!(live.name, "WF");
+        assert_eq!(live.instructions, "original");
+    }
+
     #[tokio::test]
     async fn retry_scope_is_atomic_and_active_retry_cannot_reset_checkpoints() {
         let pool = mem_pool().await;
@@ -1403,7 +1664,6 @@ mod tests {
         )
         .await
         .unwrap();
-        repo.bump_version(&wf.id).await.unwrap();
         let pinned = repo.definition_for_run(&run).await.unwrap();
         assert_eq!(pinned.name, "Original");
         assert_eq!(pinned.instructions, "original instruction");
@@ -1433,21 +1693,21 @@ mod tests {
             "nodes": [{"id":"a","kind":"manual_trigger"}], "edges": []
         }))
         .unwrap();
-        let v = repo.bump_version(&wf.id).await.unwrap();
-        assert_eq!(v, 2);
-        repo.snapshot_version(
-            &wf.id,
-            v,
-            "WF",
-            "desc",
-            "",
-            &g2,
-            "edited graph",
-            "resume",
-            &"u1".into(),
-        )
-        .await
-        .unwrap();
+        let edited = repo
+            .publish(
+                &wf.id,
+                None,
+                None,
+                None,
+                Some(&g2),
+                None,
+                "edited graph",
+                Some(&"u1".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.version, 2);
         assert_eq!(repo.current_version(&wf.id).await.unwrap(), 2);
 
         let versions = repo.list_versions(&wf.id).await.unwrap();

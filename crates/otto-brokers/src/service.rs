@@ -1015,11 +1015,12 @@ impl BrokersService {
             let key_preview = m.key.as_deref().and_then(|k| {
                 std::str::from_utf8(k).ok().map(|s| {
                     let s = s.trim_end_matches('\0');
-                    if s.len() > 64 {
-                        format!("{}…", &s[..64])
-                    } else {
-                        s.to_string()
+                    let mut chars = s.chars();
+                    let mut preview: String = chars.by_ref().take(64).collect();
+                    if chars.next().is_some() {
+                        preview.push('…');
                     }
+                    preview
                 })
             });
 
@@ -1034,39 +1035,27 @@ impl BrokersService {
             };
 
             // Build headers: original + any added by the transform.
-            let mut headers: Vec<(String, Vec<u8>)> = m.headers.clone();
+            let mut headers = m.headers.clone();
             if let Some(t) = &req.transform {
                 if let Some((hk, hv)) = &t.add_header {
                     // Overwrite existing header with the same key, else append.
                     if let Some(pos) = headers.iter().position(|(k, _)| k == hk) {
-                        headers[pos] = (hk.clone(), hv.as_bytes().to_vec());
+                        headers[pos] = (hk.clone(), Some(hv.as_bytes().to_vec()));
                     } else {
-                        headers.push((hk.clone(), hv.as_bytes().to_vec()));
+                        headers.push((hk.clone(), Some(hv.as_bytes().to_vec())));
                     }
                 }
             }
 
-            let value = m.value.clone().unwrap_or_default();
-            let produce_req = ProduceReq {
-                partition: None, // let the broker choose
-                key: key
-                    .as_deref()
-                    .and_then(|k| std::str::from_utf8(k).ok().map(|s| s.to_string())),
-                value: String::from_utf8_lossy(&value).into_owned(),
-                headers: headers
-                    .into_iter()
-                    .map(|(k, v)| MessageHeader {
-                        key: k,
-                        value: String::from_utf8_lossy(&v).into_owned(),
-                    })
-                    .collect(),
-                key_base64: false,
-                value_base64: false,
-                confirm: true, // guard already checked by the HTTP handler
-            };
-
-            let target = req.target_topic.clone();
-            let resp = client.produce(&target, &produce_req).await?;
+            let resp = client
+                .produce_raw(
+                    &req.target_topic,
+                    None, // let the broker choose; the source partition need not exist there
+                    key.as_deref(),
+                    m.value.as_deref(),
+                    &headers,
+                )
+                .await?;
             let _ = registry; // kept alive for the duration
 
             evidence.push(ReplayEvidence {
@@ -1372,7 +1361,7 @@ fn decode_batch(
                 .into_iter()
                 .map(|(k, v)| MessageHeader {
                     key: k,
-                    value: String::from_utf8_lossy(&v).into_owned(),
+                    value: String::from_utf8_lossy(v.as_deref().unwrap_or_default()).into_owned(),
                 })
                 .collect(),
             size_bytes: m.size,
@@ -1627,5 +1616,335 @@ mod single_flight_tests {
         let _held = a.lock().await;
         assert!(b.try_lock().is_err(), "a second opener waits for the first");
         assert!(other.try_lock().is_ok(), "other clusters are not blocked");
+    }
+}
+
+#[cfg(test)]
+mod replay_integrity_tests {
+    use super::*;
+    use rdkafka::config::ClientConfig;
+    use rdkafka::message::{Header, OwnedHeaders};
+    use rdkafka::mocking::MockCluster;
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+
+    struct NoSecrets;
+    impl SecretStore for NoSecrets {
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    // An in-process Kafka protocol peer, not a real user broker. Populate the
+    // source directly so the production public producer cannot corrupt the
+    // fixture before replay is exercised. Read target bytes through consume_raw.
+    async fn replay_one(
+        key: Option<Vec<u8>>,
+        value: Option<Vec<u8>>,
+        headers: Vec<(String, Vec<u8>)>,
+        transform: Option<ReplayTransform>,
+    ) -> (crate::kafka::RawMessage, ReplayResp) {
+        replay_one_with_nullable_header(key, value, headers, transform, false).await
+    }
+
+    async fn replay_one_with_nullable_header(
+        key: Option<Vec<u8>>,
+        value: Option<Vec<u8>>,
+        headers: Vec<(String, Vec<u8>)>,
+        transform: Option<ReplayTransform>,
+        check_nullable: bool,
+    ) -> (crate::kafka::RawMessage, ReplayResp) {
+        let mock = MockCluster::new(1).unwrap();
+        mock.create_topic("source", 1, 1).unwrap();
+        mock.create_topic("target", 1, 1).unwrap();
+        let bootstrap = mock.bootstrap_servers();
+        let producer: FutureProducer = ClientConfig::new()
+            .set("bootstrap.servers", &bootstrap)
+            .create()
+            .unwrap();
+        let mut record: FutureRecord<'_, Vec<u8>, Vec<u8>> =
+            FutureRecord::to("source").partition(0);
+        if let Some(key) = &key {
+            record = record.key(key);
+        }
+        if let Some(value) = &value {
+            record = record.payload(value);
+        }
+        let mut owned = OwnedHeaders::new();
+        for (name, bytes) in &headers {
+            owned = owned.insert(Header {
+                key: name,
+                value: Some(bytes.as_slice()),
+            });
+        }
+        if check_nullable {
+            owned = owned.insert(Header::<&[u8]> {
+                key: "x-null",
+                value: None,
+            });
+            owned = owned.insert(Header {
+                key: "x-empty",
+                value: Some(b"".as_slice()),
+            });
+        }
+        record = record.headers(owned);
+        producer.send(record, Duration::from_secs(5)).await.unwrap();
+        let client = Arc::new(
+            KafkaClient::connect(&KafkaConnSpec {
+                bootstrap_servers: bootstrap.clone(),
+                security_protocol: SecurityProtocol::Plaintext,
+                sasl_mechanism: None,
+                sasl_username: None,
+                sasl_password: None,
+                tls_skip_verify: false,
+            })
+            .unwrap(),
+        );
+        // The service's warm client path needs no DB read; no schema, user state
+        // or credential is touched. Keep the existing service/transform intact.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let service = BrokersService::new(BrokerClustersRepo::new(pool), Arc::new(NoSecrets), None);
+        let id = "isolated-replay".to_string();
+        service.pool.insert(
+            id.clone(),
+            Pooled {
+                client: client.clone(),
+                registry: None,
+                tunnel: None,
+                created: Instant::now(),
+                last_used: Instant::now(),
+            },
+        );
+        let response = service
+            .replay(
+                &id,
+                &ReplayReq {
+                    source_topic: "source".into(),
+                    target_topic: "target".into(),
+                    selector: ReplaySelector::OffsetRange {
+                        partition: 0,
+                        from: 0,
+                        to: 0,
+                    },
+                    transform,
+                    confirm: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.count, 1);
+        if check_nullable {
+            // Inspect the target with librdkafka directly: consume_raw currently
+            // flattens null headers, so using it as the oracle would hide loss.
+            tokio::task::spawn_blocking(move || {
+                use rdkafka::consumer::{BaseConsumer, Consumer};
+                use rdkafka::message::{Headers, Message};
+                let consumer: BaseConsumer = ClientConfig::new()
+                    .set("bootstrap.servers", &bootstrap)
+                    .set("group.id", "nullable-replay-oracle")
+                    .set("enable.auto.commit", "false")
+                    .create()
+                    .unwrap();
+                let mut assignment = rdkafka::TopicPartitionList::new();
+                assignment
+                    .add_partition_offset("target", 0, rdkafka::Offset::Beginning)
+                    .unwrap();
+                consumer.assign(&assignment).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "target replay arrives before timeout"
+                    );
+                    if let Some(Ok(message)) = consumer.poll(Duration::from_millis(100)) {
+                        let headers = message.headers().expect("replayed headers");
+                        let null = headers.iter().find(|h| h.key == "x-null").unwrap();
+                        let empty = headers.iter().find(|h| h.key == "x-empty").unwrap();
+                        assert_eq!(null.value, None, "null header must remain null");
+                        assert_eq!(
+                            empty.value,
+                            Some(b"".as_slice()),
+                            "present empty header must remain present"
+                        );
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let raw = tokio::task::spawn_blocking(move || {
+            client.consume_raw("target", &serde_json::from_value(serde_json::json!({
+            "partition": 0, "start": { "type": "beginning" }, "limit": 1, "max_wait_ms": 3000
+        })).unwrap())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(raw.messages.len(), 1);
+        (raw.messages.into_iter().next().unwrap(), response)
+    }
+
+    #[tokio::test]
+    async fn replay_preserves_nullable_headers_without_changing_text_transform() {
+        let (actual, _) = replay_one_with_nullable_header(
+            Some(b"key".to_vec()),
+            Some(b"value".to_vec()),
+            vec![("replace".into(), vec![0xff])],
+            Some(ReplayTransform {
+                set_key: None,
+                add_header: Some(("replace".into(), "updated".into())),
+            }),
+            true,
+        )
+        .await;
+        assert_eq!(
+            actual
+                .headers
+                .iter()
+                .find(|(key, _)| key == "replace")
+                .unwrap()
+                .1
+                .as_deref(),
+            Some(b"updated".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_preserves_binary_key_payload_and_header_bytes() {
+        let key = Some(vec![0xff, 0, 0x80]);
+        let value = Some(vec![0xff, 0, 0x81]);
+        let headers = vec![("x-binary".into(), vec![0xff, 0, 0x82])];
+        let (actual, _) = replay_one(key.clone(), value.clone(), headers.clone(), None).await;
+        assert_eq!(actual.key, key);
+        assert_eq!(actual.value, value);
+        assert_eq!(
+            actual.headers,
+            headers
+                .into_iter()
+                .map(|(k, v)| (k, Some(v)))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_preserves_tombstone_distinct_from_present_empty() {
+        for value in [None, Some(Vec::new())] {
+            let (actual, _) = replay_one(Some(b"key".to_vec()), value.clone(), vec![], None).await;
+            assert_eq!(
+                actual.value, value,
+                "null deletion and zero-byte value have different compaction semantics"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_text_transform_changes_only_selected_key_and_header() {
+        let (actual, _) = replay_one(
+            Some(vec![0xff]),
+            Some(vec![0x80, 0]),
+            vec![
+                ("override".into(), vec![0xff]),
+                ("preserve".into(), vec![0xfe, 0]),
+            ],
+            Some(ReplayTransform {
+                set_key: Some("new-key".into()),
+                add_header: Some(("override".into(), "new-value".into())),
+            }),
+        )
+        .await;
+        assert_eq!(actual.key.as_deref(), Some(b"new-key".as_slice()));
+        assert_eq!(actual.value, Some(vec![0x80, 0]));
+        assert_eq!(
+            actual.headers,
+            vec![
+                ("override".into(), Some(b"new-value".to_vec())),
+                ("preserve".into(), Some(vec![0xfe, 0]))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_unicode_preview_never_panics_at_a_multibyte_boundary() {
+        for key in [
+            format!("{}é", "a".repeat(63)),
+            "é".repeat(40),
+            "".into(),
+            "a".repeat(64),
+        ] {
+            let (actual, response) = replay_one(
+                Some(key.clone().into_bytes()),
+                Some(b"value".to_vec()),
+                vec![],
+                None,
+            )
+            .await;
+            assert_eq!(actual.key, Some(key.clone().into_bytes()));
+            assert_eq!(response.count, 1);
+            let preview = response.evidence[0].key_preview.as_ref().unwrap();
+            assert!(preview.chars().count() <= 65);
+            if key.len() <= 64 {
+                assert_eq!(preview, &key);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn public_produce_empty_text_is_tombstone_but_empty_base64_is_present_empty() {
+        let mock = MockCluster::new(1).unwrap();
+        mock.create_topic("public-produce", 1, 1).unwrap();
+        let client = Arc::new(
+            KafkaClient::connect(&KafkaConnSpec {
+                bootstrap_servers: mock.bootstrap_servers(),
+                security_protocol: SecurityProtocol::Plaintext,
+                sasl_mechanism: None,
+                sasl_username: None,
+                sasl_password: None,
+                tls_skip_verify: false,
+            })
+            .unwrap(),
+        );
+        for value_base64 in [false, true] {
+            client
+                .produce(
+                    "public-produce",
+                    &ProduceReq {
+                        partition: Some(0),
+                        key: Some("key".into()),
+                        value: String::new(),
+                        headers: vec![],
+                        key_base64: false,
+                        value_base64,
+                        confirm: true,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let raw = tokio::task::spawn_blocking(move || {
+            client.consume_raw("public-produce", &serde_json::from_value(serde_json::json!({
+            "partition": 0, "start": { "type": "beginning" }, "limit": 2, "max_wait_ms": 3000
+        })).unwrap())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(raw.messages.len(), 2);
+        assert_eq!(
+            raw.messages[0].value, None,
+            "documented empty non-base64 input produces a tombstone"
+        );
+        assert_eq!(
+            raw.messages[1].value,
+            Some(vec![]),
+            "base64 can represent a present zero-byte payload"
+        );
     }
 }

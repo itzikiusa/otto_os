@@ -38,7 +38,10 @@
   let dirty = $state(false);
   let loadedFor = $state<string | null>(null);
 
+  // Selection/reseed ownership is distinct from edits within the same draft.
+  let editorGeneration = 0;
   function seed(env: ApiEnvironment | null): void {
+    editorGeneration++;
     loadedFor = env?.id ?? null;
     dirty = false;
     rows = env
@@ -95,7 +98,10 @@
   let saving = $state(false);
   async function save(): Promise<void> {
     const env = selected;
-    if (!env) return;
+    if (!env || saving) return;
+    const submittedRows = rows;
+    const submittedGeneration = editorGeneration;
+    const workspaceId = ws.currentId;
     const variables: Record<string, string> = {};
     const secret_keys: string[] = [];
     const secret_values: Record<string, string> = {};
@@ -116,7 +122,23 @@
     saving = true;
     const saved = await apiClient.saveEnvironment({ name: env.name, variables, secret_keys, secret_values, secret_renames }, env.id);
     saving = false;
-    if (saved) seed(saved);
+    if (!saved || selected?.id !== env.id || loadedFor !== env.id || ws.currentId !== workspaceId) return;
+    if (rows === submittedRows || (editorGeneration !== submittedGeneration && !dirty)) {
+      seed(saved);
+    } else {
+      // An unchanged secret row can drop its submitted plaintext. A secret
+      // renamed again while saving must now refer to the first persisted name.
+      // Keep all newer keys/values and the dirty flag for the next Save.
+      rows = rows.map((row) => {
+        if (!row.secret) return row;
+        const submitted = submittedRows.find((r) => r === row || (r.storedKey !== null && r.storedKey === row.storedKey));
+        const storedKey = submitted?.key.trim();
+        if (!submitted || !storedKey || !saved.secret_keys.includes(storedKey)) return row;
+        return row === submitted
+          ? { ...row, storedKey, touched: false, value: '' }
+          : { ...row, storedKey };
+      });
+    }
   }
 
   async function create(): Promise<void> {

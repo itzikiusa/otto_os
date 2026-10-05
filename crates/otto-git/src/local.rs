@@ -2162,15 +2162,165 @@ impl LocalGit {
         }
         let ri = std::sync::atomic::AtomicBool::new(false);
         let out = self.diff_patch_bytes(target, &paths, &ri).await?;
+        let captured_bytes = out.len();
         let caps = opts.caps;
         let mut resp = off_runtime(out.len(), move || {
             crate::parse::parse_diff_bytes_capped(&out, caps.as_ref())
         })
         .await?;
+        if matches!(target, DiffTarget::Working) {
+            self.append_untracked(&paths, &mut resp, caps, captured_bytes)
+                .await?;
+        }
         if ri.load(std::sync::atomic::Ordering::Relaxed) {
             resp.renames_incomplete = Some(true);
         }
         Ok(resp)
+    }
+
+    /// Parse each untracked patch as it arrives, then release its raw bytes.
+    /// Keep bounded read-ahead, but stop launching patches once the response
+    /// budget is spent. Remaining paths still receive explicit summary rows.
+    async fn append_untracked(
+        &self,
+        paths: &[&str],
+        resp: &mut DiffResp,
+        caps: Option<crate::parse::DiffCaps>,
+        mut captured_bytes: usize,
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+        let files = self.untracked(paths).await?;
+        let mut remaining = caps;
+        let charge = |remaining: &mut Option<crate::parse::DiffCaps>, parsed: &DiffResp| {
+            if let Some(caps) = remaining {
+                for line in parsed
+                    .files
+                    .iter()
+                    .flat_map(|f| &f.hunks)
+                    .flat_map(|h| &h.lines)
+                {
+                    caps.total_lines = caps.total_lines.saturating_sub(1);
+                    caps.total_bytes = caps.total_bytes.saturating_sub(line.content.len() + 1);
+                }
+            }
+        };
+        charge(&mut remaining, resp);
+        // A patch adds a prefix byte per rendered line plus file headers.
+        // The parser still applies exact rendered line/byte budgets. A child
+        // exceeding this safety ceiling becomes an explicit too-large row.
+        // Discarded per-file bodies still cost I/O and memory. Bound collection
+        // separately from retained rendering, with room for one cut file plus
+        // a following small file. Read-ahead adds at most eight bounded children.
+        let raw_budget = caps.map(|c| {
+            c.total_bytes
+                .saturating_mul(2)
+                .saturating_add(64 * 1024)
+                .min(GIT_STDOUT_CAP)
+        });
+        let file_capture_limit = caps.map(|c| {
+            c.file_bytes
+                .saturating_mul(2)
+                .saturating_add(64 * 1024)
+                .min(GIT_STDOUT_CAP)
+        });
+        let child_limit = file_capture_limit
+            .zip(raw_budget)
+            .map(|(file, total)| file.min(total));
+        let aggregate_cut = child_limit
+            .zip(file_capture_limit)
+            .is_some_and(|(child, file)| child < file);
+        let mut consumed = 0;
+        {
+            let mut patches = futures_util::stream::iter(files.clone())
+                .map(|f: String| async move {
+                    let cmd = GitCmd::diff("diff")
+                        .args(["-U3", "--no-index"])
+                        .paths(["/dev/null", f.as_str()]);
+                    let cmd = match child_limit {
+                        Some(limit) => cmd.truncate_stdout(limit),
+                        None => cmd,
+                    };
+                    let mut process = self.base_cmd();
+                    process.args(cmd.argv());
+                    let (output, cut) = self
+                        .spawn_limited(
+                            process,
+                            SpawnClass::LocalRead,
+                            "diff",
+                            None,
+                            StdoutLimit::of(&cmd),
+                        )
+                        .await?;
+                    // --no-index returns 1 for a normal difference. A killed
+                    // capped read is also expected, but all other failures matter.
+                    if !cut && !matches!(output.status.code(), Some(0 | 1)) {
+                        return Err(upstream_err(
+                            &String::from_utf8_lossy(&output.stderr),
+                            &String::from_utf8_lossy(&output.stdout),
+                            output.status.code(),
+                        ));
+                    }
+                    Ok((output.stdout, cut))
+                })
+                .buffered(8);
+            while resp.truncated != Some(true) {
+                if raw_budget.is_some_and(|budget| captured_bytes >= budget) {
+                    resp.truncated = Some(true);
+                    break;
+                }
+                let Some(result) = patches.next().await else {
+                    break;
+                };
+                let (bytes, cut) = result?;
+                captured_bytes = captured_bytes.saturating_add(bytes.len());
+                if caps.is_none() && captured_bytes > GIT_STDOUT_CAP {
+                    return Err(Error::Upstream(format!(
+                        "working diff exceeds the {GIT_STDOUT_CAP}-byte aggregate patch limit; request individual files"
+                    )));
+                }
+                if cut {
+                    let root = self.repo_path.clone();
+                    let file = vec![files[consumed].clone()];
+                    let mut summary =
+                        off_runtime(usize::MAX, move || untracked_summary(&root, &file)).await?;
+                    if aggregate_cut {
+                        resp.truncated = Some(true);
+                    } else {
+                        for row in &mut summary {
+                            row.too_large = Some(true);
+                        }
+                    }
+                    resp.files.extend(summary);
+                } else {
+                    let mut parsed = off_runtime(bytes.len(), move || {
+                        crate::parse::parse_diff_bytes_capped(&bytes, remaining.as_ref())
+                    })
+                    .await?;
+                    charge(&mut remaining, &parsed);
+                    if parsed.truncated == Some(true) {
+                        resp.truncated = Some(true);
+                    }
+                    resp.files.append(&mut parsed.files);
+                }
+                consumed += 1;
+                if raw_budget.is_some_and(|budget| captured_bytes > budget) {
+                    resp.truncated = Some(true);
+                }
+            }
+            // Dropping this bounded stream cancels outstanding LocalRead jobs;
+            // kill_on_drop terminates their direct child. Explicit capture
+            // overflow and timeout paths also terminate the process group.
+        }
+        if consumed < files.len() {
+            let root = self.repo_path.clone();
+            let omitted = files[consumed..].to_vec();
+            let summary =
+                off_runtime(usize::MAX, move || untracked_summary(&root, &omitted)).await?;
+            resp.files.extend(summary);
+            resp.truncated = Some(true);
+        }
+        crate::parse::fill_totals(resp);
+        Ok(())
     }
 
     /// git's raw unified diff for `target`, scoped to `paths` (empty = all).
@@ -2203,7 +2353,8 @@ impl LocalGit {
                     .exec(&diff("diff", &["-U3", m, l, "HEAD"]), None)
                     .await?;
                 note_renames(&head_err, ri);
-                let mut out = if head_ok {
+                // Untracked patches are streamed/parsed separately by diff_with.
+                if head_ok {
                     head_out
                 } else {
                     let mut s = run(diff("diff", &["-U3", m, l, "--cached"]))
@@ -2211,27 +2362,7 @@ impl LocalGit {
                         .unwrap_or_default();
                     s.extend(run(diff("diff", &["-U3", m, l])).await.unwrap_or_default());
                     s
-                };
-                // Untracked files: render each as a fully-added diff. Scope the
-                // `ls-files` to the pathspec so a single-file request only checks
-                // that one path (and runs at most one `--no-index` diff). A full
-                // working diff runs up to 8 of them at once (in order) instead
-                // of one after another: 200 new files were 200 serial spawns.
-                use futures_util::{StreamExt, TryStreamExt};
-                let added: Vec<Vec<u8>> = futures_util::stream::iter(self.untracked(paths).await?)
-                    .map(|f| async move {
-                        let cmd = GitCmd::diff("diff")
-                            .args(["-U3", "--no-index"])
-                            .paths(["/dev/null", f.as_str()]);
-                        self.exec(&cmd, None).await.map(|(_, stdout, _, _)| stdout)
-                    })
-                    .buffered(8)
-                    .try_collect()
-                    .await?;
-                for stdout in added {
-                    out.extend_from_slice(&stdout);
                 }
-                out
             }
             DiffTarget::Staged => run(diff("diff", &["-U3", m, l, "--cached"])).await?,
             DiffTarget::Commit(sha) => {

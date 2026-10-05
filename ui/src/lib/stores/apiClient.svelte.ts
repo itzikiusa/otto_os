@@ -433,6 +433,9 @@ class ApiClientStore {
   /** Workspace whose tabs are in memory; null until the first restore. Gates
    *  persistence so a not-yet-restored blank tab can't clobber a saved set. */
   private tabsWid: Id | null = null;
+  /** Distinguish returning to a workspace from the visit that issued a request. */
+  private workspaceGeneration = 0;
+  private publicationWorkspace: Id | null = null;
   private tabsWriteTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
@@ -489,6 +492,7 @@ class ApiClientStore {
    *  the previous workspace's pending write first so nothing is lost. */
   private restoreTabs(wid: Id): void {
     if (this.tabsWid === wid) return;
+    this.workspaceOwner();
     this.historyRefresh.reset();
     this.historyDetail.cancel();
     this.history = [];
@@ -640,6 +644,20 @@ class ApiClientStore {
     return id ? `/workspaces/${id}/api-client` : null;
   }
 
+  /** Capture publication ownership; a server write may finish after this visit
+   * ends, but its response/error must not change the newly displayed workspace. */
+  private workspaceOwner(): () => boolean {
+    const wid = this.wsId();
+    if (wid !== this.publicationWorkspace) {
+      this.publicationWorkspace = wid;
+      this.workspaceGeneration++;
+      this.loadedAt = null;
+      this.automationsLoadedAt = null;
+    }
+    const generation = this.workspaceGeneration;
+    return () => this.wsId() === wid && this.workspaceGeneration === generation;
+  }
+
   // ── Loading ───────────────────────────────────────────────────────────────
 
   /** When this workspace's lists last loaded successfully (stale-while-
@@ -652,6 +670,7 @@ class ApiClientStore {
    *  skips the refetch (`force` overrides) — local edits update the store
    *  directly and history arrives live over `api_history_appended`. */
   async loadAll(opts: { force?: boolean } = {}): Promise<void> {
+    const current = this.workspaceOwner();
     const wid = this.wsId();
     const base = this.base();
     if (!wid || !base) return;
@@ -678,7 +697,7 @@ class ApiClientStore {
         api.get<ApiEnvironment[]>(`${base}/environments`),
         this.loadHistory(),
       ]);
-      if (this.wsId() !== wid) return;
+      if (!current()) return;
       this.collections = collections;
       this.requests = summaryItems(requests, wid);
       this.environments = environments;
@@ -695,26 +714,27 @@ class ApiClientStore {
       // Open tabs' saved rows (dirty dots, secret stripping) — one GET each.
       for (const t of this.tabs) if (t.requestId) void this.ensureRequest(t.requestId);
     } catch (e) {
-      if (this.wsId() === wid) {
+      if (current()) {
         this.requestsLoadError = errMsg(e);
         this.envLoadError = errMsg(e);
       }
     } finally {
-      if (this.wsId() === wid) this.loading = false;
+      if (current()) this.loading = false;
     }
-    if (this.wsId() === wid) void this.loadSshConnections();
+    if (current()) void this.loadSshConnections();
   }
 
   /** Load the workspace's `ssh`-kind connections for the SSH-tunnel picker.
    * Best-effort: a Viewer without connections access just sees an empty list. */
   async loadSshConnections(): Promise<void> {
+    const current = this.workspaceOwner();
     const wid = this.wsId();
     if (!wid) return;
     try {
       const all = await api.get<Connection[]>(`/workspaces/${wid}/connections`);
-      if (this.wsId() === wid) this.sshConnections = all.filter((c) => c.kind === 'ssh');
+      if (current()) this.sshConnections = all.filter((c) => c.kind === 'ssh');
     } catch {
-      this.sshConnections = [];
+      if (current()) this.sshConnections = [];
     }
   }
 
@@ -730,36 +750,47 @@ class ApiClientStore {
   }
 
   async loadCollections(): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
-      this.collections = await api.get<ApiCollection[]>(`${base}/collections`);
+      const rows = await api.get<ApiCollection[]>(`${base}/collections`);
+      if (!current()) return;
+      this.collections = rows;
       this.requestsLoadError = null;
     } catch (e) {
+      if (!current()) return;
       this.refreshFailed('collections', 'requests', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
   async loadRequests(): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       const wid = this.wsId();
       const rows = await api.get<ApiOverviewRequest[]>(`${base}/requests/summaries`);
-      if (wid && this.base() === base) this.requests = summaryItems(rows, wid);
+      if (!current()) return;
+      if (wid) this.requests = summaryItems(rows, wid);
       this.requestsLoadError = null;
     } catch (e) {
+      if (!current()) return;
       this.refreshFailed('requests', 'requests', this.collections.length === 0 && this.requests.length === 0, e);
     }
   }
 
   async loadEnvironments(): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
-      this.environments = await api.get<ApiEnvironment[]>(`${base}/environments`);
+      const rows = await api.get<ApiEnvironment[]>(`${base}/environments`);
+      if (!current()) return;
+      this.environments = rows;
       this.envLoadError = null;
     } catch (e) {
+      if (!current()) return;
       this.refreshFailed('environments', 'environments', this.environments.length === 0, e);
     }
   }
@@ -970,18 +1001,21 @@ class ApiClientStore {
   // ── Collections ─────────────────────────────────────────────────────────
 
   async saveCollection(req: UpsertApiCollectionReq, id?: Id): Promise<ApiCollection | null> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return null;
     try {
       const saved = id
         ? await api.patch<ApiCollection>(`${base}/collections/${id}`, req)
         : await api.post<ApiCollection>(`${base}/collections`, req);
+      if (!current()) return saved;
       this.collections =
         id != null && this.collections.some((c) => c.id === saved.id)
           ? this.collections.map((c) => (c.id === saved.id ? saved : c))
           : [...this.collections, saved];
       return saved;
     } catch (e) {
+      if (!current()) return null;
       toasts.error('Save collection failed', errMsg(e));
       return null;
     }
@@ -1161,10 +1195,12 @@ class ApiClientStore {
   }
 
   async deleteCollection(id: Id): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       await api.del(`${base}/collections/${id}`);
+      if (!current()) return;
       // Drop the collection + descendant folders; orphan their requests locally.
       const removed = new Set<Id>();
       const collect = (cid: Id): void => {
@@ -1182,6 +1218,7 @@ class ApiClientStore {
         );
       }
     } catch (e) {
+      if (!current()) return;
       toasts.error('Delete collection failed', errMsg(e));
     }
   }
@@ -1189,16 +1226,18 @@ class ApiClientStore {
   // ── Requests ────────────────────────────────────────────────────────────
 
   async saveRequest(req: UpsertApiRequestReq, id?: Id): Promise<ApiRequest | null> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return null;
     try {
       const saved = id
         ? await api.patch<ApiRequest>(`${base}/requests/${id}`, req)
         : await api.post<ApiRequest>(`${base}/requests`, req);
-      if (this.base() !== base) return saved;
+      if (!current()) return saved;
       this.upsertRequest(saved);
       return saved;
     } catch (e) {
+      if (!current()) return null;
       toasts.error('Save request failed', errMsg(e));
       return null;
     }
@@ -1262,13 +1301,16 @@ class ApiClientStore {
   }
 
   async deleteRequest(id: Id): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       await api.del(`${base}/requests/${id}`);
+      if (!current()) return;
       this.dropRequest(id);
       if (this.draft.requestId === id) this.draft = { ...this.draft, requestId: null };
     } catch (e) {
+      if (!current()) return;
       toasts.error('Delete request failed', errMsg(e));
     }
   }
@@ -1276,41 +1318,50 @@ class ApiClientStore {
   // ── Environments ────────────────────────────────────────────────────────
 
   async saveEnvironment(req: UpsertApiEnvironmentReq, id?: Id): Promise<ApiEnvironment | null> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return null;
     try {
       const saved = id
         ? await api.patch<ApiEnvironment>(`${base}/environments/${id}`, req)
         : await api.post<ApiEnvironment>(`${base}/environments`, req);
+      if (!current()) return saved;
       this.environments = this.environments.some((e) => e.id === saved.id)
         ? this.environments.map((e) => (e.id === saved.id ? saved : e))
         : [...this.environments, saved];
       return saved;
     } catch (e) {
+      if (!current()) return null;
       toasts.error('Save environment failed', errMsg(e));
       return null;
     }
   }
 
   async deleteEnvironment(id: Id): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       await api.del(`${base}/environments/${id}`);
+      if (!current()) return;
       this.environments = this.environments.filter((e) => e.id !== id);
     } catch (e) {
+      if (!current()) return;
       toasts.error('Delete environment failed', errMsg(e));
     }
   }
 
   async activateEnvironment(id: Id): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       await api.post(`${base}/environments/${id}/activate`, {});
+      if (!current()) return;
       // Exactly one active env: reflect it locally without a refetch.
       this.environments = this.environments.map((e) => ({ ...e, is_active: e.id === id }));
     } catch (e) {
+      if (!current()) return;
       toasts.error('Activate environment failed', errMsg(e));
     }
   }
@@ -1600,14 +1651,18 @@ class ApiClientStore {
   // ── Automations (collection runner) ───────────────────────────────────────
 
   async loadAutomations(opts: { force?: boolean } = {}): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     const last = this.automationsLoadedAt;
     if (!opts.force && last?.base === base && Date.now() - last.at < RELOAD_FRESH_MS) return;
     try {
-      this.automations = await api.get<ApiAutomation[]>(`${base}/automations`);
+      const rows = await api.get<ApiAutomation[]>(`${base}/automations`);
+      if (!current()) return;
+      this.automations = rows;
       this.automationsLoadedAt = { base, at: Date.now() };
     } catch (e) {
+      if (!current()) return;
       toasts.error('Could not load automations', errMsg(e));
     }
   }
@@ -1616,30 +1671,36 @@ class ApiClientStore {
     req: UpsertApiAutomationReq,
     id?: Id,
   ): Promise<ApiAutomation | null> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return null;
     try {
       const saved = id
         ? await api.patch<ApiAutomation>(`${base}/automations/${id}`, req)
         : await api.post<ApiAutomation>(`${base}/automations`, req);
+      if (!current()) return saved;
       this.automations = this.automations.some((a) => a.id === saved.id)
         ? this.automations.map((a) => (a.id === saved.id ? saved : a))
         : [...this.automations, saved];
       return saved;
     } catch (e) {
+      if (!current()) return null;
       toasts.error('Save automation failed', errMsg(e));
       return null;
     }
   }
 
   async deleteAutomation(id: Id): Promise<void> {
+    const current = this.workspaceOwner();
     const base = this.base();
     if (!base) return;
     try {
       await api.del(`${base}/automations/${id}`);
+      if (!current()) return;
       this.automations = this.automations.filter((a) => a.id !== id);
       if (this.lastRun?.automation_id === id) this.lastRun = null;
     } catch (e) {
+      if (!current()) return;
       toasts.error('Delete automation failed', errMsg(e));
     }
   }

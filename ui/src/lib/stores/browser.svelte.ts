@@ -71,6 +71,23 @@ class BrowserStore {
    *  not land over tab B's page — or another workspace's — after a switch. */
   private pageSeq = 0;
   private annotationSeq = 0;
+  private workspaceGeneration = 0;
+  private tabsSequence = 0;
+  private navigationSequence = new Map<string, number>();
+  // Client response guards cannot order writes at the server. Keep at most
+  // one pending chain per tab; settled chains release their cache entry.
+  private tabMutations = new Map<string, Promise<BrowserTab>>();
+
+  private patchTab(id: string, patch: Parameters<typeof browserApi.navigateTab>[1]): Promise<BrowserTab> {
+    const previous = this.tabMutations.get(id);
+    const task = previous
+      ? previous.catch(() => undefined).then(() => browserApi.navigateTab(id, patch))
+      : browserApi.navigateTab(id, patch);
+    this.tabMutations.set(id, task);
+    const release = () => { if (this.tabMutations.get(id) === task) this.tabMutations.delete(id); };
+    void task.then(release, release);
+    return task;
+  }
 
   get activeTab(): BrowserTab | null {
     return this.tabs.find((t) => t.id === this.activeId) ?? null;
@@ -79,6 +96,8 @@ class BrowserStore {
   async loadTabs(workspaceId: string): Promise<void> {
     if (this.wsId !== workspaceId) {
       this.wsId = workspaceId;
+      this.workspaceGeneration++;
+      this.navigationSequence.clear();
       this.agentSessionId = lsGet(agentKey(workspaceId));
       // A workspace switch must not keep showing the previous workspace's
       // open page / marks (or let its in-flight page load land).
@@ -90,21 +109,25 @@ class BrowserStore {
       this.loadingPage = false;
       this.summary = '';
     }
+    const generation = this.workspaceGeneration, sequence = ++this.tabsSequence;
+    const current = () => generation === this.workspaceGeneration && sequence === this.tabsSequence;
     this.loadingTabs = true;
     try {
       const tabs = await browserApi.listTabs(workspaceId);
-      if (this.wsId !== workspaceId) return;
+      if (!current()) return;
       this.tabs = tabs;
       if (!this.activeId && this.tabs.length) this.activeId = this.tabs[0].id;
     } catch {
-      if (this.wsId === workspaceId) this.tabs = [];
+      if (current()) this.tabs = [];
     } finally {
-      if (this.wsId === workspaceId) this.loadingTabs = false;
+      if (current()) this.loadingTabs = false;
     }
   }
 
   async openTab(url: string): Promise<BrowserTab> {
+    const generation = this.workspaceGeneration;
     const tab = await browserApi.createTab(this.wsId, url);
+    if (generation !== this.workspaceGeneration) return tab;
     // The server's own `browser_tab_updated` broadcast for this exact create
     // can beat the HTTP response back to the client (WS push vs. awaited
     // fetch aren't ordered) — `applyEvent` may have already appended it. Dedupe
@@ -164,7 +187,7 @@ class BrowserStore {
   async setMode(id: string, mode: 'reader' | 'live'): Promise<void> {
     const tab = this.tabs.find((t) => t.id === id);
     if (!tab || tab.mode === mode) return;
-    const patched = await browserApi.navigateTab(id, { mode });
+    const patched = await this.patchTab(id, { mode });
     this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
     if (id !== this.activeId) return;
     if (isNativeLive(patched)) {
@@ -178,8 +201,10 @@ class BrowserStore {
   /** Create a tab that opens directly in live mode (e.g. a `window.open()`
    *  fired from inside another live tab) — skips the reader fetch entirely. */
   async openLiveTab(url: string): Promise<BrowserTab> {
+    const generation = this.workspaceGeneration;
     const tab = await browserApi.createTab(this.wsId, url);
-    const patched = await browserApi.navigateTab(tab.id, { mode: 'live' });
+    const patched = await this.patchTab(tab.id, { mode: 'live' });
+    if (generation !== this.workspaceGeneration) return patched;
     this.tabs = this.tabs.some((t) => t.id === patched.id)
       ? this.tabs.map((t) => (t.id === patched.id ? patched : t))
       : [...this.tabs, patched];
@@ -199,7 +224,34 @@ class BrowserStore {
   }
 
   async closeTab(id: string): Promise<void> {
-    await browserApi.closeTab(id);
+    this.navigationSequence.delete(id);
+    const wasActive = this.activeId === id;
+    const previous = { page: this.page, annotations: this.annotations, error: this.pageError };
+    const workspace = this.workspaceGeneration;
+    if (wasActive) {
+      // Invalidate before either await: the old reader can finish while the
+      // close request (or its preceding PATCH) is still pending.
+      this.pageSeq++;
+      this.annotationSeq++;
+      this.page = null;
+      this.annotations = [];
+      this.pageError = '';
+      this.loadingPage = false;
+    }
+    const sequence = this.pageSeq;
+    try {
+      await this.tabMutations.get(id)?.catch(() => undefined);
+      await browserApi.closeTab(id);
+    } catch (e) {
+      if (wasActive && this.activeId === id && this.workspaceGeneration === workspace && this.pageSeq === sequence) {
+        this.page = previous.page;
+        this.annotations = previous.annotations;
+        this.pageError = previous.error;
+        const tab = this.activeTab;
+        if (!this.page && tab && !isNativeLive(tab)) void this.loadPage(tab.url);
+      }
+      throw e;
+    }
     const at = this.tabs.findIndex((t) => t.id === id);
     this.tabs = this.tabs.filter((t) => t.id !== id);
     if (this.activeId === id) {
@@ -229,19 +281,26 @@ class BrowserStore {
       await this.openTab(url);
       return;
     }
+    const generation = this.workspaceGeneration;
+    const sequence = (this.navigationSequence.get(tab.id) ?? 0) + 1;
+    this.navigationSequence.set(tab.id, sequence);
+    const current = () => generation === this.workspaceGeneration && this.navigationSequence.get(tab.id) === sequence;
     if (isNativeLive(tab)) {
       // The native webview does the actual navigation (BrowserView's driver
       // effect picks up the URL change below); just persist it so the tab
       // strip and a future reload reflect it — no reader fetch.
-      const patched = await browserApi.navigateTab(tab.id, { url, title: url });
+      const patched = await this.patchTab(tab.id, { url, title: url });
+      if (!current()) return;
       this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
       return;
     }
-    await this.loadPage(url);
-    const patched = await browserApi.navigateTab(tab.id, {
+    const page = await this.loadPage(url);
+    if (!current()) return;
+    const patched = await this.patchTab(tab.id, {
       url,
-      title: this.page?.title || url,
+      title: page?.title || url,
     });
+    if (!current()) return;
     this.tabs = this.tabs.map((t) => (t.id === patched.id ? patched : t));
   }
 
@@ -267,7 +326,7 @@ class BrowserStore {
   /** Fetch `url` into the reader. `fresh` bypasses both the per-tab cache and
    *  the daemon's one-minute page cache (Retry); `background` keeps the page
    *  that's on screen (no spinner, no error swap) while revalidating. */
-  async loadPage(url: string, opts: { fresh?: boolean; background?: boolean } = {}): Promise<void> {
+  async loadPage(url: string, opts: { fresh?: boolean; background?: boolean } = {}): Promise<BrowserPage | undefined> {
     const mine = ++this.pageSeq;
     const ws = this.wsId;
     const current = () => mine === this.pageSeq && ws === this.wsId;
@@ -282,9 +341,10 @@ class BrowserStore {
         browserApi.listAnnotations(ws, url).catch(() => [] as BrowserAnnotation[]),
       ]);
       this.rememberPage(ws, url, page);
-      if (!current()) return;
+      if (!current()) return page;
       this.page = page;
       this.annotations = annotations;
+      return page;
     } catch (e) {
       if (!current() || opts.background) return;
       this.page = null;

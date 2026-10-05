@@ -73,7 +73,7 @@
   }
 
   async function mint(): Promise<void> {
-    if (minting) return;
+    if (minting || freshSecret) return;
     minting = true;
     try {
       const resp = await api.post<CreateApiTokenResp>('/auth/tokens', {
@@ -176,7 +176,7 @@
         onkeydown={(e) => { if (e.key === 'Enter') void mint(); }}
         maxlength={80}
       />
-      <button class="btn primary" disabled={minting} onclick={mint}>
+      <button class="btn primary" disabled={minting || !!freshSecret} onclick={mint}>
         <Icon name="plus" size={13} /> {minting ? 'Creating…' : 'Create token'}
       </button>
     </div>

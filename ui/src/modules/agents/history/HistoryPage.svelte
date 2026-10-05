@@ -18,7 +18,7 @@
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { api } from '../../../lib/api/client';
-  import { winKey } from '../../../lib/win';
+  import { transcript } from '../../../lib/stores/transcript.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -132,7 +132,11 @@
   // ── Actions ─────────────────────────────────────────────────────────────────
   let busy = $state(false);
 
-  /** Resume in Otto: import (on_disk) → restart (exited/reconnectable) → open in Chat. */
+  function isLiveStatus(status: HistoryStatus): boolean {
+    return status === 'working' || status === 'running' || status === 'idle';
+  }
+
+  /** Import if needed, safely ensure the session is live, then open in Chat. */
   async function resume(e: HistoryEntry): Promise<void> {
     if (!wsId || busy) return;
     busy = true;
@@ -142,10 +146,10 @@
         sid = (await history.importEntry(wsId, e)).id;
         await ws.refreshSessions();
       }
-      if (e.status !== 'running' && e.status !== 'idle') {
-        await ws.restartSession(sid);
-        history.patchSession(sid, { status: 'running' });
-      }
+      // The row may be stale in either direction. The server checks the live
+      // PTY under its resume lock and never replaces an already-live process.
+      const resumed = await ws.resumeSession(sid);
+      history.patchSession(sid, { status: resumed.status });
       openInChat(sid);
     } catch (err) {
       toasts.error('Could not resume', err instanceof Error ? err.message : String(err));
@@ -154,13 +158,9 @@
     }
   }
 
-  /** Open a live session in the Chat view (SessionView reads this key first). */
+  /** Update both the reactive view preference and its persisted value. */
   function openInChat(sid: string): void {
-    try {
-      localStorage.setItem(winKey(`otto_session_view:${sid}`), 'chat');
-    } catch {
-      /* storage unavailable — SessionView falls back to its default */
-    }
+    transcript.setView(sid, 'chat');
     ws.setViewMode('tabs');
     ws.navigateToSession(sid);
   }
@@ -203,11 +203,11 @@
   }
 
   function resumeLabel(e: HistoryEntry): string {
-    return e.status === 'running' || e.status === 'idle' ? 'Open in Otto' : 'Resume in Otto';
+    return isLiveStatus(e.status) ? 'Open in Otto' : 'Resume in Otto';
   }
 
   function menuFor(e: HistoryEntry): MenuItem[] {
-    const live = e.status === 'running' || e.status === 'idle';
+    const live = isLiveStatus(e.status);
     return [
       {
         label: resumeLabel(e),
@@ -269,6 +269,7 @@
 
   /** Sentence-case status words (content.md), matching the session vocabulary. */
   const STATUS_LABEL: Record<HistoryStatus, string> = {
+    working: 'Working',
     running: 'Running',
     idle: 'Idle',
     exited: 'Ended',
@@ -283,6 +284,7 @@
   ];
   const STATUSES: { id: StatusFilter; label: string }[] = [
     { id: 'all', label: 'Any status' },
+    { id: 'working', label: 'Working' },
     { id: 'running', label: 'Running' },
     { id: 'idle', label: 'Idle' },
     { id: 'exited', label: 'Exited' },
@@ -381,7 +383,7 @@
       </button>
       <!-- The primary is last (the trailing edge is where the eye lands). -->
       {#if canEdit}
-        {@const resumable = cur.status === 'running' || cur.status === 'idle' || cur.resumable || cur.status === 'on_disk'}
+        {@const resumable = isLiveStatus(cur.status) || cur.resumable || cur.status === 'on_disk'}
         <button
           class="btn small primary"
           onclick={() => void resume(cur)}

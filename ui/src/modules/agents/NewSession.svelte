@@ -83,6 +83,16 @@
   let cwd = $state('');
   let browser = $state(false);
   let busy = $state(false);
+  interface PendingSpawn {
+    provider: string;
+    title: string;
+    cwd: string;
+    run: () => Promise<{id: string}>;
+  }
+  // Only failures survive an attempt; callbacks capture the submitted request.
+  let pendingSpawns = $state<PendingSpawn[]>([]);
+  let batchFailures = $state<string[]>([]);
+  let batchSuccesses = $state<string[]>([]);
   // Daemon-side folder picker for the working directory (and the extra-dirs
   // field): pointing a session at a folder outside the workspace should not
   // require creating a workspace for it, or typing an absolute path by hand.
@@ -298,90 +308,78 @@
   });
 
   async function create(): Promise<void> {
-    if (busy || total === 0) return;
+    if (busy) return;
+    if (pendingSpawns.length) { await retryFailed(); return; }
+    if (total === 0) return;
     const unavailable = chosen.find((p) => !providerReadiness(p).available);
     if (unavailable) { toasts.error(`Cannot start ${unavailable}`, providerReadiness(unavailable).message); return; }
-    busy = true;
-    try {
-      // Fold a pending draft (typed but not yet "Add"-ed) into the list.
-      const dirs = [...extraDirs];
-      const pending = dirDraft.trim();
-      if (pending !== '' && !dirs.includes(pending)) dirs.push(pending);
-      const base = title.trim();
-      const firstMessage = prompt.trim();
-      // The daemon takes the cwd verbatim, so expand a leading `~` here (the
-      // scratch default advertises it) when the daemon's home is known.
-      let dir = cwd.trim();
-      const home = ws.scratch?.root_path;
-      if (home && (dir === '~' || dir.startsWith('~/'))) dir = home + dir.slice(1);
+    const dirs = [...extraDirs];
+    const pending = dirDraft.trim();
+    if (pending !== '' && !dirs.includes(pending)) dirs.push(pending);
+    const base = title.trim(), firstMessage = prompt.trim();
+    let dir = cwd.trim();
+    const home = ws.scratch?.root_path;
+    if (home && (dir === '~' || dir.startsWith('~/'))) dir = home + dir.slice(1);
+    const options = {scratch: scratchMode};
+    const workspaceId = ws.currentId;
+    const sessionModel = supportsModel && model.trim() !== '' ? model.trim() : null;
+    const spawns = chosen.flatMap((p) => Array.from({length: counts[p]}, () => p));
+    pendingSpawns = spawns.map((p, i) => {
+      const meta: Record<string, unknown> = {};
+      if (accountIds[p]) meta.account_id = accountIds[p];
+      if (networkProfileId) meta.network_profile_id = networkProfileId;
+      if (browser && (p === 'claude' || p === 'codex')) meta.browser = true;
+      if (dirs.length > 0) meta.extra_dirs = [...dirs];
+      const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
+      const request = {provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel};
+      return {provider: p, title: sessionTitle ?? p, cwd: dir, run: async () => {
+        // A workspace change must not redirect a retained failed request.
+        if (!options.scratch && ws.currentId !== workspaceId) throw new Error('Return to the original workspace to retry this session.');
+        if (!providerReadiness(p).available) throw new Error(providerReadiness(p).message);
+        return firstMessage !== '' && p !== 'shell'
+          ? ws.openSessionWithPrompt({...request, prompt: firstMessage, meta}, options)
+          : ws.createSessionQuiet({...request, kind: 'agent', meta: Object.keys(meta).length ? meta : null}, options);
+      }};
+    });
+    batchSuccesses = [];
+    await retryFailed();
+  }
 
-      // Flatten the batch into one spawn per session, provider by provider in
-      // grid order, so "3 claude, 2 codex" starts in a predictable order.
-      const spawns = chosen.flatMap((p) => Array.from({ length: counts[p] }, () => p));
-      const created: string[] = [];
-      const failures: string[] = [];
-      for (const [i, p] of spawns.entries()) {
-        const meta: Record<string, unknown> = {};
-        if (accountIds[p]) meta.account_id = accountIds[p];
-        if (networkProfileId) meta.network_profile_id = networkProfileId;
-        if (browser && (p === 'claude' || p === 'codex')) meta.browser = true;
-        if (dirs.length > 0) meta.extra_dirs = dirs;
+  async function retryFailed(): Promise<void> {
+    if (busy || pendingSpawns.length === 0) return;
+    busy = true;
+    const submitted = pendingSpawns;
+    const failed: PendingSpawn[] = [], failures: string[] = [], created: string[] = [];
+    try {
+      for (const spawn of submitted) {
         try {
-          // Quiet creates throughout: routing to each session as it appears
-          // would yank the user through the whole batch. We open them below.
-          // A typed title is a BASE name for a batch — numbered so the
-          // sessions stay tellable apart; alone it is used verbatim.
-          const sessionTitle = base === '' ? null : spawns.length > 1 ? `${base} ${i + 1}` : base;
-          // The pinned model only applies to a single-provider batch.
-          const sessionModel = supportsModel && model.trim() !== '' ? model.trim() : null;
-          // An opening message goes through `/sessions/open`, which delivers
-          // it once the CLI is ready (agents only — a plain shell has no
-          // conversation to open). The store stamps origin=manual (A6).
-          const s =
-            firstMessage !== '' && p !== 'shell'
-              ? await ws.openSessionWithPrompt(
-                  { provider: p, title: sessionTitle, cwd: dir === '' ? null : dir, model: sessionModel, prompt: firstMessage, meta },
-                  { scratch: scratchMode },
-                )
-              : await ws.createSessionQuiet(
-                  {
-                    kind: 'agent',
-                    provider: p,
-                    title: sessionTitle,
-                    cwd: dir === '' ? null : dir,
-                    meta: Object.keys(meta).length > 0 ? meta : null,
-                    model: sessionModel,
-                  },
-                  { scratch: scratchMode },
-                );
-          created.push(s.id);
-        } catch (e) {
-          failures.push(`${p}: ${e instanceof Error ? e.message : String(e)}`);
+          const session = await spawn.run();
+          created.push(session.id);
+        } catch (error) {
+          failed.push(spawn);
+          failures.push(`${spawn.title} (${spawn.provider}): ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-
-      // Foreground everything that started (tiled when there's more than one,
-      // matching how the command palette lands a multi-agent spawn), routing to
-      // the last so Back returns through them.
-      if (created.length > 0) savePrefs({ provider, browser });
-      if (created.length > 1) ws.setViewMode('tiled');
+      // Commit outcome before navigation; successful members can never enter a retry.
+      pendingSpawns = failed;
+      batchFailures = failures;
+      batchSuccesses = [...batchSuccesses, ...created];
+      if (created.length > 0) savePrefs({provider, browser});
+      if (batchSuccesses.length > 1) ws.setViewMode('tiled');
       for (const id of created.slice(0, -1)) ws.openSession(id);
       if (created.length > 0) ws.navigateToSession(created[created.length - 1]);
-
-      if (failures.length > 0) {
-        toasts.error(
-          created.length > 0 ? 'Some sessions did not start' : 'Could not create session',
-          failures.join('\n'),
-        );
-        if (created.length === 0) return; // keep the sheet open to retry
+      if (failed.length > 0) {
+        toasts.error(batchSuccesses.length ? 'Some sessions did not start' : 'Could not create session', failures.join('\n'));
+        return;
       }
       onclose();
-    } catch (e) {
-      toastError('Couldn’t create session', e);
+    } catch (error) {
+      toastError('Couldn’t create session', error);
     } finally {
       busy = false;
     }
   }
+
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
@@ -624,10 +622,19 @@
     </div>
   {/if}
 
+  {#if batchFailures.length}
+    <div role="status">
+      <p>{batchSuccesses.length} started; {pendingSpawns.length} still need to start. Retry uses the submitted settings.</p>
+      {#each batchFailures as failure, i}
+        <p>{failure}<br /><span class="hint">{pendingSpawns[i]?.cwd}</span></p>
+      {/each}
+    </div>
+  {/if}
+
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
-    <button class="btn primary" disabled={busy || total === 0} onclick={create}>
-      {busy ? 'Starting…' : total > 1 ? `Start ${total} sessions` : 'Start session'}
+    <button class="btn primary" disabled={busy || (pendingSpawns.length === 0 && total === 0)} onclick={create}>
+      {busy ? 'Starting…' : pendingSpawns.length ? `Retry ${pendingSpawns.length} failed` : total > 1 ? `Start ${total} sessions` : 'Start session'}
     </button>
   {/snippet}
 </Modal>

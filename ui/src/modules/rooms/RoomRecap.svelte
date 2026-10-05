@@ -72,7 +72,7 @@
   {#snippet footer()}<button class="btn" onclick={() => prepare = false}>Cancel</button><button class="btn primary" disabled={busy || !capability || (!capability.speech_ready && !partial)} onclick={create}>Ask everyone to consent</button>{/snippet}
 </Modal>{/if}
 {#if settings}<RecapSettingsModal onclose={() => { settings = false; void openPrepare(); }} />{/if}
-{#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}><RecapPanel recapId={room.recap.id} /></Modal>{/if}
+{#if panel && room.recap}<Modal title="Room recap" width={960} onclose={() => panel = false}>{#key room.recap.id}<RecapPanel recapId={room.recap.id} />{/key}</Modal>{/if}
 <style>
   .recap-banner { padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); max-height: 35%; overflow: auto; }
   .recap-banner:empty { display: none; } .status, .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; } .status span, .hint { font-size: var(--fs-s); color: var(--text-dim); } p, li { line-height: 1.5; overflow-wrap: anywhere; } .recap-banner p { margin-block: 8px; font-size: var(--fs-s); } [role='alert'] { color: var(--danger); } .check { display: flex; gap: 8px; align-items: start; margin-block: 16px; } details { margin-block-start: 8px; font-size: var(--fs-s); }

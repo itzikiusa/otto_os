@@ -3149,6 +3149,7 @@ class DatabaseStore {
     },
   ): Promise<QueryResult | null> {
     const id = this.selectedConnId;
+    const origin = this.selectedConn ? { ...this.selectedConn } : null;
     const t = this.tab;
     const outcome = opts?.outcome;
     if (!id) {
@@ -3235,10 +3236,10 @@ class DatabaseStore {
           // guarded connection always takes the typed confirm (and re-runs with
           // the explicit confirm flag); an unguarded one takes the caller's
           // attributed confirm, then re-runs as an ordinary run.
-          const guarded = this.isGuarded;
+          const guarded = origin?.environment === 'prod' || origin?.read_only === true;
           opts?.awaitingHuman?.(guarded ? 'Waiting for the typed write confirm' : 'Waiting for you to allow the write');
           const ok = guarded
-            ? await this.confirmGuardedWrite(e, opts?.agentLabel)
+            ? await this.confirmGuardedWrite(origin, e, opts?.agentLabel)
             : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
@@ -3253,7 +3254,7 @@ class DatabaseStore {
           // guarded connection. Ask for a typed confirmation and, if granted,
           // retry with the explicit confirm flag.
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
-          const ok = await this.confirmGuardedWrite(e, opts?.agentLabel);
+          const ok = await this.confirmGuardedWrite(origin, e, opts?.agentLabel);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
             toasts.info('Write cancelled');
             this.clearPending(t);
@@ -3367,8 +3368,7 @@ class DatabaseStore {
    * production is a deliberate, explicit act. Returns true only on an exact,
    * case-insensitive match.
    */
-  private async confirmGuardedWrite(blocked?: unknown, agentLabel?: string): Promise<boolean> {
-    const conn = this.selectedConn;
+  private async confirmGuardedWrite(conn: Connection | null, blocked?: unknown, agentLabel?: string): Promise<boolean> {
     if (!conn) return false;
     const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
     // An agent-driven write names who is asking — the typed confirm is the
@@ -3406,6 +3406,9 @@ class DatabaseStore {
    */
   async runManagedStatement(sql: string, node?: string | null): Promise<QueryResult | null> {
     const id = this.selectedConnId;
+    const origin = this.selectedConn ? { ...this.selectedConn } : null;
+    const accessEpoch = this.accessEpoch;
+    const connEpoch = id ? this.epochOf(id) : 0;
     if (!id) throw new Error('No connection selected');
     // Same scope rule as `runQuery`: only an OMITTED node means "active DB";
     // an explicit `null` (a grid edit of a result that ran unscoped) stays
@@ -3421,8 +3424,8 @@ class DatabaseStore {
       return await post(false);
     } catch (e) {
       if (isWriteBlocked(e)) {
-        const ok = await this.confirmGuardedWrite(e);
-        if (!ok) return null;
+        const ok = await this.confirmGuardedWrite(origin, e);
+        if (!ok || accessEpoch !== this.accessEpoch || connEpoch !== this.epochOf(id)) return null;
         return await post(true);
       }
       throw e;

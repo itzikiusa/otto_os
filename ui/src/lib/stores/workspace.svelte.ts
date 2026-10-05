@@ -1605,6 +1605,14 @@ class WorkspaceStore {
    *  save — reconnects the terminal, not just the pane header's button. */
   restartNonces: Record<Id, number> = $state({});
 
+  /** Open/resume preserves an already-live process, even from a stale row. */
+  async resumeSession(id: Id): Promise<Session> {
+    const s = await api.post<Session>(`/sessions/${id}/resume`);
+    this.sessions = this.sessions.map((x) => (x.id === id ? s : x));
+    this.statusMap[id] = s.status;
+    return s;
+  }
+
   async restartSession(id: Id, opts?: { quiet?: boolean }): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/restart`);
     this.sessions = this.sessions.map((x) => (x.id === id ? s : x));

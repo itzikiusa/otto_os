@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, patch, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::Problem;
 use otto_core::auth::{AuthUser, RoleChecker};
@@ -286,8 +286,12 @@ pub fn router<S: ProductCtx>() -> Router<S> {
             get(list_transcripts::<S>).post(create_transcript::<S>),
         )
         .route(
+            "/product/stories/{sid}/transcripts/search",
+            get(search_transcripts::<S>),
+        )
+        .route(
             "/product/transcripts/{trid}",
-            delete(delete_transcript::<S>),
+            get(get_transcript::<S>).delete(delete_transcript::<S>),
         )
         // Publish discovery
         .route(
@@ -1061,14 +1065,62 @@ async fn update_draft_body<S: ProductCtx>(
 // Transcripts
 // ---------------------------------------------------------------------------
 
+#[derive(Default, Deserialize)]
+struct TranscriptQuery {
+    #[serde(default)]
+    summary: bool,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    q: Option<String>,
+    max_matches: Option<usize>,
+}
+
 async fn list_transcripts<S: ProductCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
     Path(StoryId { sid }): Path<StoryId>,
+    Query(query): Query<TranscriptQuery>,
 ) -> ApiResult<Response> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
-    let transcripts = ctx.product_repo().list_transcripts(&sid).await?;
-    Ok(Json(transcripts).into_response())
+    if query.summary {
+        let page = ctx
+            .product_repo()
+            .transcript_summaries(&sid, query.limit.unwrap_or(50), query.cursor.as_deref())
+            .await?;
+        return Ok(Json(page).into_response());
+    }
+    // Preserve the full-array contract for existing agent/context callers.
+    Ok(Json(ctx.product_repo().list_transcripts(&sid).await?).into_response())
+}
+
+async fn search_transcripts<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(StoryId { sid }): Path<StoryId>,
+    Query(query): Query<TranscriptQuery>,
+) -> ApiResult<Response> {
+    ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
+    let page = ctx
+        .product_repo()
+        .search_transcripts(
+            &sid,
+            query.q.as_deref().unwrap_or_default(),
+            query.limit.unwrap_or(100),
+            query.max_matches.unwrap_or(5000),
+            query.cursor.as_deref(),
+        )
+        .await?;
+    Ok(Json(page).into_response())
+}
+
+async fn get_transcript<S: ProductCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(TranscriptItemId { trid }): Path<TranscriptItemId>,
+) -> ApiResult<Response> {
+    let sid = ctx.product_repo().transcript_story_id(&trid).await?;
+    ws_from_story(&ctx, &user, &sid, WorkspaceRole::Viewer).await?;
+    Ok(Json(ctx.product_repo().get_transcript(&trid).await?).into_response())
 }
 
 async fn create_transcript<S: ProductCtx>(
@@ -1119,17 +1171,7 @@ async fn publish_as_rfc<S: ProductCtx>(
     ctx.product()
         .authorize_account_id(&req.account_id, &user)
         .await?;
-    let detail = ctx
-        .product()
-        .publish_as_rfc(
-            &sid,
-            &req.account_id,
-            &req.space_key,
-            req.parent_id.as_deref(),
-            req.title.as_deref(),
-            &user.id,
-        )
-        .await?;
+    let detail = ctx.product().publish_as_rfc(&sid, &req, &user.id).await?;
     Ok(Json(detail).into_response())
 }
 
@@ -1144,16 +1186,7 @@ async fn publish_as_story<S: ProductCtx>(
     ctx.product()
         .authorize_account_id(&req.account_id, &user)
         .await?;
-    let detail = ctx
-        .product()
-        .publish_as_story(
-            &sid,
-            &req.account_id,
-            &req.project_key,
-            &req.issue_type,
-            &user.id,
-        )
-        .await?;
+    let detail = ctx.product().publish_as_story(&sid, &req, &user.id).await?;
     Ok(Json(detail).into_response())
 }
 
@@ -1499,6 +1532,500 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     }
+
+    struct PublishTestSecret;
+    impl SecretStore for PublishTestSecret {
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get(&self, _: &str) -> Result<Option<String>> {
+            Ok(Some("isolated-test-token".into()))
+        }
+        fn delete(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct TranscriptFixture {
+        pool: DbPool,
+        ctx: TestCtx,
+        user: Id,
+        workspace: Id,
+        story: Id,
+        rows: Vec<otto_state::ProductTranscript>,
+    }
+
+    async fn transcript_fixture(count: usize, body_bytes: usize) -> TranscriptFixture {
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let workspace = seed_workspace(&pool).await;
+        let ctx = TestCtx::new(pool.clone());
+        let story = ctx
+            .svc
+            .create_draft(&workspace, &user, Some("Transcript fixture"))
+            .await
+            .unwrap()
+            .story
+            .id;
+        let mut rows = Vec::new();
+        for index in 0..count {
+            let row = ctx
+                .repo
+                .create_transcript(otto_state::NewTranscript {
+                    story_id: story.clone(),
+                    title: format!("Transcript {index}"),
+                    body: format!("{}\nbody-{index}", "x".repeat(body_bytes)),
+                    created_by: user.clone(),
+                })
+                .await
+                .unwrap();
+            // Equal timestamps deliberately exercise the stable ID tie-breaker.
+            sqlx::query("UPDATE product_transcripts SET created_at = ? WHERE id = ?")
+                .bind("2026-01-01T00:00:00+00:00")
+                .bind(&row.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            rows.push(row);
+        }
+        rows.sort_by(|a, b| b.id.cmp(&a.id));
+        TranscriptFixture {
+            pool,
+            ctx,
+            user,
+            workspace,
+            story,
+            rows,
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_summary_page_excludes_100_large_bodies() {
+        let fixture = transcript_fixture(100, 256 * 1024).await;
+        let response = app(fixture.ctx, &fixture.user)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/product/stories/{}/transcripts?summary=true&limit=25",
+                        fixture.story
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            bytes.len() < 64 * 1024,
+            "summary endpoint transferred {} bytes",
+            bytes.len()
+        );
+        let page: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let items = page["items"].as_array().expect("summary envelope");
+        assert_eq!(items.len(), 25);
+        assert!(items.iter().all(|item| item.get("body").is_none()));
+        assert!(items
+            .iter()
+            .all(|item| item["body_bytes"].as_u64().unwrap() >= 256 * 1024));
+        assert!(page["next_cursor"].is_string());
+    }
+
+    #[tokio::test]
+    async fn transcript_legacy_list_keeps_full_body_compatibility() {
+        let fixture = transcript_fixture(1, 32).await;
+        let response = app(fixture.ctx, &fixture.user)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/product/stories/{}/transcripts", fixture.story))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let rows = body_json(response).await;
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["body"], fixture.rows[0].body);
+    }
+
+    #[tokio::test]
+    async fn transcript_summary_cursor_survives_timestamp_ties_and_new_imports() {
+        let fixture = transcript_fixture(8, 32).await;
+        let routes = app(fixture.ctx.clone(), &fixture.user);
+        let mut cursor = String::new();
+        let mut seen = Vec::new();
+        for page_number in 0..3 {
+            let response = routes
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/product/stories/{}/transcripts?summary=true&limit=3{cursor}",
+                            fixture.story
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let page = body_json(response).await;
+            let items = page["items"].as_array().expect("bounded summary envelope");
+            assert!(items.len() <= 3);
+            seen.extend(
+                items
+                    .iter()
+                    .map(|item| item["id"].as_str().unwrap().to_string()),
+            );
+            if page_number == 0 {
+                fixture
+                    .ctx
+                    .repo
+                    .create_transcript(otto_state::NewTranscript {
+                        story_id: fixture.story.clone(),
+                        title: "Imported after page one".into(),
+                        body: "Newer body".into(),
+                        created_by: fixture.user.clone(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            cursor = page["next_cursor"]
+                .as_str()
+                .map(|value| format!("&cursor={value}"))
+                .unwrap_or_default();
+        }
+        assert_eq!(
+            seen,
+            fixture
+                .rows
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(cursor.is_empty());
+        let response = routes
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/product/stories/{}/transcripts?summary=true&cursor=not-a-cursor",
+                        fixture.story
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn transcript_search_reaches_old_collapsed_body_with_literal_unicode_counts() {
+        let fixture = transcript_fixture(105, 16).await;
+        let target = fixture.rows.last().unwrap();
+        let body = "First CAFÉ.[x] then café.[x], plus unrelated caféx.";
+        // This is an old row beyond the first two 50-summary pages.
+        sqlx::query("UPDATE product_transcripts SET body = ? WHERE id = ?")
+            .bind(body)
+            .bind(&target.id)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+        let routes = app(fixture.ctx.clone(), &fixture.user);
+        let mut cursor = String::new();
+        let mut found = Vec::new();
+        for _ in 0..120 {
+            let response = routes.clone().oneshot(Request::builder()
+                .uri(format!("/product/stories/{}/transcripts/search?q=caf%C3%A9.%5Bx%5D&limit=7&max_matches=5000{cursor}", fixture.story))
+                .body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let page = body_json(response).await;
+            let items = page["items"].as_array().expect("bounded search envelope");
+            assert!(items.len() <= 7);
+            assert!(items.iter().all(|item| item.get("body").is_none()));
+            found.extend(items.iter().cloned());
+            let Some(next) = page["next_cursor"].as_str() else {
+                break;
+            };
+            cursor = format!("&cursor={next}");
+        }
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["id"], target.id);
+        assert_eq!(
+            found[0]["match_count"], 2,
+            "literal, case-insensitive, non-overlapping occurrences"
+        );
+        let response = routes
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/product/transcripts/{}", target.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await["body"], body);
+    }
+
+    struct TranscriptRoleCheck {
+        expected_workspace: Id,
+        observed: Arc<std::sync::Mutex<usize>>,
+    }
+    impl RoleChecker for TranscriptRoleCheck {
+        fn check<'a>(
+            &'a self,
+            _: &'a User,
+            workspace: &'a Id,
+            role: WorkspaceRole,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                assert_eq!(workspace, &self.expected_workspace);
+                assert_eq!(role, WorkspaceRole::Viewer);
+                *self.observed.lock().unwrap() += 1;
+                Err(otto_core::Error::Forbidden(
+                    "no access to transcript workspace".into(),
+                ))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_summary_search_and_detail_authorize_owning_story() {
+        let mut fixture = transcript_fixture(1, 32).await;
+        let observed = Arc::new(std::sync::Mutex::new(0));
+        fixture.ctx.roles = Arc::new(TranscriptRoleCheck {
+            expected_workspace: fixture.workspace,
+            observed: observed.clone(),
+        });
+        let routes = app(fixture.ctx, &fixture.user);
+        for uri in [
+            format!(
+                "/product/stories/{}/transcripts?summary=true",
+                fixture.story
+            ),
+            format!(
+                "/product/stories/{}/transcripts/search?q=body",
+                fixture.story
+            ),
+            format!("/product/transcripts/{}", fixture.rows[0].id),
+        ] {
+            let response = routes
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(*observed.lock().unwrap(), 3);
+    }
+
+    /// Exercise the real preview HTTP reads, request deserialization, auth,
+    /// service, and outbound clients. Every account points only at wiremock.
+    async fn reviewed_publish_case(mode: &str, mutation: &str) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let remote = MockServer::start().await;
+        let outbound_path = if mode == "story" {
+            "/rest/api/3/issue"
+        } else {
+            "/wiki/rest/api/content"
+        };
+        Mock::given(method("POST"))
+            .and(path(outbound_path))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "101", "key": "TEST-1", "title": "Reviewed title",
+                "self": format!("{}/rest/api/3/issue/101", remote.uri()),
+                "space": {"key": "TEST"}, "version": {"number": 1},
+                "_links": {"webui": "/spaces/TEST/pages/101"}
+            })))
+            .mount(&remote)
+            .await;
+        let pool = mem_pool().await;
+        let user = seed_user(&pool).await;
+        let ws = seed_workspace(&pool).await;
+        let mut ctx = TestCtx::new(pool.clone());
+        ctx.svc = Arc::new(ProductService::new(
+            ctx.repo.clone(),
+            ctx.issues.clone(),
+            Arc::new(PublishTestSecret),
+        ));
+        let account = ctx
+            .issues
+            .create_account(otto_state::NewIssueAccount {
+                user_id: user.clone(),
+                provider: otto_core::domain::IssueProviderKind::Jira,
+                label: "Isolated publish capture".into(),
+                email: "test@example.invalid".into(),
+                token_ref: "publish-test".into(),
+                base_url: remote.uri(),
+                token_expires_at: None,
+            })
+            .await
+            .unwrap();
+        let created = ctx
+            .svc
+            .create_draft(&ws, &user, Some("Reviewed title"))
+            .await
+            .unwrap();
+        let sid = created.story.id;
+        let original_body = "Reviewed body\nSecond line with café.";
+        let saved = ctx
+            .svc
+            .update_draft_body(&sid, "Reviewed title", original_body, &user)
+            .await
+            .unwrap();
+        let vid = saved.source.unwrap().id;
+        let reference = format!("{}/wiki/spaces/TEST/pages/100", remote.uri());
+        ctx.repo
+            .update_story(
+                &sid,
+                otto_state::StoryPatch {
+                    source_kind: Some("confluence".into()),
+                    source_key: Some("100".into()),
+                    account_id: Some(account.id.clone()),
+                    url: Some(reference.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let routes = app(ctx.clone(), &user);
+        let preview_response = routes
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/product/versions/{vid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview_response.status(), StatusCode::OK);
+        let preview = body_json(preview_response).await;
+        assert_eq!(preview["body_md"], original_body);
+        let reviewed = serde_json::json!({
+            "version_id": vid, "body_sha256": otto_core::proof::content_sha256(preview["body_md"].as_str().unwrap()),
+            "title": "Reviewed title", "source_kind": "confluence", "url": reference,
+        });
+        match mutation {
+            "same_version_body" => {
+                ctx.svc
+                    .update_draft_body(&sid, "Reviewed title", "UNREVIEWED same-ID body", &user)
+                    .await
+                    .unwrap();
+                assert_eq!(ctx.repo.list_versions(&sid).await.unwrap()[0].id, vid);
+            }
+            "new_version" => {
+                ctx.repo
+                    .add_version(otto_state::NewVersion {
+                        story_id: sid.clone(),
+                        kind: "suggested".into(),
+                        title: "Reviewed title".into(),
+                        body_md: "UNREVIEWED newer version".into(),
+                        raw_json: None,
+                        change_notes: None,
+                        created_by: user.clone(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            "title" | "reference" => {
+                ctx.repo
+                    .update_story(
+                        &sid,
+                        otto_state::StoryPatch {
+                            title: (mutation == "title").then(|| "UNREVIEWED title".into()),
+                            url: (mutation == "reference")
+                                .then(|| format!("{}/UNREVIEWED-reference", remote.uri())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            "unchanged" | "missing_review" => {}
+            _ => panic!("unknown test mutation"),
+        }
+        let mut payload = serde_json::json!({
+            "account_id": account.id, "project_key": "TEST", "issue_type": "Story",
+            "space_key": "TEST", "parent_id": "42", "reviewed_content": reviewed,
+        });
+        if mutation == "missing_review" {
+            payload.as_object_mut().unwrap().remove("reviewed_content");
+        }
+        let response = routes
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/product/stories/{sid}/publish-as-{mode}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let detail = body_json(response).await;
+        let requests = remote.received_requests().await.unwrap();
+        let publications: Vec<_> = requests
+            .iter()
+            .filter(|request| request.url.path() == outbound_path)
+            .collect();
+        if mutation != "unchanged" {
+            assert_eq!(status, StatusCode::CONFLICT,
+                "{mode}/{mutation}: stale review must require rereview; sent {} outbound publications; response {detail}", publications.len());
+            assert!(requests.is_empty(), "reject before any outbound request");
+            return;
+        }
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(publications.len(), 1);
+        let sent: serde_json::Value = serde_json::from_slice(&publications[0].body).unwrap();
+        if mode == "story" {
+            assert_eq!(sent["fields"]["summary"], "Reviewed title");
+            assert_eq!(
+                sent["fields"]["description"],
+                otto_issues::adf::text_to_adf(&format!("> RFC: {reference}\n\n{original_body}"))
+            );
+        } else {
+            assert_eq!(sent["title"], "Reviewed title");
+            assert_eq!(
+                sent["body"]["storage"]["value"],
+                otto_issues::confluence::markdown_to_storage(original_body)
+            );
+            assert_eq!(sent["ancestors"][0]["id"], "42");
+        }
+    }
+
+    macro_rules! reviewed_publish_test {
+        ($name:ident, $mode:literal, $mutation:literal) => {
+            #[tokio::test]
+            async fn $name() {
+                reviewed_publish_case($mode, $mutation).await;
+            }
+        };
+    }
+    reviewed_publish_test!(
+        reviewed_jira_same_version_body,
+        "story",
+        "same_version_body"
+    );
+    reviewed_publish_test!(reviewed_jira_new_version, "story", "new_version");
+    reviewed_publish_test!(reviewed_jira_title, "story", "title");
+    reviewed_publish_test!(reviewed_jira_reference, "story", "reference");
+    reviewed_publish_test!(reviewed_jira_missing_review, "story", "missing_review");
+    reviewed_publish_test!(reviewed_jira_unchanged_payload, "story", "unchanged");
+    reviewed_publish_test!(
+        reviewed_confluence_same_version_body,
+        "rfc",
+        "same_version_body"
+    );
+    reviewed_publish_test!(reviewed_confluence_new_version, "rfc", "new_version");
+    reviewed_publish_test!(reviewed_confluence_title, "rfc", "title");
+    reviewed_publish_test!(reviewed_confluence_reference, "rfc", "reference");
+    reviewed_publish_test!(reviewed_confluence_missing_review, "rfc", "missing_review");
+    reviewed_publish_test!(reviewed_confluence_unchanged_payload, "rfc", "unchanged");
 
     // -----------------------------------------------------------------------
     // Tests — collection routes (unchanged paths)
