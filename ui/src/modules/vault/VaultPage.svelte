@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
   // (Files / Search / Tags over the active vault), center (note edit⇄read or
   // the graph), right panel (backlinks / outgoing / outline / properties /
@@ -72,7 +73,7 @@
     } catch (e) {
       // Surface the daemon's reason inline — a silently-failing dialog is the
       // worst kind of "did nothing".
-      createError = e instanceof Error ? e.message : String(e);
+      createError = loadErrorText(e);
     } finally {
       creating = false;
     }

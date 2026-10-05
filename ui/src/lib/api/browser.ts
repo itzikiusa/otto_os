@@ -86,8 +86,8 @@ export function deleteAnnotation(id: string) {
   return api.del<void>(`/browser/annotations/${id}`);
 }
 
-export function summarize(ws: string, url: string) {
-  return api.post<BrowserSummarizeResp>(`${base(ws)}/summarize`, { url });
+export function summarize(ws: string, url: string, signal?: AbortSignal) {
+  return api.post<BrowserSummarizeResp>(`${base(ws)}/summarize`, { url }, signal);
 }
 
 export function sendAnnotation(ws: string, id: string, sessionId: string) {

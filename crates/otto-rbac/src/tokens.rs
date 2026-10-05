@@ -1529,6 +1529,42 @@ impl AuthRepo {
             .collect()
     }
 
+    /// List the caller's **live** share tokens across every session (newest
+    /// first) — the Settings → Sharing "Active links" table. Owner-scoped:
+    /// another user's links never appear. Metadata only — never the secret.
+    pub async fn list_shares_for_user(&self, owner_user_id: &Id) -> Result<Vec<ShareInfo>> {
+        let now = Utc::now().to_rfc3339();
+        let rows = sqlx::query(
+            "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
+             FROM auth_sessions
+             WHERE kind = 'share' AND revoked = 0 AND user_id = ? AND expires_at > ?
+             ORDER BY created_at DESC
+             LIMIT 500",
+        )
+        .bind(owner_user_id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("list shares for user: {e}")))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let scope_role: String = row.get("scope_role");
+                let role = WorkspaceRole::parse(&scope_role)
+                    .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                Ok(ShareInfo {
+                    id: row.get("id"),
+                    session_id: Id::from(row.get::<String, _>("session_scope")),
+                    role,
+                    token_prefix: row.get("token_prefix"),
+                    label: row.get("label"),
+                    created_at: parse_ts(&row.get::<String, _>("created_at"))?,
+                    expires_at: parse_ts(&row.get::<String, _>("expires_at"))?,
+                })
+            })
+            .collect()
+    }
+
     /// Revoke one of `owner_user_id`'s share tokens by id (flips `revoked=1`).
     /// Owner-scoped and kind-scoped: it never touches another user's row or a
     /// non-share token. Idempotent (a second revoke is a no-op).

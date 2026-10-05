@@ -10,6 +10,7 @@ import type {
   RunInsightsReq,
   RunInsightsResp,
   InsightReportStatus,
+  ActiveInsightsRun,
 } from './types';
 
 export const insightsApi = {
@@ -26,6 +27,12 @@ export const insightsApi = {
   /** Start an ad-hoc run for a period; the report appears in the list shortly. */
   run: (body: RunInsightsReq) =>
     api.post<RunInsightsResp>('/insights/run', body),
+
+  /** Runs still generating (the page restores its banner from these). */
+  activeRuns: () => api.get<ActiveInsightsRun[]>('/insights/runs/active'),
+
+  /** Stop a run: kills its session (root only). */
+  cancelRun: (runId: string) => api.post<void>(`/insights/runs/${encodeURIComponent(runId)}/cancel`, {}),
 
   /**
    * Resolve a report's `html_path` to a revocable object URL the webview can

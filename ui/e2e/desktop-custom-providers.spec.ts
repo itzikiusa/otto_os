@@ -223,7 +223,7 @@ test('prepare_context node exposes a Provider selector', async ({ page }) => {
 });
 
 test('loop sub-steps expose a Provider selector (not raw JSON only)', async ({ page }) => {
-  await addWfNode(page, 'Loop (Until)');
+  await addWfNode(page, 'Repeat (Until)');
   // Add an agent sub-step → its Provider select appears with the default label.
   await page.getByRole('button', { name: 'Add step' }).click();
   const prov = page.locator('.inspector .ls-prov').first();

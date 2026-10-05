@@ -115,7 +115,7 @@
       product.tab = 'overview';
       onclose();
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      formError = loadErrorText(e);
     } finally {
       submitting = false;
     }

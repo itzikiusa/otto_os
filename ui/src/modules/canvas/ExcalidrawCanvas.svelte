@@ -128,14 +128,24 @@
     return els;
   }
 
+  /** A scene-load fallback fired: tell the user once per scene (it used to
+   *  be console-only, so a half-drawn board looked like a silent bug). */
+  let layoutWarnedFor: string | null = null;
+  function layoutProblem(what: string, err: unknown): void {
+    // eslint-disable-next-line no-console
+    console.error(`[canvas] ${what}:`, err);
+    if (layoutWarnedFor === sceneId) return;
+    layoutWarnedFor = sceneId;
+    toasts.warn('Part of this drawing couldn’t be laid out', 'Showing it as saved — some shapes or labels may be out of place. Ask Otto to redraw it, or restore a previous version.');
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function safeRestore(arr: any[]): any[] {
     if (!restore) return arr;
     try {
       return restore(arr, null);
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('[canvas] restoreElements failed:', err);
+      layoutProblem('restoreElements failed', err);
       return arr;
     }
   }
@@ -165,16 +175,14 @@
       try {
         return safeRestore([...routeArrows(full), ...buildExcalidrawElements(els.filter((e) => !isFull(e)))]);
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[canvas] mixed scene build failed:', err);
+        layoutProblem('mixed scene build failed', err);
       }
     }
     if (isSimplified(els)) {
       try {
         return safeRestore(buildExcalidrawElements(els));
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[canvas] buildExcalidrawElements failed:', err);
+        layoutProblem('buildExcalidrawElements failed', err);
       }
     }
     return safeRestore(routeArrows(els));

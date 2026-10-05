@@ -12,7 +12,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
-  import { mcpApi } from '../../lib/api/mcp';
+  import { mcpApi, mcpCpApi } from '../../lib/api/mcp';
+  import { router } from '../../lib/router.svelte';
   import { mcpCpExtraApi } from '../mcp/cp-api';
   import type { McpServer, CreateMcpServerReq } from '../../lib/api/types';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -243,6 +244,33 @@
     }
   }
 
+  // Two registries exist on purpose for now: this ungoverned `.mcp.json` list
+  // and the governed MCP Control Plane (per-tool permissions, approvals,
+  // audit). "Move to Control Plane" registers the same command there and turns
+  // this entry OFF (never deletes it — the user removes it when satisfied).
+  // Secret env values are Keychain-only and never readable back, so a server
+  // carrying them can't be copied: it is re-added on the Control Plane instead.
+  let movingId = $state<string | null>(null);
+  async function moveToControlPlane(s: McpServer): Promise<void> {
+    if (!wsId || s.secret_env_keys.length) return;
+    const ok = await confirmer.ask(
+      `Register “${s.name}” in the MCP Control Plane, where its tools are permissioned, approved and audited? This entry is then turned off here (not deleted), so the server isn’t written to .mcp.json twice.`,
+      { title: 'Move to Control Plane', confirmLabel: 'Move' },
+    );
+    if (!ok) return;
+    movingId = s.id;
+    try {
+      await mcpCpApi.cpCreate(wsId, { name: s.name, transport: 'stdio', command: s.command, args: s.args, env: s.env, enabled: true });
+      if (s.enabled) await mcpApi.update(s.id, { enabled: false });
+      await load(wsId);
+      toasts.success(`${s.name} is now governed`, 'Review its tools on the MCP Control Plane.');
+    } catch (e) {
+      toasts.error(`Couldn’t move ${s.name}`, errMsg(e));
+    } finally {
+      movingId = null;
+    }
+  }
+
   async function remove(s: McpServer): Promise<void> {
     if (!wsId) return;
     if (
@@ -280,6 +308,17 @@
   </PageHeader>
   <PageBody width="readable">
   <SectionIntro>Enabled servers are merged into this workspace’s <code>.mcp.json</code> when an agent session spawns here, alongside Otto’s own entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</SectionIntro>
+
+  <div class="card ungoverned" data-testid="mcp-ungoverned-note">
+    <Icon name="warning" size={14} />
+    <div class="ungoverned-text">
+      <strong>Ungoverned — written to <code>.mcp.json</code>.</strong>
+      Servers here run with every tool allowed: no per-tool permissions, approvals or audit. The
+      <strong>MCP Control Plane</strong> is the governed registry — prefer it for new servers, and use
+      “Move to Control Plane” on a server below to bring it under governance.
+    </div>
+    <button class="btn small" onclick={() => router.go('mcp/servers')}><Icon name="server" size={12} /> Open MCP Control Plane</button>
+  </div>
 
   <div class="section-title">Built in</div>
   <div class="card mcp-card otto" data-testid="connections-mcp">
@@ -372,6 +411,13 @@
                 />
                 Enabled
               </label>
+              <button
+                class="btn small srv-move"
+                disabled={locked || movingId !== null || s.secret_env_keys.length > 0}
+                aria-busy={movingId === s.id}
+                title={s.secret_env_keys.length > 0 ? 'Its secret values stay in the Keychain and can’t be copied — add it on the MCP Control Plane instead' : `Register ${s.name} in the governed MCP Control Plane`}
+                onclick={() => void moveToControlPlane(s)}
+              >{movingId === s.id ? 'Moving…' : 'Move to Control Plane'}</button>
               <button
                 class="icon-btn srv-tool"
                 disabled={locked}
@@ -487,6 +533,22 @@
 {/if}
 
 <style>
+  .ungoverned {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    margin-block-end: 14px;
+    border-color: var(--warning);
+    background: var(--warning-soft);
+    font-size: var(--fs-s);
+    line-height: 1.5;
+  }
+  .ungoverned > :global(svg) { color: var(--warning); margin-block-start: 2px; flex-shrink: 0; }
+  .ungoverned-text { flex: 1 1 260px; min-width: 0; }
+  .ungoverned-text code { font-family: var(--font-mono); font-size: var(--fs-xs); }
+  .srv-move { white-space: nowrap; }
   /* Section chrome: shared PageHeader bar + scrolling PageBody. */
   .settings-section {
     display: flex;

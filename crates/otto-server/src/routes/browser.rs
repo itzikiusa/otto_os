@@ -24,6 +24,7 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use otto_core::api::Problem;
 use otto_core::domain::WorkspaceRole;
@@ -1045,6 +1046,10 @@ async fn summarize_page(
     let nonce = otto_core::new_id();
     let prompt = build_summarize_prompt(&page.url, &page.title, &capped, &nonce);
     let meta = serde_json::json!({ "source": "browser_summarize", "url": page.url });
+    // Stop: the page's Stop button aborts this request; the client going away
+    // drops this future mid-turn, and the guard then kills the agent session so
+    // the turn really stops (not just the spinner). Disarmed once the turn ends.
+    let mut stop_guard = KillSessionOnDrop::new(Arc::clone(&ctx.manager));
     let turn = crate::agent_session::run_session_turn(
         &ctx,
         &ws,
@@ -1056,9 +1061,10 @@ async fn summarize_page(
         meta,
         &prompt,
         crate::agent_session::STUCK_IDLE,
-        |_| {},
+        |sid| stop_guard.arm(sid),
     )
     .await;
+    stop_guard.disarm();
     let _ = tokio::fs::remove_dir_all(&dir).await;
     let (raw, _sid) = turn?;
 
@@ -1067,6 +1073,39 @@ async fn summarize_page(
         engine: page.engine.clone(),
         degraded: page.degraded,
     }))
+}
+
+/// Kills an agent session if dropped while armed — i.e. when the HTTP request
+/// driving its turn is cancelled (client Stop / disconnect) before the turn
+/// finished. `arm` records the session id as soon as it exists.
+struct KillSessionOnDrop {
+    manager: Arc<otto_sessions::SessionManager>,
+    sid: Option<Id>,
+}
+
+impl KillSessionOnDrop {
+    fn new(manager: Arc<otto_sessions::SessionManager>) -> Self {
+        Self { manager, sid: None }
+    }
+    fn arm(&mut self, sid: &Id) {
+        self.sid = Some(sid.clone());
+    }
+    fn disarm(&mut self) {
+        self.sid = None;
+    }
+}
+
+impl Drop for KillSessionOnDrop {
+    fn drop(&mut self) {
+        if let Some(sid) = self.sid.take() {
+            let manager = Arc::clone(&self.manager);
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = manager.kill_session(&sid).await;
+                });
+            }
+        }
+    }
 }
 
 /// The summarize-turn prompt. `capped_markdown` is already truncated to

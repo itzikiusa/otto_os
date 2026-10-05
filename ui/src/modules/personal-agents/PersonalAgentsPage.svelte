@@ -15,6 +15,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -151,7 +152,7 @@
     {#snippet tabs()}
       <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
         <button role="tab" aria-selected={sub !== 'rooms'} tabindex={sub !== 'rooms' ? 0 : -1} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
-        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Rooms</button>
+        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Agent rooms</button>
       </div>
     {/snippet}
     {#snippet actions()}
@@ -189,7 +190,9 @@
             actionIcon="plus"
             variant="page"
             onaction={() => (creating = true)}
-          />
+          >
+            <AutomateGuide current="personal-agents" />
+          </EmptyState>
         {/snippet}
         {#if !primaryAgent && Object.keys(autonomyById).length > 0}
           <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as <strong>your agent</strong> (its Autonomy tab): your main assistant, routing specialist work to the others.</p>

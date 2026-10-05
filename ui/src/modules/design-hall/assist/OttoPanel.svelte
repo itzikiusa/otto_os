@@ -42,6 +42,7 @@
   import { library } from '../library.svelte';
   import { asks } from './asks.svelte';
   import { acceptVariant, getLearned, listTurns, listVariantRuns } from './api';
+  import { interruptSession } from '../../../lib/api/interrupt';
   import { askError, sendAsk } from './run';
   import {
     QUICK_ACTIONS,
@@ -257,6 +258,23 @@
   const busy = $derived(!!running || !!runningRun);
   const versionOf = (id: string | null) => (id ? (versions.find((v) => v.id === id) ?? null) : null);
   const liveSession = $derived(running?.session_id ?? runningRun?.turns.find((t) => t.session_id && !isTerminal(t.status))?.session_id ?? null);
+
+  // Stop: interrupt the live turn's agent (Esc into its PTY) — the turn then
+  // settles through its normal status events; the session itself is kept.
+  let stopping = $state(false);
+  async function stopTurn(): Promise<void> {
+    const sid = liveSession;
+    if (!sid || stopping) return;
+    stopping = true;
+    try {
+      await interruptSession(sid);
+      toasts.info('Stopped Otto', 'The agent’s current turn was interrupted.');
+    } catch (e) {
+      toastError('Couldn’t stop Otto', e);
+    } finally {
+      stopping = false;
+    }
+  }
   const stale = $derived(events.state !== 'connected');
 
   // Context Otto is given besides the ask (the server builds it from links;
@@ -456,6 +474,7 @@
       <span class="grow"></span>
       {#if liveSession}
         <button class="linkbtn" onclick={() => openSession(liveSession!)} data-testid="design-otto-live">View live session</button>
+        <button class="linkbtn" onclick={() => void stopTurn()} disabled={stopping} aria-busy={stopping} data-testid="design-otto-stop"><Icon name="stop" size={11} /> {stopping ? 'Stopping…' : 'Stop'}</button>
       {/if}
     </div>
     <div class="state" role="status">

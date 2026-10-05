@@ -199,7 +199,7 @@
 
 <div class="rooms">
   {#if !viewport.isPhone || !selectedId}
-  <aside class="list" aria-label="Rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
+  <aside class="list" aria-label="Agent rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
       <input
         bind:this={createEl}
