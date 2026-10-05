@@ -192,7 +192,7 @@ pub trait SwarmHost: Send + Sync + 'static {
         timeout: Duration,
         waiting_idle: Duration,
         stuck_idle: Duration,
-        transcript_ok: Option<fn(&str) -> bool>,
+        transcript_ok: Option<for<'s> fn(&'s str) -> bool>,
         on_status: &'a mut StatusFn<'a>,
     ) -> RunOutcome;
     /// Run `attempt` up to `max_attempts` times with auto-recovery (kill the

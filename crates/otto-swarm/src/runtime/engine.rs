@@ -2281,7 +2281,7 @@ async fn resume(
     ))
 }
 
-pub(crate) fn emit_status(ctx: &SwarmRt, ws: &Id, sid: &str, status: &str) {
+pub fn emit_status(ctx: &SwarmRt, ws: &Id, sid: &str, status: &str) {
     let _ = ctx.events().send(Event::SwarmStatus {
         workspace_id: ws.clone(),
         swarm_id: sid.to_string(),

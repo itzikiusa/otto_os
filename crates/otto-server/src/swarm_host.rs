@@ -200,7 +200,7 @@ impl SwarmHost for ServerCtx {
         timeout: Duration,
         waiting_idle: Duration,
         stuck_idle: Duration,
-        transcript_ok: Option<fn(&str) -> bool>,
+        transcript_ok: Option<for<'s> fn(&'s str) -> bool>,
         on_status: &'a mut StatusFn<'a>,
     ) -> RunOutcome {
         let out = agent_run::watch_for_result(
