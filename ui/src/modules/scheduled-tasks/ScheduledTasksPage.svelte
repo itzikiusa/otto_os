@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import { onDestroy, tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -691,6 +692,7 @@
     if (sessionId) ws.navigateToSession(sessionId);
   }
 
+  const reportSeq = latestOnly();
   async function viewReport(run: ScheduledTaskRun, taskName: string, plain = false): Promise<void> {
     reportRun = run;
     reportTaskName = taskName;
@@ -699,12 +701,16 @@
     reportLoading = true;
     reportText = '';
     reportError = '';
+    // Only the report last asked for may land (A's slow text used to fill
+    // the modal opened for B).
+    const t = reportSeq.begin();
     try {
-      reportText = await authedText(scheduledTasksApi.reportPath(run.id));
+      const text = await authedText(scheduledTasksApi.reportPath(run.id));
+      if (t.current) reportText = text;
     } catch (e) {
-      reportError = loadErrorText(e);
+      if (t.current) reportError = loadErrorText(e);
     } finally {
-      reportLoading = false;
+      if (t.current) reportLoading = false;
     }
   }
 

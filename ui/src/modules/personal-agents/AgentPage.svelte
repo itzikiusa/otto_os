@@ -1,6 +1,7 @@
 <script lang="ts">
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
+  import { latestOnly } from '../../lib/latest';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { tabKeys } from '../../lib/tabKeys';
   import { tick } from 'svelte';
@@ -298,17 +299,22 @@
   let reportError = $state('');
   let reportLoading = $state(false);
 
+  const reportSeq = latestOnly();
   async function viewReport(run: PersonalAgentRun): Promise<void> {
     reportRun = run;
     reportLoading = true;
     reportText = '';
     reportError = '';
+    // Only the report last asked for may land (A's slow text used to fill
+    // the modal opened for B).
+    const t = reportSeq.begin();
     try {
-      reportText = await authedText(personalAgentsApi.reportPath(run.id));
+      const text = await authedText(personalAgentsApi.reportPath(run.id));
+      if (t.current) reportText = text;
     } catch (e) {
-      reportError = loadErrorText(e);
+      if (t.current) reportError = loadErrorText(e);
     } finally {
-      reportLoading = false;
+      if (t.current) reportLoading = false;
     }
   }
 

@@ -6,6 +6,7 @@ import { scheduledTasksApi, type ScheduledTaskInput } from '../api/scheduledTask
 import type { OttoEvent, ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun } from '../api/types';
 import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
+import { latestByKey } from '../latest';
 
 class ScheduledTasksStore {
   list: ScheduledTask[] = $state([]);
@@ -18,6 +19,9 @@ class ScheduledTasksStore {
   /** task_id → why its run history failed to load (absent = ok). */
   runsError: Record<string, string> = $state({});
   private wsId = '';
+  /** Per-task run-history ordering: a run's start and finish events each fire
+   *  `loadRuns`; the START snapshot landing last stuck the row on "Running". */
+  private runsSeq = latestByKey<string>();
   private listGeneration = 0;
   private workspaceGeneration = 0;
 
@@ -50,11 +54,15 @@ class ScheduledTasksStore {
   }
 
   async loadRuns(taskId: string): Promise<void> {
+    const t = this.runsSeq.begin(taskId);
     try {
-      this.runsByTask = { ...this.runsByTask, [taskId]: await scheduledTasksApi.runs(taskId) };
+      const runs = await scheduledTasksApi.runs(taskId);
+      if (!t.current) return;
+      this.runsByTask = { ...this.runsByTask, [taskId]: runs };
       const { [taskId]: _drop, ...rest } = this.runsError;
       this.runsError = rest;
     } catch (e) {
+      if (!t.current) return;
       this.runsError = { ...this.runsError, [taskId]: loadErrorText(e) };
     }
   }
@@ -78,6 +86,7 @@ class ScheduledTasksStore {
 
   async remove(id: string): Promise<void> {
     await scheduledTasksApi.remove(id);
+    this.runsSeq.cancel(id);
     if (this.wsId) await this.loadList(this.wsId);
     const next = { ...this.runsByTask };
     delete next[id];
