@@ -644,7 +644,7 @@ async fn poll_review(ctx: &ServerCtx, review_id: &Id, budget: Duration) -> Resul
             ctx.reviews_store
                 .review_status(review_id)
                 .await
-                .is_ok_and(|s| review_is_terminal(s))
+                .is_ok_and(review_is_terminal)
         },
         REVIEW_SAFETY_RECHECK,
         budget,
