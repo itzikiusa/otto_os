@@ -3705,7 +3705,7 @@ dependencies = [
 
 [[package]]
 name = "otto-aws"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "bytes",
@@ -3733,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "otto-brokers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -3768,7 +3768,7 @@ dependencies = [
 
 [[package]]
 name = "otto-browser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3795,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "otto-canvas"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "otto-core",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "otto-channels"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3833,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "otto-connections"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "otto-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -3879,7 +3879,7 @@ dependencies = [
 
 [[package]]
 name = "otto-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "hex",
@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "otto-dbviewer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "otto-design"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3948,7 +3948,7 @@ dependencies = [
 
 [[package]]
 name = "otto-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "otto-improve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "otto-issues"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "otto-k8s"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4043,7 +4043,7 @@ dependencies = [
 
 [[package]]
 name = "otto-keychain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "keyring",
@@ -4058,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "otto-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4083,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "otto-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -4102,7 +4102,7 @@ dependencies = [
 
 [[package]]
 name = "otto-netguard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest",
  "tokio",
@@ -4110,7 +4110,7 @@ dependencies = [
 
 [[package]]
 name = "otto-orchestrator"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "otto-core",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "otto-product"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4148,7 +4148,7 @@ dependencies = [
 
 [[package]]
 name = "otto-pty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "libc",
@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "otto-rbac"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "chrono",
@@ -4181,14 +4181,14 @@ dependencies = [
 
 [[package]]
 name = "otto-sandbox"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "otto-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4269,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "otto-sessions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4298,7 +4298,7 @@ dependencies = [
 
 [[package]]
 name = "otto-skills"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "include_dir",
@@ -4312,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "otto-ssh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otto-core",
  "serde",
@@ -4323,7 +4323,7 @@ dependencies = [
 
 [[package]]
 name = "otto-state"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "futures-util",
@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "otto-swarm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -4360,7 +4360,7 @@ dependencies = [
 
 [[package]]
 name = "otto-transcript"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "hex",
@@ -4375,7 +4375,7 @@ dependencies = [
 
 [[package]]
 name = "otto-usage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -4393,7 +4393,7 @@ dependencies = [
 
 [[package]]
 name = "otto-vault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
@@ -4417,7 +4417,7 @@ dependencies = [
 
 [[package]]
 name = "otto-workgraph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "otto-core",
  "otto-state",
@@ -4430,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "ottod"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "axum-server",

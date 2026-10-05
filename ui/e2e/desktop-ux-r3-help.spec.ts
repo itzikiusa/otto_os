@@ -81,7 +81,7 @@ test('coach failed skill discovery has inline retry and skill installation recov
 async function realMedia(page: Page) {
   const bytes = readFileSync(process.env.OTTO_E2E_TOUR_VIDEO!);
   await page.route('**/walkthroughs/resolve**', (r) => r.fulfill({ json: { url: `${new URL(page.url()).origin}/__r3tour.mp4` } }));
-  await page.route('**/otto-tour-poster.jpg', (r) => r.abort());
+  await page.route(/otto-tour[^/]*poster\.jpg/, (r) => r.abort());
   await page.route('**/__r3tour.mp4', (r) => {
     const range = r.request().headers().range?.match(/bytes=(\d+)-(\d*)/);
     const start = range ? Number(range[1]) : 0;

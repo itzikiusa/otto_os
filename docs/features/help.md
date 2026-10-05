@@ -87,8 +87,8 @@ summary: One sentence, what it's for.
 `film.json`:
 
 ```json
-{ "file": "otto-tour.mp4", "poster": "otto-tour-poster.jpg", "captions": "otto-tour.vtt",
-  "duration": 150, "chapters": [ { "id": "agents", "section": "agents", "title": "Agents", "start": 12, "duration": 20 } ] }
+{ "file": "otto-tour-20261005.mp4", "poster": "otto-tour-20261005-poster.jpg", "captions": "otto-tour-20261005.vtt",
+  "duration": 140, "chapters": [ { "id": "agents", "section": "agents", "title": "Agents", "start": 12, "duration": 20 } ] }
 ```
 
 - The MP4 and poster are **not bundled**. They are streamed from
@@ -98,7 +98,7 @@ summary: One sentence, what it's for.
   redirects), falling back to the raw URL.
 - **Captions:** GitHub's asset host sends no CORS headers, so a remote
   `<track>` can't load from it. Put the VTT next to the manifest
-  (`ui/src/lib/walkthroughs/otto-tour.vtt`, a few KB) and the player serves it
+  (`ui/src/lib/walkthroughs/<name>.vtt`, a few KB) and the player serves it
   from a same-origin `blob:` URL, on by default with a CC toggle. With a
   non-GitHub base, the VTT is loaded from the host in CORS mode instead.
 - A chapter's `section` should name a guide id; then the chapter shows **Read
