@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
+import { strictRequire, unused } from './strictRequire.ts';
 
 // Execute the actual store methods; the harness supplies only transport and
 // browser globals. State proxies are immaterial to these transition tests.
@@ -21,10 +22,18 @@ function setup(overrides: Record<string, unknown> = {}) {
   const source = readFileSync(new URL('../src/modules/vault/vault.svelte.ts', import.meta.url), 'utf8');
   const context = {
     exports: {} as Record<string, any>, $state: (v: unknown) => v,
-    require: (p: string) => p.endsWith('treeRefresh') ? {refreshVisibleTree} : p.endsWith('/vault') ? api : p.endsWith('/client') ? {ApiError}
-      : p.includes('workspace.svelte') ? {ws: {current: {id: 'ws'}}}
-      : p.includes('toast') ? {toasts: {error() {}, success() {}, warn() {}}}
-      : p.endsWith('/storage') ? {lsGet: () => null, lsSet() {}, lsRemove() {}} : {},
+    require: strictRequire([
+      ['/treeRefresh', {refreshVisibleTree}],
+      ['/api/vault', api],
+      ['/api/client', {ApiError, authedBlobUrl: unused('client.authedBlobUrl')}],
+      ['/api/types', unused('/api/types')],
+      ['/workspace.svelte', {ws: {current: {id: 'ws'}}}],
+      ['/toast.svelte', {toasts: {error() {}, success() {}, warn() {}}}],
+      ['/storage', {lsGet: () => null, lsSet() {}, lsRemove() {}}],
+      ['/loadError', unused('/loadError')],
+      ['/confirm.svelte', unused('/confirm.svelte')],
+      ['/poll', unused('/poll')],
+    ]),
     localStorage: {setItem() {}, getItem() {return null;}}, setTimeout, clearTimeout, setInterval, clearInterval, URL,
   };
   runInNewContext(ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022}}).outputText, context);
