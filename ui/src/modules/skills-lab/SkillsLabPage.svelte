@@ -10,6 +10,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import SkillsBrowser from './SkillsBrowser.svelte';
   import SkillReviewPanel from './SkillReviewPanel.svelte';
   import SkillsEvalPage from '../skills-eval/SkillsEvalPage.svelte';
@@ -122,6 +123,15 @@
       </div>
     {/snippet}
     {#snippet actions()}
+      {#if auth.can('settings', 'admin')}
+        <!-- Where this page's defaults live: the evaluator's agents/iterations
+             (evaluator tab) or the installed library (skills tab). -->
+        <button class="icon-btn" data-overflow="-1" data-icon="gear"
+          data-label={tab === 'evaluator' ? 'Evaluator defaults' : 'Skill library settings'}
+          onclick={() => router.go(tab === 'evaluator' ? 'settings/skill-eval' : 'settings/skills')}
+          aria-label={tab === 'evaluator' ? 'Evaluator defaults' : 'Skill library settings'}
+          title={tab === 'evaluator' ? 'Evaluator defaults (Settings → Skills evaluator)' : 'Installed skills (Settings → Skills)'}><Icon name="gear" size={14} /></button>
+      {/if}
       {#if tab === 'skills'}
         <button class="btn small" data-overflow="-1" data-icon="download" data-label="Import a skill (.zip)…" onclick={() => browser?.openImport()} title="Import a skill package (.zip)">
           <Icon name="download" size={12} /> Import…
