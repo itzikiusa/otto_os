@@ -1,6 +1,7 @@
 // Workspaces + sessions + tab/split state for the shell and Agent Mode.
 
 import { api, getToken } from '../api/client';
+import { plural } from '../plural';
 import { listActiveWorkflowRuns } from '../api/workflows';
 import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
@@ -30,7 +31,6 @@ import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
 import { toastError } from '../toastError';
-import { plural } from '../plural';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;

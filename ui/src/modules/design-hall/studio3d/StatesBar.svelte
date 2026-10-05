@@ -98,11 +98,17 @@
     items.push(
       { separator: true },
       {
-        label: 'Delete state',
+        label: 'Delete state…',
         icon: 'trash',
         danger: true,
         disabled: readonly,
-        action: () => {
+        action: async () => {
+          const ok = await confirmer.ask(`Delete the state “${st.name ?? st.id}”? Its recorded differences go with it.`, {
+            title: 'Delete state',
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (!ok) return;
           onchange(removeState(doc, st.id));
           onpick(null);
         },

@@ -353,7 +353,7 @@
       },
       { separator: true },
       {
-        label: inStaged ? 'Discard' : 'Discard unstaged changes',
+        label: inStaged ? 'Discard…' : 'Discard unstaged changes…',
         icon: 'trash',
         danger: true,
         action: () => void discardPaths([c.path], c.path, section),
@@ -378,7 +378,7 @@
       },
       { separator: true },
       {
-        label: `Discard ${node.name}/ (${n})`,
+        label: `Discard ${node.name}/ (${n})…`,
         icon: 'trash',
         danger: true,
         action: () => void discardPaths(paths, `${node.path}/ (${n})`, section),

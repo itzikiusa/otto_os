@@ -1,4 +1,5 @@
 import { mergeVariableWrites } from '../api/scripts';
+import { plural } from '../plural';
 import type { ApiAutomationRun, StartApiAutomationRunReq } from '../api/types';
 // API client ("Postman") store — workspace-scoped collections, requests,
 // environments, history, plus a live "draft" request the builder edits and
@@ -42,7 +43,6 @@ import { toasts } from '../toast.svelte';
 import type { PreRequestReq, TestResult } from '../api/scripts';
 import { runScript } from '../api/scriptRunner';
 import {
-import { plural } from '../plural';
   detectAndParse,
   collectionToPostman,
   isImportedEnvironment,

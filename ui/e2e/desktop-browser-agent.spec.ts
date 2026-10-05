@@ -209,34 +209,3 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   await openRightPanelTab(page, 'Browser');
   await expect(page.locator('.rpanel').getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
 });
-  await expect(group).toBeVisible();
-  // v1 is the default — the pre-existing per-session panel (its take-over
-  // toolbar), no Browser-module chrome.
-  await expect(group.getByRole('button', { name: 'v1' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(panel.getByPlaceholder('Search or enter URL…')).toBeVisible();
-  await expect(panel.getByPlaceholder('Enter URL', { exact: true })).toHaveCount(0);
-
-  await group.getByRole('button', { name: 'v2' }).click();
-  await expect(group.getByRole('button', { name: 'v2' })).toHaveAttribute('aria-pressed', 'true');
-  // v2: the Browser module's URL bar + an ask bar aimed at the active session.
-  await expect(panel.getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
-  const ask = panel.getByLabel('Ask the agent about this page');
-  await expect(ask).toBeVisible();
-  // No page open yet → disabled with the "open a page" hint, not the
-  // "attach a session" one (the session is the pane beside it).
-  await expect(ask).toHaveAttribute('placeholder', /Open a page first/);
-  // No embedded dock inside the panel — the session IS the main pane.
-  await expect(panel.getByLabel('Browser agent')).toHaveCount(0);
-
-  // The choice persists across a reload (the panel's active tab itself does
-  // not — re-open Browser and the switch comes back on v2).
-  await page.reload();
-  await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('button', { name: /E2E Shell/ }).first().click();
-  await openRightPanelTab(page, 'Browser');
-  await expect(page.locator('.rpanel').getByRole('button', { name: 'v2' })).toHaveAttribute('aria-pressed', 'true');
-
-  // Back to v1 restores the original panel.
-  await page.locator('.rpanel').getByRole('button', { name: 'v1' }).click();
-  await expect(page.locator('.rpanel').getByPlaceholder('Search or enter URL…')).toBeVisible();
-});
