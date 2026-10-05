@@ -6665,6 +6665,10 @@ export interface CreateShareResp {
   url: string;
   /** Metadata for the newly-minted share. */
   info: ShareInfo;
+  /** Whether another device can open `url`. False when the origin is loopback
+   *  or empty (no Public link domain and no network listener) — show the
+   *  "only works on this Mac" warning instead of the phone QR hint. */
+  reachable_remotely: boolean;
 }
 
 // ---------------------------------------------------------------------------

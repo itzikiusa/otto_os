@@ -438,7 +438,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
+| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo, reachable_remotely}` (token shown once). Origin: `share_base_url` setting → non-loopback request Host → `https://<lan-ip>:<port>` when the network listener is on → the request Host. `reachable_remotely=false` ⇔ the origin is loopback/empty. With `recipient_email` on a loopback origin → 409 (set a Public link domain first) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
 | GET /api/v1/auth/shares | member (self-owned) | — | `MyShare[]` = `ShareInfo` fields + `session_title: string \| null` (null when the session is gone) — the caller's live (non-revoked, non-expired) links across ALL sessions, newest first, capped at 500. Never another user's links, never the secret |
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
