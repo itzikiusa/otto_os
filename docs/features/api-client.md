@@ -896,6 +896,7 @@ scripts it did not intend to change.
 | Plain-language helpers | `ui/src/lib/api/apiVars.ts` (variable resolution, method/status tones), `ui/src/lib/api/jsonTree.ts` |
 | UI store / scripts / import / codegen | `ui/src/lib/stores/apiClient.svelte.ts`, `apiStream.svelte.ts`, `ui/src/lib/api/scripts.ts`, `importers.ts`, `codegen.ts` |
 | Backend (REST) | `crates/otto-server/src/routes/api_client.rs`, `grpc.rs`, `api_stream.rs` |
+| Engines (gRPC, automation scripts) | `crates/otto-apiclient/src/grpc.rs` (tonic/protox/prost-reflect), `crates/otto-apiclient/src/scripts.rs` (boa_engine `pm` runtime) — `routes/grpc.rs` is the thin auth wrapper |
 | SSRF guard | `crates/otto-netguard/src/lib.rs` |
 | Domain / contract DTOs | `crates/otto-core/src/domain.rs`, `crates/otto-core/src/api.rs`, `docs/contracts/api.md` |
 

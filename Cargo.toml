@@ -11,6 +11,7 @@ members = [
     "crates/otto-aws",
     "crates/otto-k8s",
     "crates/otto-dbviewer",
+    "crates/otto-apiclient",
     "crates/otto-orchestrator",
     "crates/otto-git",
     "crates/otto-issues",
@@ -57,6 +58,7 @@ otto-connections = { path = "crates/otto-connections" }
 otto-aws = { path = "crates/otto-aws" }
 otto-k8s = { path = "crates/otto-k8s" }
 otto-dbviewer = { path = "crates/otto-dbviewer" }
+otto-apiclient = { path = "crates/otto-apiclient" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
 otto-git = { path = "crates/otto-git" }
 otto-issues = { path = "crates/otto-issues" }

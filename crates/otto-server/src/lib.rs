@@ -8,7 +8,8 @@ pub mod agent_run;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;
-pub mod api_scripts;
+/// Moved to `otto-apiclient`; re-exported so `crate::api_scripts` paths hold.
+pub use otto_apiclient::scripts as api_scripts;
 pub mod api_secrets;
 pub mod assistant;
 pub mod auth;
