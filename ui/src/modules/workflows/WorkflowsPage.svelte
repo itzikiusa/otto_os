@@ -1497,6 +1497,12 @@
   let swarmOpts = $state<{ id: string; name: string }[] | null>(null);
   let swarmProjectOpts = $state<Record<string, { id: string; name: string }[]>>({});
   let swarmOptsWs: string | null = null;
+  // Each list / project lookup is tried ONCE per workspace (pending or
+  // failed): the effect re-runs per keystroke in the free-text fallback, and
+  // used to re-fetch the list — and `GET /swarm/swarms/<partial id>` — per
+  // character after a failure.
+  let swarmListTried = false;
+  const swarmProjectsTried = new Set<string>();
   $effect(() => {
     const wsId = current?.workspace_id;
     if (selectedNode?.kind !== 'swarm_task' || !wsId) return;
@@ -1505,16 +1511,24 @@
       if (swarmOptsWs !== wsId) {
         swarmOptsWs = wsId;
         swarmOpts = null;
+        swarmListTried = false;
+        swarmProjectsTried.clear();
       }
-      if (swarmOpts === null) {
+      if (swarmOpts === null && !swarmListTried) {
+        swarmListTried = true;
         api
           .get<{ id: string; name: string }[]>(`/workspaces/${wsId}/swarm/swarms`)
-          .then((l) => (swarmOpts = l.map((x) => ({ id: x.id, name: x.name }))))
+          .then((l) => {
+            if (swarmOptsWs === wsId) swarmOpts = l.map((x) => ({ id: x.id, name: x.name }));
+          })
           .catch(() => {});
       }
-      if (sid && !swarmProjectOpts[sid]) {
+      // Only a COMPLETE id: one the list knows, or (free text) a full ULID.
+      const complete = swarmOpts ? swarmOpts.some((o) => o.id === sid) : /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(sid);
+      if (sid && complete && !swarmProjectOpts[sid] && !swarmProjectsTried.has(sid)) {
+        swarmProjectsTried.add(sid);
         api
-          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${sid}`)
+          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${encodeURIComponent(sid)}`)
           .then((d) => (swarmProjectOpts = { ...swarmProjectOpts, [sid]: d.projects.map((x) => ({ id: x.id, name: x.name })) }))
           .catch(() => {});
       }

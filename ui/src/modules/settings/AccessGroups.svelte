@@ -214,12 +214,10 @@
         operations,
         grantable_operations: grantable,
       };
-      const name = input.name;
-      if (roleId) await accessApi.updateRole(roleId, input);
-      else await accessApi.createRole(input);
+      const result = roleId ? await accessApi.updateRole(roleId, input) : await accessApi.createRole(input);
       roles = await accessApi.roles();
-      // Stay on the preset just saved (it used to reset to a blank form).
-      const saved = roles.find((r) => r.name === name);
+      // Stay on the preset just saved — by id (two presets may share a name).
+      const saved = roles.find((r) => r.id === result.id);
       editRole(saved);
     }, creating ? 'Preset created' : 'Preset saved');
   }
