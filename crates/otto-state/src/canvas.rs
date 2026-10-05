@@ -431,11 +431,19 @@ impl CanvasRepo {
     }
 
     pub async fn delete(&self, id: &Id) -> Result<()> {
-        // Explicit child delete first (independent of the foreign_keys pragma,
-        // which isn't guaranteed on every pool — see other repos' convention).
+        // ONE write transaction: a failure (or a crash) midway used to leave
+        // a scene with its refs/versions/files half gone across five
+        // autocommits. Explicit child deletes first (independent of the
+        // foreign_keys pragma, which isn't guaranteed on every pool — see
+        // other repos' convention). File GC runs after the commit.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("delete canvas scene begin"))?;
         sqlx::query("DELETE FROM canvas_scene_refs WHERE scene_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete canvas scene refs"))?;
         let refs = sqlx::query(
@@ -443,31 +451,35 @@ impl CanvasRepo {
                  SELECT id FROM canvas_scene_versions WHERE scene_id = ?)",
         )
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("delete canvas version files"))?
         .rows_affected();
         sqlx::query("DELETE FROM canvas_scene_versions WHERE scene_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete canvas scene versions"))?;
         let live = sqlx::query("DELETE FROM canvas_scene_files WHERE scene_id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete canvas scene files"))?
             .rows_affected();
-        if refs + live > 0 {
-            self.gc_files().await?;
-        }
         let result = sqlx::query("DELETE FROM canvas_scenes WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("delete canvas scene"))?;
         if result.rows_affected() == 0 {
+            // Nothing of a missing scene is touched (the tx rolls back).
             return Err(Error::NotFound(format!("canvas scene {id}")));
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("delete canvas scene commit"))?;
+        if refs + live > 0 {
+            self.gc_files().await?;
         }
         Ok(())
     }
@@ -1146,6 +1158,48 @@ mod tests {
         let list = repo.list_versions(&scene.id).await.unwrap();
         assert_eq!(list.len() as i64, SCENE_VERSIONS_KEPT);
 
+        repo.delete(&scene.id).await.unwrap();
+        assert!(repo.list_versions(&scene.id).await.unwrap().is_empty());
+    }
+
+    /// r10: delete is one transaction — a failure on the last statement
+    /// leaves the scene's history intact instead of half deleted.
+    #[tokio::test]
+    async fn failed_delete_leaves_the_scene_whole() {
+        let repo = CanvasRepo::new(mem_pool().await);
+        let scene = repo
+            .create(NewScene {
+                workspace_id: "w1".into(),
+                story_id: None,
+                title: "D".into(),
+                doc_json: r#"{"format":"d2","source":"a"}"#.into(),
+                provider: "claude".into(),
+                section: None,
+                created_by: "u1".into(),
+            })
+            .await
+            .unwrap();
+        repo.snapshot(&scene.id, "agent", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER block_scene_delete BEFORE DELETE ON canvas_scenes \
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END",
+        )
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        assert!(repo.delete(&scene.id).await.is_err());
+        assert_eq!(
+            repo.list_versions(&scene.id).await.unwrap().len(),
+            1,
+            "versions rolled back with the failed delete"
+        );
+        sqlx::query("DROP TRIGGER block_scene_delete")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
         repo.delete(&scene.id).await.unwrap();
         assert!(repo.list_versions(&scene.id).await.unwrap().is_empty());
     }
