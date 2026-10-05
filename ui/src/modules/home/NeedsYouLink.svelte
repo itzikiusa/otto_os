@@ -36,14 +36,14 @@
 >
   <Icon name="bell" size={12} />
   <span>{label}</span>
-  <Icon name="arrow" size={11} />
+  <Icon name="arrow" size={12} />
 </button>
 
 <style>
   .nyl {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
