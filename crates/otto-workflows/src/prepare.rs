@@ -13,7 +13,7 @@
 use otto_core::Id;
 use serde_json::Value;
 
-use crate::state::ServerCtx;
+use crate::WorkflowCtx;
 
 /// Resolve the Jira key a `prepare_context` step should fetch, in order:
 /// `params.key` (the workflow author's, trusted verbatim) → the Jira key in
@@ -24,7 +24,7 @@ use crate::state::ServerCtx;
 /// a pasted issue URL yields its key): "N/A" / "none" used to be fetched as
 /// `/issue/N/A` and written as `jira-N/A.md` (which failed, and with
 /// `require: true` failed the run). A value with no key means "no ticket".
-pub(crate) fn extract_jira_key(params: &Value, input: &Value) -> Option<String> {
+pub fn extract_jira_key(params: &Value, input: &Value) -> Option<String> {
     if let Some(k) = params
         .get("key")
         .and_then(Value::as_str)
@@ -106,19 +106,19 @@ fn scan_jira_key(text: &str) -> Option<String> {
 /// explicit `params.account_id` wins; else the run user's own Jira account
 /// (first one); else any Jira account configured on the daemon (single-user
 /// / admin-configured setups). `Err` carries a human-readable reason.
-pub(crate) async fn resolve_jira_account(
-    ctx: &ServerCtx,
+pub async fn resolve_jira_account<C: WorkflowCtx>(
+    ctx: &C,
     run_user: &Id,
     account_id: Option<&str>,
 ) -> std::result::Result<otto_core::domain::IssueAccount, String> {
     if let Some(id) = account_id.map(str::trim).filter(|s| !s.is_empty()) {
         return ctx
-            .issues_store
+            .issues_store()
             .get_account(&id.to_string())
             .await
             .map_err(|e| e.to_string());
     }
-    if let Ok(accounts) = ctx.issues_store.list_accounts(run_user).await {
+    if let Ok(accounts) = ctx.issues_store().list_accounts(run_user).await {
         if let Some(a) = accounts
             .into_iter()
             .find(|a| matches!(a.provider, otto_core::domain::IssueProviderKind::Jira))
@@ -127,7 +127,7 @@ pub(crate) async fn resolve_jira_account(
         }
     }
     let all = ctx
-        .issues_store
+        .issues_store()
         .list_all_accounts()
         .await
         .map_err(|e| e.to_string())?;
@@ -138,7 +138,7 @@ pub(crate) async fn resolve_jira_account(
 
 /// Render a fetched issue (+ its comments/links/attachments) to markdown —
 /// the body written to `jira-<KEY>.md`.
-pub(crate) fn render_issue_md(issue: &otto_issues::IssueFull) -> String {
+pub fn render_issue_md(issue: &otto_issues::IssueFull) -> String {
     let mut md = String::new();
     md.push_str(&format!("# {}: {}\n\n", issue.key, issue.summary));
     md.push_str(&format!("- URL: {}\n", issue.url));

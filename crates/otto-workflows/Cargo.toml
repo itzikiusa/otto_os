@@ -12,6 +12,11 @@ license.workspace = true
 [dependencies]
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+# `prepare_context` renders a fetched `IssueFull` to markdown.
+otto-issues = { workspace = true }
+# The chat workflow trigger implements `otto_channels::WorkflowChatTrigger`.
+otto-channels = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

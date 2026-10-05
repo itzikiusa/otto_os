@@ -3254,7 +3254,7 @@ both `create_run` and the spawned `run_workflow` call — so a fixed instruction
 engine's prompt normalization exactly like a chat-started run.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
-`otto-server::workflow_chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
+`otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
 every inbound Slack/Telegram/webhook message *before* normal session routing. Resolution order:
 
 1. **Legacy structured command** — a message declaring `Action: Workflow` + `Name:` (see

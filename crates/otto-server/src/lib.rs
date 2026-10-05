@@ -118,13 +118,13 @@ pub mod turn_oracle;
 pub mod ui_bridge;
 pub mod ui_commands;
 pub mod vault_docs_agent;
-pub mod workflow_chat;
 pub mod workflow_engine;
-pub mod workflow_prepare;
 pub mod workflow_trigger_scheduler;
 // Pure workflow pieces live in `otto-workflows`; aliased so `crate::workflow_*` paths resolve.
+pub use otto_workflows::chat as workflow_chat;
 use otto_workflows::checkpoint as workflow_checkpoint;
 pub use otto_workflows::context as workflow_context;
+pub use otto_workflows::prepare as workflow_prepare;
 use otto_workflows::validation as workflow_validation;
 pub mod workgraph_projector;
 pub mod ws_events;

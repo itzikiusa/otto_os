@@ -4442,8 +4442,11 @@ dependencies = [
 name = "otto-workflows"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "otto-channels",
  "otto-core",
+ "otto-issues",
  "otto-state",
  "serde",
  "serde_json",

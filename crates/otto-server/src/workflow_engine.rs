@@ -1225,8 +1225,16 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
     fn workspaces(&self) -> &otto_state::WorkspacesRepo {
         &self.workspaces
     }
+    fn issues_store(&self) -> &otto_state::IssuesRepo {
+        &self.issues_store
+    }
     fn spawn_run(&self, ws: Workspace, wf: Workflow, run_id: Id, input: Value, scope: RunScope) {
         spawn_run(self.clone(), ws, wf, run_id, input, scope, None);
+    }
+    fn request_skip_current(&self, run_id: &str, node_id: &str) {
+        if let Ok(mut s) = self.wf_skip_current.lock() {
+            s.insert(skip_marker_key(run_id, node_id));
+        }
     }
 }
 
