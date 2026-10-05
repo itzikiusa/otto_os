@@ -79,11 +79,11 @@ test('every nav row opens a page titled with the same label', async ({ page }) =
 test('⌘K "Settings: <section>" opens that section', async ({ page }) => {
   await boot(page, 'home');
   await page.keyboard.press('Meta+k');
-  await page.keyboard.type('settings: mcp servers');
+  await page.keyboard.type('mcp servers settings');
   const item = page
     .getByTestId('floating-bar')
     .getByRole('option')
-    .filter({ hasText: 'Settings: MCP servers' })
+    .filter({ hasText: 'Go to MCP servers settings' })
     .first();
   await expect(item).toBeVisible();
   await expect(item.locator('.opt-detail')).toHaveText('Integrations');

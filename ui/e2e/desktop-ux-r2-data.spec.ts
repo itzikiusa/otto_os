@@ -58,7 +58,7 @@ test('Groups ignores delayed details after choosing another group', async ({page
   });
   await setup(page,'broker');
   await page.locator('.tabs button', {hasText:'Groups'}).click();
-  await expect(page.getByText('Loading group…', {exact:true})).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Loading this group' })).toBeVisible();
   await page.locator('.grow-row', {hasText:'beta'}).click();
   await expect(page.locator('.detail .gid.big')).toHaveText('beta');
   const done = page.waitForResponse(r => r.url().endsWith('/groups/alpha'));

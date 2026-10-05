@@ -67,7 +67,7 @@ async function openFixture(page: Page): Promise<void> {
 async function markHeading(page: Page, note: string): Promise<void> {
   await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
-  await page.getByPlaceholder('Add a note').fill(note);
+  await page.getByLabel('Note for this mark').fill(note);
   await page.getByRole('button', { name: 'Save mark' }).click();
   await expect(page.locator('.notes-rail')).toContainText(note);
 }

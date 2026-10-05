@@ -150,7 +150,7 @@ test('stash, stale worktree and submodule actions are accessible by keyboard and
 async function remoteFixtures(page: Page) {
   await page.route('**/api/v1/git/accounts', r => r.fulfill({ json: accounts.map(a => ({ ...a, provider: 'github', namespace: a.id, username: 'audit' })) }));
   await page.goto('/#/git');
-  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await page.getByRole('button', { name: 'Open a repository', exact: true }).click(); await page.getByRole('menuitem', { name: 'Add a local repository…' }).click();
 }
 test('add repository modes support arrows and Home End', async ({ page }) => {
   await remoteFixtures(page);
@@ -363,7 +363,7 @@ test('remote browsing refreshes after reopening and ignores older queries', asyn
   await page.waitForTimeout(150);
   await expect(page.locator('.remote-list')).not.toContainText('old-repository');
   await page.getByRole('dialog', { name: 'Add repository' }).getByRole('button', { name: 'Cancel', exact: true }).click();
-  await page.getByRole('button', { name: 'Add repository', exact: true }).click();
+  await page.getByRole('button', { name: 'Open a repository', exact: true }).click(); await page.getByRole('menuitem', { name: 'Add a local repository…' }).click();
   await expect(page.locator('.remote-list')).toContainText('new-repository');
 });
 

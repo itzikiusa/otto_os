@@ -202,7 +202,7 @@ test('cancel a running run from the run view (R7)', async ({ page }) => {
   await expect(cancel).toBeVisible({ timeout: 10_000 });
   await cancel.click();
   // Cancelling can't be undone, so it asks first.
-  await page.getByRole('dialog').getByRole('button', { name: 'Cancel run', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Stop run', exact: true }).click();
 
   // …and the run reaches the canceled terminal state (poll well before the
   // ~30s of delays could finish it on their own).

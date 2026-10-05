@@ -264,7 +264,7 @@ test('requests: explains the opt-in, links to settings, then lists routes once a
   await expect(off.getByRole('button', { name: 'STG AWS settings' })).toBeVisible();
   // The settings form carries the new toggle and the daemon persists it.
   await off.getByRole('button', { name: 'STG AWS settings' }).click();
-  const toggle = page.getByTestId('k8s-monitor-request-labels');
+  const toggle = page.getByTestId('k8s-monitor-request-labels').getByRole('switch');
   await expect(toggle).toBeVisible();
   await toggle.check();
   await page.getByTestId('k8s-monitor-save').click();

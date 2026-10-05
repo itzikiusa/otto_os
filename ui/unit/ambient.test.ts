@@ -31,6 +31,8 @@ function varsFor(theme: string, scheme: AmbientScheme): Record<string, string> {
   const out: Record<string, string> = {};
   for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const sel = m[1];
+    // A force-dark island styles a subtree, not <html>.
+    if (sel.includes('.otto-force-dark')) continue;
     const root = /^\s*:root\s*$/.test(sel);
     const own = sel.includes(`data-theme='${theme}'`) && (theme === 'pro-dark' || sel.includes(`data-scheme='${scheme}'`));
     if (!root && !own) continue;

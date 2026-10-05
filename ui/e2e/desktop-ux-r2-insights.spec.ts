@@ -82,7 +82,7 @@ test('Insights Health keyboard navigation, recovery, dependencies and bundle', a
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await page.getByRole('button', { name: /Agent Sessions Degraded/ }).click();
+  await page.getByRole('button', { name: /Agent sessions Degraded/ }).click();
   await expect(page.getByText('/tmp/fake-codex', { exact: true })).toBeVisible();
   const dl = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download support bundle', exact: true }).click();
@@ -91,7 +91,7 @@ test('Insights Health keyboard navigation, recovery, dependencies and bundle', a
   await expectNoHorizontalOverflow(page);
   const label = page.locator('.feature-label');
   await expect.poll(() => label.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
-  const toggle = page.getByRole('button', { name: /Agent Sessions Degraded/ });
+  const toggle = page.getByRole('button', { name: /Agent sessions Degraded/ });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r2-health-phone.png' });
 });

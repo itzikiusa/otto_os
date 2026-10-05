@@ -445,7 +445,7 @@ test('EC2: the seeded instance is running → Stop with typed id → stopped', a
   const row = page.locator('tr.trow', { hasText: env.instanceId });
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row).toContainText(INSTANCE_NAME);
-  await expect(row.locator('.pill')).toHaveText('running');
+  await expect(row.locator('.badge')).toHaveText('Running');
 
   await row.getByRole('button', { name: `Actions for ${env.instanceId}` }).click();
   await page.getByRole('menuitem', { name: 'Stop', exact: true }).click();
@@ -455,7 +455,7 @@ test('EC2: the seeded instance is running → Stop with typed id → stopped', a
   await dlg.locator('input.cf-input').fill(env.instanceId);
   await dlg.getByRole('button', { name: 'Stop', exact: true }).click();
   await expect(page.getByText('stop sent')).toBeVisible({ timeout: 15_000 });
-  await pollWithRefresh(page, 'Refresh', () => row.locator('.pill').innerText(), /^stopp(ed|ing)$/);
+  await pollWithRefresh(page, 'Refresh', () => row.locator('.badge').innerText(), /^Stopp(ed|ing)$/);
   expect(realErrors(errors), `console errors: ${errors.join('\n')}`).toEqual([]);
 });
 

@@ -259,7 +259,7 @@ test('ui: optional reviewers submit exact config and show the live review round'
   const panel = page.locator('.docs-agents');
   await expect(panel).toBeVisible({ timeout: 15_000 });
   await panel.locator('textarea').fill('No-review payload');
-  await expect(panel.getByRole('checkbox', { name: 'Review outcomes' })).not.toBeChecked();
+  await expect(panel.getByRole('switch', { name: 'Review outcomes' })).not.toBeChecked();
   await panel.getByRole('button', { name: /^Run$/i }).click();
   const submissions = () =>
     page.evaluate(
@@ -272,7 +272,7 @@ test('ui: optional reviewers submit exact config and show the live review round'
   await panel.getByRole('button', { name: 'New run' }).click();
 
   await panel.locator('textarea').fill('Review-config payload');
-  await panel.getByRole('checkbox', { name: 'Review outcomes' }).check();
+  await panel.getByRole('switch', { name: 'Review outcomes' }).check();
   await expect(panel.locator('.reviewer-config-row')).toHaveCount(1);
   await expect(panel.getByLabel('Maximum review iterations')).toHaveValue('3');
 

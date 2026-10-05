@@ -127,12 +127,12 @@ test('settings form validates locally, fills a preset, and the daemon rejects en
   // answers 409 (usage engine off) and the toast carries that hint; with one
   // installed the save goes through. Either way the daemon's validation ran.
   await page.getByTestId('k8s-monitor-interval').fill('60');
-  await page.getByTestId('k8s-monitor-enabled').check();
+  await page.getByTestId('k8s-monitor-enabled').getByRole('switch').check();
   await page.getByTestId('k8s-monitor-save').click();
   await expect(page.locator('body')).toContainText(/usage engine|ClickHouse|Monitoring saved/i);
 
   // Disabled saves fine and round-trips.
-  await page.getByTestId('k8s-monitor-enabled').uncheck();
+  await page.getByTestId('k8s-monitor-enabled').getByRole('switch').uncheck();
   await page.getByTestId('k8s-monitor-save').click();
   await expect(page.locator('body')).toContainText('Monitoring saved');
   const saved = await ctx.get(`${base}/api/v1/k8s/clusters/${clusterId}/monitor`);

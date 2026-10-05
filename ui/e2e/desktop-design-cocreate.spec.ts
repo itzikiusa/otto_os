@@ -162,9 +162,9 @@ test('What Otto learned: a proposal is approved and rolled back only after askin
   await expect(card).toContainText(/too busy/i, { timeout: 20_000 });
 
   await card.getByTestId('design-rule-approve').click();
-  const confirm = page.getByRole('dialog', { name: 'Approve team rule' });
+  const confirm = page.getByRole('dialog', { name: 'Accept team rule' });
   await expect(confirm).toContainText('roll it back');
-  await confirm.getByRole('button', { name: 'Approve rule' }).click();
+  await confirm.getByRole('button', { name: 'Accept rule' }).click();
   await page.getByTestId('design-learned-tab-rules').click();
   const rule = page.getByTestId('design-active-rule').first();
   await expect(rule).toContainText(/too busy/i);

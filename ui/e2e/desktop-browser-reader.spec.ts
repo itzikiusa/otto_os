@@ -76,7 +76,7 @@ test('mark → note → rail shows it', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
-  await page.getByPlaceholder('Add a note').fill('interesting');
+  await page.getByLabel('Note for this mark').fill('interesting');
   await page.getByRole('button', { name: 'Save mark' }).click();
 
   await expect(page.locator('.notes-rail')).toContainText('interesting');
@@ -95,7 +95,7 @@ test('send-to-session posts the annotation id + chosen session', async ({ page }
   await openFixture(page);
   await page.getByRole('button', { name: 'Mark passage' }).click();
   await page.locator('.reader h1').click();
-  await page.getByPlaceholder('Add a note').fill('send me');
+  await page.getByLabel('Note for this mark').fill('send me');
   await page.getByRole('button', { name: 'Save mark' }).click();
   await expect(page.locator('.notes-rail')).toContainText('send me');
 
