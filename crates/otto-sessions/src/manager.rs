@@ -1657,6 +1657,12 @@ pub(crate) async fn wait_exit_code(
 /// must not make the session unopenable.
 const RETIRED_EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// Longest one session's shutdown waits for its resume lock, and the budget
+/// all of them share (see `SessionManager::shutdown_ids`): well inside the
+/// daemon's 12 s teardown timeout.
+const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(1);
+const SHUTDOWN_LOCK_BUDGET: Duration = Duration::from_secs(4);
+
 /// Wait (bounded by [`RETIRED_EXIT_WAIT`]) for a retired process's exit.
 async fn await_retired_exit(id: &Id, mut rx: tokio::sync::watch::Receiver<Option<i32>>) {
     if tokio::time::timeout(RETIRED_EXIT_WAIT, wait_exit_code(&mut rx))
@@ -1753,6 +1759,9 @@ pub struct SessionManager {
     /// by [`Self::retry_deferred_adoptions`] and by [`Self::ensure_live`]
     /// before it would ever start a second CLI (review S1-09).
     deferred_holders: Arc<DashMap<Id, std::path::PathBuf>>,
+    /// Daemon shutdown has begun ([`Self::shutdown_all`] /
+    /// [`Self::shutdown_for_restart`]): no restart may spawn any more.
+    shutting_down: std::sync::atomic::AtomicBool,
     /// Shared so the per-session status task can evict an exited handle
     /// (otherwise dead PtyHandles — and their emulator + ring buffer — leak).
     live: Arc<DashMap<Id, Arc<PtyHandle>>>,
@@ -1916,6 +1925,7 @@ impl SessionManager {
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
             deferred_holders: Arc::new(DashMap::new()),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             suspend_hold: Arc::new(DashMap::new()),
             passive_resume: Arc::new(DashMap::new()),
             retiring: Arc::new(DashMap::new()),
@@ -5176,6 +5186,8 @@ impl SessionManager {
     /// closes (no orphaned agent processes left running) and on daemon
     /// shutdown. Returns the number of sessions terminated.
     pub async fn shutdown_all(&self) -> usize {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
         self.shutdown_ids(ids).await
     }
@@ -5188,11 +5200,29 @@ impl SessionManager {
     /// that already passed that check BEFORE our `Exited`. Without it, a
     /// tick's `Working`/`Idle` could land after `Exited` and the next boot
     /// counted the killed (engine) session as a suspended live one.
+    ///
+    /// The lock wait is BOUNDED (review S1-15): a resume in flight can hold
+    /// it for seconds (`RETIRED_EXIT_WAIT`, the pre-spawn hook, the spawn),
+    /// and the whole shutdown sits under the daemon's 12 s teardown budget —
+    /// two slow resumes used to exhaust it, leaving every later session
+    /// neither killed nor marked exited. Past [`SHUTDOWN_LOCK_WAIT`] (or the
+    /// shared [`SHUTDOWN_LOCK_BUDGET`]) the session is retired without the
+    /// lock; the in-flight resume then refuses to spawn (`shutting_down`).
     async fn shutdown_ids(&self, ids: Vec<Id>) -> usize {
         let count = ids.len();
+        let budget_end = tokio::time::Instant::now() + SHUTDOWN_LOCK_BUDGET;
         for id in ids {
             let lock = self.resume_lock(&id);
-            let _guard = lock.lock().await;
+            let wait = budget_end
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(SHUTDOWN_LOCK_WAIT);
+            let _guard = match tokio::time::timeout(wait, lock.lock()).await {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    tracing::warn!(session = %id, "shutdown: resume lock busy — retiring the session without it");
+                    None
+                }
+            };
             self.networks.clear(&id);
             if let Some((_, handle)) = self.live.remove(&id) {
                 let _ = handle.kill();
@@ -5530,9 +5560,22 @@ impl SessionManager {
         self.apply_sandbox(&mut spec, &session).await;
         // Blocking-pool fork/exec, mirroring create(): idle-resume runs on the
         // terminal-attach path, so a blocked async worker here is user-visible.
-        let spawned = self
-            .spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
-            .await;
+        // Shutdown has begun (review S1-15): a respawn completing now would
+        // land after the teardown iterated past this session — a live CLI
+        // nobody kills, its row later counted as a suspended live one.
+        let spawned = if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(Error::Conflict("the daemon is shutting down".into()))
+        } else {
+            self.spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
+                .await
+        };
+        let spawned = match spawned {
+            Ok(handle) if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) => {
+                let _ = handle.kill();
+                Err(Error::Conflict("the daemon is shutting down".into()))
+            }
+            other => other,
+        };
         let handle = match spawned {
             Ok(handle) => Arc::new(handle),
             Err(e) => {
@@ -5837,6 +5880,8 @@ impl SessionManager {
     /// exited exactly as [`Self::shutdown_all`] does. With it off, everything
     /// is killed. Returns `(killed, kept_running)`.
     pub async fn shutdown_for_restart(&self) -> (usize, usize) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let persist = self.persistence_enabled().await;
         if persist {
             // No teardown path from here on may end a held session.
@@ -6706,6 +6751,67 @@ mod tests {
         drop(guard);
         assert_eq!(shutdown.await.unwrap(), 1);
         assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
+        assert_eq!(manager.live_count(), 0);
+    }
+
+    /// Review S1-15: resumes stuck holding their locks used to stall the
+    /// serial shutdown past the daemon's 12 s teardown budget, leaving later
+    /// sessions neither killed nor marked exited. The lock waits are bounded
+    /// now, and a restart after shutdown began refuses to spawn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_retires_every_session_within_its_budget_despite_held_locks() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let mut ids = Vec::new();
+        for n in 0..4 {
+            let s = manager
+                .create(
+                    &workspace,
+                    &user,
+                    CreateSessionReq {
+                        kind: SessionKind::Agent,
+                        provider: Some("shell".into()),
+                        title: Some(format!("Held {n}")),
+                        cwd: Some("/tmp".into()),
+                        connection_id: None,
+                        model: None,
+                        meta: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            ids.push(s.id);
+        }
+        // Every session looks mid-resume: its lock is held and never freed.
+        let locks: Vec<_> = ids.iter().map(|id| manager.resume_lock(id)).collect();
+        let mut guards = Vec::new();
+        for lock in &locks {
+            guards.push(lock.lock().await);
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(manager.shutdown_all().await, ids.len());
+        assert!(
+            started.elapsed() < SHUTDOWN_LOCK_BUDGET + Duration::from_secs(3),
+            "shutdown took {:?}",
+            started.elapsed()
+        );
+        for id in &ids {
+            assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Exited);
+        }
+        assert_eq!(manager.live_count(), 0);
+        drop(guards);
+        // A resume that reaches its spawn after shutdown began must not spawn.
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec /bin/sleep 60".into()],
+            cwd: Some("/tmp".into()),
+            env: vec![],
+        };
+        let err = manager
+            .restart(&ids[0], Some(spec))
+            .await
+            .expect_err("shutting down");
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
         assert_eq!(manager.live_count(), 0);
     }
 
