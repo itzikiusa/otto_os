@@ -681,6 +681,7 @@
             onReplyComment={(parentId, body) => postComment(body, undefined, undefined, parentId)}
             onResolveComment={resolveThread}
             loadFile={loadPrFile}
+            stateKey={`${repoId}#${number}`}
           />
         {/if}
       </section>

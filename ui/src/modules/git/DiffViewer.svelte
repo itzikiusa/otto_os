@@ -55,6 +55,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
+  import { carryViewState, carryViewed } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
@@ -98,6 +99,10 @@
      * "Load anyway" (`full`). Without it such files show a note instead.
      */
     loadFile?: DiffFileLoader;
+    /** Stable identity of what this diff shows (e.g. `repo#pr`). When set, a
+     *  re-fetched diff with the same key keeps viewed marks, expansions and
+     *  the open composer for paths that still exist (a push re-fetches). */
+    stateKey?: string;
   }
   let {
     diff,
@@ -110,6 +115,7 @@
     repoId,
     wip,
     loadFile,
+    stateKey,
   }: Props = $props();
 
   let mode = $state<'unified' | 'split'>('unified');
@@ -146,6 +152,8 @@
   // `sel` only restyle rows, so toggling them never rebuilds rows.
   interface ViewState {
     for: DiffResp | null;
+    /** The `stateKey` this state was made under (carry-over across reloads). */
+    key: string | undefined;
     /** Explicit collapse choices; a missing path uses its derived default. */
     overrides: Record<string, boolean>;
     composer: ComposerAt | null;
@@ -159,6 +167,7 @@
   }
   const freshState = (d: DiffResp | null): ViewState => ({
     for: d,
+    key: stateKey,
     overrides: {},
     composer: null,
     uncapped: new Map(),
@@ -167,15 +176,30 @@
     full: new Set(),
   });
   let vsRaw = $state.raw<ViewState>(freshState(null));
-  const vs: ViewState = $derived(vsRaw.for === diff ? vsRaw : freshState(diff));
+  const diffPaths = $derived(new Set(diff.files.map((f) => f.path)));
+  /** Same identity, new diff object (a reload): carry, don't reset. */
+  const sameKey = (k: string | undefined): boolean => stateKey !== undefined && k === stateKey;
+  const vs: ViewState = $derived(
+    vsRaw.for === diff
+      ? vsRaw
+      : sameKey(vsRaw.key)
+        ? { ...freshState(diff), ...carryViewState(vsRaw, diffPaths) }
+        : freshState(diff),
+  );
   /** Patch the view state of diff `d` — a no-op once `d` is no longer shown. */
   function patchVs(p: Partial<ViewState>, d: DiffResp = diff): void {
     if (d !== diff) return;
-    vsRaw = { ...vs, ...p, for: d };
+    vsRaw = { ...vs, ...p, for: d, key: stateKey };
   }
 
-  let viewedRaw = $state.raw<{ for: DiffResp | null; v: Set<string> }>({ for: null, v: new Set() });
-  const viewed = $derived(viewedRaw.for === diff ? viewedRaw.v : new Set<string>());
+  let viewedRaw = $state.raw<{ for: DiffResp | null; key: string | undefined; v: Set<string> }>({ for: null, key: undefined, v: new Set() });
+  const viewed = $derived(
+    viewedRaw.for === diff
+      ? viewedRaw.v
+      : sameKey(viewedRaw.key)
+        ? carryViewed(viewedRaw.v, diffPaths)
+        : new Set<string>(),
+  );
 
   let composerText = $state('');
   let composerBusy = $state(false);
@@ -861,12 +885,15 @@
   async function submitComment(): Promise<void> {
     const c = vs.composer;
     if (!c || !onAddComment || composerText.trim() === '') return;
-    const d = diff;
     composerBusy = true;
     try {
       await onAddComment(c.path, c.line, composerText.trim(), { side: c.side, oldLine: c.oldLine });
-      patchVs({ composer: null }, d);
-      composerText = '';
+      // Only close the composer that was posted: the user may have opened
+      // another line's composer (and typed into it) while this one posted.
+      if (vs.composer === c) {
+        patchVs({ composer: null });
+        composerText = '';
+      }
     } finally {
       composerBusy = false;
     }
@@ -1077,7 +1104,7 @@
     const next = new Set(viewed);
     if (next.has(path)) next.delete(path);
     else next.add(path);
-    viewedRaw = { for: diff, v: next };
+    viewedRaw = { for: diff, key: stateKey, v: next };
   }
 
   const viewedCount = $derived(viewed.size);
