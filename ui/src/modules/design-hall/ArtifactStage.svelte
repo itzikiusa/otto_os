@@ -46,11 +46,14 @@
     selectedId?: string | null;
     /** A compact render for Compare panes (no source pane, no chrome). */
     compact?: boolean;
+    /** The editor holds unsaved edits (the site publish sheet warns). */
+    dirty?: boolean;
     onchange?: (source: string) => void;
   }
   let {
     artifact,
     source,
+    dirty = undefined,
     blobUrl = null,
     noVersion = false,
     readonly = false,
@@ -232,7 +235,7 @@
 <div class="stage" class:split={hasSourcePane} class:compact>
   <div class="view" data-testid="design-stage">
     {#if artifact.format === 'otto-site'}
-      <SiteStudio {artifact} {source} readonly={!editable} {compact} onchange={(s) => editable && onchange?.(s)} />
+      <SiteStudio {artifact} {source} {dirty} readonly={!editable} {compact} onchange={(s) => editable && onchange?.(s)} />
     {:else if kind === 'html' || inner.kind === 'html'}
       {#if compact || device === 'none'}
         <!-- Fit: render at a 1280px desktop viewport and scale it into the pane,

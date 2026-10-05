@@ -44,9 +44,11 @@
     readonly?: boolean;
     /** Compare panes: the page only, fit to the pane, no panels. */
     compact?: boolean;
+    /** The owning editor's unsaved-edits flag (publish sheet warning). */
+    dirty?: boolean;
     onchange?: (source: string) => void;
   }
-  let { artifact, source, readonly = false, compact = false, onchange }: Props = $props();
+  let { artifact, source, dirty = undefined, readonly = false, compact = false, onchange }: Props = $props();
 
   // The page stylesheet is injected once into the document (every rule is
   // scoped under .os-*, so it can't touch the app).
@@ -718,6 +720,7 @@
       {artifact}
       {doc}
       source={ops.serializeSite(doc)}
+      unsaved={dirty}
       {findings}
       {embedCount}
       onclose={() => (publishMode = null)}

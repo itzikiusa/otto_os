@@ -845,6 +845,7 @@
               <ArtifactStage
                 {artifact}
                 {source}
+                {dirty}
                 {blobUrl}
                 noVersion={!head}
                 {readonly}

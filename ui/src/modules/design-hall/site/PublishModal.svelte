@@ -17,6 +17,19 @@
   import type { AuditFinding } from './engine/audit';
   import type { SiteDoc } from './engine/types';
   import { exportZip, listPublishes, previewHtml, publishLocal } from './siteApi';
+  import { baseUrl } from '../../../lib/api/client';
+  import { auth } from '../../../lib/stores/auth.svelte';
+
+  // Name the REAL audience (S18-10): the daemon's actual host:port, and the
+  // reach the listener setting gives — not a hardcoded "127.0.0.1, this Mac".
+  const daemonHost = (() => {
+    try {
+      return new URL(baseUrl()).host;
+    } catch {
+      return 'your Otto daemon';
+    }
+  })();
+  const onNetwork = $derived(!!auth.meta?.network_listener);
 
   interface Props {
     mode: 'zip' | 'local';
@@ -24,14 +37,18 @@
     doc: SiteDoc;
     /** The working copy as the studio would save it (dirty check vs the head). */
     source: string;
+    /** The editor's own dirty flag. When given it wins: comparing raw bytes
+     *  with this serializer's output flagged any other formatting as unsaved. */
+    unsaved?: boolean;
     findings: AuditFinding[];
     embedCount: number;
     onclose: () => void;
     onpreview: (served: Record<string, string>, url: string) => void;
   }
-  let { mode, artifact, doc, source, findings, embedCount, onclose, onpreview }: Props = $props();
+  let { mode, artifact, doc, source, unsaved = undefined, findings, embedCount, onclose, onpreview }: Props = $props();
 
-  let dirty = $state<boolean | null>(null);
+  let fetchedDirty = $state<boolean | null>(null);
+  const dirty = $derived(unsaved ?? fetchedDirty);
   let history = $state<DesignPublish[]>([]);
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -39,10 +56,12 @@
 
   $effect(() => {
     const id = artifact.id;
-    void design
-      .fetchContent(id, { asText: true })
-      .then((c) => (dirty = (c.text ?? '') !== source))
-      .catch(() => (dirty = null));
+    if (unsaved === undefined) {
+      void design
+        .fetchContent(id, { asText: true })
+        .then((c) => (fetchedDirty = (c.text ?? '') !== source))
+        .catch(() => (fetchedDirty = null));
+    }
     void listPublishes(id)
       .then((h) => (history = h.slice(0, 5)))
       .catch(() => (history = []));
@@ -127,9 +146,13 @@
         <li><Icon name="shield" size={12} /> The exact version of everything it embeds is recorded with this export</li>
       </ul>
     {:else}
-      <p class="lead">Serves <strong>{artifact.title}</strong> v{seq} from your Otto daemon at <span class="mono">127.0.0.1:7700</span>.</p>
+      <p class="lead">Serves <strong>{artifact.title}</strong> v{seq} from your Otto daemon at <span class="mono">{daemonHost}</span>.</p>
       <ul class="checks">
-        <li><Icon name="shield" size={12} /> Only reachable from this Mac, and only with your Otto sign-in</li>
+        {#if onNetwork}
+          <li data-testid="site-local-reach"><Icon name="warning" size={12} /> The network listener is on: devices on your network can reach it. Anyone signed in to this Otto who can view this design can open the preview.</li>
+        {:else}
+          <li data-testid="site-local-reach"><Icon name="shield" size={12} /> Reachable only from this Mac (the daemon listens on loopback). Anyone signed in to this Otto who can view this design can open the preview.</li>
+        {/if}
         <li><Icon name="check" size={12} /> Rendered by the same engine as the export, with every linked artifact pinned</li>
       </ul>
       {#if local}
