@@ -55,7 +55,7 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes") |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid bearer (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
 | 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
@@ -493,7 +493,12 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
 | POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
 
-`ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at}`.
+`ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at, dormant}`.
+`dormant: true` marks an email-OTP share whose window lapsed but which the link
+holder can still revive with `POST /share/extend` — both share lists include it
+(so it can be revoked) until its **7-day absolute lifetime** (`created_at + 7d`),
+past which extend answers 403 and the row drops out. Extend is also capped at
+3 per share per hour (429) and never clears the IP throttle.
 `role` is `"viewer"` (read-only) or `"editor"` (read + input); never `"admin"`.
 TTL is FIXED (never slid); `expires_at = created_at + ttl_secs`.
 
@@ -2385,7 +2390,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
 | GET /api-client/oauth2/callback?state=&code=&error= | one-use state | provider redirect | static HTML; code exchanged with PKCE, tokens stored in Keychain |
-| GET /ws/api-client/stream?token=&workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade | relay; scoped/share and MCP-only tokens rejected |
+| GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed), `?token=` legacy fallback | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command. Understands attached short flags (`-XPOST`, `-HName:v`, `-uuser:pw`), `-F`/`--form`/`--form-string` (→ `body_mode:"multipart"`, a `[{key,type,value,filename}]` row array; `name=@path` becomes a `file` row with only the file name), `--json` (body + JSON Content-Type/Accept), `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v` (User-Agent/Referer/Cookie headers), `-I` (HEAD), `--oauth2-bearer` (bearer auth); value-taking flags it doesn't model (`--cacert`, `--resolve`, `-c`, …) consume their value |
 
@@ -2504,7 +2509,7 @@ way — it never falls back to a direct, unguarded egress.
 | GET /notifications | member | — | `Notice[]` — global/system notices + the caller's own (root sees all) |
 | DELETE /notifications | member | — | clears the caller's own notices (root clears all; global/system notices remain for non-root) |
 | GET /notifications/settings | member | — | `NotificationSettings {expiry_threshold_days, native_enabled, session_events, native_on_waiting}` — `native_on_waiting` (default `true`; absent in older rows → `true`): the UI also raises a native banner for the info "Session awaiting input" (`…:waiting`) notice when the user is not watching that session |
-| PUT /notifications/settings | member | NotificationSettings | settings |
+| PUT /notifications/settings | root | NotificationSettings | settings (403 for non-root: one daemon-wide row) |
 | POST /notifications/read-all | member | — | marks the caller's own notices read (root marks all) |
 | POST /notifications/read | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — mark a batch read in ONE statement with ONE `notifications_changed` (only when `changed > 0`); same ownership rule as the single-row call (foreign / global-for-non-root / unknown / already-read ids are skipped); > 500 ids → 400 |
 | POST /notifications/dismiss | member | `{ids: Id[]}` (≤ 500) | `{changed: number}` — dismiss a batch in ONE statement with ONE `notifications_changed`; same ownership rule as `DELETE /notifications/{id}` |
@@ -2896,8 +2901,8 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 |---|---|---|
 | GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
-| GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
+| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/api-client/stream | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)

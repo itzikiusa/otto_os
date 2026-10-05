@@ -208,6 +208,11 @@ pub struct ShareInfo {
     pub created_at: DateTime<Utc>,
     /// FIXED expiry (`created_at + ttl`); never slid for share tokens.
     pub expires_at: DateTime<Utc>,
+    /// An email-OTP share whose window has lapsed but which the link holder can
+    /// still revive with `POST /share/extend` (until its 7-day absolute
+    /// lifetime). Listed so the owner can see — and revoke — it (S8-06).
+    #[serde(default)]
+    pub dormant: bool,
 }
 
 /// `POST /api/v1/sessions/{id}/share` — mint a scoped share-link token.

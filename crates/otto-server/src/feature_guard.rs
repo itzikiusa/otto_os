@@ -138,8 +138,10 @@ where
         // route (searches, introspection, the governed invoke — which applies
         // the same policy per tool). This is what makes the native stdio tools
         // (room posts, canvas/swarm writes, PR comments…) read-only too, not
-        // just the governed catalog. A session row that no longer exists is not
-        // read-only (its tokens are revoked when the session is removed).
+        // just the governed catalog. An unreadable row (a DB error, or a row
+        // already gone — its tokens are revoked with it) fails CLOSED, like the
+        // root-route gate: a transient SQLITE_BUSY must never let a read-only
+        // agent's write through (S8-08).
         if let Some(sid) = ctx
             .managed_session_id
             .clone()
@@ -149,7 +151,7 @@ where
                 if let Some(pool) = state.resource_pool() {
                     let read_only = crate::personal_agent_policy::session_read_only(&pool, &sid)
                         .await
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if read_only {
                         return forbidden(
                             "this agent session is read-only: it may read but not change anything",

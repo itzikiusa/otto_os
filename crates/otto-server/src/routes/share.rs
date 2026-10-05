@@ -407,10 +407,13 @@ pub async fn extend_otp_share(
 pub async fn extend_share(
     State(ctx): State<ServerCtx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    client: Option<axum::Extension<otto_sessions::share_throttle::ClientIp>>,
     Json(req): Json<ExtendShareReq>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let ip = peer.ip();
+    // Tunnel-aware client IP (host guard) — the raw peer is 127.0.0.1 for
+    // every visitor behind the Cloudflare tunnel (S8-02).
+    let ip = client.map_or(peer.ip(), |c| c.0.ip);
 
     // 1. IP rate-limit BEFORE doing any work → 429 with Retry-After.
     if let Err(locked) = otto_sessions::share_throttle::global().check(ip) {
@@ -422,6 +425,25 @@ pub async fn extend_share(
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", secs.to_string())],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    // 1b. Per-share extend budget (S8-06): every extend de-verifies the guest
+    //     and emails the recipient from the owner's sender, so a link holder
+    //     must not be able to do it at will.
+    if !extend_budget_ok(&req.token) {
+        let body = otto_core::api::Problem {
+            code: "too_many_requests".to_string(),
+            message: format!(
+                "this share was extended {EXTEND_MAX_PER_WINDOW} times in the last hour; \
+                 try again later"
+            ),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", EXTEND_WINDOW.as_secs().to_string())],
             Json(body),
         )
             .into_response();
@@ -461,8 +483,9 @@ pub async fn extend_share(
         .into_response();
     }
 
-    // Success: clear the IP's failure tally and audit the extension.
-    otto_sessions::share_throttle::global().clear(ip);
+    // Success: audit the extension. The IP's failure tally is deliberately NOT
+    // cleared (S8-06) — a successful extend says nothing about the caller's
+    // earlier failed guesses.
     ctx.audit(NewAuditEntry {
         user_id: Some(owner_id.clone()),
         action: "share.extend".into(),
@@ -473,6 +496,40 @@ pub async fn extend_share(
     .await;
 
     Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Extends one share may take per [`EXTEND_WINDOW`] (S8-06).
+const EXTEND_MAX_PER_WINDOW: usize = 3;
+/// Sliding window for [`EXTEND_MAX_PER_WINDOW`].
+const EXTEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Take one slot of the per-share extend budget, keyed on the token's hash
+/// (never the raw token). In-memory and per-process like the IP throttle; the
+/// map is pruned on every call and capped so junk tokens can't grow it.
+fn extend_budget_ok(token: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static SLOTS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+    let key = otto_rbac::tokens::token_hash(token);
+    let mut map = SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    map.retain(|_, v| {
+        v.retain(|t| now.duration_since(*t) < EXTEND_WINDOW);
+        !v.is_empty()
+    });
+    if map.len() >= 10_000 && !map.contains_key(&key) {
+        return false;
+    }
+    let slots = map.entry(key).or_default();
+    if slots.len() >= EXTEND_MAX_PER_WINDOW {
+        return false;
+    }
+    slots.push(now);
+    true
 }
 
 /// `POST /api/v1/share/verify` — redeem an emailed OTP for a share token
@@ -486,10 +543,13 @@ pub async fn extend_share(
 pub async fn verify_share(
     State(ctx): State<ServerCtx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    client: Option<axum::Extension<otto_sessions::share_throttle::ClientIp>>,
     Json(req): Json<VerifyShareReq>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let ip = peer.ip();
+    // Tunnel-aware client IP (host guard) — the raw peer is 127.0.0.1 for
+    // every visitor behind the Cloudflare tunnel (S8-02).
+    let ip = client.map_or(peer.ip(), |c| c.0.ip);
 
     // 1. IP rate-limit BEFORE attempting verification → 429 with Retry-After.
     if let Err(locked) = otto_sessions::share_throttle::global().check(ip) {
@@ -685,4 +745,22 @@ pub async fn share_whoami(
         "session_id": scope.session_id,
         "role": scope.role.as_str(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S8-06: a share may be extended at most `EXTEND_MAX_PER_WINDOW` times
+    /// per window; other shares keep their own budget.
+    #[test]
+    fn extend_budget_caps_each_share_independently() {
+        let a = format!("budget-test-a-{}", otto_core::new_id());
+        let b = format!("budget-test-b-{}", otto_core::new_id());
+        for _ in 0..EXTEND_MAX_PER_WINDOW {
+            assert!(extend_budget_ok(&a));
+        }
+        assert!(!extend_budget_ok(&a), "the next extend must be refused");
+        assert!(extend_budget_ok(&b), "another share is unaffected");
+    }
 }

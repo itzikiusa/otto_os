@@ -221,7 +221,7 @@
   import { SearchAddon } from '@xterm/addon-search';
   import { WebglAddon } from '@xterm/addon-webgl';
   import '@xterm/xterm/css/xterm.css';
-  import { wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
+  import { wsConnect, wsUrl, WS_BEARER_SUBPROTOCOL } from '../api/client';
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
@@ -525,8 +525,20 @@
   let exitProbes = 0;
   const MAX_EXIT_PROBES = 30;
 
+  /** Guest (share-link) sockets refused before ever opening, in a row. A
+   *  lapsed/revoked share is refused at the upgrade forever; retrying it every
+   *  5 s with no cap just fed the daemon's failure throttle (S1-05). Owners
+   *  keep retrying (a daemon restart also refuses for a while); a guest stops
+   *  after `MAX_GUEST_REFUSALS` and keeps the "Reconnect now" button. */
+  let guestRefusals = 0;
+  const MAX_GUEST_REFUSALS = 8;
+
   function scheduleReconnect(afterExit = false): void {
     if (closedByUs || reconnectTimer) return;
+    if (shareToken && guestRefusals >= MAX_GUEST_REFUSALS) {
+      reconnecting = false;
+      return;
+    }
     if (exitCode !== null && !afterExit) return;
     reconnecting = true;
     const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
@@ -832,17 +844,16 @@
     resyncPending = false;
     viewAttach = opts.view ?? !resumeOnOpen;
     dormantView = false;
-    // When a shareToken is supplied (guest share view) use the otto-bearer
-    // subprotocol so the token travels in Sec-WebSocket-Protocol instead of
-    // the URL query string (keeps it out of access logs). The stored owner
-    // login token path (wsUrl) is unchanged for all normal sessions.
+    // Every bearer — the guest's share token AND the owner's login token —
+    // travels in the otto-bearer subprotocol (Sec-WebSocket-Protocol), never
+    // the URL query string, so it stays out of tunnel/proxy access logs (S1-13).
     if (socketFactory) {
       sock = socketFactory();
     } else if (shareToken) {
       const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
       sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
-      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`) + (viewAttach ? '&view=1' : ''));
+      sock = wsConnect(`/ws/term/${sessionId}${viewAttach ? '?view=1' : ''}`);
     }
     sock.binaryType = 'arraybuffer';
     wireSocket(sock);
@@ -896,7 +907,10 @@
   /** This component's handlers on `s` — a socket it just opened, or one it
    *  adopted from the parking lot (already open: onopen never fires). */
   function wireSocket(s: WebSocket): void {
+    let opened = s.readyState === WebSocket.OPEN;
     s.onopen = () => {
+      opened = true;
+      guestRefusals = 0;
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
@@ -1037,6 +1051,7 @@
       connected = false;
       compactQueue.cancel(compactClient);
       if (closedByUs) return;
+      if (!opened) guestRefusals++;
       if (exitCode === null) {
         disconnected = true;
         scheduleReconnect();
@@ -2977,7 +2992,7 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="ov-status">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; guestRefusals = 0; connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">

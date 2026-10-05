@@ -623,3 +623,69 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
     assert_eq!(out["code"], "no_ui_client", "{out}");
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
 }
+
+/// S8-03: an open `/ws/events` socket is re-validated — revoking its token
+/// (here: a logout with it) closes the socket with 4401 promptly, instead of
+/// streaming events as that identity forever.
+#[tokio::test]
+async fn events_socket_closes_when_its_token_is_revoked() {
+    let d = boot().await;
+    let mut ws = d.ws(&d.bob).await;
+    let mut other = d.ws(&d.human).await;
+    let status = d
+        .http
+        .post(format!("{}/api/v1/auth/logout", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204, "logout revokes the presented token");
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("the revoked socket must close within seconds");
+    assert_eq!(closed, Some(4401), "closed with the auth-revoked code");
+    // Another user's socket is untouched by the revocation pulse.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), other.next())
+            .await
+            .map_or(true, |m| !matches!(m, Some(Ok(Message::Close(_))))),
+        "a still-valid socket must stay open"
+    );
+}
+
+/// S8-05: the notification settings are one daemon-wide row — a non-root
+/// member gets 403 on the write; root may still read and write it.
+#[tokio::test]
+async fn notification_settings_write_is_root_only() {
+    let d = boot().await;
+    let current: Value = d
+        .http
+        .get(format!("{}/api/v1/notifications/settings", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let put = |token: String| {
+        d.http
+            .put(format!("{}/api/v1/notifications/settings", d.base))
+            .bearer_auth(token)
+            .json(&current)
+            .send()
+    };
+    assert_eq!(put(d.bob.clone()).await.unwrap().status().as_u16(), 403);
+    assert_eq!(put(d.human.clone()).await.unwrap().status().as_u16(), 200);
+}

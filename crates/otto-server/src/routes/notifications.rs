@@ -173,11 +173,16 @@ pub async fn get_settings(
 }
 
 /// `PUT /api/v1/notifications/settings` — replace and return settings.
+///
+/// Root only (S8-05): the settings are ONE daemon-wide row (native toasts,
+/// session events, credential-expiry threshold), so letting any member — a
+/// Viewer included — write it let them silence root's notices.
 pub async fn put_settings(
     State(ctx): State<ServerCtx>,
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Json(body): Json<NotificationSettings>,
 ) -> ApiResult<Json<NotificationSettings>> {
+    crate::auth::require_root(&user)?;
     let repo = NotificationsRepo::new(ctx.pool.clone());
     Ok(Json(repo.put_settings(&body).await?))
 }

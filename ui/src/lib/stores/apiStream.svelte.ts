@@ -2,7 +2,7 @@
 // WebSocket) bridged through the daemon's `/ws/api-client/stream` relay, and
 // accumulates the events/messages for the response console.
 
-import { baseUrl, getToken } from '../api/client';
+import { baseUrl, getToken, WS_BEARER_SUBPROTOCOL } from '../api/client';
 import type { ExecuteApiReq } from '../api/types';
 import { confirmNewHost } from './apiClient.svelte';
 
@@ -75,8 +75,7 @@ class ApiStreamStore {
     try {
       const base = new URL(baseUrl());
       const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-      const token = getToken() ?? '';
-      wsUrl = `${proto}//${base.host}/ws/api-client/stream?token=${encodeURIComponent(token)}&workspace_id=${encodeURIComponent(workspaceId)}`;
+      wsUrl = `${proto}//${base.host}/ws/api-client/stream?workspace_id=${encodeURIComponent(workspaceId)}`;
     } catch {
       this.fail('Invalid daemon base URL');
       return;
@@ -84,7 +83,9 @@ class ApiStreamStore {
 
     let sock: WebSocket;
     try {
-      sock = new WebSocket(wsUrl);
+      // The bearer rides in the otto-bearer subprotocol, never the URL (S11-11).
+      const token = getToken();
+      sock = token ? new WebSocket(wsUrl, [WS_BEARER_SUBPROTOCOL, token]) : new WebSocket(wsUrl);
     } catch {
       this.fail('Could not open relay socket');
       return;

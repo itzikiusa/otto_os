@@ -899,9 +899,13 @@ class EventsClient {
         /* malformed frame — ignore */
       }
     };
-    this.sock.onclose = () => {
+    this.sock.onclose = (ev?: CloseEvent) => {
       this.state = 'offline';
       liveEvents.setConnected(false);
+      // 4401 = the daemon re-validated this socket's credential and it no
+      // longer verifies (logout elsewhere, "revoke all", expired
+      // impersonation — ws.md). Re-boot: a rejected token lands on sign-in.
+      if (ev?.code === 4401) void auth.boot(true);
       // The daemon may be restarting, and the next one may not hold the
       // alias: stop using it until the socket is back (resume / re-arm).
       suspendAltLoopback();

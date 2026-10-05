@@ -84,7 +84,10 @@ Apple Developer ID.
 
 - Daemon bound to `127.0.0.1`; `network_listener` OFF; exposure only via the tunnel.
 - Share tokens: scoped to one session, **never root**, short fixed TTL, single-use OTP
-  (when enabled), IP rate-limited, revocable, token carried in the URL **fragment**
+  (when enabled), IP rate-limited (keyed on the tunnel's `CF-Connecting-IP` for
+  requests that arrive on loopback with the Public link domain as `Host`, so one
+  visitor's bad guesses never lock out another; a token that verifies is never
+  refused), 7-day absolute lifetime + 3 extends/hour, revocable, token carried in the URL **fragment**
   (not sent to servers/Referer) and over the `otto-bearer` WS subprotocol (not the URL).
 - Per-user RBAC + data isolation apply (`docs/MULTI-USER-RBAC.md`).
 

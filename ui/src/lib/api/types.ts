@@ -6602,6 +6602,10 @@ export interface ShareInfo {
   created_at: string;
   /** FIXED expiry (created_at + ttl); never slid for share tokens. */
   expires_at: string;
+  /** Lapsed email-OTP share the link holder can still revive via
+   *  `POST /share/extend` (until its 7-day absolute lifetime) — listed so the
+   *  owner can revoke it. */
+  dormant?: boolean;
 }
 
 /** `GET /auth/shares` row — one of the caller's live links, any session. */

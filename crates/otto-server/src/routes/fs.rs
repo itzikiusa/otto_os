@@ -35,6 +35,31 @@ pub(crate) mod sandbox {
         ".config/gh",
         ".azure",
         ".password-store",
+        // S8-09 / S11-08: more credential stores a non-root caller must not read.
+        ".terraform.d",
+        ".config/op",
+        ".otto",
+        "Library/Keychains",
+        "Library/Cookies",
+        "Library/Safari",
+        "Library/Application Support/Google/Chrome",
+        "Library/Application Support/BraveSoftware",
+        "Library/Application Support/Microsoft Edge",
+        "Library/Application Support/Firefox",
+        "Library/Application Support/Arc",
+    ];
+
+    /// Individual credential FILES (relative to `$HOME`) whose directories stay
+    /// browsable (agent CLI homes, git and cargo config).
+    const HOME_DENY_FILES: &[&str] = &[
+        ".codex/auth.json",
+        ".claude/.credentials.json",
+        ".claude.json",
+        ".git-credentials",
+        ".config/git/credentials",
+        ".cargo/credentials",
+        ".cargo/credentials.toml",
+        ".gemini/oauth_creds.json",
     ];
 
     /// Absolute prefixes excluded from session artifacts (system secret stores).
@@ -61,6 +86,16 @@ pub(crate) mod sandbox {
         ".npmrc",
         ".pypirc",
         ".dockercfg",
+        ".git-credentials",
+        // Shell / REPL histories routinely hold pasted tokens and passwords.
+        ".bash_history",
+        ".zsh_history",
+        ".sh_history",
+        ".python_history",
+        ".node_repl_history",
+        ".psql_history",
+        ".mysql_history",
+        ".rediscli_history",
     ];
 
     /// Filename substrings whose presence marks a likely secret (private keys,
@@ -85,6 +120,12 @@ pub(crate) mod sandbox {
                     if canonical == denied || canonical.starts_with(&denied) {
                         return true;
                     }
+                }
+                if HOME_DENY_FILES
+                    .iter()
+                    .any(|rel| canonical == home_canon.join(rel))
+                {
+                    return true;
                 }
             }
         }
@@ -282,12 +323,21 @@ fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
 /// unrestricted (OS-permission) access. `raw` is the caller's path; it is
 /// expanded + canonicalized here so `..`/symlinks can't dodge the prefixes.
 fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     let expanded = expand_home(if raw.is_empty() { "~" } else { raw });
     // A path that doesn't resolve is left to the handler's own error.
     let Ok(canonical) = Path::new(&expanded).canonicalize() else {
         return Ok(());
     };
+    non_root_canonical_denied(&canonical)
+}
+
+/// [`non_root_fs_denied`] for a path that is ALREADY canonical — `/fs/read`
+/// checks the very path it then opens (S8-09: no second resolution a symlink
+/// swap could slip between).
+fn non_root_canonical_denied(canonical: &std::path::Path) -> ApiResult<()> {
+    use std::path::PathBuf;
+    let canonical = canonical.to_path_buf();
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from);
@@ -462,10 +512,9 @@ pub async fn read_file(
         std::time::Duration::from_secs(10),
         move |cancel| {
             browse_canceled(&cancel)?;
-            if restricted {
-                non_root_fs_denied(&params.path)?;
-            }
-            let result = read_file_sync(&params.path);
+            // The deny check runs inside `read_file_sync`, on the canonical
+            // path it opens (one resolution — S8-09).
+            let result = read_file_sync(&params.path, restricted);
             browse_canceled(&cancel)?;
             result
         },
@@ -474,12 +523,15 @@ pub async fn read_file(
     .map(Json)
 }
 
-fn read_file_sync(path: &str) -> ApiResult<FsRead> {
+fn read_file_sync(path: &str, restricted: bool) -> ApiResult<FsRead> {
     let expanded = expand_home(path);
     let target = std::path::Path::new(&expanded);
     let canonical = target
         .canonicalize()
         .map_err(|e| filesystem_error("resolve file", target, e))?;
+    if restricted {
+        non_root_canonical_denied(&canonical)?;
+    }
     let metadata = std::fs::metadata(&canonical)
         .map_err(|e| filesystem_error("inspect file", &canonical, e))?;
     if !metadata.is_file() {
@@ -541,10 +593,14 @@ fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>
     options.read(true);
     // A path can change between metadata and open. Nonblocking open avoids a
     // replaced FIFO hanging a worker; verify the actual open handle as well.
+    // `path` is canonical, so its last component is never a symlink: refuse
+    // one that appeared since (a swap after the deny check, S8-09).
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        options.custom_flags(
+            (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+        );
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
@@ -594,7 +650,7 @@ mod tests {
         let path = outside.path().join("id_ed25519");
         std::fs::write(&path, "synthetic fixture, not a key").unwrap();
         assert_eq!(
-            super::read_file_sync(path.to_str().unwrap())
+            super::read_file_sync(path.to_str().unwrap(), false)
                 .unwrap()
                 .content,
             "synthetic fixture, not a key"
@@ -872,12 +928,12 @@ mod tests {
         let cap = super::MAX_READ_BYTES as usize;
         for bytes in [vec![b'x'; cap + 9], vec![0xff; cap]] {
             std::fs::write(&path, bytes).unwrap();
-            let read = super::read_file_sync(path.to_str().unwrap()).unwrap();
+            let read = super::read_file_sync(path.to_str().unwrap(), false).unwrap();
             assert!(read.truncated);
             assert!(read.content.len() <= cap);
         }
         std::fs::write(&path, b"binary\0fixture").unwrap();
-        let read = super::read_file_sync(path.to_str().unwrap()).unwrap();
+        let read = super::read_file_sync(path.to_str().unwrap(), false).unwrap();
         assert!(read.truncated);
         assert!(read.content.is_empty());
         std::fs::write(&path, b"synthetic fixture").unwrap();
@@ -885,26 +941,26 @@ mod tests {
         {
             let link = temp.path().join("symlink");
             std::os::unix::fs::symlink(&path, &link).unwrap();
-            let read = super::read_file_sync(link.to_str().unwrap()).unwrap();
+            let read = super::read_file_sync(link.to_str().unwrap(), false).unwrap();
             assert_eq!(read.path, path.canonicalize().unwrap().to_string_lossy());
             assert_eq!(read.content, "synthetic fixture");
             let socket = temp.path().join("socket");
             let _socket = std::os::unix::net::UnixListener::bind(&socket).unwrap();
             assert!(matches!(
-                super::read_file_sync(socket.to_str().unwrap())
+                super::read_file_sync(socket.to_str().unwrap(), false)
                     .unwrap_err()
                     .0,
                 otto_core::Error::Invalid(_)
             ));
         }
         assert!(matches!(
-            super::read_file_sync(temp.path().to_str().unwrap())
+            super::read_file_sync(temp.path().to_str().unwrap(), false)
                 .unwrap_err()
                 .0,
             otto_core::Error::Invalid(_)
         ));
         assert!(matches!(
-            super::read_file_sync(temp.path().join("missing").to_str().unwrap())
+            super::read_file_sync(temp.path().join("missing").to_str().unwrap(), false)
                 .unwrap_err()
                 .0,
             otto_core::Error::NotFound(_)
@@ -935,7 +991,7 @@ mod tests {
         std::fs::write(&path, "synthetic fixture").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o0)).unwrap();
-        let read = super::read_file_sync(path.to_str().unwrap());
+        let read = super::read_file_sync(path.to_str().unwrap(), false);
         let browse = super::browse_sync(
             super::BrowseParams {
                 path: Some(folder.to_string_lossy().into()),
@@ -1005,6 +1061,43 @@ mod tests {
         assert!(super::non_root_fs_denied(key.to_str().unwrap()).is_err());
         assert!(super::non_root_fs_denied(ok.to_str().unwrap()).is_ok());
         assert!(super::non_root_fs_denied(dir.path().to_str().unwrap()).is_ok());
+    }
+
+    /// S8-09 / S11-08: a restricted read is checked on the canonical path it
+    /// opens — histories and git credentials are refused, also through a
+    /// symlink with an innocent name; a plain file still reads.
+    #[test]
+    fn restricted_read_refuses_credential_files_and_links_to_them() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [".zsh_history", ".git-credentials", ".bash_history"] {
+            let secret = dir.path().join(name);
+            std::fs::write(&secret, "token=hunter2").unwrap();
+            let err = super::read_file_sync(secret.to_str().unwrap(), true).unwrap_err();
+            assert!(
+                matches!(err.0, otto_core::Error::Forbidden(_)),
+                "{name} must be refused"
+            );
+            #[cfg(unix)]
+            {
+                let link = dir
+                    .path()
+                    .join(format!("notes-{}.txt", name.trim_start_matches('.')));
+                std::os::unix::fs::symlink(&secret, &link).unwrap();
+                let err = super::read_file_sync(link.to_str().unwrap(), true).unwrap_err();
+                assert!(
+                    matches!(err.0, otto_core::Error::Forbidden(_)),
+                    "a link to {name} must be refused"
+                );
+            }
+        }
+        let ok = dir.path().join("readme.md");
+        std::fs::write(&ok, "hi").unwrap();
+        assert_eq!(
+            super::read_file_sync(ok.to_str().unwrap(), true)
+                .unwrap()
+                .content,
+            "hi"
+        );
     }
 
     #[test]

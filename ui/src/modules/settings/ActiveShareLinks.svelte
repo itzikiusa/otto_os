@@ -110,7 +110,11 @@
             </td>
             <td>{s.role === 'editor' ? 'Can type' : 'View only'}</td>
             <td class="dim">{s.label ?? '—'}</td>
-            <td title={new Date(s.expires_at).toLocaleString()}>{rel(s.expires_at)}</td>
+            <td
+              title={s.dormant
+                ? 'Window lapsed — the link holder can still request a new code until it is revoked'
+                : new Date(s.expires_at).toLocaleString()}
+            >{s.dormant ? 'Dormant (revivable)' : rel(s.expires_at)}</td>
             <td class="act">
               <button class="btn small" disabled={revoking.has(s.id) || revokingAll} aria-busy={revoking.has(s.id)} onclick={() => void revoke(s)}>
                 {revoking.has(s.id) ? 'Revoking…' : 'Revoke'}
