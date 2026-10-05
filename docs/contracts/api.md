@@ -2018,7 +2018,7 @@ workspace from the workflow/run row.
 | POST /workspaces/{wid}/workflows/generate | ws editor | GenerateWorkflowReq | Workflow (AI-generated) |
 | GET /workflows/{id} | ws viewer | — | Workflow |
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
-| DELETE /workflows/{id} | ws editor | — | 204 |
+| DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver) |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`) |
 | POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
