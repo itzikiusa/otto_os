@@ -69,6 +69,8 @@ export interface SceneHandle {
   /** Bring a kicked-out student back (the delete failed). */
   restore(id: string): void;
   resetView(): void;
+  /** Draw one frame (e.g. after the host mounted new HTML labels). */
+  redraw(): void;
   /** False pauses the loop (inactive Home space / hidden tab). */
   setActive(on: boolean): void;
   /** Called after every rendered frame (the host repositions HTML labels). */
@@ -132,7 +134,10 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
   renderer.outputColorSpace = T.SRGBColorSpace;
   renderer.setClearColor(0x000000, 0);
   const canvas = renderer.domElement;
-  Object.assign(canvas.style, { display: 'block', width: '100%', height: '100%', touchAction: 'none' });
+  // Touch: a one-finger VERTICAL swipe still scrolls the Home page (a widget
+  // must not trap the page on a phone); horizontal drags orbit, pinch zooms.
+  const coarse = !!window.matchMedia?.('(pointer: coarse)').matches;
+  Object.assign(canvas.style, { display: 'block', width: '100%', height: '100%', touchAction: coarse ? 'pan-y' : 'none' });
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', opts.label);
   host.appendChild(canvas);
@@ -267,14 +272,16 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
     const board = part('board', rooms.length);
     const withBack = rooms.filter((r) => r.backRow.length > 0);
     const stripe = part('stripe', withBack.length);
-    const surface2 = tc('--surface-2');
-    const surface3 = tc('--surface-3');
+    // The stage behind the campus is --surface-2: floors are a step darker/
+    // lighter (--surface-3) so every room reads as a tile on it.
+    const floorC = tc('--surface-3');
+    const boardC = mix(tc('--text-dim'), tc('--surface'), 0.35);
     const accent = tc('--accent');
     const wallC = tc('--border-strong');
     const text = tc('--text-dim');
     rooms.forEach((r, i) => {
       setInst(floor, i, r.x, -0.03, r.z, r.width, 0.06, r.depth);
-      floor.setColorAt(i, r.current ? mix(surface2, accent, 0.16) : surface2);
+      floor.setColorAt(i, r.current ? mix(floorC, accent, 0.16) : floorC);
       const hw = r.width / 2;
       const hd = r.depth / 2;
       const wc = r.current ? mix(wallC, accent, 0.55) : wallC;
@@ -291,7 +298,7 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
       for (let k = i * 5; k < i * 5 + 5; k++) wall.setColorAt(k, wc);
       // The board on the back wall (the room name floats above it as HTML).
       setInst(board, i, r.x, 0.95, r.z - hd + 0.06, Math.min(r.width - 1, 3.2), 0.7, 0.04);
-      board.setColorAt(i, r.current ? mix(surface3, accent, 0.3) : surface3);
+      board.setColorAt(i, r.current ? mix(boardC, accent, 0.3) : boardC);
     });
     withBack.forEach((r, i) => {
       const z = r.z + r.backRow[0].seat.z + SEAT_GAP_HALF;
@@ -353,12 +360,12 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
     const desk = meshes.get('desk');
     const screen = meshes.get('screen');
     if (!desk || !screen) return;
-    const deskC = tc('--surface-3');
-    const deskBack = mix(tc('--surface-3'), tc('--text-dim'), 0.25);
+    const deskC = mix(tc('--text-dim'), tc('--surface-3'), 0.55);
+    const deskBack = mix(tc('--text-dim'), tc('--surface-3'), 0.75);
     const accent = tc('--accent');
     const on = tc('--success');
     const off = mix(tc('--surface-3'), tc('--text-dim'), 0.35);
-    const headC = mix(tc('--text-dim'), tc('--surface'), 0.15);
+    const headC = mix(tc('--text'), tc('--surface'), 0.3);
     const warn = tc('--warning');
     const deskOwners = owners.get('desk') ?? [];
     deskOwners.forEach((id, i) => {
@@ -701,6 +708,10 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
       wake();
     },
     resetView,
+    redraw() {
+      needsFrame = true;
+      wake();
+    },
     setActive(on) {
       active = on;
       if (on) {

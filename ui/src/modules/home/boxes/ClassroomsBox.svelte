@@ -183,10 +183,12 @@
   let youEl = $state<HTMLElement | null>(null);
   function roomLabel(node: HTMLElement, id: string) {
     roomEls.set(id, node);
+    queueMicrotask(() => handle?.redraw());
     return { destroy: () => roomEls.delete(id) };
   }
   function nameLabel(node: HTMLElement, id: string) {
     nameEls.set(id, node);
+    queueMicrotask(() => handle?.redraw());
     return { destroy: () => nameEls.delete(id) };
   }
   /** Students that carry a floating provider tag: all of them on a small
@@ -326,6 +328,32 @@
     studentMenu(e, s);
   }
 
+  function stopTouch(e: TouchEvent): void {
+    e.stopPropagation();
+  }
+  function onPointerLeave(): void {
+    down = null;
+    if (tip && !tip.pinned) scheduleHide();
+  }
+  $effect(() => {
+    const el = host;
+    if (!el) return;
+    const on: [string, (e: never) => void][] = [
+      ['pointermove', onPointerMove],
+      ['pointerdown', onPointerDown],
+      ['pointerup', onPointerUp],
+      ['pointerleave', onPointerLeave],
+      ['contextmenu', onContextMenu],
+      // An orbit drag is not Home's swipe-between-spaces gesture.
+      ['touchstart', stopTouch],
+      ['touchend', stopTouch],
+    ];
+    for (const [t, f] of on) el.addEventListener(t, f as EventListener);
+    return () => {
+      for (const [t, f] of on) el.removeEventListener(t, f as EventListener);
+    };
+  });
+
   // ── Actions ──────────────────────────────────────────────────────────────
   async function open(s: Student | null | undefined): Promise<void> {
     if (!s) return;
@@ -337,7 +365,7 @@
   async function kick(s: Student): Promise<void> {
     closeTip();
     const gone = await kickOut(s, {
-      confirm: (message, opts) => confirmer.ask(message, opts),
+      ask: (message, opts) => confirmer.ask(message, opts),
       kill: (id) => ws.killSession(id),
       animate: (id) => handle?.kickOut(id) ?? Promise.resolve(),
       restore: (id) => handle?.restore(id),
@@ -369,8 +397,8 @@
   }
 
   function onKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && tip) {
-      e.stopPropagation();
+    if (e.key === 'Escape' && tip && !e.defaultPrevented) {
+      e.preventDefault(); // Home's Esc (exit zoom) skips a handled key
       closeTip();
     }
   }
@@ -382,8 +410,9 @@
   const nRooms = $derived(model.rooms.length);
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="cr" onkeydown={onKey}>
+<svelte:window onkeydown={onKey} />
+
+<div class="cr">
   <div class="bar">
     <span class="sum">
       {plural(nRooms, 'classroom')} · {plural(model.total, 'student')}
@@ -409,18 +438,9 @@
     {/if}
     {#if mode === '3d'}
       <div class="stage" bind:this={stage}>
-        <div
-          class="canvas"
-          bind:this={host}
-          onpointermove={onPointerMove}
-          onpointerdown={onPointerDown}
-          onpointerup={onPointerUp}
-          onpointerleave={() => {
-            down = null;
-            if (tip && !tip.pinned) scheduleHide();
-          }}
-          oncontextmenu={onContextMenu}
-        ></div>
+        <!-- Pointer surface only (listeners attached in script): the keyboard
+             path to every student is the companion list below. -->
+        <div class="canvas" bind:this={host}></div>
         {#if handle}
           <div class="overlay" aria-hidden="true">
             {#each model.rooms as r (r.id)}
@@ -429,7 +449,7 @@
               </div>
             {/each}
             {#each tagged as s (s.id)}
-              <div class="tag" class:needs={s.visual === 'needs-you'} use:nameLabel={s.id}>{s.initials}</div>
+              <div class="seat-id" class:needs={s.visual === 'needs-you'} use:nameLabel={s.id}>{s.initials}</div>
             {/each}
             <div class="you" bind:this={youEl}>You · headmaster</div>
           </div>
@@ -588,7 +608,7 @@
     overflow: hidden;
   }
   .room-label,
-  .tag,
+  .seat-id,
   .you {
     position: absolute;
     top: 0;
@@ -625,7 +645,8 @@
   .room-label.current b {
     color: var(--accent-text);
   }
-  .tag {
+  /* The provider identifier floating over a student (projected, not a pill). */
+  .seat-id {
     padding: 0 4px;
     border-radius: var(--radius-s);
     font-family: var(--font-mono);
@@ -635,7 +656,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
   }
-  .tag.needs {
+  .seat-id.needs {
     color: var(--warning);
     border-color: var(--warning);
   }

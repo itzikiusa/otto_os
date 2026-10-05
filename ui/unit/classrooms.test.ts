@@ -278,7 +278,7 @@ function fakes(confirmed: boolean, killErr?: Error) {
   let prompt = '';
   let opts: unknown = null;
   const deps: KickDeps = {
-    confirm: async (message, o) => {
+    ask: async (message, o) => {
       calls.push('confirm');
       prompt = message;
       opts = o;
@@ -357,7 +357,7 @@ test('the box wires kick-out to ws.killSession and detention to ws.archiveSessio
   const src = readFileSync(join(import.meta.dirname, '..', 'src/modules/home/boxes/ClassroomsBox.svelte'), 'utf8');
   assert.match(src, /kill: \(id\) => ws\.killSession\(id\)/);
   assert.match(src, /archive: \(id\) => ws\.archiveSession\(id\)/);
-  assert.match(src, /confirm: \(message, opts\) => confirmer\.ask\(message, opts\)/);
+  assert.match(src, /ask: \(message, opts\) => confirmer\.ask\(message, opts\)/);
   assert.doesNotMatch(src, /[^.\w]confirm\(/, 'never the native confirm()');
   // Destructive rows only for students the caller can manage.
   assert.match(src, /s\.canManage\s*\n?\s*\?/);

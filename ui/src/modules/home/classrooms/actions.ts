@@ -21,7 +21,8 @@ export interface ConfirmOpts {
 }
 
 export interface KickDeps {
-  confirm(message: string, opts: ConfirmOpts): Promise<boolean>;
+  /** `confirmer.ask` — the in-app danger confirm. */
+  ask(message: string, opts: ConfirmOpts): Promise<boolean>;
   /** The app's delete path (`ws.killSession`). */
   kill(id: string): Promise<void>;
   /** Walk-out animation (resolves at once under reduced motion). */
@@ -57,7 +58,7 @@ export function kickOutPrompt(s: Target): { message: string; opts: ConfirmOpts }
 export async function kickOut(s: Target, deps: KickDeps): Promise<boolean> {
   if (!s.canManage) return false;
   const { message, opts } = kickOutPrompt(s);
-  if (!(await deps.confirm(message, opts))) return false;
+  if (!(await deps.ask(message, opts))) return false;
   const [err] = await Promise.all([
     deps.kill(s.id).then(
       () => null,
