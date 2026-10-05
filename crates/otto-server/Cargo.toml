@@ -21,6 +21,10 @@ path = "tests/snips.rs"
 
 [features]
 default = []
+# Test fixtures (`otto_server::test_support`, `ServerCtx::for_tests`). Enabled for
+# this crate's own integration tests by the self dev-dependency below; never in
+# a release build.
+test-util = []
 
 [dependencies]
 hex = { workspace = true }
@@ -100,6 +104,8 @@ boa_engine = "0.22.0"
 otto-keychain.workspace = true
 
 [dev-dependencies]
+# Self dev-dependency: turns on `test-util` for tests/*.rs.
+otto-server = { path = ".", features = ["test-util"] }
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5.3", features = ["util"] }

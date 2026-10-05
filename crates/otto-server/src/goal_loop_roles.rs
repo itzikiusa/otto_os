@@ -32,16 +32,9 @@ pub async fn run(
     let user = otto_state::UsersRepo::new(ctx.pool.clone())
         .get(&loop_.created_by)
         .await?;
-    let global = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        role.provider.trim(),
-        otto_core::provider::workspace_default(&workspace.settings),
-        otto_core::provider::global_default(global.as_ref()),
-    ]);
+    let provider = ctx
+        .resolve_provider(Some(&workspace), Some(&role.provider))
+        .await?;
     let mut state = LoopAgentState {
         name: name.into(),
         provider: provider.clone(),
@@ -149,16 +142,9 @@ pub async fn define(
         .map_err(|e| Error::Internal(e.to_string()))?;
     let output = dir.path().join("result.json");
     let prompt = format!("{prompt}\nDo not change source, commit, push, or publish. Encode your full response in a JSON object with one string field result. Write the complete JSON to {}, then atomically rename it to {}.", dir.path().join("result.tmp").display(), output.display());
-    let global = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        role.provider.trim(),
-        otto_core::provider::workspace_default(&workspace.settings),
-        otto_core::provider::global_default(global.as_ref()),
-    ]);
+    let provider = ctx
+        .resolve_provider(Some(workspace), Some(&role.provider))
+        .await?;
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let opts = crate::agent_session::TurnOpts {
         done_file: Some(output),

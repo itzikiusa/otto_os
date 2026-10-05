@@ -290,9 +290,12 @@ pub async fn assist_preview(
     let prompt = build_assist_prompt(&req.prompt, "mermaid", "canvas.mermaid", "flowchart TD\n");
     let meta = serde_json::json!({ "source": "canvas_assist_preview" });
     // No scene here (throwaway preview) → no scene provider to honor. Run under the
-    // user's global default agent rather than hard-coding claude, and pre-trust the
+    // user's workspace/global default agent rather than hard-coding claude, and pre-trust the
     // cwd so a non-claude provider doesn't stall on the first-run trust prompt.
-    let provider = preview_provider(&ctx).await;
+    let provider = ctx
+        .resolve_provider(Some(&ws), None)
+        .await
+        .map_err(ApiError)?;
     otto_sessions::trust::ensure_trusted(&provider, &ws.root_path);
     let (raw, sid) = crate::agent_session::run_session_turn(
         &ctx,
@@ -312,19 +315,6 @@ pub async fn assist_preview(
     let parsed = parse_assist(&raw);
     let src = parsed.mermaid.clone().unwrap_or_default();
     Ok(Json(result_for("mermaid", &src, parsed.note)))
-}
-
-/// The provider for a scene-less preview turn: the workspace/global default
-/// agent (mirrors `insights::default_provider`), never a hard-coded "claude".
-async fn preview_provider(ctx: &ServerCtx) -> String {
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
-        global_default.as_ref(),
-    )])
 }
 
 // ---------------------------------------------------------------------------

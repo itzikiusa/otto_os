@@ -505,16 +505,10 @@ async fn apply_fixes(
         .get(&review.workspace_id)
         .await
         .map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let provider = ctx
+        .resolve_provider(Some(&ws), Some(&req.provider))
         .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.trim(),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
     let row = SkillReviewAgent {
         name: "fixer".into(),
         provider: provider.clone(),

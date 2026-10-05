@@ -1060,14 +1060,7 @@ fn fix_prompt(goal: &SwarmGoal, v: &Verdict) -> String {
     s
 }
 
-pub(crate) fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
-    }
-}
+pub(crate) use otto_core::text::clip_chars as clip;
 
 #[cfg(test)]
 mod tests {

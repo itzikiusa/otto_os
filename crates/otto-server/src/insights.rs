@@ -762,10 +762,11 @@ pub async fn run_insights(
     let cwd = data_dir.to_string_lossy().into_owned();
 
     // Provider/model come from the insights config (built-in or custom, e.g.
-    // grok); an empty provider falls back to the global default agent.
+    // grok); an empty provider falls back to the host workspace's default agent,
+    // then the global default.
     let cfg = read_config(&insights_dir(ctx));
     let provider = if cfg.provider.trim().is_empty() {
-        default_provider(ctx).await
+        ctx.resolve_provider(Some(&ws), None).await?
     } else {
         cfg.provider.trim().to_string()
     };
@@ -865,18 +866,6 @@ async fn pick_host(ctx: &ServerCtx) -> Option<(otto_core::domain::Workspace, ott
     // Prefer the workspace admin/first member as the actor.
     let user_id = members.first().map(|m| m.user_id.clone())?;
     Some((ws, user_id))
-}
-
-/// The global default provider for headless insights runs.
-async fn default_provider(ctx: &ServerCtx) -> String {
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
-        global_default.as_ref(),
-    )])
 }
 
 // ---------------------------------------------------------------------------

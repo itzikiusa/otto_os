@@ -86,13 +86,7 @@ fn next_generation() -> u64 {
 }
 
 fn clip(s: &str) -> String {
-    let s = s.trim();
-    if s.chars().count() <= MAX_DETAIL_CHARS {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(MAX_DETAIL_CHARS).collect();
-    out.push('…');
-    out
+    otto_core::text::clip_chars(s.trim(), MAX_DETAIL_CHARS)
 }
 
 /// Start a new generation for `(ws, channel)` in `state`, keeping the last

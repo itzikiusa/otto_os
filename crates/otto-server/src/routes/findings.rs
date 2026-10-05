@@ -66,22 +66,9 @@ async fn finding_agent_provider(ctx: &ServerCtx, workspace_id: &Id) -> String {
             return p.trim().to_string();
         }
     }
-    let ws_default = ctx
-        .workspaces
-        .get(workspace_id)
+    let ws = ctx.workspaces.get(workspace_id).await.ok();
+    ctx.resolve_provider_or_fallback(ws.as_ref(), None, "findings.agent")
         .await
-        .ok()
-        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
-        .unwrap_or_default();
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        ws_default.as_str(),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 // ---------------------------------------------------------------------------

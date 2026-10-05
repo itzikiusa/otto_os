@@ -15,7 +15,7 @@
 //! are NOT killed when done — they stay live/openable so the PO can inspect
 //! each lens's terminal afterward.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -659,12 +659,7 @@ const RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(2), Duration::from_sec
 /// Maps analysis-agent id → a cancel flag, so a manual Stop (or shutdown) can
 /// signal an in-flight `run_agent_with_recovery` to abort without it being
 /// mistaken for a failure (which would auto-retry).
-pub type CancelRegistry = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
-
-/// Create the shared registry (called once at boot, stored in `ServerCtx`).
-pub fn new_cancel_registry() -> CancelRegistry {
-    Arc::new(Mutex::new(HashMap::new()))
-}
+pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
 
 fn register_cancel(reg: &CancelRegistry, agent_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));

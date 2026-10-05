@@ -66,6 +66,14 @@ pub fn pr_draft_model_from(value: Option<&serde_json::Value>) -> String {
         .to_string()
 }
 
+/// Settings key for the GLOBAL default agent provider (a bare JSON string, e.g.
+/// `"codex"`; empty/absent ⇒ unset). The per-workspace override lives in the
+/// workspace's own `settings` JSON under
+/// [`otto_core::provider::WORKSPACE_DEFAULT_PROVIDER_FIELD`]. Resolution order
+/// (request → workspace → global → `"claude"`) is implemented once, in
+/// `otto_server::provider_resolve` on top of [`otto_core::provider`].
+pub const DEFAULT_PROVIDER_KEY: &str = "default_provider";
+
 type SettingsCache =
     std::collections::HashMap<(u64, String), (std::time::Instant, Option<serde_json::Value>)>;
 

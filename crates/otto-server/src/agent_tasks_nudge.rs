@@ -380,55 +380,14 @@ pub fn looks_like_permission_prompt(screen_lower: &str) -> bool {
 
 /// Drop ESC/CSI/OSC sequences from a screen snapshot, keeping printable text.
 pub fn strip_ansi(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if b == 0x1b {
-            i += 1;
-            match bytes.get(i) {
-                Some(b'[') => {
-                    i += 1;
-                    while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                Some(b']') => {
-                    // OSC … BEL or ESC \
-                    i += 1;
-                    while i < bytes.len()
-                        && bytes[i] != 0x07
-                        && !(bytes[i] == 0x1b && bytes.get(i + 1) == Some(&b'\\'))
-                    {
-                        i += 1;
-                    }
-                    i += if bytes.get(i) == Some(&0x1b) { 2 } else { 1 };
-                }
-                Some(_) => i += 1,
-                None => {}
-            }
-            continue;
-        }
-        if b == b'\n' || b == b'\r' || b == b'\t' {
-            out.push(' ');
-        } else if b >= 0x20 {
-            // Decode the UTF-8 sequence starting here; skip a broken byte.
-            let len = match b {
-                0x00..=0x7f => 1,
-                0xc0..=0xdf => 2,
-                0xe0..=0xef => 3,
-                _ => 4,
-            };
-            if let Ok(s) = std::str::from_utf8(&bytes[i..(i + len).min(bytes.len())]) {
-                out.push_str(s);
-            }
-            i += len;
-            continue;
-        }
-        i += 1;
-    }
-    out
+    otto_core::text::strip_ansi_bytes(bytes)
+        .chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' | '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 #[cfg(test)]

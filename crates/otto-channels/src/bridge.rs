@@ -809,7 +809,12 @@ impl Bridge {
                 // workspace's default → the global default → "claude". Guard
                 // against a stale/removed provider so the session still spawns
                 // rather than erroring out.
-                let global_default = self.settings.get("default_provider").await.ok().flatten();
+                let global_default = self
+                    .settings
+                    .get(otto_state::settings::DEFAULT_PROVIDER_KEY)
+                    .await
+                    .ok()
+                    .flatten();
                 let mut provider = otto_core::provider::resolve_provider(&[
                     &integ.preferred_cli,
                     otto_core::provider::workspace_default(&ws.settings),

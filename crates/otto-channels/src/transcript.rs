@@ -498,17 +498,7 @@ fn emoji_label(name: &str) -> (&'static str, String) {
 
 /// Truncate a string to at most `max_chars` Unicode scalar values, appending
 /// `…` when it is actually truncated.
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (count, c) in s.chars().enumerate() {
-        if count >= max_chars {
-            out.push('…');
-            return out;
-        }
-        out.push(c);
-    }
-    out
-}
+use otto_core::text::clip_chars as truncate_chars;
 
 /// Build a short human-readable summary of a tool call's input. Any home
 /// directory in a path is abbreviated to `~` via `home`.

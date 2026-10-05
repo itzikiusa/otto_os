@@ -1465,22 +1465,13 @@ async fn run_executor_attempt(
     // (not a bare hardcoded "claude"), honoring Settings → Providers.
     let resolved_provider;
     let provider = if exec.provider.trim().is_empty() {
-        let global = otto_state::SettingsRepo::new(ctx.pool.clone())
-            .get("default_provider")
-            .await
-            .ok()
-            .flatten();
-        let ws_default = ctx
-            .workspaces
-            .get(&loop_.workspace_id)
-            .await
-            .ok()
-            .map(|w| otto_core::provider::workspace_default(&w.settings).to_string())
-            .unwrap_or_default();
-        resolved_provider = otto_core::provider::resolve_provider(&[
-            ws_default.as_str(),
-            otto_core::provider::global_default(global.as_ref()),
-        ]);
+        resolved_provider = match ctx.resolve_provider_for_ws(&loop_.workspace_id, None).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(loop_id = %loop_.id, error = %e, "goal loop: provider resolution failed; using fallback");
+                otto_core::provider::FALLBACK_PROVIDER.to_string()
+            }
+        };
         resolved_provider.as_str()
     } else {
         exec.provider.trim()

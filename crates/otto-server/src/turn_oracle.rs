@@ -576,11 +576,7 @@ fn push_pending(
 }
 
 fn truncate_chars(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    s.chars().take(max).collect()
+    otto_core::text::prefix_chars(s.trim(), max).to_string()
 }
 
 fn parse_ts(s: &str) -> Option<SystemTime> {

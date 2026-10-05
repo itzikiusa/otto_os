@@ -1298,6 +1298,24 @@ export type OttoEvent =
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
+  // Self-improvement engine (otto-improve) — see docs/contracts/ws.md.
+  | { type: 'improvement_run_started'; workspace_id: Id; run_id: Id }
+  | {
+      type: 'improvement_run_finished';
+      workspace_id: Id;
+      run_id: Id;
+      status: 'done' | 'skipped' | 'failed';
+      applied: number;
+      pending: number;
+    }
+  | { type: 'improvement_edit_applied'; workspace_id: Id; run_id: Id; edit_id: Id; target_ref: string }
+  | {
+      type: 'improvement_approval_pending';
+      workspace_id: Id;
+      run_id: Id;
+      edit_id: Id;
+      target_ref: string;
+    }
   | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
   | {
       type: 'api_history_appended';
@@ -2918,6 +2936,10 @@ export interface AddRepoReq {
   clone_url?: string | null;
   name?: string | null;
   git_account_id?: Id | null;
+  /** Parent directory to clone INTO (repo lands at `<clone_dir>/<name>`; a
+   *  leading `~` is expanded). Defaults to the workspace root. Only meaningful
+   *  with `clone_url`. */
+  clone_dir?: string | null;
 }
 
 /** `PATCH /repos/{id}` — (re)bind the repo's hosting account. The field is
@@ -3413,6 +3435,12 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** Proof pack to gate this PR on: Otto refuses to open the PR unless the pack
+   *  is `passed`/`waived` (or `allow_unproven` is set). */
+  proof_pack_id?: string | null;
+  /** Open the PR even over an unproven pack — records an audit `approval`
+   *  artifact on the pack. */
+  allow_unproven?: boolean | null;
   /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
    *  Bitbucket Cloud draft field). Absent = ready for review. */
   draft?: boolean;

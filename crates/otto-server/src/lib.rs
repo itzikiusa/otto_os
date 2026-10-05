@@ -73,6 +73,7 @@ pub mod product_run;
 pub mod product_swarm;
 pub mod product_watcher;
 pub mod proof;
+pub mod provider_resolve;
 pub mod repo_directory;
 pub mod report_delivery;
 pub mod resource_sessions;
@@ -108,6 +109,8 @@ pub mod swarm_verify;
 pub mod swarm_wake;
 pub mod swarm_workspace;
 pub mod telemetry;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod transport;

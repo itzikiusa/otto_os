@@ -15,6 +15,11 @@ use serde_json::Value;
 /// The ultimate fallback agent when nothing is configured anywhere.
 pub const FALLBACK_PROVIDER: &str = "claude";
 
+/// The field of a workspace's `settings` JSON object holding its per-workspace
+/// default provider. (The global setting key has the same spelling:
+/// `otto_state::settings::DEFAULT_PROVIDER_KEY`.)
+pub const WORKSPACE_DEFAULT_PROVIDER_FIELD: &str = "default_provider";
+
 /// Resolve a provider name from an ordered list of candidate strings: the first
 /// non-blank candidate wins; if every candidate is blank, returns
 /// [`FALLBACK_PROVIDER`]. Whitespace-only candidates count as blank.
@@ -35,7 +40,7 @@ pub fn resolve_provider(candidates: &[&str]) -> String {
 /// default"), which [`resolve_provider`] treats as unset.
 pub fn workspace_default(settings: &Value) -> &str {
     settings
-        .get("default_provider")
+        .get(WORKSPACE_DEFAULT_PROVIDER_FIELD)
         .and_then(Value::as_str)
         .unwrap_or("")
 }
