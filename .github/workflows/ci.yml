@@ -2,9 +2,9 @@ name: CI
 
 # Lint, type-check, and test the Rust workspace + the Svelte UI on every push
 # and pull request. The Tauri desktop app (apps/desktop/src-tauri) is a separate,
-# macOS-only workspace (launchd + Keychain + codesigning) and is intentionally
-# NOT built here — `cargo build --workspace` from the repo root covers the daemon
-# crates and `ottod`, which is what CI guards.
+# macOS-only workspace (launchd + Keychain + codesigning): `cargo build
+# --workspace` from the repo root covers the daemon crates and `ottod`, and the
+# `desktop` job below runs the shell's own unit tests on a macOS runner.
 
 on:
   push:
@@ -600,6 +600,40 @@ jobs:
         # attack recovers plaintext from a party performing RSA DECRYPTION,
         # which Otto never does. Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
+
+  # The desktop shell's unit tests: supervisor install logic (ottod.prev,
+  # plist secrets mode, slow-boot recovery), the browser URL allow-list, the
+  # windows registry and the capability pin ("no remote/webviews block").
+  # A separate Cargo workspace, so the root jobs never compile it. The
+  # embedded UI and the ottod sidecar are stubbed: tests never launch either.
+  desktop:
+    name: Desktop shell (macOS unit tests)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      # tauri::generate_context! embeds `frontendDist` (ui/dist) and the build
+      # script requires the `externalBin` sidecar at binaries/ottod-<triple>.
+      - name: Stub the embedded UI and the ottod sidecar
+        run: |
+          mkdir -p ui/dist
+          printf '<!doctype html><div id="app"></div>\n' > ui/dist/index.html
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p apps/desktop/src-tauri/binaries
+          printf '#!/bin/sh\nexit 0\n' > "apps/desktop/src-tauri/binaries/ottod-$triple"
+          chmod +x "apps/desktop/src-tauri/binaries/ottod-$triple"
+
+      - name: cargo test (desktop)
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
   # Duplicate-version report (deny.toml: multiple-versions = "warn"). Advisory:
   # it surfaces crates compiled twice at different semver majors so they can be
