@@ -47,6 +47,7 @@ function browser(initial = '#/home') {
     './desktop': { isEmbedded: false },
     '../modules/rooms/room-access': { captureRoomInvite },
     './sidebar': { activeNavId },
+    './shareTokenStore': { dropShareToken: () => {}, storeShareToken: () => {}, storedShareToken: () => null },
   }, { window, history });
   return { router, history, entries: () => entries.map((e) => e.hash), at: () => at, loc };
 }
