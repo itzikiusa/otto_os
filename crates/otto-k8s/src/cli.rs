@@ -590,9 +590,11 @@ mod tests {
 
         let stale =
             sh("echo 'error: You must be logged in to the server (Unauthorized)' >&2; exit 1")
-                .with_reauth(Reauth(std::sync::Arc::new(|| {
-                    Box::pin(async { Ok(sh("echo 'rollout complete'")) })
-                })));
+                .with_reauth(Reauth(std::sync::Arc::new(
+                    || -> crate::BoxFut<'static, Result<Kubectl>> {
+                        Box::pin(async { Ok(sh("echo 'rollout complete'")) })
+                    },
+                )));
         let out = stale
             .run_tolerant(["x"], Duration::from_secs(10))
             .await
