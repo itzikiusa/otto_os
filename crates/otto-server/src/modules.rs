@@ -619,6 +619,86 @@ impl otto_canvas::CanvasCtx for ServerCtx {
     }
 }
 
+impl otto_canvas::CanvasAssistCtx for ServerCtx {
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+    async fn resolve_provider(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+    ) -> otto_core::Result<String> {
+        ServerCtx::resolve_provider(self, ws, requested).await
+    }
+    fn ensure_trusted(&self, provider: &str, cwd: &str) {
+        otto_sessions::trust::ensure_trusted(provider, cwd);
+    }
+    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
+        &self,
+        t: otto_canvas::AgentTurn<'_>,
+        on_ready: F,
+    ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::run_session_turn(
+            self,
+            t.ws,
+            t.user,
+            t.existing,
+            t.title,
+            t.cwd,
+            t.provider,
+            t.meta,
+            t.prompt,
+            crate::agent_session::STUCK_IDLE,
+            on_ready,
+        )
+        .await
+        .map_err(|e| e.0)
+    }
+    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
+        self.manager.kill_session(sid).await
+    }
+}
+
+impl otto_insights::InsightsCtx for ServerCtx {
+    fn library(&self) -> &otto_context::Library {
+        &self.context_library
+    }
+    fn manager(&self) -> &Arc<otto_sessions::SessionManager> {
+        &self.manager
+    }
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    async fn resolve_provider(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+    ) -> otto_core::Result<String> {
+        ServerCtx::resolve_provider(self, ws, requested).await
+    }
+    async fn submit_prompt(&self, sid: &otto_core::Id, prompt: &str) -> bool {
+        if !crate::review_session::wait_for_tui(&self.manager, sid).await {
+            return false;
+        }
+        let _ = self
+            .manager
+            .input(sid, &crate::review_session::bracketed_paste(prompt))
+            .await;
+        tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
+        let _ = self.manager.input(sid, b"\r").await;
+        true
+    }
+}
+
 impl otto_design::DesignCtx for ServerCtx {
     /// A per-request handle over the shared pool, `<data>/design` and the
     /// event bus — no ServerCtx field, so the test harnesses that build a
@@ -631,6 +711,61 @@ impl otto_design::DesignCtx for ServerCtx {
     }
     fn validate_content(&self, format: &str, bytes: &[u8]) -> otto_core::Result<()> {
         crate::design_hall::validate_content(format, bytes)
+    }
+}
+
+impl otto_design_assist::DesignAssistCtx for ServerCtx {
+    fn events(&self) -> &tokio::sync::broadcast::Sender<otto_core::event::Event> {
+        &self.events
+    }
+    fn workspaces(&self) -> &otto_state::WorkspacesRepo {
+        &self.workspaces
+    }
+    fn product_repo(&self) -> &otto_state::ProductRepo {
+        &self.product_repo
+    }
+    fn improve_engine(&self) -> &Arc<otto_improve::ImprovementEngine> {
+        &self.improve_engine
+    }
+    fn memory(&self) -> &Arc<otto_memory::MemoryService> {
+        &self.memory
+    }
+    async fn resolve_provider_or_fallback(
+        &self,
+        ws: Option<&otto_core::domain::Workspace>,
+        requested: Option<&str>,
+        site: &'static str,
+    ) -> String {
+        ServerCtx::resolve_provider_or_fallback(self, ws, requested, site).await
+    }
+    async fn run_agent_turn<F: FnOnce(&otto_core::Id) + Send>(
+        &self,
+        t: otto_design_assist::AgentTurn<'_>,
+        on_ready: F,
+    ) -> otto_core::Result<(String, otto_core::Id)> {
+        crate::agent_session::run_session_turn_with(
+            self,
+            t.ws,
+            t.user,
+            t.existing,
+            t.title,
+            t.cwd,
+            t.provider,
+            t.meta,
+            t.prompt,
+            t.stuck_after,
+            crate::agent_session::TurnOpts {
+                done_file: t.done_file,
+                quiet_done: t.quiet_done,
+                ..Default::default()
+            },
+            on_ready,
+        )
+        .await
+        .map_err(|e| e.0)
+    }
+    async fn kill_session(&self, sid: &otto_core::Id) -> otto_core::Result<()> {
+        self.manager.kill_session(sid).await
     }
 }
 
@@ -849,15 +984,15 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
             "/product/discovery-chats/{cid}/apply",
             post(crate::product_chat::apply_action),
         )
-        // Canvas agent-assist: turn a prompt into diagram blocks (needs the
-        // orchestrator, so it lives here rather than in the otto-canvas crate).
+        // Canvas agent-assist: turn a prompt into diagram blocks. The engine is
+        // otto-canvas's; the agent turn runs through `CanvasAssistCtx` (above).
         .route(
             "/canvas/scenes/{id}/assist",
-            post(crate::canvas_assist::assist_scene),
+            post(otto_canvas::assist::assist_scene::<ServerCtx>),
         )
         .route(
             "/canvas/assist/preview",
-            post(crate::canvas_assist::assist_preview),
+            post(otto_canvas::assist::assist_preview::<ServerCtx>),
         )
         // Session ↔ Canvas scene references — needs the SessionManager to resolve
         // a session's workspace, so it lives here rather than in otto-canvas.
@@ -8808,8 +8943,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         // Design Hall — the artifact graph (`/design/*`, Feature::Design).
         otto_design::router::<ServerCtx>(),
         // The unified design-assist pipeline (agent turns, variants, learned
-        // rules) — needs the session runner, so it lives in the server.
-        crate::design_assist::routes(),
+        // rules) — otto-design-assist's; the turn runs via `DesignAssistCtx`.
+        otto_design_assist::routes::<ServerCtx>(),
         otto_memory::router::<ServerCtx>(),
         otto_vault::router::<ServerCtx>(),
         crate::vault_docs_agent::routes(),
@@ -8824,7 +8959,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::swarm_runtime::routes(),
         crate::routes::goal_loops::routes(),
         crate::routes::proof::routes(),
-        crate::insights::routes(),
+        otto_insights::routes::<ServerCtx>(),
         orchestrator_routes(),
         db_explorer_routes(),
         pr_review_routes(),

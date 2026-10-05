@@ -1,0 +1,24 @@
+[package]
+name = "otto-insights"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-core = { workspace = true }
+otto-state = { workspace = true }
+otto-context = { workspace = true }
+otto-sessions = { workspace = true }
+# The bundled `insights` collector script (materialized next to the reports).
+otto-skills = { workspace = true }
+# `blocking` spans, like the host's `offload::blocking`.
+otto-telemetry = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }

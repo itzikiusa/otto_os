@@ -22,7 +22,7 @@
 //! no agent runs), we take the source from the reply and write it into the file
 //! so the next resumed turn sees it.
 //!
-//! Routes (registered in modules.rs, gated by `Feature::Canvas`):
+//! Routes (mounted by otto-server's modules.rs, gated by `Feature::Canvas`):
 //!   POST /api/v1/canvas/scenes/{id}/assist   (ws editor) → AssistResult
 //!   POST /api/v1/canvas/assist/preview       (canvas edit) → AssistResult
 
@@ -36,9 +36,7 @@ use otto_core::{Error, Id};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+use crate::assist_ctx::{AgentTurn, ApiError, ApiResult, CanvasAssistCtx, CurrentUser};
 
 /// Live-preview file poll cadence while the agent edits.
 const POLL: Duration = Duration::from_millis(900);
@@ -88,21 +86,22 @@ pub struct AssistResult {
 /// `POST /canvas/scenes/{id}/assist` — edit the scene's backing file, commit the
 /// result to the scene, and broadcast it. Returns the new source so the UI can
 /// render immediately (it also gets the live `CanvasUpdated` events).
-pub async fn assist_scene(
+pub async fn assist_scene<C: CanvasAssistCtx>(
     Path(id): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<AssistReq>,
 ) -> ApiResult<Json<AssistResult>> {
     let scene = ctx
-        .canvas_repo
+        .canvas_repo()
         .get(&id)
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("canvas scene {id}"))))?;
-    crate::auth::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor).await?;
+    crate::assist_ctx::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor)
+        .await?;
     let ws = ctx
-        .workspaces
+        .workspaces()
         .get(&scene.workspace_id)
         .await
         .map_err(ApiError)?;
@@ -116,14 +115,13 @@ pub async fn assist_scene(
     // a resumed session always finds the same file). Scene ids are daemon-minted,
     // but the id arrived as a route param — confine the join under the canvas
     // root so a hostile id can't steer the fs ops (rust/path-injection).
-    let dir = otto_core::paths::confine_join(&ctx.data_dir.join("canvas"), &scene.id).ok_or_else(
-        || {
+    let dir = otto_core::paths::confine_join(&ctx.data_dir().join("canvas"), &scene.id)
+        .ok_or_else(|| {
             ApiError(Error::Invalid(format!(
                 "unsafe canvas scene id {}",
                 scene.id
             )))
-        },
-    )?;
+        })?;
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return Err(ApiError(Error::Internal(format!(
             "canvas scratch dir: {e}"
@@ -145,7 +143,7 @@ pub async fn assist_scene(
     // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
     // stall on a first-run trust prompt (same as the orchestrate path). Trust the
     // SCENE's provider — a non-claude provider must trust the dir it will run in.
-    otto_sessions::trust::ensure_trusted(&scene.provider, &dir_str);
+    ctx.ensure_trusted(&scene.provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
     let poll = spawn_file_poll(&ctx, &scene, &doc, &file_path, &format, &agent_view, &keep);
@@ -154,7 +152,7 @@ pub async fn assist_scene(
     let meta = serde_json::json!({ "source": "canvas_assist", "scene_id": scene.id });
     // Surface the agent session the MOMENT it exists (turn start) so the Canvas
     // Assistant panel can attach the live shell immediately, not after the turn.
-    let ready_events = ctx.events.clone();
+    let ready_events = ctx.events().clone();
     let ready_ws = scene.workspace_id.clone();
     let ready_scene = scene.id.clone();
     let on_ready = move |sid: &Id| {
@@ -164,24 +162,25 @@ pub async fn assist_scene(
             session_id: sid.clone(),
         });
     };
-    let turn = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        scene.session_id.as_ref(),
-        &format!("Canvas: {}", scene.title),
-        &dir_str,
-        &scene.provider,
-        meta,
-        &prompt,
-        crate::agent_session::STUCK_IDLE,
-        on_ready,
-    )
-    .await;
+    let turn = ctx
+        .run_agent_turn(
+            AgentTurn {
+                ws: &ws,
+                user: &user,
+                existing: scene.session_id.as_ref(),
+                title: &format!("Canvas: {}", scene.title),
+                cwd: &dir_str,
+                provider: &scene.provider,
+                meta,
+                prompt: &prompt,
+            },
+            on_ready,
+        )
+        .await;
     poll.abort();
     let (raw, sid) = turn?;
     if scene.session_id.is_none() {
-        let _ = ctx.canvas_repo.set_session(&scene.id, &sid).await;
+        let _ = ctx.canvas_repo().set_session(&scene.id, &sid).await;
     }
 
     // The committed source = the edited file, or the reply's block as a fallback.
@@ -207,12 +206,12 @@ pub async fn assist_scene(
     // turn is one "Restore" away. Best-effort — never blocks the commit.
     if new_source != current {
         let _ = ctx
-            .canvas_repo
+            .canvas_repo()
             .snapshot(&scene.id, "agent", Some(&user.id), None)
             .await;
     }
     let commit = ctx
-        .canvas_repo
+        .canvas_repo()
         .update(
             &scene.id,
             otto_state::SceneUpdate {
@@ -223,14 +222,14 @@ pub async fn assist_scene(
         )
         .await;
     if let Err(Error::Conflict(_)) = commit {
-        if let Ok(Some(fresh)) = ctx.canvas_repo.get(&scene.id).await {
+        if let Ok(Some(fresh)) = ctx.canvas_repo().get(&scene.id).await {
             let fresh_doc: Value = serde_json::from_str(&fresh.doc_json).unwrap_or(Value::Null);
             let fresh_src = current_source(&fresh_doc, &doc_format(&fresh_doc));
             if fresh_src == current {
                 // Source untouched by the user — apply the agent's result
                 // against the fresh stamp (preserves their title edit).
                 let _ = ctx
-                    .canvas_repo
+                    .canvas_repo()
                     .update(
                         &scene.id,
                         otto_state::SceneUpdate {
@@ -256,7 +255,7 @@ pub async fn assist_scene(
         }
     }
     let final_source = current_source(&committed_doc, &doc_format(&committed_doc));
-    let _ = ctx.events.send(Event::CanvasUpdated {
+    let _ = ctx.events().send(Event::CanvasUpdated {
         workspace_id: scene.workspace_id.clone(),
         scene_id: scene.id.clone(),
         doc: committed_doc,
@@ -269,8 +268,8 @@ pub async fn assist_scene(
 /// Chat bridge / legacy empty-canvas hero). Runs a THROWAWAY session and parses
 /// its reply (no file to persist — there's no scene to own one). Gated upstream
 /// by the `Feature::Canvas` edit capability.
-pub async fn assist_preview(
-    State(ctx): State<ServerCtx>,
+pub async fn assist_preview<C: CanvasAssistCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<AssistReq>,
 ) -> ApiResult<Json<AssistResult>> {
@@ -279,10 +278,15 @@ pub async fn assist_preview(
             "workspace_id is required for preview".into(),
         ))
     })?;
-    crate::auth::require_ws_role(&ctx, &user, &Id::from(ws_id.clone()), WorkspaceRole::Editor)
-        .await?;
+    crate::assist_ctx::require_ws_role(
+        &ctx,
+        &user,
+        &Id::from(ws_id.clone()),
+        WorkspaceRole::Editor,
+    )
+    .await?;
     let ws = ctx
-        .workspaces
+        .workspaces()
         .get(&Id::from(ws_id))
         .await
         .map_err(ApiError)?;
@@ -296,22 +300,23 @@ pub async fn assist_preview(
         .resolve_provider(Some(&ws), None)
         .await
         .map_err(ApiError)?;
-    otto_sessions::trust::ensure_trusted(&provider, &ws.root_path);
-    let (raw, sid) = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        None,
-        "Canvas: preview",
-        &ws.root_path,
-        &provider,
-        meta,
-        &prompt,
-        crate::agent_session::STUCK_IDLE,
-        |_| {},
-    )
-    .await?;
-    let _ = ctx.manager.kill_session(&sid).await;
+    ctx.ensure_trusted(&provider, &ws.root_path);
+    let (raw, sid) = ctx
+        .run_agent_turn(
+            AgentTurn {
+                ws: &ws,
+                user: &user,
+                existing: None,
+                title: "Canvas: preview",
+                cwd: &ws.root_path,
+                provider: &provider,
+                meta,
+                prompt: &prompt,
+            },
+            |_| {},
+        )
+        .await?;
+    let _ = ctx.kill_session(&sid).await;
     let parsed = parse_assist(&raw);
     let src = parsed.mermaid.clone().unwrap_or_default();
     Ok(Json(result_for("mermaid", &src, parsed.note)))
@@ -719,8 +724,8 @@ fn result_for(format: &str, source: &str, note: String) -> AssistResult {
 /// Spawn a background task that broadcasts `CanvasUpdated` on each file change
 /// while the agent edits, for a live "draws itself" preview. Aborted when the
 /// turn returns.
-fn spawn_file_poll(
-    ctx: &ServerCtx,
+fn spawn_file_poll<C: CanvasAssistCtx>(
+    ctx: &C,
     scene: &otto_state::CanvasScene,
     doc: &Value,
     file_path: &std::path::Path,
@@ -730,7 +735,7 @@ fn spawn_file_poll(
 ) -> tokio::task::JoinHandle<()> {
     let doc = doc.clone();
     let keep = keep.clone();
-    let events = ctx.events.clone();
+    let events = ctx.events().clone();
     let workspace_id = scene.workspace_id.clone();
     let scene_id = scene.id.clone();
     let path = file_path.to_path_buf();

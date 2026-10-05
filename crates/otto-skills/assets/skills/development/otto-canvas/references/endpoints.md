@@ -7,7 +7,7 @@ All paths are under the API prefix **`/api/v1`** on the `ottod` daemon
 back as `{"code","message"}` with the HTTP status.
 
 Verified against `crates/otto-canvas/src/http.rs`,
-`crates/otto-server/src/canvas_assist.rs`, and
+`crates/otto-canvas/src/assist.rs`, and
 `crates/otto-server/src/product_chat.rs`.
 
 ---

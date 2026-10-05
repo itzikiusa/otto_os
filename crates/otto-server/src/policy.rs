@@ -1556,7 +1556,7 @@ mod tests {
                 "/api/v1/design/artifacts/{id}/links/{link_id}",
             ),
             (Method::POST, "/api/v1/design/signals"),
-            // design_assist.rs — agent turns, variants, learned rules.
+            // otto-design-assist — agent turns, variants, learned rules.
             (Method::POST, "/api/v1/design/artifacts/{id}/assist"),
             (Method::POST, "/api/v1/design/artifacts/{id}/variants"),
             (

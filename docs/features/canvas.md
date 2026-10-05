@@ -16,7 +16,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 (and you) can see it without leaving the conversation (§7a).
 
 > **Where this lives in the code.** CRUD crate: `crates/otto-canvas/` (`http.rs`,
-> `types.rs`, `lib.rs`). Agent-assist (needs the orchestrator): `crates/otto-server/src/canvas_assist.rs`.
+> `types.rs`, `lib.rs`). Agent-assist: `assist.rs` (+ `assist_ctx.rs` — the host runs the agent turn through `CanvasAssistCtx`).
 > Persistence: `crates/otto-state/src/canvas.rs` (`CanvasRepo`), migrations
 > `0072_canvas_scenes.sql` / `0074_session_links.sql` / `0075_canvas_scene_meta.sql` /
 > `0093_canvas_scene_refs.sql` (session references, §7a). Session-ref routes (need
@@ -51,7 +51,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 | Concern | Source |
 |---|---|
 | Scene CRUD router + DTOs | `crates/otto-canvas/src/http.rs`, `types.rs` (`CanvasCtx`, `router`, `CreateSceneReq`, `UpdateSceneReq`, `empty_doc`) |
-| Agent-assist (file-backed draw) | `crates/otto-server/src/canvas_assist.rs` (`assist_scene`, `assist_preview`) |
+| Agent-assist (file-backed draw) | `crates/otto-canvas/src/assist.rs` (`assist_scene`, `assist_preview`) |
 | One managed agent turn (create/resume) | `crates/otto-server/src/agent_session.rs` (`run_session_turn`) |
 | Persistence + repo | `crates/otto-state/src/canvas.rs` (`CanvasScene`, `CanvasSceneSummary`, `CanvasRepo`) |
 | Server wiring (router mount + assist routes) | `crates/otto-server/src/modules.rs` |
@@ -79,7 +79,7 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 ## 2. The file-backed model
 
 A scene's persisted `doc_json` is a small, opaque document the server and the UI
-share (the Rust side never parses its meaning — see `canvas_assist.rs::build_doc`):
+share (the Rust side never parses its meaning — see `otto-canvas/src/assist.rs::build_doc`):
 
 ```jsonc
 {

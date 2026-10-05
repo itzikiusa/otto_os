@@ -61,6 +61,7 @@ otto-git.workspace = true
 otto-issues.workspace = true
 otto-channels.workspace = true
 otto-improve.workspace = true
+otto-insights.workspace = true
 otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
@@ -71,6 +72,7 @@ otto-product.workspace = true
 otto-canvas.workspace = true
 # Design Hall — the artifact graph (projects / artifacts / versions / links).
 otto-design.workspace = true
+otto-design-assist.workspace = true
 otto-swarm.workspace = true
 otto-workgraph.workspace = true
 otto-memory.workspace = true

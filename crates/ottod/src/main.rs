@@ -1416,7 +1416,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // most-recent missed period iff it has no report yet. Runs the due-check on
     // startup (catch-up after the app was closed), then hourly.
     let _insights_scheduler_handle =
-        otto_server::insights::InsightsScheduler::new(ctx.clone()).start();
+        otto_insights::InsightsScheduler::new(ctx.clone()).start();
     tracing::info!("insights scheduler started");
 
     // Daily CLI auto-update: updates the agent CLIs (claude/codex/…) at a

@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 otto-core = { workspace = true }
 otto-state = { workspace = true }
+# `recruiter::extract_json` — the assist reply's fallback JSON scrape.
+otto-swarm = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }

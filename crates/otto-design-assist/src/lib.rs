@@ -41,7 +41,7 @@
 //! as PENDING edits of the `design-team-style` skill — approve / reject /
 //! rollback stay human-only through the existing improvement-edit routes.
 //!
-//! Routes (registered in modules.rs; `/design/*` = Feature::Design, writes Edit):
+//! Routes (mounted by otto-server's modules.rs; `/design/*` = Feature::Design, writes Edit):
 //!   POST /api/v1/design/artifacts/{id}/assist                     (ws editor) → 202 DesignAssistTurn
 //!   GET  /api/v1/design/artifacts/{id}/assist                     (ws viewer) → DesignAssistTurn[]
 //!   POST /api/v1/design/artifacts/{id}/variants                   (ws editor) → 202 DesignVariantRun
@@ -77,9 +77,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+mod ctx;
+use ctx::{require_ws_role, ApiError, ApiResult, CurrentUser};
+pub use ctx::{AgentTurn, DesignAssistCtx};
 
 /// Live-preview file poll cadence while the agent edits.
 const POLL: Duration = Duration::from_millis(900);
@@ -323,22 +323,22 @@ pub struct DesignLearnExtractResp {
 /// The design-assist routes (paths relative to `/api/v1`). The artifact path
 /// segment is `{id}` — the same name `otto_design::router` uses, so the two
 /// routers merge without a matchit conflict.
-pub fn routes() -> Router<ServerCtx> {
+pub fn routes<C: DesignAssistCtx>() -> Router<C> {
     Router::new()
         .route(
             "/design/artifacts/{id}/assist",
-            get(list_turns).post(start_assist),
+            get(list_turns::<C>).post(start_assist::<C>),
         )
         .route(
             "/design/artifacts/{id}/variants",
-            get(list_variant_runs).post(start_variants),
+            get(list_variant_runs::<C>).post(start_variants::<C>),
         )
         .route(
             "/design/artifacts/{id}/variants/{version}/accept",
-            post(accept_variant),
+            post(accept_variant::<C>),
         )
-        .route("/design/learned", get(get_learned))
-        .route("/design/learned/extract", post(extract_learned))
+        .route("/design/learned", get(get_learned::<C>))
+        .route("/design/learned/extract", post(extract_learned::<C>))
 }
 
 // ---------------------------------------------------------------------------
@@ -563,12 +563,19 @@ fn canvas_base(inner: &str) -> &'static str {
 }
 
 /// Every check a committed document passes: otto-design's cheap per-encoding
-/// checks, then the server's deep ones (`scene3d` schema).
-fn validate_doc(format: &str, bytes: &[u8]) -> Result<(), Error> {
+/// checks, then the host's deep ones (`deep` = [`DesignCtx::validate_content`],
+/// e.g. the server's `scene3d` schema).
+///
+/// [`DesignCtx::validate_content`]: otto_design::DesignCtx::validate_content
+fn validate_doc(
+    format: &str,
+    bytes: &[u8],
+    deep: impl FnOnce(&str, &[u8]) -> Result<(), Error>,
+) -> Result<(), Error> {
     let spec = dformat::spec(format)
         .ok_or_else(|| Error::Invalid(format!("unknown design format {format:?}")))?;
     dformat::validate(spec, bytes)?;
-    crate::design_hall::validate_content(format, bytes)
+    deep(format, bytes)
 }
 
 /// The contents of the first ```<lang> fenced block.
@@ -1118,14 +1125,14 @@ struct Assembled {
 }
 
 /// Caches "may this user view workspace X" for one request.
-struct ViewCheck<'a> {
-    ctx: &'a ServerCtx,
+struct ViewCheck<'a, C> {
+    ctx: &'a C,
     user: &'a User,
     cache: HashMap<Id, bool>,
 }
 
-impl<'a> ViewCheck<'a> {
-    fn new(ctx: &'a ServerCtx, user: &'a User) -> Self {
+impl<'a, C: DesignAssistCtx> ViewCheck<'a, C> {
+    fn new(ctx: &'a C, user: &'a User) -> Self {
         Self {
             ctx,
             user,
@@ -1139,7 +1146,7 @@ impl<'a> ViewCheck<'a> {
         }
         let ok = self
             .ctx
-            .roles
+            .roles()
             .check(self.user, &ws.to_string(), WorkspaceRole::Viewer)
             .await
             .is_ok();
@@ -1219,8 +1226,8 @@ fn is_png_file(p: &FsPath) -> bool {
 /// state). Explicit references that don't exist / aren't visible are errors;
 /// everything else degrades to "none".
 #[allow(clippy::too_many_arguments)]
-async fn assemble(
-    ctx: &ServerCtx,
+async fn assemble<C: DesignAssistCtx>(
+    ctx: &C,
     svc: &DesignService,
     user: &User,
     a: &DesignArtifact,
@@ -1400,14 +1407,14 @@ async fn assemble(
     // Story (acceptance criteria live in the imported source body).
     let mut story = None;
     for sid in svc.store().story_ids_for(&a.id).await.unwrap_or_default() {
-        let Ok(st) = ctx.product_repo.get_story(&sid).await else {
+        let Ok(st) = ctx.product_repo().get_story(&sid).await else {
             continue;
         };
         if !view.can(&st.workspace_id).await {
             continue;
         }
         let body = ctx
-            .product_repo
+            .product_repo()
             .latest_source_version(&st.id)
             .await
             .ok()
@@ -1456,7 +1463,7 @@ async fn assemble(
 
     // Team rules (approved) + the `design` memory collection.
     let rules = ctx
-        .improve_engine
+        .improve_engine()
         .design_rules_active(&a.workspace_id)
         .await
         .unwrap_or_default();
@@ -1468,7 +1475,7 @@ async fn assemble(
     };
     for q in [Some(text).filter(|t| !t.is_empty()), None] {
         let hits = ctx
-            .memory
+            .memory()
             .search(
                 &a.workspace_id,
                 otto_memory::MemoryQuery {
@@ -1614,8 +1621,8 @@ async fn materialize(
 // ---------------------------------------------------------------------------
 
 /// Everything one spawned turn owns.
-struct TurnJob {
-    ctx: ServerCtx,
+struct TurnJob<C> {
+    ctx: C,
     ws: Workspace,
     user: User,
     artifact: DesignArtifact,
@@ -1656,14 +1663,15 @@ fn done_marker() -> (PathBuf, String) {
 }
 
 /// Broadcast each valid change of the agent's file while a MAIN turn runs.
-fn spawn_live_poll(job: &TurnJob) -> tokio::task::JoinHandle<()> {
-    let events = job.ctx.events.clone();
+fn spawn_live_poll<C: DesignAssistCtx>(job: &TurnJob<C>) -> tokio::task::JoinHandle<()> {
+    let events = job.ctx.events().clone();
     let path = job.agent_path.clone();
     let adapter = job.adapter.clone();
     let base_doc = job.base_doc.clone();
     let ws = job.artifact.workspace_id.clone();
     let aid = job.artifact.id.clone();
     let mut last = job.base_source.clone().into_bytes();
+    let host = job.ctx.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(POLL).await;
@@ -1681,7 +1689,7 @@ fn spawn_live_poll(job: &TurnJob) -> tokio::task::JoinHandle<()> {
                 continue;
             };
             // A half-written / invalid document is never pushed to viewers.
-            if validate_doc(&adapter.format, &doc).is_err() {
+            if validate_doc(&adapter.format, &doc, |f, b| host.validate_content(f, b)).is_err() {
                 continue;
             }
             let content =
@@ -1701,7 +1709,7 @@ fn spawn_live_poll(job: &TurnJob) -> tokio::task::JoinHandle<()> {
 /// Restore the on-disk copies of a MAIN turn to the base document (after a
 /// failed / invalid / critique turn), so the working copy keeps mirroring
 /// the head.
-async fn restore_base(job: &TurnJob) {
+async fn restore_base<C: DesignAssistCtx>(job: &TurnJob<C>) {
     if job.branch != Branch::Main {
         return;
     }
@@ -1715,9 +1723,9 @@ async fn restore_base(job: &TurnJob) {
 
 /// Run one turn to completion and return its final state (also stored in the
 /// registry and broadcast as `design_assist_updated`).
-async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
+async fn run_job<C: DesignAssistCtx>(mut job: TurnJob<C>) -> DesignAssistTurn {
     let ctx = job.ctx.clone();
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let aid = job.artifact.id.clone();
     let tid = job.turn_id.clone();
 
@@ -1727,7 +1735,7 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
 
     let sid_cell: Arc<Mutex<Option<Id>>> = Arc::new(Mutex::new(None));
     let on_ready = {
-        let events = ctx.events.clone();
+        let events = ctx.events().clone();
         let cell = Arc::clone(&sid_cell);
         let aid = aid.clone();
         let tid = tid.clone();
@@ -1767,21 +1775,19 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
     let dir_str = job.dir.to_string_lossy().to_string();
     let turn = tokio::time::timeout(
         TURN_CAP,
-        crate::agent_session::run_session_turn_with(
-            &ctx,
-            &job.ws,
-            &job.user,
-            job.existing_session.as_ref(),
-            &title,
-            &dir_str,
-            &job.provider,
-            meta,
-            &prompt,
-            STUCK_AFTER,
-            crate::agent_session::TurnOpts {
+        ctx.run_agent_turn(
+            AgentTurn {
+                ws: &job.ws,
+                user: &job.user,
+                existing: job.existing_session.as_ref(),
+                title: &title,
+                cwd: &dir_str,
+                provider: &job.provider,
+                meta,
+                prompt: &prompt,
+                stuck_after: STUCK_AFTER,
                 done_file: Some(done_path.clone()),
                 quiet_done: Some(QUIET_DONE),
-                ..Default::default()
             },
             on_ready,
         ),
@@ -1795,10 +1801,10 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
 
     let result: Result<(String, Id), String> = match turn {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e.0.to_string()),
+        Ok(Err(e)) => Err(e.to_string()),
         Err(_) => {
             if let Some(s) = &known_sid {
-                let _ = ctx.manager.kill_session(s).await;
+                let _ = ctx.kill_session(s).await;
             }
             Err(format!(
                 "the agent turn exceeded {} minutes and was stopped",
@@ -1850,7 +1856,7 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
     });
     match final_turn {
         Some(t) => {
-            emit_turn(&ctx.events, &t);
+            emit_turn(ctx.events(), &t);
             t
         }
         None => {
@@ -1877,7 +1883,7 @@ async fn run_job(mut job: TurnJob) -> DesignAssistTurn {
                 started_at: Utc::now(),
                 finished_at: Some(Utc::now()),
             };
-            emit_turn(&ctx.events, &t);
+            emit_turn(ctx.events(), &t);
             t
         }
     }
@@ -1906,7 +1912,12 @@ impl Outcome {
 
 /// Read the agent's result, validate it and commit it (main head, a variant
 /// branch, or — when a human saved meanwhile — a side version).
-async fn finalize(svc: &DesignService, job: &TurnJob, reply: &str, sid: &Id) -> Outcome {
+async fn finalize<C: DesignAssistCtx>(
+    svc: &DesignService,
+    job: &TurnJob<C>,
+    reply: &str,
+    sid: &Id,
+) -> Outcome {
     let findings = match read_capped(&job.dir.join("findings.json"), 64 * 1024).await {
         Some(b) => parse_findings(&String::from_utf8_lossy(&b)),
         None => vec![],
@@ -1952,11 +1963,12 @@ async fn finalize(svc: &DesignService, job: &TurnJob, reply: &str, sid: &Id) -> 
     let Some(src) = src else {
         return out; // nothing changed
     };
-    let doc = match job
-        .adapter
-        .wrap(&job.base_doc, &src)
-        .and_then(|d| validate_doc(&job.adapter.format, &d).map(|_| d))
-    {
+    let doc = match job.adapter.wrap(&job.base_doc, &src).and_then(|d| {
+        validate_doc(&job.adapter.format, &d, |f, b| {
+            job.ctx.validate_content(f, b)
+        })
+        .map(|_| d)
+    }) {
         Ok(d) => d,
         Err(e) => {
             restore_base(job).await;
@@ -2148,20 +2160,24 @@ fn clean_selection(sel: Option<Value>) -> Result<Option<Value>, Error> {
     }
 }
 
-async fn pick_provider(ctx: &ServerCtx, ws: &Workspace, requested: Option<&str>) -> String {
+async fn pick_provider<C: DesignAssistCtx>(
+    ctx: &C,
+    ws: &Workspace,
+    requested: Option<&str>,
+) -> String {
     ctx.resolve_provider_or_fallback(Some(ws), requested, "design_assist")
         .await
 }
 
-async fn load_editable(
-    ctx: &ServerCtx,
+async fn load_editable<C: DesignAssistCtx>(
+    ctx: &C,
     svc: &DesignService,
     user: &User,
     id: &str,
     role: WorkspaceRole,
 ) -> ApiResult<DesignArtifact> {
     let a = svc.store().require_artifact(id).await?;
-    crate::auth::require_ws_role(ctx, user, &a.workspace_id, role).await?;
+    require_ws_role(ctx, user, &a.workspace_id, role).await?;
     Ok(a)
 }
 
@@ -2205,16 +2221,16 @@ fn new_turn(
 /// artifact's working copy. Answers 202 once the session is live (or after
 /// `READY_WAIT`); completion arrives as `design_assist_updated` (+ the usual
 /// `design_artifact_updated` for a committed version).
-pub async fn start_assist(
+pub async fn start_assist<C: DesignAssistCtx>(
     Path(id): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<DesignAssistReq>,
 ) -> ApiResult<(StatusCode, Json<DesignAssistTurn>)> {
     let prompt = clean_prompt(&req.prompt)?;
     let mode = Mode::parse(req.mode.as_deref())?;
     let selection = clean_selection(req.selection)?;
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
     let (head, base_doc) = svc.head_content(&a).await?;
     let adapter = adapter_for(&a.format, &base_doc)?;
@@ -2232,7 +2248,7 @@ pub async fn start_assist(
     let turn_id = new_id();
     let guard = try_busy(&a.id, format!("turn:{turn_id}"))?;
 
-    let ws = ctx.workspaces.get(&a.workspace_id).await?;
+    let ws = ctx.workspaces().get(&a.workspace_id).await?;
     let provider = pick_provider(&ctx, &ws, req.provider.as_deref()).await;
     let existing = stored_session(&a.meta, &provider);
     let ctxin = assemble(
@@ -2281,7 +2297,7 @@ pub async fn start_assist(
         &ctxin.rules,
     );
     put_turn(turn.clone());
-    emit_turn(&ctx.events, &turn);
+    emit_turn(ctx.events(), &turn);
 
     let (tx, rx) = oneshot::channel();
     let base_source = adapter.agent_source(&base_doc);
@@ -2322,12 +2338,12 @@ pub async fn start_assist(
 }
 
 /// `GET /design/artifacts/{id}/assist` — recent turns (in memory; newest first).
-pub async fn list_turns(
+pub async fn list_turns<C: DesignAssistCtx>(
     Path(id): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<DesignAssistTurn>>> {
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Viewer).await?;
     Ok(Json(turns_for(&a.id)))
 }
@@ -2335,9 +2351,9 @@ pub async fn list_turns(
 /// `POST /design/artifacts/{id}/variants` — n (≤ 4) parallel fresh turns, each
 /// committed on `variant/<run>/<k>` (head untouched). `design_variants_ready`
 /// fires once every turn finished.
-pub async fn start_variants(
+pub async fn start_variants<C: DesignAssistCtx>(
     Path(id): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<DesignVariantsReq>,
 ) -> ApiResult<(StatusCode, Json<DesignVariantRun>)> {
@@ -2350,13 +2366,13 @@ pub async fn start_variants(
         ))));
     }
     let selection = clean_selection(req.selection)?;
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
     let (head, base_doc) = svc.head_content(&a).await?;
     let adapter = adapter_for(&a.format, &base_doc)?;
     let run_id = new_id();
     let guard = try_busy(&a.id, format!("variants:{run_id}"))?;
-    let ws = ctx.workspaces.get(&a.workspace_id).await?;
+    let ws = ctx.workspaces().get(&a.workspace_id).await?;
     let default_provider = pick_provider(&ctx, &ws, req.provider.as_deref()).await;
     let ctxin = assemble(
         &ctx,
@@ -2434,7 +2450,7 @@ pub async fn start_variants(
             &ctxin.rules,
         );
         put_turn(turn.clone());
-        emit_turn(&ctx.events, &turn);
+        emit_turn(ctx.events(), &turn);
         turns.push(turn);
         jobs.push(TurnJob {
             ctx: ctx.clone(),
@@ -2465,7 +2481,7 @@ pub async fn start_variants(
         });
     }
 
-    let events = ctx.events.clone();
+    let events = ctx.events().clone();
     let (ws_id, aid, rid, base) = (
         a.workspace_id.clone(),
         a.id.clone(),
@@ -2508,12 +2524,12 @@ pub async fn start_variants(
 
 /// `GET /design/artifacts/{id}/variants` — the artifact's variant runs,
 /// newest first (≤ 10): persisted versions + live turn states.
-pub async fn list_variant_runs(
+pub async fn list_variant_runs<C: DesignAssistCtx>(
     Path(id): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<DesignVariantRun>>> {
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Viewer).await?;
     let versions = svc
         .store()
@@ -2600,14 +2616,14 @@ pub async fn list_variant_runs(
 /// `POST /design/artifacts/{id}/variants/{version}/accept` — fast-forward main
 /// to the variant, record `variant_accepted` / `variant_rejected`, then run a
 /// learning pass in the background (suggest-only).
-pub async fn accept_variant(
+pub async fn accept_variant<C: DesignAssistCtx>(
     Path((id, version)): Path<(Id, String)>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     body: Option<Json<AcceptVariantReq>>,
 ) -> ApiResult<Json<DesignVariantAcceptResp>> {
     let force = body.map(|Json(b)| b.force).unwrap_or(false);
-    let svc = crate::design_hall::service(&ctx);
+    let svc = ctx.design();
     let a = load_editable(&ctx, &svc, &user, &id, WorkspaceRole::Editor).await?;
     if let Some(b) = busy_of(&a.id) {
         return Err(ApiError(Error::Conflict(format!(
@@ -2637,8 +2653,11 @@ pub async fn accept_variant(
 // Learning v1
 // ---------------------------------------------------------------------------
 
-async fn workspace_candidates(ctx: &ServerCtx, ws_id: &Id) -> Result<Vec<RuleCandidate>, Error> {
-    let svc = crate::design_hall::service(ctx);
+async fn workspace_candidates<C: DesignAssistCtx>(
+    ctx: &C,
+    ws_id: &Id,
+) -> Result<Vec<RuleCandidate>, Error> {
+    let svc = ctx.design();
     let since = otto_design::store::stamp(Utc::now() - chrono::Duration::days(LEARN_LOOKBACK_DAYS));
     let sigs = svc
         .store()
@@ -2654,11 +2673,11 @@ async fn workspace_candidates(ctx: &ServerCtx, ws_id: &Id) -> Result<Vec<RuleCan
 }
 
 /// Extract candidates and propose the ready ones (unless learning is `off`).
-async fn run_learning_pass(
-    ctx: &ServerCtx,
+async fn run_learning_pass<C: DesignAssistCtx>(
+    ctx: &C,
     ws_id: &Id,
 ) -> Result<(String, otto_improve::DesignLearnOutcome, Vec<RuleCandidate>), Error> {
-    let ws = ctx.workspaces.get(ws_id).await?;
+    let ws = ctx.workspaces().get(ws_id).await?;
     let mode = learning_mode(&ws.settings).to_string();
     let candidates = workspace_candidates(ctx, ws_id).await?;
     if mode == "off" {
@@ -2675,11 +2694,11 @@ async fn run_learning_pass(
         })
         .collect();
     let outcome = ctx
-        .improve_engine
+        .improve_engine()
         .learn_design_rules(ws_id, &proposals)
         .await?;
     if !outcome.proposed.is_empty() {
-        let _ = ctx.events.send(Event::DesignLearningUpdate {
+        let _ = ctx.events().send(Event::DesignLearningUpdate {
             workspace_id: ws_id.clone(),
             kind: "rule_proposed".into(),
             signal_id: None,
@@ -2707,14 +2726,14 @@ fn learned_edit(e: &otto_core::domain::ImprovementEdit) -> DesignLearnedEdit {
 
 /// `GET /design/learned?workspace_id=` — active rules (with evidence), the
 /// pending proposals, the decision history and the current candidates.
-pub async fn get_learned(
-    State(ctx): State<ServerCtx>,
+pub async fn get_learned<C: DesignAssistCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Query(q): Query<LearnedQuery>,
 ) -> ApiResult<Json<DesignLearnedResp>> {
-    crate::auth::require_ws_role(&ctx, &user, &q.workspace_id, WorkspaceRole::Viewer).await?;
-    let ws = ctx.workspaces.get(&q.workspace_id).await?;
-    let engine = &ctx.improve_engine;
+    require_ws_role(&ctx, &user, &q.workspace_id, WorkspaceRole::Viewer).await?;
+    let ws = ctx.workspaces().get(&q.workspace_id).await?;
+    let engine = ctx.improve_engine();
     let path = engine.design_skill_path(&ws.id).await?;
     let lines = engine.design_rules_active(&ws.id).await?;
     let edits = engine.design_rule_edits(&ws.id).await?;
@@ -2760,12 +2779,12 @@ pub async fn get_learned(
 
 /// `POST /design/learned/extract {workspace_id}` — run the extractor now and
 /// propose the ready candidates as pending edits (suggest-only).
-pub async fn extract_learned(
-    State(ctx): State<ServerCtx>,
+pub async fn extract_learned<C: DesignAssistCtx>(
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<LearnExtractReq>,
 ) -> ApiResult<Json<DesignLearnExtractResp>> {
-    crate::auth::require_ws_role(&ctx, &user, &req.workspace_id, WorkspaceRole::Editor).await?;
+    require_ws_role(&ctx, &user, &req.workspace_id, WorkspaceRole::Editor).await?;
     let (mode, outcome, candidates) = run_learning_pass(&ctx, &req.workspace_id).await?;
     Ok(Json(DesignLearnExtractResp {
         mode,
@@ -2847,14 +2866,24 @@ mod tests {
 
     #[test]
     fn documents_are_validated_per_format() {
-        assert!(validate_doc("html", b"<h1>x</h1>").is_ok());
-        assert!(validate_doc("excalidraw", b"[1]").is_err());
+        // The host's deep check (otto-server's scene3d schema — its own tests
+        // cover the schema) runs after the cheap per-encoding ones.
+        let no_deep = |_: &str, _: &[u8]| Ok(());
+        let deep_rejects = |f: &str, _: &[u8]| Err(Error::Invalid(format!("deep {f}")));
+        assert!(validate_doc("html", b"<h1>x</h1>", no_deep).is_ok());
+        assert!(validate_doc("excalidraw", b"[1]", no_deep).is_err());
         assert!(validate_doc(
             "scene3d",
-            br#"{"type":"otto-scene3d","version":1,"objects":[]}"#
+            br#"{"type":"otto-scene3d","version":1,"objects":[]}"#,
+            no_deep
         )
         .is_ok());
-        assert!(validate_doc("scene3d", br#"{"type":"otto-scene3d","version":9}"#).is_err());
+        assert!(validate_doc(
+            "scene3d",
+            br#"{"type":"otto-scene3d","version":1,"objects":[]}"#,
+            deep_rejects
+        )
+        .is_err());
     }
 
     #[test]

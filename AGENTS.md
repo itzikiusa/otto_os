@@ -53,11 +53,13 @@ Otto.app (Tauri / otto-desktop)
 | `otto-issues` | Jira / Confluence integration |
 | `otto-channels` | Slack / Telegram bridges |
 | `otto-improve` | Self-improvement engine |
+| `otto-insights` | Insights — opt-in catch-up scheduler + reports/config/run API that runs the `insights` skill in a headless agent session (behind `InsightsCtx`) |
 | `otto-context` | Context assembly |
 | `otto-memory` | Workspace-scoped agent knowledge store (keyword/FTS5 recall; no embeddings) |
 | `otto-vault` | Vault docs home — file-backed Obsidian-parity markdown vaults + OKF (derived SQLite index: notes, links, tags, FTS, graph) |
-| `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
+| `otto-canvas` | Canvas scene CRUD (file-backed visual scenes) + the agent-assist engine (`assist.rs`; the host runs the agent turn via `CanvasAssistCtx`) |
 | `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
+| `otto-design-assist` | Design Hall agent-assist engine — assist turns, variants, learned team rules (the host runs the agent turn via `DesignAssistCtx`; keeps `otto-design` free of session/agent deps) |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
