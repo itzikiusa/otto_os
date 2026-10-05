@@ -2871,10 +2871,17 @@ mod tests {
         let out = session_cwd(&fallback);
         let root = std::env::temp_dir().join(SCRATCH_ROOT);
         assert!(std::path::Path::new(&out).starts_with(&root), "{out}");
-        // A zero max-age sweep removes it (age > 0 once any time has passed).
+        let _ = std::fs::remove_dir_all(&out);
+        // The sweep removes children older than max-age (private root, so
+        // parallel tests' fresh dirs are never touched).
+        let mine = tempfile::tempdir().unwrap();
+        let child = mine.path().join("old");
+        std::fs::create_dir_all(&child).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        sweep_stale_scratch(&root, std::time::Duration::from_millis(1));
-        assert!(!std::path::Path::new(&out).exists(), "stale scratch swept");
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_secs(3600));
+        assert!(child.exists(), "fresh scratch kept");
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_millis(1));
+        assert!(!child.exists(), "stale scratch swept");
     }
 
     #[test]
