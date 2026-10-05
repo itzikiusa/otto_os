@@ -245,7 +245,7 @@ test('Kafka schema tablet gives versions usable width and supports keyboard navi
   await expect(page.locator('.schema .view .payload')).toContainText('customer_identifier');
   mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/schema-tablet.png`});
   const width=await page.locator('.schema .view').evaluate(el=>el.getBoundingClientRect().width);expect(width).toBeGreaterThan(300);
-  const tabs=page.getByRole('tablist',{name:'Subject views'});await expect(tabs).toHaveAttribute('tabindex','-1');await tabs.getByRole('tab',{name:'Schema',exact:true}).focus();await page.keyboard.press('ArrowLeft');await expect(tabs.getByRole('tab',{name:'Versions & Compat'})).toBeFocused();
+  const tabs=page.getByRole('tablist',{name:'Subject views'});await tabs.getByRole('tab',{name:'Schema',exact:true}).focus();await page.keyboard.press('ArrowLeft');await expect(tabs.getByRole('tab',{name:'Versions & Compat'})).toBeFocused();
   await expect(page.getByText('Synthetic versions unavailable',{exact:true})).toBeVisible();fail=false;await page.locator('.svp').getByRole('button',{name:'Retry',exact:true}).click();
   await page.getByRole('button',{name:'Show diff v1 → v2'}).click();await expect(page.locator('.diff-section')).toContainText('customer_identifier');
   await page.locator('.compat-input').fill(schema);await page.getByRole('button',{name:'Check',exact:true}).click();await expect(page.locator('.compat-result')).toHaveText('Compatible');expect(checked).toEqual({schema});await expectNoHorizontalOverflow(page);

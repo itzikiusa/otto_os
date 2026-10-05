@@ -2,7 +2,7 @@
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
@@ -109,9 +109,14 @@
       {#if selected}
         <div class="view-head">
           <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs" role="tablist" aria-label="Subject views" tabindex="-1" onkeydown={onTabKey}>
-            <button class:on={!showVersions} role="tab" aria-selected={!showVersions} tabindex={showVersions ? -1 : 0} onclick={() => (showVersions = false)}>Schema</button>
-            <button class:on={showVersions} role="tab" aria-selected={showVersions} tabindex={showVersions ? 0 : -1} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
+          <div class="view-tabs">
+            <Tabs
+              label="Subject views"
+              size="s"
+              tabs={[{ id: 'schema', label: 'Schema' }, { id: 'versions', label: 'Versions & Compat' }]}
+              value={showVersions ? 'versions' : 'schema'}
+              onchange={(id) => (showVersions = id === 'versions')}
+            />
           </div>
         </div>
         {#if showVersions}
@@ -194,22 +199,10 @@
     word-break: break-all;
   }
   .view-tabs {
-    display: flex;
-    gap: 2px;
     margin-inline-start: auto;
   }
-  .view-tabs button {
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    padding: 6px 10px;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-  }
-  .view-tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .view-tabs :global(.otabs) {
+    border-block-end: 0;
   }
   .payload {
     flex: 1;
