@@ -552,3 +552,26 @@ fn adoption_keeps_a_grid_taller_than_the_restore_bounds() {
         !pid_alive(holder_pid)
     });
 }
+
+/// Review S1-20: a resize whose holder write fails must leave the mirror at
+/// its old size — otherwise every later identical resize is a "same size"
+/// no-op and the PTY and the mirror stay out of sync.
+#[test]
+fn failed_held_resize_keeps_the_mirror_at_the_old_size() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec cat"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    h.simulate_holder_reconnecting();
+    h.resize(90, 30).expect_err("no connection to send the resize on");
+    assert_eq!(h.size(), (80, 24), "mirror reverted");
+}
