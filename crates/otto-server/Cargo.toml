@@ -34,6 +34,8 @@ tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 otto-core.workspace = true
 otto-state.workspace = true
+# Scheduled tasks + Goal Loops engines (glue: src/automation_ctx.rs).
+otto-automation.workspace = true
 otto-rbac.workspace = true
 otto-netguard.workspace = true
 tokio.workspace = true

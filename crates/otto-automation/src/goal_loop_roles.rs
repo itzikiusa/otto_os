@@ -1,6 +1,7 @@
 //! Provider-aware role turns. Role slots follow executor slots, preserving their
 //! stable retry indices while retaining every role session for reload/history.
-use crate::state::ServerCtx;
+use crate::agent::RoleTurn;
+use crate::AutomationCtx;
 use otto_core::domain::{GoalLoop, GoalLoopRoleCfg, LoopAgentState};
 use otto_core::{Error, Id, Result};
 use std::sync::atomic::Ordering;
@@ -19,7 +20,7 @@ fn valid_result(text: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     iter_id: &Id,
     name: &str,
@@ -28,8 +29,8 @@ pub async fn run(
     cwd: &str,
     budget: u64,
 ) -> Result<String> {
-    let workspace = ctx.workspaces.get(&loop_.workspace_id).await?;
-    let user = otto_state::UsersRepo::new(ctx.pool.clone())
+    let workspace = ctx.workspaces().get(&loop_.workspace_id).await?;
+    let user = otto_state::UsersRepo::new(ctx.pool().clone())
         .get(&loop_.created_by)
         .await?;
     let provider = ctx
@@ -45,7 +46,7 @@ pub async fn run(
         output_summary: None,
     };
     let index = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .append_iter_agent(iter_id, &state)
         .await?;
     let dir = tempfile::Builder::new()
@@ -57,64 +58,41 @@ pub async fn run(
     let prompt = format!("{prompt}\n\nExecution policy: this role is read-only except for its result file. Do not edit source, stage, commit, push, publish or send messages.\n\nFinally encode your full response as a JSON object with one string field named result. Write the complete JSON to {}, then atomically rename it to {}. A chat reply alone does not finish the turn.", temporary.display(), output.display());
     let meta = serde_json::json!({"source":"goal_loop", "loop_id":loop_.id,
         "role":name, "model":role.model});
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let opts = crate::agent_session::TurnOpts {
-        done_file: Some(output),
-        done_file_validator: Some(valid_result),
-        ..Default::default()
-    };
-    let handle = ctx.goal_loops.lock().unwrap().get(&loop_.id).cloned();
+    let handle = ctx.goal_loops().lock().unwrap().get(&loop_.id).cloned();
     // Parks on the loop flag bell (perf W8) instead of a 100 ms poll.
     let cancelled = crate::goal_loop::until_flag(|| {
         handle
             .as_ref()
             .is_some_and(|h| h.cancel.load(Ordering::Relaxed) || h.paused.load(Ordering::Relaxed))
     });
-    let turn = async {
-        crate::agent_session::run_session_turn_with(
-            ctx,
-            &workspace,
-            &user,
-            None,
-            name,
-            cwd,
-            &provider,
-            meta,
-            &prompt,
-            Duration::from_secs(budget),
-            opts,
-            |id| {
-                let _ = ready_tx.send(id.clone());
-            },
-        )
-        .await
-        .map(|(text, _)| text)
-        .map_err(|e| format!("{e:?}"))
+    let turn = RoleTurn {
+        workspace: &workspace,
+        user: &user,
+        title: name,
+        cwd,
+        provider: &provider,
+        meta,
+        prompt: &prompt,
+        budget: Duration::from_secs(budget),
+        done_file: output,
+        done_file_validator: valid_result,
     };
-    let result = crate::review_summarizer::drive(
-        turn,
-        ready_rx,
-        Duration::from_secs(budget),
-        cancelled,
-        |id| {
+    let result = ctx
+        .run_role_turn(turn, cancelled, |id| {
             state.session_id = Some(id);
             state.status = "running".into();
             let state = state.clone();
             async move {
-                ctx.goal_loops_repo
+                ctx.goal_loops_repo()
                     .set_iter_agent_at(iter_id, index, &state)
                     .await
                     .map_err(|e| e.to_string())
             }
-        },
-        |id| async move {
-            crate::review_session::stop_review_sessions(&ctx.manager, &[id]).await;
-        },
-    )
-    .await;
+        })
+        .await;
     state.status = if result.is_ok() { "done" } else { "error" }.into();
     state.note = result.as_ref().err().cloned().unwrap_or_default();
-    ctx.goal_loops_repo
+    ctx.goal_loops_repo()
         .set_iter_agent_at(iter_id, index, &state)
         .await?;
     let text = result.map_err(Error::Upstream)?;
@@ -129,7 +107,7 @@ pub async fn run(
 /// Definition happens before a loop exists, but still uses the configured
 /// provider and a managed, inspectable session with bounded cleanup.
 pub async fn define(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     workspace: &otto_core::domain::Workspace,
     user: &otto_core::domain::User,
     role: &GoalLoopRoleCfg,
@@ -145,45 +123,22 @@ pub async fn define(
     let provider = ctx
         .resolve_provider(Some(workspace), Some(&role.provider))
         .await?;
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let opts = crate::agent_session::TurnOpts {
-        done_file: Some(output),
-        done_file_validator: Some(valid_result),
-        ..Default::default()
+    let turn = RoleTurn {
+        workspace,
+        user,
+        title: "Goal definer",
+        cwd,
+        provider: &provider,
+        meta: serde_json::json!({"source":"goal_loop", "role":"definer", "model":role.model}),
+        prompt: &prompt,
+        budget: Duration::from_secs(300),
+        done_file: output,
+        done_file_validator: valid_result,
     };
-    let turn = async {
-        crate::agent_session::run_session_turn_with(
-            ctx,
-            workspace,
-            user,
-            None,
-            "Goal definer",
-            cwd,
-            &provider,
-            serde_json::json!({"source":"goal_loop", "role":"definer", "model":role.model}),
-            &prompt,
-            Duration::from_secs(300),
-            opts,
-            |id| {
-                let _ = ready_tx.send(id.clone());
-            },
-        )
+    let result = ctx
+        .run_role_turn(turn, std::future::pending(), |_| async { Ok(()) })
         .await
-        .map(|(text, _)| text)
-        .map_err(|e| format!("{e:?}"))
-    };
-    let result = crate::review_summarizer::drive(
-        turn,
-        ready_rx,
-        Duration::from_secs(300),
-        std::future::pending(),
-        |_| async { Ok(()) },
-        |id| async {
-            crate::review_session::stop_review_sessions(&ctx.manager, &[id]).await;
-        },
-    )
-    .await
-    .map_err(Error::Upstream)?;
+        .map_err(Error::Upstream)?;
     let value: serde_json::Value =
         serde_json::from_str(&result).map_err(|e| Error::Upstream(e.to_string()))?;
     value["result"]

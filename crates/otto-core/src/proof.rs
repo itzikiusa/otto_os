@@ -2282,3 +2282,12 @@ mod tests {
         assert!(h2.contains("&lt;script&gt;"));
     }
 }
+
+/// One captured command run (`sh -c <cmd>`): combined output, exit code, wall
+/// time. Produced by the proof runner and goal-loop verification commands.
+pub struct CmdRun {
+    pub success: bool,
+    pub exit_code: i32,
+    pub output: String,
+    pub duration_ms: u64,
+}

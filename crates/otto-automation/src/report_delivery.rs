@@ -15,7 +15,7 @@ use otto_channels::improve_notify::build_adapter;
 use otto_channels::{Adapter, GmailSender, WebhookAdapter};
 use otto_state::{EmailSendersRepo, IntegrationsRepo};
 
-use crate::state::ServerCtx;
+use crate::AutomationCtx;
 
 /// Extract the short summary from a report: everything up to the first `---`/`***`
 /// horizontal rule, else the first ~800 characters. Always trimmed.
@@ -85,7 +85,7 @@ pub async fn write_report(abs: &std::path::Path, report: &str) -> Result<()> {
 /// redacted (the report leaves the machine). Best-effort by contract: the
 /// report is stored regardless.
 pub async fn deliver_destination(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     workspace_id: &str,
     owner: Option<&str>,
     name: &str,
@@ -116,7 +116,7 @@ pub async fn deliver_destination(
 }
 
 async fn deliver_channel(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     workspace_id: &str,
     destination: &Value,
     kind: &str,
@@ -128,7 +128,7 @@ async fn deliver_channel(
         "telegram" => Channel::Telegram,
         _ => return (false, Some(format!("bad channel '{kind}'"))),
     };
-    let integ = match IntegrationsRepo::new(ctx.pool.clone())
+    let integ = match IntegrationsRepo::new(ctx.pool().clone())
         .get(&workspace_id.to_string(), channel)
         .await
     {
@@ -154,7 +154,7 @@ async fn deliver_channel(
     }
     // One adapter (one Keychain read, the shared HTTP pool) for the message and
     // its attachment.
-    let Some(adapter) = build_adapter(&ctx.secrets, &integ).await else {
+    let Some(adapter) = build_adapter(ctx.secrets(), &integ).await else {
         return (
             false,
             Some("channel send failed (bot token missing or API error)".into()),
@@ -176,7 +176,7 @@ async fn deliver_channel(
 }
 
 async fn deliver_email(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     owner: Option<&str>,
     destination: &Value,
     msg: &str,
@@ -195,12 +195,12 @@ async fn deliver_email(
             Some("no owner to resolve a verified email sender".into()),
         );
     };
-    let sender = match EmailSendersRepo::new(ctx.pool.clone()).get(owner).await {
+    let sender = match EmailSendersRepo::new(ctx.pool().clone()).get(owner).await {
         Ok(Some(s)) if s.verified_at.is_some() => s,
         Ok(_) => return (false, Some("no verified email sender for the owner".into())),
         Err(e) => return (false, Some(e.to_string())),
     };
-    let pw = match otto_core::secrets::get_async(&ctx.secrets, &sender.secret_ref).await {
+    let pw = match otto_core::secrets::get_async(ctx.secrets(), &sender.secret_ref).await {
         Ok(Some(p)) => p,
         _ => {
             return (

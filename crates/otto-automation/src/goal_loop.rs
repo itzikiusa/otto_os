@@ -4,8 +4,8 @@
 //! goal is met or a hard limit (iterations / active time) is hit.
 //!
 //! Reuse is plumbing-only: executors run as live, openable [`SessionManager`]
-//! sessions (review-style spawn/inject/watch via [`crate::agent_run`] +
-//! [`crate::review_session`]); the planner/evaluator/digester/definer are
+//! sessions (review-style spawn/inject/watch via the shared agent-run runner
+//! behind [`crate::AutomationCtx`]); the planner/evaluator/digester/definer are
 //! managed provider-aware turns with absolute deadlines. The
 //! concurrency/safety model is OURS: v1 runs executors SEQUENTIALLY on one
 //! worktree (no git-index races), the evaluator ground-truths command criteria,
@@ -26,10 +26,9 @@ use otto_core::domain::{
 use otto_core::event::Event;
 use otto_core::{Error, Id, Result};
 
-use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome, WatchStatus};
+use crate::agent::{FailReason, RunOutcome, WatchStatus};
 use crate::goal_loop_parse::{parse_evaluation, parse_executor_result};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
-use crate::state::ServerCtx;
+use crate::AutomationCtx;
 
 // --- Registry --------------------------------------------------------------
 
@@ -74,12 +73,12 @@ const FLAG_SAFETY: Duration = Duration::from_secs(10);
 
 /// Wake every [`until_flag`] waiter to re-check its condition. Call after
 /// raising a loop control flag.
-pub(crate) fn ring_flags() {
+pub fn ring_flags() {
     flag_bell().notify_waiters();
 }
 
 /// Resolve once `raised()` is true — immediately when it already is.
-pub(crate) async fn until_flag(raised: impl Fn() -> bool) {
+pub async fn until_flag(raised: impl Fn() -> bool) {
     until_flag_every(raised, FLAG_SAFETY).await
 }
 
@@ -151,20 +150,20 @@ const HARD_CAP: Duration = Duration::from_secs(4 * 60 * 60);
 /// Start (or resume) a loop: provision its worktree, mark it Running, register
 /// the control handle (cancelling any prior controller), and spawn the
 /// controller task. Errors (e.g. bad repo) surface to the caller.
-pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
-    ctx.goal_loops.require_idle(loop_id)?;
-    let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
+pub async fn start_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
+    ctx.goal_loops().require_idle(loop_id)?;
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
     let (branch, wt, base) = crate::goal_loop_workspace::provision_worktree(ctx, &loop_).await?;
-    ctx.goal_loops_repo
+    ctx.goal_loops_repo()
         .set_branch(loop_id, &branch, &wt, &base)
         .await?;
-    ctx.goal_loops_repo
+    ctx.goal_loops_repo()
         .mark_running(loop_id, Utc::now())
         .await?;
 
     let handle = LoopHandle::new();
     {
-        let mut reg = ctx.goal_loops.lock().unwrap();
+        let mut reg = ctx.goal_loops().lock().unwrap();
         if let Some(old) = reg.insert(loop_id.to_string(), handle.clone()) {
             old.cancel.store(true, Ordering::Relaxed);
             ring_flags();
@@ -192,12 +191,12 @@ pub async fn start_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
 /// active window (see `GoalLoopsRepo::pause_running`), then the controller is
 /// flagged to idle. A loop the controller already finished/blocked is left as
 /// is — pausing must never overwrite a terminal or Blocked status.
-pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
-    if !ctx.goal_loops_repo.pause_running(loop_id).await? {
+pub async fn pause_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
+    if !ctx.goal_loops_repo().pause_running(loop_id).await? {
         return Ok(());
     }
-    let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
-    if let Some(h) = ctx.goal_loops.lock().unwrap().get(loop_id) {
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
+    if let Some(h) = ctx.goal_loops().lock().unwrap().get(loop_id) {
         h.paused.store(true, Ordering::Relaxed);
         h.interrupted.store(true, Ordering::Relaxed);
         ring_flags();
@@ -217,8 +216,8 @@ pub async fn pause_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
 
 /// Stop a loop: cancel the controller or finalize directly. Execution resources
 /// are released while tracked and untracked working files remain intact.
-pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
-    let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
+pub async fn stop_loop(ctx: &impl AutomationCtx, loop_id: &Id) -> Result<()> {
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
     if loop_.status.is_terminal() {
         return Ok(());
     }
@@ -226,7 +225,7 @@ pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
     // it finalizes itself (the cancel path checks `is_current`, so it still
     // sees its own handle) and deregisters on exit.
     let had_controller = {
-        let reg = ctx.goal_loops.lock().unwrap();
+        let reg = ctx.goal_loops().lock().unwrap();
         match reg.get(&loop_id.to_string()) {
             Some(h) => {
                 h.cancel.store(true, Ordering::Relaxed);
@@ -256,12 +255,12 @@ pub async fn stop_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<()> {
 /// (Best-effort convenience mirroring review's per-agent retry; the controller's
 /// own recovery loop already retries within an attempt budget.)
 pub async fn retry_executor(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_id: &Id,
     iter_idx: u32,
     agent_index: usize,
 ) -> Result<()> {
-    let loop_ = ctx.goal_loops_repo.get(loop_id).await?;
+    let loop_ = ctx.goal_loops_repo().get(loop_id).await?;
     // Only when Blocked: a Running loop's controller may be actively running this
     // very executor slot, and a second run would create a duplicate session and
     // race the `agents_json[index]` write. (Blocked has no live controller.)
@@ -270,14 +269,17 @@ pub async fn retry_executor(
             "can only retry an executor while the loop is blocked".into(),
         ));
     }
-    let iter = ctx.goal_loops_repo.get_iteration(loop_id, iter_idx).await?;
+    let iter = ctx
+        .goal_loops_repo()
+        .get_iteration(loop_id, iter_idx)
+        .await?;
     let exec = loop_
         .config
         .executors
         .get(agent_index)
         .cloned()
         .ok_or_else(|| Error::NotFound("executor".into()))?;
-    ctx.goal_loops.require_idle(loop_id)?;
+    ctx.goal_loops().require_idle(loop_id)?;
     if iter_idx != loop_.current_iteration {
         return Err(Error::Invalid(
             "only the current iteration can be retried".into(),
@@ -292,9 +294,9 @@ pub async fn retry_executor(
     let mut ledger = loop_.ledger.clone();
     ledger.verifications.clear();
     ledger.review_passed = false;
-    ctx.goal_loops_repo.set_ledger(loop_id, &ledger).await?;
+    ctx.goal_loops_repo().set_ledger(loop_id, &ledger).await?;
     // Old acceptance applies to old work. A retry must earn a fresh evaluation.
-    ctx.goal_loops_repo
+    ctx.goal_loops_repo()
         .set_iter_evaluation(
             &iter.id,
             &fallback_eval("executor retried; fresh evaluation required"),
@@ -306,11 +308,11 @@ pub async fn retry_executor(
             return Err(Error::Internal(error.to_string()));
         }
     }
-    ctx.goal_loops_repo
+    ctx.goal_loops_repo()
         .mark_running(loop_id, Utc::now())
         .await?;
     let handle = LoopHandle::new();
-    ctx.goal_loops
+    ctx.goal_loops()
         .lock()
         .unwrap()
         .insert(loop_id.clone(), handle.clone());
@@ -375,11 +377,11 @@ pub async fn retry_executor(
 
 // --- Controller ------------------------------------------------------------
 
-async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
+async fn controller(ctx: impl AutomationCtx, loop_id: Id, handle: LoopHandle) {
     let started = Instant::now();
     // Resume continuity: seed prior evaluation from the last iteration if any.
     let mut prior_eval: Option<GoalLoopEvaluation> = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .get_detail(&loop_id)
         .await
         .ok()
@@ -405,7 +407,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             return;
         }
         if handle.paused.load(Ordering::Relaxed) {
-            if let Ok(loop_) = ctx.goal_loops_repo.get(&loop_id).await {
+            if let Ok(loop_) = ctx.goal_loops_repo().get(&loop_id).await {
                 cleanup_executor_sessions(&ctx, &loop_.workspace_id, &loop_id).await;
             }
             deregister(&ctx, &loop_id, &handle);
@@ -425,7 +427,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         }
 
         // Re-read fresh state (picks up raised limits / latest digest).
-        let mut loop_ = match ctx.goal_loops_repo.get(&loop_id).await {
+        let mut loop_ = match ctx.goal_loops_repo().get(&loop_id).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(loop = %loop_id, "goal-loop: load failed, stopping: {e}");
@@ -486,7 +488,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         // ---- new iteration (or final human verification of the current one) ----
         let context_in = loop_.context_digest.clone();
         let created = if verification_only {
-            ctx.goal_loops_repo
+            ctx.goal_loops_repo()
                 .get_iteration(&loop_id, loop_.current_iteration)
                 .await
         } else {
@@ -494,12 +496,16 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             loop_.ledger.verifications.clear();
             loop_.ledger.review_passed = false;
             let _ = ctx
-                .goal_loops_repo
+                .goal_loops_repo()
                 .set_ledger(&loop_id, &loop_.ledger)
                 .await;
-            match ctx.goal_loops_repo.bump_iterations_started(&loop_id).await {
+            match ctx
+                .goal_loops_repo()
+                .bump_iterations_started(&loop_id)
+                .await
+            {
                 Ok(idx) => {
-                    ctx.goal_loops_repo
+                    ctx.goal_loops_repo()
                         .add_iteration(&loop_id, &ws, idx, &context_in, &loop_.config.executors)
                         .await
                 }
@@ -551,7 +557,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 }
             }
         };
-        let _ = ctx.goal_loops_repo.set_iter_plan(&iter.id, &plan).await;
+        let _ = ctx.goal_loops_repo().set_iter_plan(&iter.id, &plan).await;
         if stop_requested(&handle) {
             continue;
         }
@@ -559,7 +565,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         // ---- EXECUTE (sequential) ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Executing, idx).await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .update_iteration_status(&iter.id, "executing", false)
             .await;
         let mut exec_summaries: Vec<String> = if verification_only {
@@ -608,7 +614,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         // ---- EVALUATE ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Evaluating, idx).await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .update_iteration_status(&iter.id, "evaluating", false)
             .await;
         let (mut eval, verify_caps) = evaluate(
@@ -640,14 +646,14 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
             });
         }
         ledger.next_action = eval.feedback.clone();
-        let _ = ctx.goal_loops_repo.set_ledger(&loop_id, &ledger).await;
+        let _ = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .set_iter_evaluation(&iter.id, &eval)
             .await;
         let progress = eval.progress_pct.min(100);
         let applied = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .update_running_runtime(&loop_id, GoalLoopPhase::Evaluating, idx, progress)
             .await
             .unwrap_or(false);
@@ -666,7 +672,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         // ---- DIGEST ----
         set_phase(&ctx, &ws, &loop_, GoalLoopPhase::Digesting, idx).await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .update_iteration_status(&iter.id, "digesting", false)
             .await;
         let digest = run_role(
@@ -682,15 +688,15 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
         .await
         .unwrap_or(context_in);
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .set_iter_context_out(&iter.id, &digest)
             .await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .set_context_digest(&loop_id, &digest)
             .await;
         let _ = ctx
-            .goal_loops_repo
+            .goal_loops_repo()
             .update_iteration_status(&iter.id, "done", true)
             .await;
         if stop_requested(&handle) {
@@ -722,7 +728,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                         pe.feedback
                     );
                 }
-                let _ = ctx.events.send(Event::Notice {
+                let _ = ctx.events().send(Event::Notice {
                     level: "warn".into(),
                     title: "Goal loop: proof required".into(),
                     body:
@@ -755,7 +761,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                     v["approved"] == true && v["findings"].as_array().is_some_and(Vec::is_empty)
                 });
                 ledger.review_summary = review.unwrap_or_else(|e| e.to_string());
-                let _ = ctx.goal_loops_repo.set_ledger(&loop_id, &ledger).await;
+                let _ = ctx.goal_loops_repo().set_ledger(&loop_id, &ledger).await;
                 if stop_requested(&handle) {
                     continue;
                 }
@@ -794,7 +800,7 @@ async fn controller(ctx: ServerCtx, loop_id: Id, handle: LoopHandle) {
                 progress,
             );
             // Surface a free-form notice so the user knows to intervene.
-            let _ = ctx.events.send(Event::Notice {
+            let _ = ctx.events().send(Event::Notice {
                 level: "warn".into(),
                 title: "Goal loop blocked — needs input".into(),
                 body: summary.clone(),
@@ -812,8 +818,8 @@ fn stop_requested(handle: &LoopHandle) -> bool {
 
 /// True when `handle` is still the registry's current controller for this loop
 /// (i.e. a later start_loop hasn't superseded it).
-fn is_current(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) -> bool {
-    ctx.goal_loops
+fn is_current(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) -> bool {
+    ctx.goal_loops()
         .lock()
         .unwrap()
         .get(&loop_id.to_string())
@@ -821,8 +827,8 @@ fn is_current(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) -> bool {
         .unwrap_or(false)
 }
 
-fn deregister(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) {
-    let mut reg = ctx.goal_loops.lock().unwrap();
+fn deregister(ctx: &impl AutomationCtx, loop_id: &Id, handle: &LoopHandle) {
+    let mut reg = ctx.goal_loops().lock().unwrap();
     // Only remove the entry if it is still OURS (a newer start_loop may have
     // replaced it).
     if let Some(h) = reg.get(&loop_id.to_string()) {
@@ -832,13 +838,19 @@ fn deregister(ctx: &ServerCtx, loop_id: &Id, handle: &LoopHandle) {
     }
 }
 
-async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPhase, idx: u32) {
+async fn set_phase(
+    ctx: &impl AutomationCtx,
+    ws: &Id,
+    loop_: &GoalLoop,
+    phase: GoalLoopPhase,
+    idx: u32,
+) {
     // Progress comes from the ROW: `loop_` is the snapshot read at the top of
     // the iteration, and re-writing its `progress_pct` here clobbered the
     // evaluation's fresh value every iteration (the list bar jumped back, and
     // a succeeded loop was stored and shown as 0%).
     let progress = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .get(&loop_.id)
         .await
         .map(|l| l.progress_pct)
@@ -846,7 +858,7 @@ async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPh
     // Conditional on `running`: never resurrects a loop paused/stopped since
     // the controller's last stop check.
     let applied = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .update_running_runtime(&loop_.id, phase, idx, progress)
         .await
         .unwrap_or(false);
@@ -866,18 +878,18 @@ async fn set_phase(ctx: &ServerCtx, ws: &Id, loop_: &GoalLoop, phase: GoalLoopPh
 /// Mark the loop terminal (the repo write banks the open active window), preserve working files
 /// and release any lingering managed sessions.
 async fn finalize(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_id: &Id,
     status: GoalLoopStatus,
     summary: Option<&str>,
     error: Option<&str>,
 ) {
-    let loop_ = match ctx.goal_loops_repo.get(loop_id).await {
+    let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
         Ok(l) => l,
         Err(_) => return,
     };
     let _ = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .finalize(loop_id, status, summary, error)
         .await;
     // Keep the worktree even on failure/stop/success: commits are optional and
@@ -896,13 +908,13 @@ async fn finalize(
 
 /// Block the loop (awaiting user) without treating it as terminal-finished: the
 /// repo write banks the window (only if still anchored), clears it, sets Blocked. Resume re-spawns a controller.
-async fn block(ctx: &ServerCtx, loop_id: &Id, summary: &str) {
-    let loop_ = match ctx.goal_loops_repo.get(loop_id).await {
+async fn block(ctx: &impl AutomationCtx, loop_id: &Id, summary: &str) {
+    let loop_ = match ctx.goal_loops_repo().get(loop_id).await {
         Ok(l) => l,
         Err(_) => return,
     };
     let _ = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .finalize(loop_id, GoalLoopStatus::Blocked, Some(summary), None)
         .await;
     // Blocked is resumable — KEEP the worktree (and its commits) so Resume
@@ -911,8 +923,8 @@ async fn block(ctx: &ServerCtx, loop_id: &Id, summary: &str) {
 }
 
 /// List + kill all executor sessions tagged for this loop.
-pub async fn cleanup_executor_sessions(ctx: &ServerCtx, ws_id: &Id, loop_id: &Id) {
-    let sessions = match ctx.manager.list_by_workspace(ws_id).await {
+pub async fn cleanup_executor_sessions(ctx: &impl AutomationCtx, ws_id: &Id, loop_id: &Id) {
+    let sessions = match ctx.manager().list_by_workspace(ws_id).await {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -920,13 +932,13 @@ pub async fn cleanup_executor_sessions(ctx: &ServerCtx, ws_id: &Id, loop_id: &Id
         let is_ours = s.meta.get("source").and_then(|v| v.as_str()) == Some("goal_loop")
             && s.meta.get("loop_id").and_then(|v| v.as_str()) == Some(loop_id.as_str());
         if is_ours {
-            let _ = ctx.manager.kill_session(&s.id).await;
+            let _ = ctx.manager().kill_session(&s.id).await;
         }
     }
 }
 
 fn emit(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     ws: &Id,
     loop_id: &Id,
     status: GoalLoopStatus,
@@ -934,7 +946,7 @@ fn emit(
     current_iteration: u32,
     progress_pct: u32,
 ) {
-    let _ = ctx.events.send(Event::GoalLoopUpdated {
+    let _ = ctx.events().send(Event::GoalLoopUpdated {
         workspace_id: ws.clone(),
         loop_id: loop_id.clone(),
         status: status.as_str().to_string(),
@@ -948,7 +960,7 @@ fn emit(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_role(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     iter_id: &Id,
     name: &str,
@@ -1096,7 +1108,7 @@ fn digester_prompt(
 /// command-verify criterion by running its command (exit 0 = met), overriding the
 /// model. An "achieved" verdict with any unmet criterion is coerced to "continue".
 async fn evaluate(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     iter_id: &Id,
     wt: &str,
@@ -1180,7 +1192,7 @@ async fn evaluate(
 }
 
 /// One captured verify-command run: (criterion id, command, run outcome).
-type VerifyCapture = (String, String, crate::proof::CmdRun);
+type VerifyCapture = (String, String, otto_core::proof::CmdRun);
 
 /// Whether to ENFORCE machine-checked test evidence before a goal loop may
 /// finalize "achieved". Opt-in (default off) — evidence is always packaged
@@ -1197,23 +1209,23 @@ fn require_goal_loop_proof() -> bool {
 /// worktree diff a `diff` artifact, the evaluator's feedback a `self_review`, and
 /// the acceptance criteria a `review` summary. Best-effort.
 async fn assemble_goal_loop_proof(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     eval: &GoalLoopEvaluation,
     verify_caps: &[VerifyCapture],
     wt: &str,
 ) -> Option<otto_core::proof::ProofStatus> {
     use otto_core::proof::{ProofArtifactKind as K, ProofArtifactStatus as S, WorkItemKind};
-    let pack = crate::proof::gate(
-        ctx,
-        WorkItemKind::GoalLoop,
-        &loop_.id,
-        &loop_.workspace_id,
-        &loop_.definition.title,
-        &loop_.created_by,
-    )
-    .await
-    .ok()?;
+    let pack = ctx
+        .proof_gate(
+            WorkItemKind::GoalLoop,
+            &loop_.id,
+            &loop_.workspace_id,
+            &loop_.definition.title,
+            &loop_.created_by,
+        )
+        .await
+        .ok()?;
 
     // Verify-command test artifacts (machine-checked evidence).
     for (crit_id, cmd, run) in verify_caps {
@@ -1222,17 +1234,17 @@ async fn assemble_goal_loop_proof(
             "test_kind": "test", "criterion_id": crit_id,
             "exit_code": run.exit_code, "duration_ms": run.duration_ms,
         });
-        let _ = crate::proof::upsert_content_artifact(
-            ctx,
-            &pack,
-            K::Command,
-            cmd,
-            &run.output,
-            status,
-            meta,
-            "otto",
-        )
-        .await;
+        let _ = ctx
+            .proof_upsert_content_artifact(
+                &pack,
+                K::Command,
+                cmd,
+                &run.output,
+                status,
+                meta,
+                "otto",
+            )
+            .await;
     }
 
     // Working-tree diff vs the loop's base commit.
@@ -1240,17 +1252,17 @@ async fn assemble_goal_loop_proof(
         if let Ok(report) =
             tokio::fs::read_to_string(std::path::Path::new(wt).join("findings.md")).await
         {
-            let _ = crate::proof::upsert_content_artifact(
-                ctx,
-                &pack,
-                K::SelfReview,
-                "Research findings",
-                &report,
-                S::Info,
-                serde_json::json!({}),
-                "otto",
-            )
-            .await;
+            let _ = ctx
+                .proof_upsert_content_artifact(
+                    &pack,
+                    K::SelfReview,
+                    "Research findings",
+                    &report,
+                    S::Info,
+                    serde_json::json!({}),
+                    "otto",
+                )
+                .await;
         }
     } else if let Ok(diff) =
         crate::goal_loop_workspace::capture_work(wt, loop_.base_commit.as_deref()).await
@@ -1262,17 +1274,17 @@ async fn assemble_goal_loop_proof(
             "deletions": parsed.files.iter().filter_map(|f| f.deleted).sum::<u32>(),
             "includes_uncommitted": true,
         });
-        let _ = crate::proof::upsert_content_artifact(
-            ctx,
-            &pack,
-            K::Diff,
-            "Working tree diff",
-            &diff,
-            S::Info,
-            meta,
-            "otto",
-        )
-        .await;
+        let _ = ctx
+            .proof_upsert_content_artifact(
+                &pack,
+                K::Diff,
+                "Working tree diff",
+                &diff,
+                S::Info,
+                meta,
+                "otto",
+            )
+            .await;
     }
 
     // Self-review from the evaluator's feedback + rationale + per-criterion evidence.
@@ -1294,36 +1306,36 @@ async fn assemble_goal_loop_proof(
         eval.rationale,
         crit_lines.join("\n")
     );
-    let _ = crate::proof::upsert_content_artifact(
-        ctx,
-        &pack,
-        K::SelfReview,
-        "Goal-loop self-review",
-        &selfreview,
-        S::Info,
-        serde_json::json!({}),
-        "otto",
-    )
-    .await;
+    let _ = ctx
+        .proof_upsert_content_artifact(
+            &pack,
+            K::SelfReview,
+            "Goal-loop self-review",
+            &selfreview,
+            S::Info,
+            serde_json::json!({}),
+            "otto",
+        )
+        .await;
 
     // Acceptance-criteria review summary.
     let unmet = eval.criteria.iter().filter(|c| !c.met).count();
     let met = eval.criteria.len().saturating_sub(unmet);
     let rev_status = if unmet == 0 { S::Passed } else { S::Failed };
     let rev = format!("{met} of {} acceptance criteria met.", eval.criteria.len());
-    let _ = crate::proof::upsert_content_artifact(
-        ctx,
-        &pack,
-        K::Review,
-        "Acceptance criteria",
-        &rev,
-        rev_status,
-        serde_json::json!({"met": met, "unmet": unmet}),
-        "otto",
-    )
-    .await;
+    let _ = ctx
+        .proof_upsert_content_artifact(
+            &pack,
+            K::Review,
+            "Acceptance criteria",
+            &rev,
+            rev_status,
+            serde_json::json!({"met": met, "unmet": unmet}),
+            "otto",
+        )
+        .await;
 
-    crate::proof::recompute_and_emit(ctx, &pack.id)
+    ctx.proof_recompute_and_emit(&pack.id)
         .await
         .ok()
         .map(|p| p.status)
@@ -1383,7 +1395,7 @@ fn prompt_path(loop_id: &str, idx: u32, exec: usize) -> PathBuf {
 /// Returns a short result summary for the evaluator/digester.
 #[allow(clippy::too_many_arguments)]
 async fn run_executor(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     iter_id: &Id,
     idx: u32,
@@ -1397,18 +1409,13 @@ async fn run_executor(
     let timeout = Duration::from_secs(loop_.limits.per_phase_timeout_secs);
     let attempts = loop_.limits.max_attempts_per_executor.max(1);
 
-    let outcome = run_with_recovery(
-        &ctx.manager,
-        attempts,
-        &[EXECUTOR_RETRY_BACKOFF],
-        cancel,
-        |_attempt| {
+    let outcome = ctx
+        .run_with_recovery(attempts, &[EXECUTOR_RETRY_BACKOFF], cancel, |_attempt| {
             run_executor_attempt(
                 ctx, loop_, iter_id, idx, exec_index, exec, cwd, prompt, &out_path, timeout, cancel,
             )
-        },
-    )
-    .await;
+        })
+        .await;
 
     // Persist terminal state once.
     if let Some(raw) = outcome.raw.as_deref() {
@@ -1449,7 +1456,7 @@ async fn run_executor(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_executor_attempt(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
     iter_id: &Id,
     idx: u32,
@@ -1498,14 +1505,18 @@ async fn run_executor_attempt(
     };
     // We need a Workspace + user to create the session. The session manager
     // accepts the workspace by value; load it.
-    let ws = match ctx.workspaces.get(&loop_.workspace_id).await {
+    let ws = match ctx.workspaces().get(&loop_.workspace_id).await {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("goal-loop: load workspace: {e}");
             return RunOutcome::failed(None, FailReason::CreateFailed);
         }
     };
-    let session = match ctx.manager.create(&ws, &loop_.created_by, req, None).await {
+    let session = match ctx
+        .manager()
+        .create(&ws, &loop_.created_by, req, None)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("goal-loop: create executor session: {e}");
@@ -1526,26 +1537,28 @@ async fn run_executor_attempt(
     .await;
 
     if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        let _ = ctx.manager.kill_session(&sid).await;
+        let _ = ctx.manager().kill_session(&sid).await;
         return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
     }
     let work = async {
-        if wait_for_tui(&ctx.manager, &sid).await {
+        if ctx.wait_for_tui(&sid).await {
             if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-                let _ = ctx.manager.kill_session(&sid).await;
+                let _ = ctx.manager().kill_session(&sid).await;
                 return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
             }
-            let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-            tokio::time::sleep(PASTE_TO_ENTER).await;
-            let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-            let _ = ctx.manager.input(&sid, b"\r").await;
-            if !dispatched(&ctx.manager, &sid, before).await {
-                let _ = ctx.manager.input(&sid, b"\r").await;
+            let _ = ctx
+                .manager()
+                .input(&sid, &ctx.bracketed_paste(prompt))
+                .await;
+            tokio::time::sleep(ctx.paste_to_enter()).await;
+            let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+            let _ = ctx.manager().input(&sid, b"\r").await;
+            if !ctx.dispatched(&sid, before).await {
+                let _ = ctx.manager().input(&sid, b"\r").await;
             }
         }
 
-        watch_for_result(
-            &ctx.manager,
+        ctx.watch_for_result(
             &sid,
             provider,
             session.provider_session_id.as_deref(),
@@ -1586,7 +1599,7 @@ async fn run_executor_attempt(
                         None,
                     )
                     .await;
-                    let _ = ctx.goal_loops_repo.set_phase(&loop_id, phase).await;
+                    let _ = ctx.goal_loops_repo().set_phase(&loop_id, phase).await;
                     emit(
                         &ctx,
                         &ws,
@@ -1610,7 +1623,7 @@ async fn run_executor_attempt(
                 None => std::future::pending::<()>().await,
             }
         } => {
-            let _ = ctx.manager.kill_session(&sid).await;
+            let _ = ctx.manager().kill_session(&sid).await;
             RunOutcome::failed(Some(sid.clone()), FailReason::Stopped)
         }
         outcome = work => outcome,
@@ -1619,7 +1632,7 @@ async fn run_executor_attempt(
 
 #[allow(clippy::too_many_arguments)]
 async fn persist_agent(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     iter_id: &Id,
     index: usize,
     exec: &GoalLoopAgentCfg,
@@ -1638,7 +1651,7 @@ async fn persist_agent(
         output_summary,
     };
     let _ = ctx
-        .goal_loops_repo
+        .goal_loops_repo()
         .set_iter_agent_at(iter_id, index, &st)
         .await;
 }

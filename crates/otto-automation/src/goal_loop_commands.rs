@@ -1,5 +1,5 @@
 //! Bounded verification commands with cancellation and process-tree cleanup.
-use crate::proof::CmdRun;
+use otto_core::proof::CmdRun;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 

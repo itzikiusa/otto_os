@@ -20,13 +20,13 @@ use tracing::{debug, info, warn};
 use crate::cadence;
 use crate::cancel_signal::CancelSignal;
 use crate::scheduled_tasks_engine::{in_flight, run_task};
-use crate::state::ServerCtx;
+use crate::AutomationCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
 
 /// Start the supervisor. Returns its cancel signal; `cancel()` stops the loop at once
 /// (mirrors the swarm / workflow-trigger / cli-update schedulers).
-pub fn start(ctx: ServerCtx) -> CancelSignal {
+pub fn start(ctx: impl AutomationCtx) -> CancelSignal {
     let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
@@ -37,15 +37,15 @@ pub fn start(ctx: ServerCtx) -> CancelSignal {
 /// The daemon AWAITS this before serving the router and before [`start`] — run
 /// inside the spawned supervisor it raced the first manual "Run now" and could
 /// mark that brand-new run interrupted.
-pub async fn reap_interrupted(ctx: &ServerCtx) {
-    match ctx.scheduled_tasks.reap_running().await {
+pub async fn reap_interrupted(ctx: &impl AutomationCtx) {
+    match ctx.scheduled_tasks().reap_running().await {
         Ok(n) if n > 0 => info!("scheduled tasks: reaped {n} interrupted run(s) on startup"),
         Ok(_) => {}
         Err(e) => warn!("scheduled tasks: startup reap failed: {e}"),
     }
 }
 
-async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
+async fn supervise(ctx: impl AutomationCtx, cancel: CancelSignal) {
     loop {
         if cancel.is_cancelled() {
             return;
@@ -60,9 +60,9 @@ async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
+async fn tick(ctx: &impl AutomationCtx) -> otto_core::Result<()> {
     let now = Utc::now();
-    for task in ctx.scheduled_tasks.list_enabled().await? {
+    for task in ctx.scheduled_tasks().list_enabled().await? {
         // Not due → skip. Busy (a scheduled OR manual run in flight) → skip,
         // leaving the cursor untouched (the engine advances it only on
         // completion), so the occurrence is retried rather than lost.

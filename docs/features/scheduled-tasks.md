@@ -51,9 +51,9 @@ Implementation note: agent runs go through the shared `agent_run` session runner
 `OTTO_E2E`, which keeps the deterministic stub.
 
 This is the definitive end-user + operator guide. It documents what the code in
-`crates/otto-server/src/scheduled_tasks_engine.rs`,
-`crates/otto-server/src/scheduled_tasks_scheduler.rs`,
-`crates/otto-server/src/cadence.rs`,
+`crates/otto-automation/src/scheduled_tasks_engine.rs`,
+`crates/otto-automation/src/scheduled_tasks_scheduler.rs`,
+`crates/otto-automation/src/cadence.rs`,
 `crates/otto-server/src/routes/scheduled_tasks.rs`,
 `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`), and
 `ui/src/modules/scheduled-tasks/` actually does — the real cadence kinds, the
@@ -95,9 +95,9 @@ and deliver it to Slack, email, or a webhook. Also driveable over MCP."*
 
 | Layer | File | Responsibility |
 |---|---|---|
-| **Cadence** | `crates/otto-server/src/cadence.rs` | Pure, unit-tested `is_due` / `next_run` / `validate` for the three cadences. |
-| **Engine** | `crates/otto-server/src/scheduled_tasks_engine.rs` | `run_task`: open a run row → run the agent → extract summary → write report → deliver → advance cursor. |
-| **Scheduler** | `crates/otto-server/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
+| **Cadence** | `crates/otto-automation/src/cadence.rs` | Pure, unit-tested `is_due` / `next_run` / `validate` for the three cadences. |
+| **Engine** | `crates/otto-automation/src/scheduled_tasks_engine.rs` | `run_task`: open a run row → run the agent → extract summary → write report → deliver → advance cursor. |
+| **Scheduler** | `crates/otto-automation/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
 | **HTTP routes** | `crates/otto-server/src/routes/scheduled_tasks.rs` | The `/scheduled-tasks/*` endpoints + the preset list + the report server. |
 | **MCP surface** | `crates/otto-server/src/mcp_outward.rs` | The 7 `otto.*` scheduled-task tools (read + write). |
 | **Persistence** | `migrations/0084_scheduled_tasks.sql` (+ v2 `0086_scheduled_tasks_v2.sql`) + repo | `scheduled_tasks` + `scheduled_task_runs` tables. |
@@ -559,7 +559,7 @@ tool itself must also be enabled in the Otto Server tab.
   `/scheduled-tasks/*` routes yourself.
 - **Contracts (authoritative):** `docs/contracts/api.md` (Scheduled Tasks, #135–#143)
   and `docs/contracts/ws.md` (`scheduled_task_run_updated`).
-- **Source:** `crates/otto-server/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
+- **Source:** `crates/otto-automation/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
   `crates/otto-server/src/routes/scheduled_tasks.rs`,
   `crates/otto-server/src/mcp_outward.rs`,
   `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`),

@@ -64,6 +64,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Jira/Confluence product workflows |
 | `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
+| `otto-automation` | Scheduled Tasks (cadence, 60 s supervisor, run engine, report delivery) + Goal Loops controller, behind the `AutomationCtx` trait (otto-server's impl: `src/automation_ctx.rs`) |
 | `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor |
 | `ottod` | The daemon binary |
 
