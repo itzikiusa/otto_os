@@ -24,6 +24,7 @@
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
+  import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
 
   // ---------------------------------------------------------------------------
@@ -139,18 +140,32 @@
     setTimeout(() => statusPoll?.now({ background: true }), 16_000);
   }
 
+  // Generation guard + owner: after a workspace switch the previous
+  // workspace's cards used to stay rendered (and clickable) during the reload —
+  // toggling one PUT A's channel/allow-list/agent settings into B — and a slow
+  // response for A could land over B's.
+  const loads = latestOnly();
+  let integrationsFor = '';
   async function load(id: string): Promise<void> {
+    const t = loads.begin();
+    if (integrationsFor !== id) {
+      integrations = [];
+      integrationsFor = id;
+    }
     loading = true;
     loadError = '';
     try {
-      integrations = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      const rows = await api.get<Integration[]>(`/workspaces/${id}/integrations`);
+      if (!t.current || wsId !== id) return;
+      integrations = rows;
     } catch (e) {
+      if (!t.current || wsId !== id) return;
       // Inline, not a toast: the cards would otherwise all read "Not
       // configured" — one Save away from overwriting a real integration.
       loadError = loadErrorText(e);
       integrations = [];
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 
@@ -178,6 +193,9 @@
 
   async function save(): Promise<void> {
     if (!wsId) return;
+    const prev = integrations.find((i) => i.channel === editChannel);
+    const wasOpen = !!prev?.enabled && prev.allowed_users.trim() === '';
+    if (fEnabled && !wasOpen && !(await openToEveryoneOk(editChannel, fAllowedUsers))) return;
     editBusy = true;
     try {
       const body: UpsertIntegrationReq = {
@@ -217,8 +235,19 @@
   // Toggle enabled (quick toggle from card — keeps all existing values)
   // ---------------------------------------------------------------------------
 
+  /** Turning a bridge ON with no allow-list lets ANYONE who can message the
+   *  bot drive an agent here — ask first, as a danger. */
+  async function openToEveryoneOk(channel: Channel, allowed: string): Promise<boolean> {
+    if (channel === 'webhook' || allowed.trim() !== '') return true;
+    return confirmer.ask(
+      `No allowed users are set, so anyone who can message the ${channelLabel(channel)} bot can start and steer agents in this workspace. Add allowed users first unless that is what you want.`,
+      { title: 'Open to everyone?', confirmLabel: 'Enable for everyone', danger: true },
+    );
+  }
+
   async function toggleEnabled(intg: Integration): Promise<void> {
     if (!wsId) return;
+    if (!intg.enabled && !(await openToEveryoneOk(intg.channel, intg.allowed_users))) return;
     try {
       const body: UpsertIntegrationReq = {
         enabled: !intg.enabled,
@@ -252,7 +281,7 @@
     if (!wsId || removing[channel]) return;
     const label = channelLabel(channel);
     const secretWord = channel === 'webhook' ? 'The key' : 'Tokens';
-    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration?', confirmLabel: 'Remove' }))) return;
+    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration?', confirmLabel: 'Remove', danger: true }))) return;
     removing = { ...removing, [channel]: true };
     try {
       await api.del(`/workspaces/${wsId}/integrations/${channel}`);

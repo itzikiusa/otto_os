@@ -47,6 +47,7 @@
   import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
   import { router } from '../../lib/router.svelte';
+  import { guardUnsaved } from '../../lib/leaveGuard';
   import { registry } from '../../lib/commands.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -177,6 +178,16 @@
     return () => { clearTimeout(timer); ctl.abort(); };
   });
   const instructionsDirty = $derived(wfInstructions !== (current?.instructions ?? ''));
+  // Leaving the module (sidebar, ⌘K, a link) or switching workspace with an
+  // unsaved canvas / instructions edit asks first — `discardEditsOk` only
+  // covered switching workflows inside the page. Moving within Workflows
+  // (`workflows/<id>`) is handled by `openGuarded`, so it's allowed here.
+  $effect(() =>
+    guardUnsaved(() => (dirty || instructionsDirty) && !!current, {
+      what: current ? `“${current.name}”` : 'this workflow',
+      allow: (to) => to === 'workflows' || to.startsWith('workflows/'),
+    }),
+  );
 
   $effect(() => {
     if (ws.currentId) {
@@ -258,12 +269,19 @@
   // Single-flight refetch: at most one GET in the air; a request that arrives
   // while one is flying coalesces into one trailing fetch.
   let runRead: AbortController | null = null;
+  /** The run `runRead` is fetching. A queued refetch only coalesces into a
+   *  read for the SAME run: Start's catch-up refetch used to be queued behind
+   *  the PREVIOUS run's read, which the run switch then aborted — dropping the
+   *  catch-up and leaving the new run on "Queued" for up to 15 s. */
+  let runReadFor: string | null = null;
   let runRefetchQueued = false;
   async function refetchRun(runId: string): Promise<void> {
     if (destroyed || document.hidden || run?.id !== runId) return;
-    if (runRead) {runRefetchQueued = true; return;}
+    if (runRead && runReadFor === runId) {runRefetchQueued = true; return;}
+    runRead?.abort();
     const ac = new AbortController();
     runRead = ac;
+    runReadFor = runId;
     try {
       do {
         runRefetchQueued = false;
@@ -272,7 +290,7 @@
         if (result.changed) applyRunSnapshot(result.run);
       } while (runRefetchQueued && run?.id === runId && !destroyed);
     } catch { /* The visible fallback poll heals transient errors. */ }
-    finally {if (runRead === ac) runRead = null;}
+    finally {if (runRead === ac) {runRead = null; runReadFor = null;}}
   }
   $effect(() => {
     const id = run?.id;
@@ -607,8 +625,11 @@
       wfFor = wsId;
       if (current && current.workspace_id !== wsId) {
         current = null;
-      ++viewGeneration;
-      ++versionsGeneration;
+        ++viewGeneration;
+        ++versionsGeneration;
+        // Another workspace's run must not stay open (its liveQuery polling).
+        run = null;
+        runs = [];
         graph = { nodes: [], edges: [] };
       }
     }
@@ -783,9 +804,24 @@
   // first; when the open workflow goes, open its neighbour instead of leaving
   // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
+    // Say how many runs are still going: deleting stops them, and their
+    // history goes with the workflow.
+    let active: number | null = null;
+    try {
+      const rows = await api.get<typeof runs>(`/workflows/${wf.id}/runs?summary=true`);
+      active = rows.filter((r) => r.status === 'pending' || r.status === 'running').length;
+    } catch {
+      active = null; // unknown — the confirm says so rather than claiming none
+    }
+    const runsNote =
+      active === null
+        ? ' Otto couldn’t check for running runs — any still going are stopped.'
+        : active > 0
+          ? ` ${active === 1 ? '1 run is' : `${active} runs are`} still going and will be stopped.`
+          : '';
     const ok = await confirmer.ask(
-      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can’t be undone.`,
-      { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
+      `Delete “${wf.name}”?${runsNote} Its run history and triggers are deleted with it. This can’t be undone.`,
+      { title: 'Delete workflow', confirmLabel: 'Delete workflow', danger: true },
     );
     if (!ok) return;
     try {
@@ -797,8 +833,11 @@
         if (next) open(next);
         else {
           current = null;
-      ++viewGeneration;
-      ++versionsGeneration;
+          ++viewGeneration;
+          ++versionsGeneration;
+          // The deleted workflow's run view (and its live poll) goes too.
+          run = null;
+          runs = [];
           graph = { nodes: [], edges: [] };
         }
       }
@@ -897,6 +936,28 @@
    *  This is what lets a user inspect another run while one is in flight —
    *  nothing here ever writes `run`. */
   async function waitRunTerminal(runId: string): Promise<{ status: string; error?: string | null }> {
+    // Off-screen: the run's WS events (workflowRunBus) say when it settles; a
+    // rev-guarded `/progress?after_rev=` is only a slow safety net (every
+    // OFFSCREEN_POLL_MS, skipped while the window is hidden). It used to GET
+    // the full progress every second for the whole run — ~3.6k requests/hour.
+    const OFFSCREEN_POLL_MS = 15_000;
+    let lastRev: number | undefined;
+    let lastStatus = 'running';
+    let lastError: string | null | undefined = null;
+    let nextFetch = 0;
+    const fetchProgress = async () => {
+      try {
+        const g = await workflowProgress(runId, lastRev);
+        if (g.changed) {
+          lastRev = g.rev;
+          lastStatus = g.run.status;
+          lastError = g.run.error;
+        }
+      } catch {
+        /* transient fetch error — keep waiting */
+      }
+      nextFetch = Date.now() + OFFSCREEN_POLL_MS;
+    };
     for (;;) {
       if (destroyed) return { status: 'canceled', error: null };
       const cur = untrack(() => run);
@@ -906,13 +967,12 @@
         status = cur.status;
         error = cur.error;
       } else {
-        try {
-          const g = await workflowProgress(runId);
-          status = g.changed ? g.run.status : 'running';
-          error = g.changed ? g.run.error : null;
-        } catch {
-          status = 'running'; // transient fetch error — keep waiting
-        }
+        const bus = untrack(() => ({ id: workflowRunBus.runId, status: workflowRunBus.status }));
+        const busSettled = bus.id === runId && bus.status !== '' && bus.status !== 'pending' && bus.status !== 'running';
+        // Settled per the bus → one read for the final status + error.
+        if (busSettled || (!document.hidden && Date.now() >= nextFetch)) await fetchProgress();
+        status = busSettled && (lastStatus === 'pending' || lastStatus === 'running') ? bus.status : lastStatus;
+        error = lastError;
       }
       if (status !== 'pending' && status !== 'running') return { status, error };
       await new Promise((res) => setTimeout(res, 1000));
@@ -1437,6 +1497,12 @@
   let swarmOpts = $state<{ id: string; name: string }[] | null>(null);
   let swarmProjectOpts = $state<Record<string, { id: string; name: string }[]>>({});
   let swarmOptsWs: string | null = null;
+  // Each list / project lookup is tried ONCE per workspace (pending or
+  // failed): the effect re-runs per keystroke in the free-text fallback, and
+  // used to re-fetch the list — and `GET /swarm/swarms/<partial id>` — per
+  // character after a failure.
+  let swarmListTried = false;
+  const swarmProjectsTried = new Set<string>();
   $effect(() => {
     const wsId = current?.workspace_id;
     if (selectedNode?.kind !== 'swarm_task' || !wsId) return;
@@ -1445,16 +1511,24 @@
       if (swarmOptsWs !== wsId) {
         swarmOptsWs = wsId;
         swarmOpts = null;
+        swarmListTried = false;
+        swarmProjectsTried.clear();
       }
-      if (swarmOpts === null) {
+      if (swarmOpts === null && !swarmListTried) {
+        swarmListTried = true;
         api
           .get<{ id: string; name: string }[]>(`/workspaces/${wsId}/swarm/swarms`)
-          .then((l) => (swarmOpts = l.map((x) => ({ id: x.id, name: x.name }))))
+          .then((l) => {
+            if (swarmOptsWs === wsId) swarmOpts = l.map((x) => ({ id: x.id, name: x.name }));
+          })
           .catch(() => {});
       }
-      if (sid && !swarmProjectOpts[sid]) {
+      // Only a COMPLETE id: one the list knows, or (free text) a full ULID.
+      const complete = swarmOpts ? swarmOpts.some((o) => o.id === sid) : /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(sid);
+      if (sid && complete && !swarmProjectOpts[sid] && !swarmProjectsTried.has(sid)) {
+        swarmProjectsTried.add(sid);
         api
-          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${sid}`)
+          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${encodeURIComponent(sid)}`)
           .then((d) => (swarmProjectOpts = { ...swarmProjectOpts, [sid]: d.projects.map((x) => ({ id: x.id, name: x.name })) }))
           .catch(() => {});
       }

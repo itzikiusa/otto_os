@@ -211,11 +211,15 @@
       !(await confirmer.ask(`Stop the review of “${selected.skill_name}”? Agents still running are stopped and their partial findings are not summarized.`, {
         title: 'Stop review',
         confirmLabel: 'Stop review',
+        danger: true,
       }))
     )
       return;
+    const id = selected.id;
     try {
-      selected = await skillReviewApi.cancel(selected.id);
+      const updated = await skillReviewApi.cancel(id);
+      // Another review may have been opened while the stop was in flight.
+      if (selected?.id === id) selected = updated;
       await loadList();
     } catch (e) {
       toastError('Couldn’t stop the review', e);
@@ -228,7 +232,7 @@
     if (
       !(await confirmer.ask(
         `Delete the review of “${rev.skill_name}”? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
-        { title: 'Delete review' },
+        { title: 'Delete review', confirmLabel: 'Delete', danger: true },
       ))
     )
       return;

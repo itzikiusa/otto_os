@@ -23,6 +23,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -294,10 +295,22 @@
   function sameKind(r: InsightReport): InsightReport[] {
     return reports.filter((x) => x.kind === r.kind);
   }
+  /** Report key → the previous report of the same kind, built once per
+   *  `reports` change. `previousOf` used to filter + findIndex over every
+   *  report for each row (twice per row) — O(rows × reports) per render. */
+  const previousByKey = $derived.by(() => {
+    const m = new Map<string, InsightReport | null>();
+    const byKind = new Map<string, InsightReport[]>();
+    for (const r of reports) {
+      const list = byKind.get(r.kind);
+      if (list) list.push(r);
+      else byKind.set(r.kind, [r]);
+    }
+    for (const list of byKind.values()) list.forEach((r, i) => m.set(keyOf(r), list[i + 1] ?? null));
+    return m;
+  });
   function previousOf(r: InsightReport): InsightReport | null {
-    const list = sameKind(r);
-    const i = list.findIndex((x) => keyOf(x) === keyOf(r));
-    return i >= 0 ? (list[i + 1] ?? null) : null;
+    return previousByKey.get(keyOf(r)) ?? null;
   }
 
   function shortDate(iso: string): string {
@@ -431,6 +444,10 @@
     { value: 'month:1', label: 'Last month' },
     { value: 'month:2', label: '2 months ago' },
   ];
+  /** Starting / stopping a run is root-only on the daemon (`POST /insights/run`,
+   *  `/insights/runs/{id}/cancel` → `require_root`): other members read the
+   *  reports but never see controls that can only end in a 403. */
+  const canRun = $derived(auth.isRoot);
   let runChoice = $state('day:1');
   let running = $state(false);
   /** Reason the last run did not start (e.g. skill not installed). */
@@ -487,7 +504,7 @@
   }
 
   async function runNow(choice = runChoice): Promise<void> {
-    if (loading || loadError || running || pollRunId) return;
+    if (!canRun || loading || loadError || running || pollRunId) return;
     const [p, o] = choice.split(':');
     running = true;
     runFailReason = null;
@@ -539,7 +556,12 @@
       pollCount += 1;
       let ready: InsightReport | null = null;
       try {
-        if (!pollReportKey) return;
+        // No key to poll (an older daemon's run): end the banner instead of
+        // returning without rescheduling — that left it stuck and blocked Run now.
+        if (!pollReportKey) {
+          pollRunId = null;
+          return;
+        }
         const status = await insightsApi.reportStatus(pollReportKey);
         if (disposed) return;
         if (status.report?.html_path && status.html_revision && status.html_revision !== reportBeforeRun) ready = status.report;
@@ -569,8 +591,10 @@
   $effect(() => {
     const r = selected;
     return registry.register('insights', [
+      ...(canRun ? [
       { id: 'insights.run', title: "Run yesterday’s insights report", group: 'Insights', keywords: 'generate usage report now', run: () => void runNow('day:1') },
       { id: 'insights.run-week', title: "Run last week’s insights report", group: 'Insights', keywords: 'generate weekly usage report', run: () => void runNow('week:1') },
+      ] : []),
       ...(r
         ? [
             { id: 'insights.export-md', title: 'Export insights summary as Markdown', group: 'Insights', keywords: 'download md report', run: () => exportMd(r) },
@@ -651,7 +675,7 @@
         <button class="icon-btn" data-overflow="-1" data-icon="gear" data-label="Schedule settings" onclick={() => router.go('settings/insights')} aria-label="Schedule settings" title="Schedule settings">
           <Icon name="gear" size={14} />
         </button>
-        {#if reports.length > 0 || loading}
+        {#if canRun && (reports.length > 0 || loading)}
           <select class="input run-period" bind:value={runChoice} disabled={loading || !!loadError || running || !!pollRunId} aria-label="Period to report on" title="Period to report on">
             {#each RUN_OPTIONS as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
           </select>
@@ -689,7 +713,7 @@
               <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
               <span class="dim">{Math.floor((pollBaseSec + pollCount * 3) / 60)}:{String((pollBaseSec + pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
               <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
-              <button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>
+              {#if canRun}<button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>{/if}
             </div>
           {/if}
         </div>
@@ -709,9 +733,9 @@
           icon="gauge"
           title="No insight reports yet"
           body="An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. Scheduled reports are off until you turn them on."
-          actionLabel={running ? 'Starting…' : "Run yesterday’s report"}
+          actionLabel={canRun ? (running ? 'Starting…' : "Run yesterday’s report") : undefined}
           actionIcon="play"
-          onaction={() => runNow('day:1')}
+          onaction={canRun ? () => runNow('day:1') : undefined}
         >
           <button class="btn ghost" onclick={() => router.go('settings/insights')}>Turn on scheduled reports</button>
         </EmptyState>
@@ -730,6 +754,7 @@
                 {#each shownRows as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
+                  {@const stats = rowStats(r)}
                   <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
@@ -742,9 +767,9 @@
                     {:else if !r.summary.trim() && !r.html_path}
                       <div class="row-headline dim">No summary yet — the run may still be writing it.</div>
                     {/if}
-                    {#if rowStats(r).length > 0}
+                    {#if stats.length > 0}
                       <div class="row-stats">
-                        {#each rowStats(r) as s (s.key)}
+                        {#each stats as s (s.key)}
                           <span class="stat {s.d?.tone ?? 'neutral'}" title={statTitle(s.key, s.value)}>
                             {statText(s.key, s.value)}
                             {#if s.d && s.d.direction !== 'flat'}<Icon name={s.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}

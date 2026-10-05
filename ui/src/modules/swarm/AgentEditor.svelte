@@ -88,7 +88,8 @@
   function buildSchedule(): AgentSchedule | null {
     if (!scheduled) return null;
     const base: AgentSchedule = { cadence, directive, enabled: true, timezone: schedTz };
-    if (cadence === 'interval') base.every_min = everyMin;
+    // The server clamps to ≥ 5 min (cadence.rs); send what will actually run.
+    if (cadence === 'interval') base.every_min = Math.max(5, Math.round(Number(everyMin) || 5));
     if (cadence === 'daily') base.at = at;
     if (cadence === 'weekly') {
       base.at = at;
@@ -224,7 +225,7 @@
           <option value="weekly">weekly</option>
         </select>
         {#if cadence === 'interval'}
-          <input class="input small" type="number" min="5" bind:value={everyMin} aria-label="Every N minutes (minimum 5)" /> min
+          <input class="input small" type="number" min="5" bind:value={everyMin} onblur={() => (everyMin = Math.max(5, Math.round(Number(everyMin) || 5)))} aria-label="Every N minutes (minimum 5)" /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
           <!-- `at` is matched in the schedule's timezone (swarm_scheduler.rs →

@@ -103,6 +103,53 @@ pub async fn set_email_sender(
     }))
 }
 
+/// `POST /api/v1/email-sender/verify` — re-run the Gmail SMTP check for the
+/// caller's EXISTING sender with the app password already in the Keychain.
+///
+/// The Settings "Re-verify" button used to `PUT` the address alone, which serde
+/// rejects (`app_password` is required) — so an unverified sender could never
+/// be re-checked without re-typing the password. 400 when no sender is set up
+/// or its Keychain entry is gone (the user must re-enter the password); 502
+/// when SMTP still fails (the row stays unverified — fail closed).
+pub async fn verify_email_sender(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+) -> ApiResult<Json<EmailSenderResp>> {
+    let repo = EmailSendersRepo::new(ctx.pool.clone());
+    let Some(row) = repo.get(&user.id).await? else {
+        return Err(ApiError(Error::Invalid(
+            "no email sender is configured — set one up first".into(),
+        )));
+    };
+    let password = otto_core::secrets::get_async(&ctx.secrets, &row.secret_ref)
+        .await?
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            ApiError(Error::Invalid(
+                "the stored App Password is missing — re-enter it with Replace…".into(),
+            ))
+        })?;
+    let sender = GmailSender::new(row.gmail_address.clone(), password);
+    sender.verify().await.map_err(|e| {
+        ApiError(Error::Upstream(format!(
+            "Gmail SMTP verification failed — the App Password may have been revoked: {e}"
+        )))
+    })?;
+    repo.set_verified(&user.id, Utc::now()).await?;
+    ctx.audit(NewAuditEntry {
+        user_id: Some(user.id.clone()),
+        action: "email_sender.verified".into(),
+        target: Some(row.gmail_address.clone()),
+        detail: Some("re-verify".into()),
+        ip: None,
+    })
+    .await;
+    Ok(Json(EmailSenderResp {
+        gmail_address: Some(row.gmail_address),
+        verified: true,
+    }))
+}
+
 /// `GET /api/v1/email-sender` — the caller's configured sender, never the
 /// password. `gmail_address` is absent when no sender is set up.
 pub async fn get_email_sender(
@@ -121,4 +168,75 @@ pub async fn get_email_sender(
             verified: false,
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_core::domain::User;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    async fn ctx_with_user() -> (tempfile::TempDir, ServerCtx, User) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
+        let pool: otto_state::DbPool = pool.into();
+        let user = User {
+            id: "u1".into(),
+            username: "u1".into(),
+            display_name: "u1".into(),
+            is_root: false,
+            disabled: false,
+            created_at: Utc::now(),
+        };
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at)
+             VALUES ('u1', 'u1', 'h', 'u1', 0, 0, ?)",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        (tmp, ctx, user)
+    }
+
+    /// S17-05: re-verify needs no password in the body, and fails closed
+    /// (400, never `verified`) when there's no sender or no stored secret.
+    #[tokio::test]
+    async fn reverify_without_sender_or_secret_is_invalid_and_stays_unverified() {
+        let (_tmp, ctx, user) = ctx_with_user().await;
+        let err = verify_email_sender(State(ctx.clone()), CurrentUser(user.clone()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.0, Error::Invalid(_)), "{err:?}");
+
+        // A row whose Keychain entry is gone → Invalid, row stays unverified.
+        let repo = EmailSendersRepo::new(ctx.pool.clone());
+        repo.upsert(&user.id, "u1@gmail.com", &secret_ref_for(&user.id))
+            .await
+            .unwrap();
+        let err = verify_email_sender(State(ctx.clone()), CurrentUser(user.clone()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.0, Error::Invalid(_)), "{err:?}");
+        assert!(repo
+            .get(&user.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .verified_at
+            .is_none());
+    }
 }

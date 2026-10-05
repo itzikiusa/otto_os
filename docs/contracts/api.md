@@ -471,6 +471,7 @@ configured address + verified flag and **never** the password.
 |---|---|---|---|
 | PUT /api/v1/email-sender | member (self-owned) | `SetEmailSenderReq {gmail_address, app_password}` | `EmailSenderResp {gmail_address, verified}` (502 on SMTP verify failure → not verified) |
 | GET /api/v1/email-sender | member (self-owned) | — | `EmailSenderResp {gmail_address?, verified}` (never the password) |
+| POST /api/v1/email-sender/verify | member (self-owned) | — (no body) | `EmailSenderResp {gmail_address, verified: true}` — re-runs the SMTP check for the caller's EXISTING sender with the App Password already in the Keychain (Settings → Re-verify). 400 when no sender is configured or its Keychain entry is missing (re-enter the password via `PUT`); 502 when SMTP still fails (stays unverified) |
 
 `EmailSenderResp` = `{gmail_address?, verified}` — `gmail_address` is omitted on
 `GET` when no sender is configured; `verified` is `true` once a real SMTP login
@@ -1624,7 +1625,7 @@ configured Jira/Confluence account.
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
-| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount |
+| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
@@ -1852,7 +1853,7 @@ are root; per-workspace context selection is workspace-scoped.
 | DELETE /library/skills/{name} | root | — | 204 (also removes Otto-managed user-level provider copies — see Bundled skills) |
 | GET /library/skills/{name}/files | root | — | `SkillFileEntry[]` (multi-file tree) |
 | GET /library/skills/{name}/file | root | `?path=<rel>` | SkillFileContentResp (one file's text) |
-| PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`) | `SkillFileEntry[]` (refreshed tree; evicts cache) |
+| PUT /library/skills/{name}/file | root | WriteSkillFileReq (`path`, `content`, `create_only?` — default false; true → **409** when `path` already exists instead of overwriting, used by "New file") | `SkillFileEntry[]` (refreshed tree; evicts cache) |
 | DELETE /library/skills/{name}/file | root | `?path=<rel>` | 204 (SKILL.md cannot be deleted) |
 | GET /library/provider-skills | any member | — | `ProviderSkillInfo[]` (on-disk `~/.claude|.codex|.agy/skills`, read-only) |
 | GET /library/provider-skills/{provider}/{name} | any member | — | ProviderSkillContent (body + file list) |

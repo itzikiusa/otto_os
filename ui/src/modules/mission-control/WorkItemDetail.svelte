@@ -243,24 +243,31 @@
     if (!d || opening) return;
     if (d.kind === 'session' || d.kind === 'external_trigger') return openSession();
     const direct = directRoute(d.kind, d.source_id);
-    if (direct) return router.go(direct);
+    if (direct) {
+      await router.goChecked(direct);
+      return;
+    }
     opening = true;
     try {
+      // Navigate FIRST and only touch the target page/store once the leave
+      // guards let us go: a declined guard used to fall through to a 10 s
+      // port wait and a false "Couldn’t open" toast (and, for a swarm, still
+      // switch the global swarm store under the page the user stayed on).
       if (d.kind === 'swarm') {
         const p = await missionControlApi.sourceProject(d.source_id);
         if (p.swarm_id) {
+          if (!(await router.goChecked(`swarm/${encodeURIComponent(p.swarm_id)}`))) return;
           await swarm.openProject(wsId, p.swarm_id, p.id);
-          router.go(`swarm/${encodeURIComponent(p.swarm_id)}`);
-        } else router.go('swarm');
+        } else await router.goChecked('swarm');
       } else if (d.kind === 'workflow') {
         const r = await missionControlApi.sourceWorkflowRun(d.source_id);
         const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
-        router.go(`workflows/${encodeURIComponent(r.workflow_id)}`);
+        if (!(await router.goChecked(`workflows/${encodeURIComponent(r.workflow_id)}`))) return;
         const page = await workflowsPagePort.get(new AbortController().signal);
         if (await page.open(r.workflow_id)) await page.openRun(r.workflow_id, r.id);
       } else if (d.kind === 'review') {
         const r = await missionControlApi.sourceReview(d.source_id);
-        router.go(reviewRoute(r.repo_id, r.pr_number));
+        await router.goChecked(reviewRoute(r.repo_id, r.pr_number));
       }
     } catch (e) {
       toastError(`Couldn’t open this in ${SOURCE_MODULE[d.kind]}`, e);

@@ -36,6 +36,21 @@
     if (id) void loops.loadList(id);
   });
 
+  // A workspace switch closes the open loop (it belongs to the previous
+  // workspace: it stayed open and controllable, and the URL kept its id) and
+  // the new-goal form. The restore effect below then reopens the new
+  // workspace's last loop.
+  let viewWs = untrack(() => ws.currentId);
+  $effect(() => {
+    const id = ws.currentId;
+    if (id === viewWs) return;
+    viewWs = id;
+    untrack(() => {
+      creating = false;
+      if (selectedId) back();
+    });
+  });
+
   const list = $derived(loops.list);
 
   function open(id: string): void {
