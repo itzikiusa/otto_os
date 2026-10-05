@@ -62,6 +62,24 @@ class DbPrefs {
     for (const fn of this.keepAliveListeners) fn(on);
   }
 
+  /** Another window (pop-out, side pane, a second main window) changed a
+   *  pref (S13-11): adopt it here too, so e.g. turning keep-alive off in a
+   *  pop-out stops THIS window's poller instead of pinging until a reload.
+   *  Fires the listeners only on a real change; no write-back (that window
+   *  already persisted it). */
+  applyStorage(key: string | null): void {
+    if (key === null || key === WARM_ON_CLICK_KEY) {
+      this.warmRestored = loadFlag(WARM_ON_CLICK_KEY, false) ? 'on-click' : 'background';
+    }
+    if (key === null || key === KEEP_ALIVE_KEY) {
+      const on = loadFlag(KEEP_ALIVE_KEY, true);
+      if (on !== this.keepAlive) {
+        this.keepAlive = on;
+        for (const fn of this.keepAliveListeners) fn(on);
+      }
+    }
+  }
+
   /** Called on every `setKeepAlive` (the database store's poller start/stop). */
   onKeepAliveChange(fn: (on: boolean) => void): () => void {
     this.keepAliveListeners.push(fn);
@@ -72,3 +90,11 @@ class DbPrefs {
 }
 
 export const dbPrefs = new DbPrefs();
+
+// `storage` fires in every OTHER same-origin document when a key changes
+// (key === null on clear()).
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (e: StorageEvent) => {
+    if (e.key === null || e.key === WARM_ON_CLICK_KEY || e.key === KEEP_ALIVE_KEY) dbPrefs.applyStorage(e.key);
+  });
+}
