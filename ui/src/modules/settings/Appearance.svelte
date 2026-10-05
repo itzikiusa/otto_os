@@ -274,6 +274,18 @@
       onchange={(v) => ui.setTermCopyOnSelect(v)}
     />
     <SettingToggle
+      label="Use Option as Meta key"
+      hint="⌥ sends Meta, so ⌥← / ⌥→ jump words and ⌥⌫ deletes a word in shells and agents. Turn it off if your keyboard layout types characters such as @ { } [ ] | or accents with ⌥."
+      checked={ui.termOptionAsMeta}
+      onchange={(v) => ui.setTermOptionAsMeta(v)}
+    />
+    <SettingToggle
+      label="Screen reader support"
+      hint="Announces terminal output to VoiceOver and lets you read the screen line by line. Uses the slower non-GPU renderer; toggling reloads open terminals."
+      checked={ui.termScreenReader}
+      onchange={(v) => ui.setTermScreenReader(v)}
+    />
+    <SettingToggle
       label="Terminal toolbar"
       hint="Show the font-size and copy-on-select controls on each terminal."
       checked={ui.termToolbar}

@@ -1838,7 +1838,12 @@
       letterSpacing: 0,
       scrollback: untrack(() => scrollback),
       theme: untrack(() => terminalTheme(ui.theme, untrack(() => effScheme))),
-      macOptionIsMeta: true,
+      // ⌥ as Meta is a per-device setting (Settings → Appearance → Terminal);
+      // default on. Live changes go through the effect below, no rebuild.
+      macOptionIsMeta: untrack(() => ui.termOptionAsMeta),
+      // Screen-reader mode: xterm keeps an aria-live mirror + accessible row
+      // tree. Effect 1 also forces the DOM renderer while it is on.
+      screenReaderMode: untrack(() => ui.termScreenReader),
       // ⌥-drag forces a LOCAL selection even while the running app has mouse
       // reporting on. Without this there is no way to select at all in a
       // mouse-reporting TUI (claude, codex, vim, htop…) on macOS: xterm's
@@ -1861,8 +1866,8 @@
   // Shift+Enter must insert a newline in the agent's composer, not submit.
   // xterm emits plain `\r` for Enter regardless of Shift, and `\r` is what
   // claude/codex read as "submit". Intercept Shift+Enter and send `\x1b\r`
-  // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (this
-  // terminal sets macOptionIsMeta), which these TUIs treat as a newline.
+  // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (with
+  // macOptionIsMeta on, the default), which these TUIs treat as a newline.
   // Plain Enter is left untouched, so it still submits.
   function termKeyHandler(e: KeyboardEvent): boolean {
     if (
@@ -2247,6 +2252,8 @@
     e.term.options.scrollback = scrollback;
     e.term.options.theme = terminalTheme(ui.theme, effScheme);
     if (e.term.options.fontFamily !== ui.termFontStack) e.term.options.fontFamily = ui.termFontStack;
+    e.term.options.macOptionIsMeta = ui.termOptionAsMeta;
+    e.term.options.screenReaderMode = ui.termScreenReader;
     if (e.status) onstatus?.(e.status);
     return true;
   }
@@ -2324,7 +2331,9 @@
     // Tracked reads — the ONLY ones: toggling RTL / phone layout re-runs this
     // effect so the terminal is rebuilt with the correct renderer (WebGL vs DOM).
     const rtl = ui.rtlBidi;
-    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER;
+    // Screen-reader support needs the DOM renderer: a WebGL canvas exposes no
+    // text to assistive tech, so toggling it rebuilds like RTL does.
+    const wantDom = viewport.isPhone || FORCE_DOM_RENDERER || ui.termScreenReader;
     // Everything else is untracked. Loading the WebGL addon (and the xterm
     // callbacks it fires synchronously) reads component state such as
     // `connected`; tracked, the socket opening re-ran this effect, whose
@@ -2684,6 +2693,16 @@
   $effect(() => {
     const lines = scrollback;
     if (term && term.options.scrollback !== lines) term.options.scrollback = lines;
+  });
+
+  // react to the ⌥-as-Meta / screen-reader settings (live options; the
+  // renderer switch for screen-reader mode is Effect 1's rebuild)
+  $effect(() => {
+    const meta = ui.termOptionAsMeta;
+    const sr = ui.termScreenReader;
+    if (!term) return;
+    if (term.options.macOptionIsMeta !== meta) term.options.macOptionIsMeta = meta;
+    if (term.options.screenReaderMode !== sr) term.options.screenReaderMode = sr;
   });
 
   // react to terminal font-family choice (live, no rebuild needed)
