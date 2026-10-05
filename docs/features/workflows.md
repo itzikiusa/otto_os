@@ -36,7 +36,9 @@
 > every lens as its own sub-agents) — §4.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
-`crates/otto-server/src/workflow_context.rs` (run context files),
+`crates/otto-workflows/src/context.rs` (run context files; the node catalog,
+graph validation, retry policy, loop checkpoints and event triggers also live in
+`crates/otto-workflows`),
 `crates/otto-server/src/workflow_prepare.rs` (`prepare_context`),
 `crates/otto-server/src/routes/workflows.rs`,
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
@@ -72,9 +74,10 @@ ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status,
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
-crates/otto-server/src/workflow_engine.rs              — the executor: node catalog, run loop, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine.rs              — the executor: run loop, per-node exec, branching/retry, proof
+crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, event-trigger listener (`WorkflowCtx`)
 crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
-crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + event-bus listener (both spawned at boot)
+crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + boot glue for the event-bus listener (both spawned at boot)
 crates/otto-server/src/workflow_chat.rs                — `Action: Workflow` chat-message parser + WorkflowChatTrigger impl
 crates/otto-core/src/expr.rs                           — the safe expression language (edge conditions, condition/loop, {{ }} templating)
 crates/otto-core (otto_core::workflows)                — the Workflow/WorkflowRun/Node/Edge/Version domain types
@@ -1018,7 +1021,7 @@ loop's worktree) **merge it back into `repos.json`** as the run progresses.
 
 ### Run context files (file-based step handoff)
 
-Every run owns `<data_dir>/workflow-context/<run_id>/` (`workflow_context.rs`)
+Every run owns `<data_dir>/workflow-context/<run_id>/` (`otto-workflows/src/context.rs`)
 — browsable in the run view under **Context files** (same tree + viewer as the
 agent Files panel, scoped to this run). Every write here is best-effort — a
 failure logs a warning and the run continues; context files never fail a node:

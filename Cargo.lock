@@ -4241,6 +4241,7 @@ dependencies = [
  "otto-transcript",
  "otto-usage",
  "otto-vault",
+ "otto-workflows",
  "otto-workgraph",
  "prost",
  "prost-reflect",
@@ -4434,6 +4435,20 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
+]
+
+[[package]]
+name = "otto-workflows"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "otto-core",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 

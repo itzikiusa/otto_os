@@ -73,6 +73,7 @@ otto-canvas.workspace = true
 otto-design.workspace = true
 otto-swarm.workspace = true
 otto-workgraph.workspace = true
+otto-workflows.workspace = true
 otto-memory.workspace = true
 otto-vault.workspace = true
 otto-pty.workspace = true

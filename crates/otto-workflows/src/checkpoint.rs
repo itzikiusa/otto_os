@@ -7,7 +7,7 @@ use otto_state::WorkflowsRepo;
 use serde_json::Value;
 use std::future::Future;
 
-pub(crate) async fn execute<F, Fut>(
+pub async fn execute<F, Fut>(
     repo: &WorkflowsRepo,
     run_id: &Id,
     mut checkpoint: WorkflowCheckpoint,
@@ -34,7 +34,7 @@ where
             return Err(Error::Conflict(format!("{} was interrupted with an unknown outcome; inspect it and explicitly retry the failed step", checkpoint.name)));
         }
         if checkpoint.status == NodeStatus::Error
-            && crate::workflow_engine::retry_backoff(
+            && crate::retry::retry_backoff(
                 checkpoint.error.as_deref().unwrap_or("step failed"),
                 policy,
                 checkpoint.attempts,
@@ -92,7 +92,7 @@ where
                         .factor
                         .powi(checkpoint.attempts.saturating_sub(1) as i32))
                 .min(60_000.0) as u64;
-                let Some((delay, _, reason)) = crate::workflow_engine::retry_backoff(
+                let Some((delay, _, reason)) = crate::retry::retry_backoff(
                     &error.to_string(),
                     &policy,
                     checkpoint.attempts,

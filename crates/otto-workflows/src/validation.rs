@@ -107,7 +107,7 @@ fn validate_node(node: &WorkflowNode, root_id: &str, depth: usize, issues: &mut 
             message,
         })
     };
-    if !crate::workflow_engine::is_known_kind(&node.kind) {
+    if !crate::catalog::is_known_kind(&node.kind) {
         issue("kind", format!("Unsupported step kind '{}'.", node.kind));
     }
     let required: &[&str] = match node.kind.as_str() {

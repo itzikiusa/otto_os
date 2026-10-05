@@ -2249,7 +2249,7 @@ reviews every entry (aggregate: `score` = min, `passed` = all; per-repo detail
 under `reviews[]`) and `git_pr` drafts/opens one PR per entry.
 
 **Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`,
-the file-based step-handoff layer (`workflow_context.rs`). Every write here is
+the file-based step-handoff layer (`otto_workflows::context`). Every write here is
 best-effort — a failure logs and the run continues; context files never fail a
 node.
 
