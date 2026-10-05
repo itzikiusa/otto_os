@@ -4231,6 +4231,7 @@ dependencies = [
  "otto-pty",
  "otto-rbac",
  "otto-sandbox",
+ "otto-server",
  "otto-sessions",
  "otto-skills",
  "otto-ssh",

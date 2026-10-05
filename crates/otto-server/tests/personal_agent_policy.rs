@@ -15,22 +15,15 @@
 //! Harness copied from `mcp_auto_approve.rs` (kept separate so the two suites
 //! evolve independently).
 
-use std::sync::Arc;
-
 use chrono::Utc;
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::{AuthRepo, RbacRoleChecker};
+use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    AgentAutonomy, AgentRule, ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool,
-    GitStore, IntegrationsRepo, IssuesRepo, NewPersonalAgent, NewSession, PersonalAgentsRepo,
-    ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
+    AgentAutonomy, AgentRule, DbPool, NewPersonalAgent, NewSession, PersonalAgentsRepo,
+    SessionsRepo, SwarmRepo,
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
 // Harness (mirrors ui_control.rs: a real base_url + listener)

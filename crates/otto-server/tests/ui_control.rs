@@ -12,25 +12,17 @@
 //! - result shaping (row cap + redaction), revoke → cancel, the quiet period,
 //!   the headless fallback, and `no_ui_client`.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::{AuthRepo, RbacRoleChecker};
+use otto_core::Id;
+use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, NewSession, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo,
-    WorkspacesRepo,
-};
+use otto_state::{DbPool, NewSession, SessionsRepo};
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 

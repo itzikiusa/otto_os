@@ -8,9 +8,6 @@
 //! real handlers via `tower::ServiceExt::oneshot` with the `AuthUser`
 //! extension injected as the production auth middleware does.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{header, Method, StatusCode};
@@ -19,23 +16,11 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
 use otto_core::domain::User;
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
-};
+use otto_state::DbPool;
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
-
-// ---------------------------------------------------------------------------
-// Stubs for unused ServerCtx dependencies (mirrors activity_isolation.rs)
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Database pool + fixtures

@@ -10,10 +10,9 @@
 //! `agents_json` and is persisted one index at a time so the UI's poll shows
 //! progress. Resilience: one stuck/failed agent never aborts the others.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path as AxPath, Query as AxQuery, State};

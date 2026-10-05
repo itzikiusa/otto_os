@@ -19,7 +19,7 @@
 //! (env vars are process-global).
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -31,18 +31,10 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use otto_core::auth::AuthUser;
 use otto_core::domain::User;
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::RbacRoleChecker;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
-use otto_state::{
-    ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool, GitStore, IntegrationsRepo,
-    IssuesRepo, ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
-};
+use otto_state::DbPool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tempfile::TempDir;
-use tokio::sync::broadcast;
 use tower::ServiceExt; // for `oneshot`
 
 /// 60×40 solid-red PNG (132 bytes) — the shared fixture for upload/capture tests.

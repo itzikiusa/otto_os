@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn clip_chars_with_uses_the_marker_only_when_cut() {
-        assert_eq!(clip_chars_with("abcdef", 3, "\n…[truncated]"), "abc\n…[truncated]");
+        assert_eq!(
+            clip_chars_with("abcdef", 3, "\n…[truncated]"),
+            "abc\n…[truncated]"
+        );
         assert_eq!(clip_chars_with("abc", 3, "!"), "abc");
     }
 

@@ -15,7 +15,7 @@
 //! are NOT killed when done — they stay live/openable so the PO can inspect
 //! each lens's terminal afterward.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
