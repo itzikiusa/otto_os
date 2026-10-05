@@ -5949,3 +5949,64 @@ Every mutation emits the owner-only WS event `workbench_doc_changed`
 short page). A non-null cursor is only a continuation hint; the next page may
 be empty. `revision:<seq>` still fetches that explicit revision independently
 of the metadata page.
+
+## Application telemetry and profiling
+
+Application telemetry is distinct from coding-agent usage. All `/api/v1/telemetry/*`
+endpoints require a logged-in root administrator (including browser ingestion).
+Collection defaults off. Enabling consents to local device diagnostics and a
+checksum-verified collector download from GitHub; signal data stays on loopback
+and in the existing local ClickHouse. Disabling drops pending measurements and
+stops the owned collector. Existing history expires under its configured TTL.
+
+| Method | Path | Request / response |
+|---|---|---|
+| GET | `/telemetry/config` | `TelemetryConfig` |
+| PUT | `/telemetry/config` | Full `TelemetryConfig`; validates, persists and applies live; returns config |
+| GET | `/telemetry/status` | `TelemetryStatus`: readiness, queue/dropped/exported counts, last error, analysis schedule, profile support |
+| POST | `/telemetry/ingest` | `{spans: TelemetrySpan[]}` → `{accepted: number}`; max 100 spans / 128 KiB; zero accepted while off |
+| GET | `/telemetry/overview?hours=24` | `TelemetryOverview`: operation percentiles/count/errors and CPU/RSS time series, from minute materialized views; hours clamped 1–720 |
+| GET | `/telemetry/suggestions` | `TelemetrySuggestion[]`, open deduplicated performance recommendations |
+| POST | `/telemetry/analyze` | Run bounded analysis now; returns current recommendations |
+| POST | `/telemetry/suggestions/{id}/dismiss` | Persist dismissal; 204 |
+| GET | `/telemetry/traces/{id}` | Up to the bounded trace detail limit, `TelemetrySpan[]`; empty when expired |
+| GET | `/telemetry/profile` | Most recent retained sanitized `TelemetryProfile`, or `null` |
+| POST | `/telemetry/profile` | Short own-daemon stack sample, `TelemetryProfile`; requires additional native-profiling opt-in, macOS and capture cooldown |
+
+`TelemetryConfig` defaults: `enabled:false`, `native_profiling:false`,
+`traces_days:1`, `logs_days:2`, `metrics_days:7`,
+`analysis_interval_hours:24`, `analysis_window_hours:24`, `suggestion_limit:100`,
+`slow_threshold_ms:100`, `min_samples:3`, `sample_interval_secs:5`,
+`cpu_spike_percent:80`, `rss_spike_mb:256`.
+Trace/log retention accepts 1–30 days, metrics 1–90. Analysis cadence accepts
+1–168 hours; its window cannot exceed trace retention. Suggestion limit is 1–100,
+minimum samples 1–10,000, resource sampling 2–60 seconds. CPU is process CPU across
+cores, so 100% means one core. Missing resource/browser capabilities are absent,
+not zero. Reducing retention changes raw and aggregate TTLs; ClickHouse removes
+expired physical parts asynchronously, and queries apply their time windows.
+
+`TelemetrySpan` fields: lowercase nonzero `trace_id` (32 hex), `span_id` (16 hex),
+nullable `parent_span_id`, safe static `name`, `component`, `kind`,
+`start_unix_nano` (integer or decimal string on ingest), `duration_ms`, `status`,
+`attributes`. Browser spans accept only known module names and the operations
+`ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
+`ui.request.queue`, `ui.response.decode`. Server spans use matched route templates;
+raw URLs, prompts, SQL, body text, headers, file paths and user identifiers are
+never exported. Browser timestamps allow at most one day of age / one minute
+of future skew; duration is finite and bounded to one hour. Attributes have an
+explicit allowlist and bounded count. W3C version-00 `traceparent` headers link
+client and server spans; malformed parents are ignored and a fresh trace starts.
+Telemetry routes exclude their own traffic from instrumentation.
+
+Latency suggestions require both a per-call p95 threshold and minimum call count;
+aggregate duration alone cannot promote millions of sub-millisecond calls. Each
+suggestion includes the window, threshold, sample count, p50/p95/max/total latency,
+trace evidence, observation time and action. Resource-spike suggestions have
+explicit CPU/RSS evidence instead of treating latency as CPU time. Native sampled
+stacks are an Otto profiling surface, not the experimental OTLP profiles signal.
+Errors use the standard `Problem` envelope: 401 unauthenticated, 403 non-root,
+400 invalid settings/batch, 413 oversized ingestion, 502 unavailable local
+pipeline or profiling prerequisites. Concrete TypeScript DTOs live in
+`ui/src/lib/api/types.ts`.
+
+`TelemetryStatus.exported` counts spans accepted by the collector, not a durable-storage acknowledgment. `dropped` counts daemon-side validation/queue discards and unacknowledged sends (including canceled sends). Collector exporter queues may still be retrying; dashboard operation counts reflect the actual stored rollups.

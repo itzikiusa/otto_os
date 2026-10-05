@@ -216,6 +216,7 @@ async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> Ser
         improve_engine,
         context_library: otto_context::Library::new(tmp.join("ctx")),
         usage,
+        telemetry: None,
         product,
         product_repo,
         attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),

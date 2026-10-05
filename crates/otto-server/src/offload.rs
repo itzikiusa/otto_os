@@ -14,7 +14,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    match tokio::task::spawn_blocking(f).await {
+    match crate::telemetry::measure("server.blocking", tokio::task::spawn_blocking(f)).await {
         Ok(v) => v,
         Err(e) => match e.try_into_panic() {
             Ok(payload) => std::panic::resume_unwind(payload),

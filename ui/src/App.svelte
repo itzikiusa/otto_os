@@ -45,6 +45,18 @@
     if (needsAuth) untrack(() => void auth.boot());
   });
 
+  // Device telemetry is administrator opt-in. Capture no guest/member activity.
+  $effect(() => {
+    if (auth.phase !== 'ready' || !auth.isRoot) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    const module = untrack(() => router.module);
+    void import('./lib/telemetryBoot').then(({ bootTelemetry }) => {
+      if (!disposed) stop = bootTelemetry(module);
+    });
+    return () => { disposed = true; stop?.(); };
+  });
+
   // First launch installs + starts the daemon in the background; poll until
   // it answers instead of parking on a manual Retry button.
   $effect(() => {

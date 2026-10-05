@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+otto-telemetry.workspace = true
 hex = { workspace = true }
 otto-core = { workspace = true }
 otto-state = { workspace = true }

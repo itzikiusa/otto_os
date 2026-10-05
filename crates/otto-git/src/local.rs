@@ -875,7 +875,11 @@ impl LocalGit {
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        let out = self.spawn_output(cmd, class, verb_of(args), None).await?;
+        let out = otto_telemetry::context::measure_result(
+            "git.spawn",
+            self.spawn_output(cmd, class, verb_of(args), None),
+        )
+        .await?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         if !out.status.success() {
@@ -916,7 +920,11 @@ impl LocalGit {
         for (k, v) in envs {
             cmd.env(k, v);
         }
-        let out = self.spawn_output(cmd, class, verb_of(args), None).await?;
+        let out = otto_telemetry::context::measure_result(
+            "git.spawn",
+            self.spawn_output(cmd, class, verb_of(args), None),
+        )
+        .await?;
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         Ok((out.status.success(), stdout, stderr, out.status.code()))
@@ -1006,7 +1014,8 @@ impl LocalGit {
     /// [`Self::exec`] where a non-zero exit is an error, classified exactly
     /// like [`Self::run`]. Returns stdout as raw bytes.
     pub(crate) async fn exec_bytes(&self, c: &GitCmd) -> Result<Vec<u8>> {
-        let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+        let (ok, stdout, stderr, code) =
+            otto_telemetry::context::measure_result("git.execute", self.exec(c, None)).await?;
         if !ok {
             let err = upstream_err(&stderr, &String::from_utf8_lossy(&stdout), code);
             tracing::warn!(
@@ -1030,7 +1039,8 @@ impl LocalGit {
     /// notes git's "rename detection was skipped due to too many files"
     /// warning into `ri`, so the response can say its pairing is partial.
     async fn exec_diff(&self, c: &GitCmd, ri: &std::sync::atomic::AtomicBool) -> Result<Vec<u8>> {
-        let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+        let (ok, stdout, stderr, code) =
+            otto_telemetry::context::measure_result("git.execute", self.exec(c, None)).await?;
         if !ok {
             let err = upstream_err(&stderr, &String::from_utf8_lossy(&stdout), code);
             tracing::warn!(
@@ -1049,7 +1059,8 @@ impl LocalGit {
     /// bounded `index.lock` retry as [`Self::run_locked`].
     pub(crate) async fn exec_locked(&self, c: &GitCmd) -> Result<()> {
         for attempt in 1u64..=3 {
-            let (ok, stdout, stderr, code) = self.exec(c, None).await?;
+            let (ok, stdout, stderr, code) =
+                otto_telemetry::context::measure_result("git.execute", self.exec(c, None)).await?;
             if ok {
                 return Ok(());
             }

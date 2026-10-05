@@ -166,6 +166,7 @@ async fn test_ctx(pool: &DbPool, data_dir: PathBuf) -> ServerCtx {
         improve_engine,
         context_library,
         usage,
+        telemetry: None,
         product,
         product_repo,
         attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),

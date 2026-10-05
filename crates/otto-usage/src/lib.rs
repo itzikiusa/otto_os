@@ -36,7 +36,7 @@ mod types;
 pub const EXTERNAL_WORKSPACE: &str = "external";
 
 pub use budget_dedup::{BudgetCheckStamp, BudgetDedup, BudgetSignal};
-pub use clickhouse::ClickHouse;
+pub use clickhouse::{ClickHouse, ClickHouseLease};
 pub use engine::{ReportOptions, UsageEngine, UsageScope};
 pub use metrics::{Metric, MetricsSampler};
 pub use pricing::{estimate_cost, is_priced, PRICED_AS_OF};

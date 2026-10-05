@@ -3,6 +3,8 @@
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { webcrypto } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
 export function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -22,6 +24,11 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
   runInNewContext(compiled, {
     exports,
     require: (name: string) => {
+      // Transport/router gained an opt-in dependency. Execute the real disabled
+      // collector here so their existing behavior tests also cover its no-op path.
+      if (!(name in imports) && (name === '../telemetry' || name === './telemetry')) {
+        return loadSource(new URL('../src/lib/telemetry.ts', import.meta.url), {}, globals);
+      }
       if (!(name in imports)) throw new Error(`Missing fixture import: ${name}`);
       return imports[name];
     },
@@ -35,6 +42,7 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
     },
     URL, URLSearchParams, Response, Request, Headers, AbortController, DOMException,
     console, setTimeout, clearTimeout, setInterval, clearInterval, queueMicrotask,
+    performance, crypto: webcrypto,
     ...globals,
   }, { timeout: 5000, filename: path.pathname });
   return exports;

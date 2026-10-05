@@ -95,7 +95,35 @@ impl Drop for Busy<'_> {
     }
 }
 
+/// An explicit lifetime lease for a sibling service using the HTTP endpoint.
+/// Shares the request counter with parking, so acquisition and parking are atomic.
+pub struct ClickHouseLease {
+    ch: std::sync::Arc<ClickHouse>,
+    pub endpoint: String,
+}
+impl Drop for ClickHouseLease {
+    fn drop(&mut self) {
+        if let Ok(mut p) = self.ch.proc.lock() {
+            p.inflight = p.inflight.saturating_sub(1);
+            p.last_use = std::time::Instant::now();
+        }
+    }
+}
+
 impl ClickHouse {
+    /// Keep the current engine awake while an external local exporter uses it.
+    /// Reacquire on engine replacement; the port is intentionally not permanent.
+    pub async fn keep_awake(self: &std::sync::Arc<Self>) -> Result<ClickHouseLease> {
+        self.proc.lock().unwrap().inflight += 1;
+        let mut lease = ClickHouseLease {
+            ch: self.clone(),
+            endpoint: String::new(),
+        };
+        let (_busy, endpoint) = self.begin().await?;
+        lease.endpoint = endpoint;
+        Ok(lease)
+    }
+
     /// Resolve the `clickhouse` binary in priority order: an explicit configured
     /// path, then `PATH`, then well-known install locations. Returns an absolute
     /// path so the daemon can run it regardless of the working directory.

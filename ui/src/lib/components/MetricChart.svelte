@@ -39,7 +39,10 @@
     emptyText = 'No data',
   }: Props = $props();
 
-  const W = 600;
+  // Match SVG coordinates to CSS pixels so narrow dashboard cards do not
+  // squeeze 11px axis labels into unreadable 4px-wide text.
+  let plotWidth = $state(600);
+  const W = $derived(Math.max(160, plotWidth));
   const PAD = { l: 44, r: 10, t: 10, b: 22 };
 
   // ── formatting ─────────────────────────────────────────────────────────────
@@ -173,11 +176,14 @@
   const xTicks = $derived.by(() => {
     const { lo, hi } = xDomain;
     const span = hi - lo;
-    const n = 5;
+    // Leave room for the longest date/time label, including the start/end
+    // anchors. A fixed six labels overlap in narrow dashboard cards.
+    const n = Math.max(1, Math.min(5, Math.floor(plotW / 90)));
     const out: { t: number; label: string }[] = [];
     for (let i = 0; i <= n; i++) {
       const t = lo + (span * i) / n;
-      out.push({ t, label: fmtTick(t, span) });
+      const label = fmtTick(t, span);
+      if (out.at(-1)?.label !== label) out.push({ t, label });
     }
     return out;
   });
@@ -271,7 +277,7 @@
   const tipFlip = $derived(hover ? hover.px > W * 0.55 : false);
 </script>
 
-<div class="mc" style="--mc-h:{H}px">
+<div class="mc" bind:clientWidth={plotWidth} style="--mc-h:{H}px">
   {#if !hasData}
     <div class="mc-empty" style="height:{H}px">{emptyText}</div>
   {:else}

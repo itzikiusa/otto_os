@@ -938,6 +938,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Insights, View);
     }
 
+    if p.starts_with("/telemetry/") {
+        return Require(Usage, Admin);
+    }
+
     // ---- Usage ----------------------------------------------------------------
     // §3.2: read summary/metrics=View; configure/install engine=Admin. Budgets are
     // spend-cap configuration ⇒ Admin (write) / View (read).
