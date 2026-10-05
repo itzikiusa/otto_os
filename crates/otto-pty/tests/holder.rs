@@ -288,14 +288,57 @@ fn kill_while_reconnecting_terminates_over_a_fresh_connection() {
     let holder_pid = h.holder().unwrap().holder_pid;
     h.simulate_holder_reconnecting();
     h.kill().expect("kill falls back to terminate");
-    assert!(
-        h.has_exited(),
-        "exit reported once the terminate is confirmed"
+    wait_until(
+        "exit reported once the holder is gone",
+        Duration::from_secs(15),
+        || h.has_exited(),
     );
-    wait_until("child gone", Duration::from_secs(10), || !pid_alive(child));
+    assert!(!pid_alive(child), "the child is dead when the exit fires");
     wait_until("holder gone", Duration::from_secs(10), || {
         !pid_alive(holder_pid)
     });
+}
+
+/// Review S1-08: the fallback used to report the exit as soon as the
+/// KILL/RELEASE bytes were written — before the holder's HUP → TERM → KILL
+/// escalation finished. With a child that ignores HUP the session looked
+/// dead (and resumable) for seconds while the CLI still ran. The exit must
+/// fire only once the child is provably gone, and `kill()` must not block
+/// the caller for the escalation.
+#[test]
+fn held_kill_fallback_reports_the_exit_only_after_the_child_is_dead() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("trap '' HUP; echo READY; while :; do sleep 0.2; done"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    let child = h.pid().unwrap();
+    h.simulate_holder_reconnecting();
+    let started = Instant::now();
+    h.kill().expect("kill falls back to terminate");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "kill() must not wait for the escalation: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !h.has_exited(),
+        "a HUP-ignoring child is still running: no exit yet"
+    );
+    let deadline = Instant::now() + otto_pty::KILL_GRACE * 2 + Duration::from_secs(10);
+    while !h.has_exited() {
+        assert!(Instant::now() < deadline, "exit never reported");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!pid_alive(child), "exit fired while the child still ran");
 }
 
 #[test]
@@ -474,4 +517,38 @@ fn history_cap_reaches_the_holder_emulator_and_regrows() {
         "history regrew past {UNVIEWED_SCROLLBACK_LINES} rows in the holder"
     );
     drop(third);
+}
+
+/// Review S1-19: adoption clamped the holder's grid to the RESTORE bounds
+/// (200 rows) although live resizes allow up to 300, so a tall session came
+/// back mirrored at 200 rows with its bottom (the TUI composer) missing.
+#[test]
+fn adoption_keeps_a_grid_taller_than_the_restore_bounds() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let first = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec cat"),
+        100,
+        30,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&first).contains("READY")
+    });
+    first
+        .resize(100, otto_pty::RESIZE_MAX_ROWS)
+        .expect("tall resize");
+    let holder_pid = first.holder().unwrap().holder_pid;
+    // Let the holder apply the RESIZE frame before handing over.
+    std::thread::sleep(Duration::from_millis(500));
+    first.detach();
+    drop(first);
+    let second = PtyHandle::adopt(&only_socket(&cfg)).expect("adopt");
+    assert_eq!(second.size(), (100, otto_pty::RESIZE_MAX_ROWS));
+    drop(second);
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
 }

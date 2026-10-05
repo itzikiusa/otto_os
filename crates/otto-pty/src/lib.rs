@@ -65,18 +65,43 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 /// rows — but finite: the emulator allocates `cols × rows` cells eagerly, so
 /// 65535×65535 is a ~137 GB allocation abort, and a zero dimension underflows
 /// the grid math and panics the reader thread (frozen output).
+///
+/// The column floor is 2, not 1: a wide (emoji / CJK) glyph occupies two
+/// cells, and the emulator's wrap math (`cols - width`) underflows on a
+/// one-column grid — a panic in debug, a wrapped 65535 and an `unwrap` panic
+/// in release — freezing the reader thread just like a zero dimension did.
+/// xterm's FitAddon never proposes fewer than 2 columns either.
+pub const RESIZE_MIN_COLS: u16 = 2;
+pub const RESIZE_MIN_ROWS: u16 = 1;
 pub const RESIZE_MAX_COLS: u16 = 500;
 pub const RESIZE_MAX_ROWS: u16 = 300;
 
-/// Reject a live grid outside `1..=RESIZE_MAX_COLS × 1..=RESIZE_MAX_ROWS`.
+/// Reject a live grid outside
+/// `RESIZE_MIN_COLS..=RESIZE_MAX_COLS × RESIZE_MIN_ROWS..=RESIZE_MAX_ROWS`.
 pub fn validate_resize(cols: u16, rows: u16) -> Result<()> {
-    if (1..=RESIZE_MAX_COLS).contains(&cols) && (1..=RESIZE_MAX_ROWS).contains(&rows) {
+    if (RESIZE_MIN_COLS..=RESIZE_MAX_COLS).contains(&cols)
+        && (RESIZE_MIN_ROWS..=RESIZE_MAX_ROWS).contains(&rows)
+    {
         Ok(())
     } else {
         Err(Error::Invalid(format!(
-            "terminal dimensions out of range: {cols}x{rows} (max {RESIZE_MAX_COLS}x{RESIZE_MAX_ROWS})"
+            "terminal dimensions out of range: {cols}x{rows} \
+             (min {RESIZE_MIN_COLS}x{RESIZE_MIN_ROWS}, max {RESIZE_MAX_COLS}x{RESIZE_MAX_ROWS})"
         )))
     }
+}
+
+/// Clamp a grid reported by a PTY holder (adoption, reconnect, lag resync)
+/// into the live-resize bounds. The holder's emulator is authoritative — it
+/// may legitimately be up to [`RESIZE_MAX_ROWS`] tall — so this only guards
+/// against nonsense; clamping to the narrower RESTORE bounds mirrored a
+/// 201–300-row session at 200 rows and then treated the next identical
+/// re-push as "same size" (review S1-19).
+pub fn clamp_live_grid(cols: u16, rows: u16) -> (u16, u16) {
+    (
+        cols.clamp(RESIZE_MIN_COLS, RESIZE_MAX_COLS),
+        rows.clamp(RESIZE_MIN_ROWS, RESIZE_MAX_ROWS),
+    )
 }
 
 /// Capacity of the output broadcast channel (chunks).
@@ -379,15 +404,28 @@ impl Mirror {
     }
 
     /// Replace the emulator with one rebuilt from a holder snapshot (a fresh
-    /// adoption, or a resync after the holder dropped a lagging stream). Live
-    /// viewers get the snapshot bytes too — it is a full repaint.
-    pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8]) {
+    /// adoption, or a resync after the holder dropped a lagging stream). The
+    /// grid is clamped with [`clamp_live_grid`].
+    ///
+    /// `initial` (adoption): the raw ring is empty, so the snapshot seeds it
+    /// (search after a daemon restart). A RESYNC (reconnect, lag) must not
+    /// touch the ring, and live viewers get a SCREEN-ONLY repaint: the full
+    /// snapshot carries up to 4000 history rows, and broadcasting it appended
+    /// the whole history again to every open xterm (and to search) on every
+    /// resync (review S1-18).
+    pub(crate) fn reset_to(&self, cols: u16, rows: u16, snapshot: &[u8], initial: bool) {
+        let (cols, rows) = clamp_live_grid(cols, rows);
         let mut parser = lock_unpoisoned(&self.parser);
         let mut fresh = vt100::Parser::new(rows, cols, EMULATOR_SCROLLBACK_LINES);
         fresh.process(snapshot);
         *parser = fresh;
-        lock_unpoisoned(&self.ring).push(snapshot);
-        let _ = self.tx.send(Bytes::copy_from_slice(snapshot));
+        if initial {
+            lock_unpoisoned(&self.ring).push(snapshot);
+            let _ = self.tx.send(Bytes::copy_from_slice(snapshot));
+        } else {
+            let repaint = PtyHandle::format_snapshot(parser.screen(), 0);
+            let _ = self.tx.send(Bytes::from(repaint));
+        }
     }
 }
 
@@ -441,8 +479,9 @@ impl PtyHandle {
 
     /// Spawn `spec` at the given `cols × rows` grid size, restoring a
     /// previously-saved terminal size on resume so the session reopens at
-    /// exactly the dimensions the user had. Values are **not** clamped here —
-    /// call [`resolve_grid`] first to sanitise raw metadata.
+    /// exactly the dimensions the user had. A grid outside the live-resize
+    /// bounds ([`validate_resize`]) falls back to the default; call
+    /// [`resolve_grid`] first to apply the stricter restore bounds.
     pub fn spawn_sized(spec: &CommandSpec, cols: u16, rows: u16) -> Result<PtyHandle> {
         Self::spawn_local(spec, cols, rows, RingBuffer::default())
     }
@@ -802,8 +841,9 @@ impl PtyHandle {
         } else {
             parser.screen_mut().set_size(rows, cols);
         }
+        let (old_rows, old_cols) = parser.screen().size();
         drop(parser);
-        match &self.backend {
+        let res = match &self.backend {
             Backend::Local { master, .. } => lock_unpoisoned(master)
                 .resize(PtySize {
                     rows,
@@ -817,7 +857,18 @@ impl PtyHandle {
             Backend::Held(conn) => conn
                 .resize(cols, rows)
                 .map_err(|e| Error::Internal(format!("pty resize (holder): {e}"))),
+        };
+        if res.is_err() {
+            // The PTY kept its old size: put the mirror back too. Leaving it
+            // at the new size made every later identical resize a "same
+            // size" no-op, so the PTY and the mirror stayed out of sync
+            // (review S1-20).
+            let mut parser = lock_unpoisoned(&self.mirror.parser);
+            if parser.screen().size() == (rows, cols) {
+                parser.screen_mut().set_size(old_rows, old_cols);
+            }
         }
+        res
     }
 
     /// Change the emulator's scrollback cap (see
@@ -947,6 +998,11 @@ impl PtyHandle {
         out
     }
 
+    /// Daemon-unique spawn counter for THIS process incarnation (see field doc).
+    pub fn spawn_seq(&self) -> u64 {
+        self.spawn_seq
+    }
+
     /// A snapshot that prepends up to `lines` rows of scrollback *history*
     /// (the rows that have scrolled off above the visible screen) before the
     /// coherent current-screen frame, so reconnecting doesn't lose history.
@@ -967,11 +1023,6 @@ impl PtyHandle {
     /// history. `lines == 0` is equivalent to [`screen_snapshot`].
     ///
     /// [`screen_snapshot`]: Self::screen_snapshot
-    /// Daemon-unique spawn counter for THIS process incarnation (see field doc).
-    pub fn spawn_seq(&self) -> u64 {
-        self.spawn_seq
-    }
-
     ///
     /// The parser lock is held only to copy the emulator state; formatting
     /// runs after it is released (see [`ScreenCapture`]).
@@ -1244,8 +1295,52 @@ mod tests {
         handle
             .resize(RESIZE_MAX_COLS, RESIZE_MAX_ROWS)
             .expect("max grid");
-        handle.resize(1, 1).expect("min grid");
-        assert_eq!(handle.size(), (1, 1));
+        handle
+            .resize(RESIZE_MIN_COLS, RESIZE_MIN_ROWS)
+            .expect("min grid");
+        assert_eq!(handle.size(), (RESIZE_MIN_COLS, RESIZE_MIN_ROWS));
+        // One column is below the floor: a wide glyph cannot fit it.
+        let err = handle.resize(1, 24).expect_err("1-column grid");
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        let _ = handle.kill();
+    }
+
+    /// A wide glyph at the narrowest accepted grid must not panic the
+    /// emulator (review S1-04: `cols - width` underflowed on a 1-column grid
+    /// and froze the reader thread). Exercised through the real reader, then
+    /// directly on the emulator for every width the bound admits.
+    #[tokio::test]
+    async fn wide_glyph_after_minimum_width_resize_does_not_panic() {
+        for rows in [RESIZE_MIN_ROWS, 24] {
+            let mut p = vt100::Parser::new(rows, RESIZE_MIN_COLS, 100);
+            p.process("\u{1F600}x\u{4E2D}\u{6587}\u{1F600}\r\n\u{1F600}".as_bytes());
+        }
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 80, 24).expect("spawn");
+        handle
+            .resize(RESIZE_MIN_COLS, 24)
+            .expect("minimum width accepted");
+        assert!(handle.resize(1, 24).is_err(), "1 column is rejected");
+        handle
+            .write("\u{1F600}x\u{1F600}\n".as_bytes())
+            .expect("write");
+        // The reader thread survives: output keeps flowing after the glyphs.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut alive = false;
+        while std::time::Instant::now() < deadline {
+            handle.write(b"PING\n").expect("write");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if handle.screen_rows().join("").contains("NG") {
+                alive = true;
+                break;
+            }
+        }
+        assert!(alive, "reader thread kept parsing after a wide glyph");
         let _ = handle.kill();
     }
 
