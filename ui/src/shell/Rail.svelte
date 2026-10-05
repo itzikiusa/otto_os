@@ -110,10 +110,35 @@
   <button
     class="rail-btn"
     onclick={() => ui.toggleRail()}
-    title="Expand sidebar (⌘1)"
+    title="Expand sidebar"
     aria-label="Expand sidebar"
+    aria-keyshortcuts="Meta+1"
   >
     <Icon name="sidebar" />
+  </button>
+  <!-- Back / Forward: the expanded Navigator's header carries them; the
+       collapsed rail must not lose them (⌘⇧←/→ are not discoverable). -->
+  <button
+    class="rail-btn"
+    onclick={() => router.back()}
+    disabled={!router.canBack}
+    title="Go back"
+    aria-label="Go back"
+    aria-keyshortcuts="Meta+Shift+ArrowLeft"
+    data-testid="rail-back"
+  >
+    <Icon name="chevronLeft" size={14} />
+  </button>
+  <button
+    class="rail-btn"
+    onclick={() => router.forward()}
+    disabled={!router.canForward}
+    title="Go forward"
+    aria-label="Go forward"
+    aria-keyshortcuts="Meta+Shift+ArrowRight"
+    data-testid="rail-forward"
+  >
+    <Icon name="chevronRight" size={14} />
   </button>
   <NotificationBell />
 
@@ -165,8 +190,9 @@
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
-      title="Settings (⌘,)"
+      title="Settings"
       aria-label="Settings"
+      aria-keyshortcuts="Meta+,"
     >
       <Icon name="gear" />
     </button>
@@ -244,9 +270,13 @@
     flex-shrink: 0;
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
-  .rail-btn:hover {
+  .rail-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text);
+  }
+  .rail-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
   }
   /* Same selection language as the Navigator: accent tint + accent glyph + a
      short accent bar at the rail's inline-start edge. */

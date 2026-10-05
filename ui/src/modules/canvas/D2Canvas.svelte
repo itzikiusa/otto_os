@@ -585,7 +585,7 @@
   .mode-bar {
     position: absolute;
     top: 12px;
-    left: 12px;
+    inset-inline-start: 12px;
     z-index: 5;
     display: inline-flex;
     align-items: center;

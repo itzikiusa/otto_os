@@ -1,4 +1,7 @@
 <script lang="ts">
+  import type { BadgeTone } from '../../lib/status';
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EC2: instances table (state pill, name, id, type, AZ, IPs, launch) with a
@@ -140,11 +143,11 @@
     if (!d) return null;
     return instances?.find((i) => i.instance_id === d.inst.instance_id) ?? d.inst;
   });
-  function pillClass(state: string): string {
+  function stateTone(state: string): BadgeTone {
     if (state === 'running') return 'ok';
     if (state === 'terminated') return 'bad';
     if (state === 'pending' || state === 'stopping' || state === 'shutting-down') return 'warn';
-    return '';
+    return 'neutral';
   }
   async function openDetail(i: Ec2Instance): Promise<void> {
     if (detail?.inst.instance_id !== i.instance_id) drawerTab = 'overview';
@@ -241,7 +244,7 @@
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}
             oncontextmenu={(e) => menu(e, i)}
           >
-            <td><span class="pill {i.state}">{i.state}</span></td>
+            <td><Badge tone={stateTone(i.state)} label={sentenceCase(i.state)} /></td>
             <td class="strong" title={i.name ?? ''}>{i.name ?? '—'}</td>
             <td class="mono">{i.instance_id}</td>
             {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
@@ -268,7 +271,7 @@
     name={inst.name ?? inst.instance_id}
     id={inst.instance_id}
     status={inst.state}
-    statusClass={pillClass(inst.state)}
+    statusTone={stateTone(inst.state)}
     tabs={DRAWER_TABS}
     tab={drawerTab}
     ontab={(t) => (drawerTab = t as DrawerTab)}
@@ -404,30 +407,6 @@
   }
   .err {
     color: var(--danger);
-  }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: lowercase;
-  }
-  .pill.running {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.pending,
-  .pill.stopping,
-  .pill.shutting-down {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-  }
-  .pill.terminated {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .dt {
     display: flex;

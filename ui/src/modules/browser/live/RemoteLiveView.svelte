@@ -18,6 +18,7 @@
   // gives the page the keyboard; Esc hands it back (⇧Esc sends Esc to the
   // page). Otto's own chords (⌘K, ⌘T, ⌘J…) never reach the page — lib/keys.ts
   // handles them first on window capture.
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -845,7 +846,7 @@
   {#if driver === 'agent'}
     <div class="drive-bar" role="status" data-testid="live-drive-bar">
       <Icon name="cursor" size={14} />
-      <span class="who"><span class="chip">Agent</span> An agent is driving this page. Its actions pause while you drive.</span>
+      <span class="who"><AgentChip title="An agent is driving this page" /> An agent is driving this page. Its actions pause while you drive.</span>
       <span class="grow"></span>
       <button class="btn small primary" onclick={takeOver} disabled={watchOnly}>Take over</button>
     </div>
@@ -1012,7 +1013,7 @@
   .drive-bar .who {
     min-width: 0;
   }
-  .drive-bar .chip {
+  .drive-bar .who :global(.agent-chip) {
     margin-inline-end: 4px;
   }
   .grow {

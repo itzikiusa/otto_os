@@ -442,7 +442,7 @@
     {/snippet}
   </PageHeader>
 
-  <PageBody width="full">
+  <PageBody>
     <!-- What the numbers cover: who, how far back, how fresh. In the page body,
          not the header, so the header keeps to tabs + Refresh / Export / settings. -->
     {#if usage.status?.available}

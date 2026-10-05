@@ -35,6 +35,7 @@
   import { paneResizer } from '../../lib/paneResizer';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -673,12 +674,60 @@
       ...s.pairs.map(([a, b]): CanvasEdge => ({ id: nid('edge'), fromUid: s.fromUid, fromCol: a, toUid: s.toUid, toCol: b, type: 'INNER' })),
     ];
   }
+  // ── "Add join…": the keyboard path to the column-to-column drag ────────────
+  // A small form (left table.column, right table.column, join type) that adds
+  // the same edge a drag would — no pointer needed.
+  let joinOpen = $state(false);
+  let jLeft = $state('');
+  let jLeftCol = $state('');
+  let jRight = $state('');
+  let jRightCol = $state('');
+  let jType = $state<JoinType>('INNER');
+  let joinError = $state<string | null>(null);
+  const jLeftT = $derived(tables.find((t) => t.uid === jLeft));
+  const jRightT = $derived(tables.find((t) => t.uid === jRight));
+  function firstCol(t: CardTable | undefined, prefer?: string): string {
+    const cols = t?.columns ?? [];
+    return (prefer && cols.find((c) => c.name === prefer)?.name) || cols[0]?.name || '';
+  }
+  function openJoinForm(): void {
+    const left = tables[0];
+    // Default the right side to a table that is not joined yet, if any.
+    const right = unreached[0] ?? tables.find((t) => t.uid !== left?.uid);
+    jLeft = left?.uid ?? '';
+    jRight = right?.uid ?? '';
+    jLeftCol = firstCol(left, left?.pk[0]);
+    jRightCol = firstCol(right, jLeftCol);
+    jType = 'INNER';
+    joinError = null;
+    joinOpen = true;
+  }
+  function addJoin(): void {
+    if (!jLeft || !jRight || !jLeftCol || !jRightCol) return;
+    if (jLeft === jRight) {
+      joinError = 'Pick two different tables.';
+      return;
+    }
+    const dup = edges.some(
+      (e) =>
+        (e.fromUid === jLeft && e.fromCol === jLeftCol && e.toUid === jRight && e.toCol === jRightCol) ||
+        (e.fromUid === jRight && e.fromCol === jRightCol && e.toUid === jLeft && e.toCol === jLeftCol),
+    );
+    if (dup) {
+      joinError = 'These columns are already joined.';
+      return;
+    }
+    edges = [...edges, { id: nid('edge'), fromUid: jLeft, fromCol: jLeftCol, toUid: jRight, toCol: jRightCol, type: jType }];
+    joinOpen = false;
+  }
+
   function edgeMenu(e: MouseEvent, id: string): void {
     const edge = edges.find((x) => x.id === id);
     if (!edge) return;
     ctxMenu.show(e, [
       ...JOIN_TYPES.map((t) => ({
-        label: `${t === 'FULL' ? 'FULL OUTER' : t} JOIN${edge.type === t ? '  ✓' : ''}`,
+        label: `${t === 'FULL' ? 'FULL OUTER' : t} JOIN`,
+        checked: edge.type === t,
         action: () => (edges = edges.map((x) => (x.id === id ? { ...x, type: t } : x))),
       })),
       { separator: true },
@@ -975,11 +1024,14 @@
           <div class="canvas-hint">
             <Icon name="layers" size={22} />
             <p class="ch-title">Build a query visually</p>
-            <p>Pick a table on the left. Add more and drag between columns to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
+            <p>Pick a table on the left. Add more and drag between columns (or use <strong>Add join…</strong>) to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
           </div>
         {/if}
-        {#if suggestions.length || unreached.length}
+        {#if tables.length > 1}
           <div class="canvas-bar">
+            <button class="btn small" onclick={openJoinForm} title="Join two columns without dragging">
+              <Icon name="merge" size={12} />Add join…
+            </button>
             {#if unreached.length}
               <span class="cb-warn"><Icon name="warning" size={12} />Not joined — left out of the SQL: {unreached.map((t) => t.alias).join(', ')}</span>
             {/if}
@@ -1225,6 +1277,54 @@
       </div>
     </div>
   </div>
+
+  {#if joinOpen}
+    <Modal title="Add join" width={440} onclose={() => (joinOpen = false)}>
+      <div class="join-form">
+        <div class="join-side">
+          <div class="field">
+            <label for="qb-join-lt">Left table</label>
+            <select id="qb-join-lt" class="input" bind:value={jLeft} onchange={() => { jLeftCol = firstCol(jLeftT); joinError = null; }}>
+              {#each tables as t (t.uid)}<option value={t.uid}>{t.alias}</option>{/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="qb-join-lc">Left column</label>
+            <select id="qb-join-lc" class="input mono" bind:value={jLeftCol} disabled={!jLeftT?.columns} onchange={() => (joinError = null)}>
+              {#if !jLeftT?.columns}<option value="">Loading columns…</option>{/if}
+              {#each jLeftT?.columns ?? [] as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+            </select>
+          </div>
+        </div>
+        <div class="join-side">
+          <div class="field">
+            <label for="qb-join-rt">Right table</label>
+            <select id="qb-join-rt" class="input" bind:value={jRight} onchange={() => { jRightCol = firstCol(jRightT, jLeftCol); joinError = null; }}>
+              {#each tables as t (t.uid)}<option value={t.uid}>{t.alias}</option>{/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="qb-join-rc">Right column</label>
+            <select id="qb-join-rc" class="input mono" bind:value={jRightCol} disabled={!jRightT?.columns} onchange={() => (joinError = null)}>
+              {#if !jRightT?.columns}<option value="">Loading columns…</option>{/if}
+              {#each jRightT?.columns ?? [] as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="qb-join-type">Join type</label>
+          <select id="qb-join-type" class="input" bind:value={jType}>
+            {#each JOIN_TYPES as t (t)}<option value={t}>{t === 'FULL' ? 'FULL OUTER' : t} JOIN</option>{/each}
+          </select>
+        </div>
+        {#if joinError}<p class="join-err" role="alert">{joinError}</p>{/if}
+      </div>
+      {#snippet footer()}
+        <button class="btn" onclick={() => (joinOpen = false)}>Cancel</button>
+        <button class="btn primary" onclick={addJoin} disabled={!jLeftCol || !jRightCol}>Add join</button>
+      {/snippet}
+    </Modal>
+  {/if}
 {/if}
 
 {#snippet groupEditor(g: CondGroup, depth: number, having: boolean)}
@@ -1283,7 +1383,7 @@
           {:else}
             <span class="val none"></span>
           {/if}
-          <button class="icon-btn" onclick={() => removeAt(g, i)} aria-label="Remove condition" title="Remove"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" onclick={() => removeAt(g, i)} aria-label="Remove condition" title="Remove condition"><Icon name="x" size={12} /></button>
         </div>
       {/if}
     {/each}
@@ -1677,6 +1777,20 @@
     color: var(--text);
     font-size: var(--fs-m);
     font-weight: 500;
+  }
+  .join-form {
+    display: flex;
+    flex-direction: column;
+  }
+  .join-side {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .join-err {
+    margin: 0;
+    color: var(--danger);
+    font-size: var(--fs-s);
   }
   .canvas-bar {
     position: absolute;

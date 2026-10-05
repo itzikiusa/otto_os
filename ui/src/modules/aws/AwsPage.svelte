@@ -142,8 +142,6 @@
   const noAccounts = $derived(aws.accountsLoaded && aws.accounts.length === 0 && !routeAccountId);
   const showRail = $derived(!noAccounts && (!viewport.isMobile || !routeAccountId));
   const showContent = $derived(noAccounts || !viewport.isMobile || !!routeAccountId);
-  // The overview's account filter lives in the header; AccountsOverview filters by it.
-  let filter = $state('');
   const SERVICE_LABEL: Record<AwsService, string> = { s3: 'S3', sqs: 'SQS', ec2: 'EC2', athena: 'Athena', eks: 'EKS', rds: 'RDS' };
 </script>
 
@@ -167,12 +165,6 @@
     {/if}
   {/snippet}
   {#snippet actions()}
-    {#if aws.installed && !routeAccountId && aws.accounts.length > 3}
-      <label class="filter input-group">
-        <Icon name="search" size={13} />
-        <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
-      </label>
-    {/if}
     {#if aws.installed && routeAccountId && account && !routeLogs && logsAllowed}
       <button class="btn" onclick={() => router.go(logsRoute(account.id))} data-testid="aws-open-logs" aria-label="CloudWatch Logs" title="CloudWatch Logs">
         <Icon name="text" size={13} />{#if !viewport.isPhone} Logs{/if}
@@ -194,7 +186,9 @@
     </div>
   </PageBody>
 {:else if aws.statusError}
-  <LoadState variant="page" what="the AWS console" error={aws.statusError} empty onretry={() => void aws.loadStatus()} />
+  <PageBody>
+    <LoadState variant="page" what="the AWS console" error={aws.statusError} empty onretry={() => void aws.loadStatus()} />
+  </PageBody>
 {:else if !aws.installed}
   <PageBody><InstallPanel /></PageBody>
 {:else}
@@ -203,7 +197,7 @@
     {#if showRail}
       <aside class="rail-col" style="--list-pane-w:{listW}px">
         {#if viewport.isMobile}
-          <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
+          <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
         {:else}
           <AccountRail
             activeId={routeAccountId}
@@ -223,10 +217,10 @@
       <section class="content">
         {#if !routeAccountId}
           {#if !viewport.isMobile || noAccounts}
-            <AccountsOverview {filter} onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
+            <AccountsOverview onadd={openCreate} onedit={openEdit} ondelete={(a) => void deleteAccount(a)} onsignin={(a) => void signIn(a)} />
           {/if}
         {:else if !aws.accountsLoaded}
-          <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={5} /></div>
+          <div class="pad"><Skeleton rows={5} label="accounts" /></div>
         {:else if !account}
           <EmptyState
             variant="page"
@@ -297,11 +291,6 @@
 {/if}
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .aws-page {
     display: flex;
     flex-direction: column;
@@ -333,16 +322,6 @@
     color: var(--text-dim);
   }
   /* Box + focus ring come from the global .input-group (app.css). */
-  .filter {
-    height: 28px;
-    padding: 0 8px;
-    border-radius: var(--radius-m);
-    background: var(--bg);
-  }
-  .filter input {
-    flex: none;
-    width: 160px;
-  }
   .rail-col {
     flex: none;
     width: var(--list-pane-w, 280px);

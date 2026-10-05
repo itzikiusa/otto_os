@@ -79,27 +79,36 @@
       await load();
       toasts.success('Custom theme created', `${label} · ${names.length} names`);
     } catch (e) {
-      toasts.error("Couldn’t create the theme", loadErrorText(e));
+      toasts.error('Couldn’t create the theme', loadErrorText(e));
     } finally {
       creating = false;
     }
   }
 
+  /** Custom themes whose delete is in flight, by id — that row's button disables. */
+  let deleting = $state<Record<string, boolean>>({});
+
   async function deleteTheme(t: NameThemeInfo): Promise<void> {
+    if (deleting[t.id]) return;
     const active = resp?.active === t.id;
     if (
       !(await confirmer.ask(
         `Delete custom theme “${t.label}” and its ${t.capacity} name${t.capacity === 1 ? '' : 's'}?${active ? ' New sessions go back to numbered names.' : ''} Sessions already named from it keep their names.`,
-        { title: 'Delete theme' },
+        { title: 'Delete theme?', confirmLabel: 'Delete theme' },
       ))
     )
       return;
+    deleting = { ...deleting, [t.id]: true };
     try {
       await api.del(`/name-themes/${t.id}`);
       await load();
       toasts.success('Theme deleted', t.label);
     } catch (e) {
-      toasts.error("Couldn’t delete the theme", loadErrorText(e));
+      toasts.error('Couldn’t delete the theme', loadErrorText(e));
+    } finally {
+      const next = { ...deleting };
+      delete next[t.id];
+      deleting = next;
     }
   }
 
@@ -162,8 +171,15 @@
           <li>
             <span class="cl-label" title={t.label}>{t.label}</span>
             <span class="cl-names" title={t.sample.join(', ')}>{t.sample.join(', ')}{t.capacity > t.sample.length ? '…' : ''}</span>
-            <button class="icon-btn" title="Delete {t.label}" aria-label="Delete {t.label}" onclick={() => deleteTheme(t)}>
-              <Icon name="trash" size={14} />
+            <button
+              class="icon-btn"
+              title={deleting[t.id] ? `Deleting ${t.label}…` : `Delete ${t.label}`}
+              aria-label={deleting[t.id] ? `Deleting ${t.label}…` : `Delete ${t.label}`}
+              aria-busy={deleting[t.id] ? 'true' : undefined}
+              disabled={deleting[t.id]}
+              onclick={() => deleteTheme(t)}
+            >
+              {#if deleting[t.id]}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="trash" size={14} />{/if}
             </button>
           </li>
         {/each}

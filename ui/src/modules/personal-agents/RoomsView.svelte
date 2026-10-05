@@ -15,6 +15,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import AgentAvatar from './AgentAvatar.svelte';
@@ -22,6 +24,8 @@
   import type { AgentRoomMessage, AgentRoomWithMembers } from '../../lib/api/types';
 
   let selectedId = $state<string | null>(null);
+  /** Rooms list width — the shared list-pane default/range, remembered. */
+  let listW = $state(loadPaneWidth('personalAgents.rooms.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let showingList = $state(false);
   let newRoomName = $state('');
   // Drafts and send results belong to a room, even while a request is pending.
@@ -194,7 +198,7 @@
 
 <div class="rooms">
   {#if !viewport.isPhone || !selectedId}
-  <aside class="list" aria-label="Rooms" bind:this={roomListEl}>
+  <aside class="list" aria-label="Rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
       <input
         bind:this={createEl}
@@ -227,6 +231,9 @@
       {/each}
     </ul>
   </aside>
+  {#if !viewport.isPhone}
+    <PaneDivider bind:width={listW} storageKey="personalAgents.rooms.listW" label="Resize the rooms list" />
+  {/if}
   {/if}
 
   {#if !viewport.isPhone || selectedId || rooms.length === 0}
@@ -357,7 +364,7 @@
 
 <style>
   .rooms { display: flex; gap: 12px; min-height: 0; flex: 1; align-items: stretch; }
-  .list { width: 220px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .list { width: var(--list-pane-w, 280px); flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
   .create { display: flex; gap: 6px; }
   .create input {
     flex: 1; min-width: 0; background: var(--bg); color: var(--text);

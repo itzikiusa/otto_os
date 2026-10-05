@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -17,6 +17,8 @@
   import { authedText } from '../../lib/api/client';
   import { scheduledTasksApi, type ScheduledTaskInput } from '../../lib/api/scheduledTasks';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import { rememberSelection } from '../../lib/lastSelection';
   import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
@@ -34,6 +36,42 @@
   let expandedId = $state<string | null>(null);
   // Agent UI control (lib/uiCommands/scheduled.ts) expands a task's runs.
   $effect(() => scheduledTasksPort.bind({ expand: (id) => (expandedId = id) }));
+
+  // The URL carries the task whose runs are open (`#/scheduled-tasks/<id>`), so
+  // a reload / share / notification lands on it. Route → page: a link (or
+  // Back/Forward) expands that task's runs and scrolls it into view; page →
+  // route: expanding / collapsing rewrites the URL in place.
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'scheduled-tasks' || !id) return;
+    untrack(() => {
+      if (id !== expandedId) void expandLinked(id);
+    });
+  });
+  async function expandLinked(id: string): Promise<void> {
+    expandedId = id;
+    void scheduledTasks.loadRuns(id);
+    await tick();
+    document.querySelector(`[data-task-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+  let routedId: string | null = null;
+  $effect(() => {
+    const id = expandedId;
+    if (id) rememberSelection('scheduled-tasks', id);
+    const was = routedId;
+    routedId = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'scheduled-tasks' && (router.parts[1] ?? null) !== id) router.replace(id ? `scheduled-tasks/${id}` : 'scheduled-tasks');
+    });
+  });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('scheduled-tasks', [
+      { id: 'scheduled-tasks.new', title: 'New scheduled task…', group: 'Scheduled Tasks', keywords: 'create cron cadence report', run: () => { if (!creating && !editId) startCreate(); } },
+    ]),
+  );
   let busy = $state(false);
   /** Inline form error (validation / failed save). Row actions report via toasts. */
   let error = $state('');
@@ -586,7 +624,7 @@
   async function stopRun(r: ScheduledTaskRun, t: ScheduledTask): Promise<void> {
     const ok = await confirmer.ask(
       `Stop this run of “${t.name}”? Its agent session (or shell command / workflow run) is stopped and nothing is delivered. The next scheduled run is unaffected.`,
-      { title: 'Stop run', confirmLabel: 'Stop run' },
+      { title: 'Stop run', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true },
     );
     if (!ok) return;
     try {

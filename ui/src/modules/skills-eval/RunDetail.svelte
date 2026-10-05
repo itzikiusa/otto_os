@@ -210,6 +210,7 @@
       !(await confirmer.ask(`Stop the evaluation of ${run.source_skill}? The iteration in progress is abandoned; finished iterations and their scores are kept.`, {
         title: 'Stop evaluation',
         confirmLabel: 'Stop run',
+        danger: true,
       }))
     )
       return;
@@ -419,8 +420,10 @@
         <StatusBadge status={evalStatus(run.status)} />
         <span class="grow"></span>
         {#if isActive(run)}
-          <button class="btn small" disabled={cancelling} onclick={cancelRun}>
-            <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop run'}
+          <!-- Red + "…" + confirm: stopping abandons an agent's in-flight
+               iteration (patterns.md › Stop). -->
+          <button class="btn small danger" disabled={cancelling} onclick={cancelRun}>
+            <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop run…'}
           </button>
         {/if}
         {#if run.best_iteration != null}

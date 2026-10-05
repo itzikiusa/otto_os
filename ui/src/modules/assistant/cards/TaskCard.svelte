@@ -33,7 +33,7 @@
   }
 </script>
 
-<ActionCard icon="check" kind={TASK_KIND[task.kind] ?? 'Task'} summary={task.title} attention={task.state === 'needs_you'} testid="card-task">
+<ActionCard icon="check" heading={TASK_KIND[task.kind] ?? 'Task'} summary={task.title} attention={task.state === 'needs_you'} testid="card-task">
   {#snippet pill()}
     <StatePill tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
   {/snippet}

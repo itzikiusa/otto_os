@@ -29,6 +29,8 @@
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { swarmPagePort } from '../../lib/uiCommands/swarm';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -142,14 +144,18 @@
   // an unhandled rejection that leaves the pane blank.
   let openError = $state<string | null>(null);
   let openErrorId = $state<string | null>(null);
+  let openingId: string | null = null;
   async function openSwarm(id: string): Promise<void> {
     openError = null;
     openErrorId = null;
+    openingId = id;
     try {
       await swarm.openSwarm(id);
     } catch (e) {
       openError = swarm.detailError ?? loadErrorText(e);
       openErrorId = id;
+    } finally {
+      if (openingId === id) openingId = null;
     }
   }
 
@@ -179,7 +185,8 @@
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
-    if (swarm.detail || swarm.loading) {
+    // A deep link (`#/swarm/<id>`) opens on its own (below).
+    if (swarm.detail || swarm.loading || untrack(() => routeSwarmId())) {
       autoPickedFor = wsId;
       return;
     }
@@ -188,8 +195,47 @@
     const id = initialSelection('swarm', swarm.swarms, (s) => s.id);
     if (id) void openSwarm(id);
   });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('swarm', [
+      { id: 'swarm.new', title: 'New swarm…', group: 'Swarm', keywords: 'create agents team org', run: () => (showNew = true) },
+    ]),
+  );
+
+  /** The swarm the URL names (`#/swarm/<id>`), or null. */
+  function routeSwarmId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'swarm' && id ? id : null;
+  }
+  // The URL carries the open swarm so a reload / share / notification lands on
+  // it; the last pick is remembered as the fallback. Only a CLOSE clears the
+  // URL, and on arrival a link naming a DIFFERENT swarm than the one the store
+  // kept wins (the effect below opens it).
+  let routedId: string | null = null;
+  let arrived = false;
   $effect(() => {
-    if (detail?.id) rememberSelection('swarm', detail.id);
+    const id = detail?.id ?? null;
+    if (id) rememberSelection('swarm', id);
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    const linked = untrack(() => routeSwarmId());
+    if (first && linked && linked !== id) return;
+    untrack(() => {
+      if (router.module === 'swarm' && linked !== id) router.replace(id ? `swarm/${id}` : 'swarm');
+    });
+  });
+  // A route change while the page is up (a notification, Back/Forward, a
+  // pasted link) opens that swarm.
+  $effect(() => {
+    const linked = routeSwarmId();
+    if (!linked) return;
+    untrack(() => {
+      if (linked !== swarm.detail?.id && linked !== openingId) void openSwarm(linked);
+    });
   });
   // The rail is pointless while there is nothing to list (and no load error to
   // retry): the page-level empty state owns the page then.

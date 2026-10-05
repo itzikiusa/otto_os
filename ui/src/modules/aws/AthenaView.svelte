@@ -384,7 +384,7 @@
           <Icon name="search" size={12} />
           <input type="search" bind:value={treeFilter} placeholder="Filter catalog…" aria-label="Filter catalog" />
         </label>
-        <button class="icon-btn" onclick={() => void loadCatalog()} title="Reload catalog" aria-label="Reload catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
+        <button class="icon-btn" onclick={() => void loadCatalog()} title="Refresh catalog" aria-label="Refresh catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
         {#if viewport.isMobile}
           <button class="icon-btn" onclick={() => (treeOpen = false)} aria-label="Hide catalog" title="Hide catalog"><Icon name="x" size={12} /></button>
         {/if}

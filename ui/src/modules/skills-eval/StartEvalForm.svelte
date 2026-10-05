@@ -12,6 +12,7 @@
     SkillSourceInfo,
     StartSkillEvalReq,
   } from '../../lib/api/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -213,13 +214,16 @@
   </p>
 
   {#if loadError}
-    <div class="load-err" role="alert">
-      <Icon name="warning" size={14} />
-      <div class="grow">
-        <strong>Couldn’t load the evaluator defaults.</strong>
-        <span class="dim">The skill list and saved validations are missing until they load. {loadError}</span>
-      </div>
-      <button class="btn small" type="button" onclick={() => void load()}>Retry</button>
+    <!-- The form stays usable (custom path), so the failure is one compact
+         line + Retry above it, not a page-level error. -->
+    <div class="load-err">
+      <LoadState
+        what="the evaluator defaults"
+        variant="compact"
+        error={`${loadError} The skill list and saved validations stay missing until they load.`}
+        empty
+        onretry={() => void load()}
+      />
     </div>
   {/if}
 
@@ -575,20 +579,9 @@
     flex: 1;
   }
   .load-err {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+    border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
-  }
-  .load-err > :global(svg) {
-    color: var(--danger);
-    flex: none;
-    margin-top: 2px;
   }
   .dim {
     color: var(--text-dim);

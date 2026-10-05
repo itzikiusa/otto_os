@@ -357,7 +357,7 @@
     runningDiscovery = true;
     try {
       await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
-      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      toasts.success('Discovery started', 'The swarm is now analyzing the story.');
       await product.changeTab('discovery');
     } catch (e) {
       toastError('Couldn’t discovery', e);
@@ -1185,7 +1185,7 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="comma,separated" bind:value={fieldDraft} />
+      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
       <input class="field-input" type="text" bind:value={fieldDraft} />
@@ -1297,7 +1297,7 @@
           <input
             class="tag-input"
             bind:value={tagInput}
-            placeholder="+ tag"
+            placeholder="Add tag…"
             disabled={tagSaving}
             aria-label="Add tag"
             spellcheck="false"
@@ -1398,7 +1398,7 @@
                 id="draft-title"
                 class="input"
                 bind:value={draftTitle}
-                placeholder="Story title…"
+                placeholder="e.g. Players can set a weekly deposit limit"
                 spellcheck="false"
               />
             </div>
@@ -1410,7 +1410,7 @@
                 class="textarea"
                 bind:value={draftBody}
                 rows={14}
-                placeholder="Write your story or paste notes here…"
+                placeholder="e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)"
                 spellcheck="false"
                 onpaste={handleBodyPaste}
               ></textarea>
@@ -1491,7 +1491,7 @@
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
-                placeholder="Paste conversation or notes here…"
+                placeholder="e.g. PO: the limit resets every Monday at midnight…"
                 spellcheck="false"
               ></textarea>
               <button
@@ -1544,7 +1544,7 @@
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
-                  placeholder="Write the description in Markdown…"
+                  placeholder="e.g. ## Goal — let players cap their weekly deposits"
                   spellcheck="false"
                   aria-label="Description (Markdown)"
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}

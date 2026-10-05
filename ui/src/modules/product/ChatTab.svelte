@@ -146,7 +146,7 @@
               </button>
               {#if c.status === 'active'}
                 <button
-                  class="archive-btn"
+                  class="archive-btn reveal-on-hover"
                   onclick={() => archiveChat(c.id)}
                   title="Archive this chat"
                   aria-label="Archive chat"
@@ -271,7 +271,7 @@
   .archive-btn {
     flex-shrink: 0;
     margin-inline-end: 8px;
-    padding: 2px 7px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -282,10 +282,18 @@
     transition: opacity var(--dur-fast), background var(--dur-fast);
     white-space: nowrap;
   }
+  /* Revealed on row hover / keyboard focus, and always shown on a touch
+     screen (no hover there) — the shared .reveal-on-hover recipe. */
   .chat-item:hover .archive-btn,
+  .chat-item:focus-within .archive-btn,
   .chat-item.active .archive-btn,
   .archive-btn:focus-visible {
     opacity: 1;
+  }
+  @media (hover: none) {
+    .archive-btn {
+      opacity: 1;
+    }
   }
   .archive-btn:hover {
     background: var(--hover);

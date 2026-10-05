@@ -21,6 +21,8 @@
   import { nativeBrowser, nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { api, baseUrl, getToken } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
 
@@ -437,7 +439,7 @@
   // ── Send to agent ─────────────────────────────────────────────────────────
   async function sendToAgent(): Promise<void> {
     if (!ws.activeSessionId || ws.activeSession?.kind !== 'agent') {
-      toasts.error('No agent session', 'Open an agent session to receive the feedback.');
+      toasts.error('Can’t send yet', 'Open an agent session to receive the feedback.');
       return;
     }
 
@@ -455,9 +457,9 @@
     try {
       await api.post(`/sessions/${ws.activeSessionId}/input`, { text, submit: true });
       annotations = [];
-      toasts.success('Sent to agent', `${n} comment(s)`);
-    } catch {
-      toasts.error('Failed to send', 'Could not inject message into the agent session.');
+      toasts.success('Sent to agent', plural(n, 'comment'));
+    } catch (e) {
+      toastError('Couldn’t send the comments to the agent', e);
     }
   }
 </script>

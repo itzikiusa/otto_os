@@ -158,6 +158,13 @@
     }
   }
 
+  /** Stop waiting for the plan (neutral: agents already started keep running,
+   *  and their plan still lands on this tab when it's written). */
+  function stopWaiting(): void {
+    clearPoll();
+    toasts.info('Stopped waiting for the plan', 'Planning agents already started keep running — the plan appears here when it’s ready.');
+  }
+
   function startPolling(): void {
     clearPoll();
     pollStartedAt = Date.now();
@@ -475,6 +482,9 @@
               {/if}
             </button>
             {#if pollTimer !== null}
+              <button class="btn" onclick={stopWaiting} title="Stop waiting for the plan (agents already started keep running)">
+                <Icon name="stop" size={12} /> Stop
+              </button>
               <span class="polling-indicator">checking every 3s…</span>
             {/if}
             {#if !swarmLink && swarm.swarms.length > 1}
@@ -549,6 +559,11 @@
               <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
                 {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
               </button>
+              {#if pollTimer !== null}
+                <button class="btn small" onclick={stopWaiting} title="Stop waiting for the plan (agents already started keep running)">
+                  <Icon name="stop" size={12} /> Stop
+                </button>
+              {/if}
               {#if !swarmLink && swarm.swarms.length > 1}
                 <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
                   <option value="">First swarm</option>

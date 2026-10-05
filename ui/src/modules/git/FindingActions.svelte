@@ -275,6 +275,7 @@
   <div class="fa-gate-done">
     <ApprovalOutcome
       outcome={finding.approval_decision === 'approved' ? 'approved' : 'denied'}
+      by={finding.approved_by}
       at={finding.approved_at}
     />
   </div>

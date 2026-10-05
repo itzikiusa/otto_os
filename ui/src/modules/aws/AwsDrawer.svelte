@@ -5,6 +5,9 @@
   // the table; phone: a full-screen sheet. Esc closes; ←/→ move between tabs.
   // The phone sheet sits on the Modal layer (above BottomNav) and registers
   // with ui.pushModal() so the native browser webview hides under it.
+  import type { BadgeTone } from '../../lib/status';
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import type { Snippet } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
@@ -19,16 +22,16 @@
     name: string;
     /** Secondary id shown after the name (instance id, endpoint…). */
     id?: string;
-    /** Status pill text + `pill-*` class suffix for colouring. */
+    /** Status text (the raw AWS state; shown sentence-cased) + its Badge tone. */
     status?: string;
-    statusClass?: string;
+    statusTone?: BadgeTone;
     tabs: { id: string; label: string }[];
     tab: string;
     ontab: (id: string) => void;
     onclose: () => void;
     children: Snippet;
   }
-  let { kind, name, id = '', status = '', statusClass = '', tabs, tab, ontab, onclose, children }: Props =
+  let { kind, name, id = '', status = '', statusTone = 'neutral', tabs, tab, ontab, onclose, children }: Props =
     $props();
 
   let drawerEl = $state<HTMLElement | null>(null);
@@ -71,7 +74,7 @@
       <span class="dr-kind">{kind}</span>
       <span class="dr-name" title={name}>{name}</span>
       {#if id && id !== name}<span class="dr-id mono" title={id}>{id}</span>{/if}
-      {#if status}<span class="pill {statusClass}">{status}</span>{/if}
+      {#if status}<Badge tone={statusTone} label={sentenceCase(status)} testid="aws-drawer-status" />{/if}
     </div>
     <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
   </header>
@@ -154,28 +157,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 100%;
-  }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: lowercase;
-  }
-  .pill.ok {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-  }
-  .pill.bad {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   /* The shared .segmented control, scrollable when the tabs outgrow the drawer. */
   .dr-tabs {

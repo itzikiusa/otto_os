@@ -405,7 +405,7 @@
     >
       <Icon name="chevronDown" size={12} />
     </button>
-    <button class="find-close-btn" onclick={close} title="Close (Esc)" aria-label="Close find bar">
+    <button class="find-close-btn" onclick={close} title="Close find bar" aria-label="Close find bar" aria-keyshortcuts="Escape">
       <Icon name="x" size={11} />
     </button>
   </div>

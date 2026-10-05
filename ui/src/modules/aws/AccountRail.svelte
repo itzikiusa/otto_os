@@ -8,6 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import { logsRoute } from './util';
@@ -148,7 +149,7 @@
       {/if}
     </div>
   {:else}
-    <p class="empty">No accounts yet.</p>
+    <EmptyState icon="cloud" title="No AWS accounts yet" />
   {/each}
 </nav>
 
@@ -289,10 +290,5 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
-  }
-  .empty {
-    margin: 8px 12px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
 </style>

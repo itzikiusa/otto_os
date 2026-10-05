@@ -19,6 +19,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
   import MermaidCanvas from './MermaidCanvas.svelte';
@@ -140,6 +141,21 @@
     showConvo = false;
     canvas.closeScene();
   }
+
+  // ⌘K: the page's verbs (new scene per format; the assistant while a scene
+  // is open). Group = the module name.
+  $effect(() => {
+    if (!ws.currentId) return registry.register('canvas', []);
+    const open = !!canvas.currentId;
+    return registry.register('canvas', [
+      { id: 'canvas.new-excalidraw', title: 'New Excalidraw board', group: 'Canvas', keywords: 'create scene whiteboard draw', run: () => void createBlank('excalidraw') },
+      { id: 'canvas.new-mermaid', title: 'New Mermaid diagram', group: 'Canvas', keywords: 'create scene flowchart sequence', run: () => void createBlank('mermaid') },
+      { id: 'canvas.new-d2', title: 'New D2 diagram', group: 'Canvas', keywords: 'create scene architecture', run: () => void createBlank('d2') },
+      ...(open
+        ? [{ id: 'canvas.assistant', title: 'Open the canvas assistant', group: 'Canvas', keywords: 'agent ai redraw chat', run: () => (showConvo = true) }]
+        : []),
+    ]);
+  });
 
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {

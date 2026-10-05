@@ -205,7 +205,7 @@
     margin-bottom: 0;
   }
   .md :global(strong) {
-    font-weight: 650;
+    font-weight: 600;
   }
   .md :global(pre) {
     background: var(--code-bg, var(--surface-2));

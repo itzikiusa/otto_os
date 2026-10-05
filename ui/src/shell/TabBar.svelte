@@ -18,6 +18,8 @@
   import { popoutItems } from '../lib/popoutMenu';
   import { confirmer } from '../lib/confirm.svelte';
   import type { MenuItem } from '../lib/contextmenu.svelte';
+  import { onTabKey } from '../lib/tabKeys';
+  import { tick } from 'svelte';
 
   // Share modal: tracks the session id we're sharing; null = closed.
   let shareSessionId = $state<string | null>(null);
@@ -72,28 +74,103 @@
       ?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
   });
 
-  // Arrow-key navigation across the tablist (ArrowLeft/Right, Home, End).
+  // Keyboard on a focused tab: ←/→ (visual direction — RTL mirrors), Home and
+  // End move AND select through the shared tablist helper; ⌥⇧←/→ moves the tab
+  // itself (the keyboard path for drag-to-reorder); Delete closes it.
   function onTabKeydown(e: KeyboardEvent, id: string): void {
-    // Only keys aimed at the tab itself: the rename field (Space, ←/→, Home/
-    // End are text editing) and the × button (Enter/Space must click it)
-    // bubble through here too.
-    if (e.target !== e.currentTarget) return;
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
       e.preventDefault();
-      activate(id);
+      const rtl = getComputedStyle(e.currentTarget as Element).direction === 'rtl';
+      moveTab(id, (e.key === 'ArrowRight') !== rtl ? 1 : -1);
       return;
     }
-    const idx = ws.openTabs.indexOf(id);
-    let target: string | undefined;
-    if (e.key === 'ArrowRight') target = ws.openTabs[idx + 1];
-    else if (e.key === 'ArrowLeft') target = ws.openTabs[idx - 1];
-    else if (e.key === 'Home') target = ws.openTabs[0];
-    else if (e.key === 'End') target = ws.openTabs[ws.openTabs.length - 1];
-    else return;
-    if (!target) return;
-    e.preventDefault();
-    activate(target);
-    (tabsEl?.querySelector(`[data-tab-id="${CSS.escape(target)}"]`) as HTMLElement | null)?.focus();
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      void ws.requestCloseTab(id);
+      return;
+    }
+    onTabKey(e);
+  }
+
+  /** Move a tab one place toward the end (+1) or the start (−1) of the strip
+   *  and keep focus on it. */
+  function moveTab(id: string, dir: 1 | -1): void {
+    const from = ws.openTabs.indexOf(id);
+    const to = from + dir;
+    if (from < 0 || to < 0 || to >= ws.openTabs.length) return;
+    ws.reorderTab(id, to);
+    void tick().then(() =>
+      tabsEl?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"] .tab-main`)?.focus(),
+    );
+  }
+
+  /** The tab's context menu. "Move left / right" are the pointer-free way to
+   *  reorder (also ⌥⇧←/→ on a focused tab); they name the VISUAL direction,
+   *  so in RTL "Move left" moves toward the end of the strip. */
+  function tabMenu(id: string, tabIdx: number): MenuItem[] {
+    const rtl = !!tabsEl && getComputedStyle(tabsEl).direction === 'rtl';
+    const last = ws.openTabs.length - 1;
+    const canBack = tabIdx > 0;
+    const canFwd = tabIdx < last;
+    const leftOk = rtl ? canFwd : canBack;
+    const rightOk = rtl ? canBack : canFwd;
+    return tidy([
+      ...(id !== DB_PANE_ID && ws.myRole !== 'viewer'
+        ? [{ label: 'Rename', icon: 'edit', action: () => startRename(id) } as MenuItem]
+        : []),
+      ...(id !== DB_PANE_ID
+        ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) } as MenuItem]
+        : []),
+      ...(id === DB_PANE_ID
+        ? popoutItems('database', 'Database')
+        : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
+      ...(leftOk || rightOk
+        ? [
+            { separator: true } as MenuItem,
+            ...(leftOk ? [{ label: 'Move left', hint: '⌥⇧←', action: () => moveTab(id, rtl ? 1 : -1) } as MenuItem] : []),
+            ...(rightOk ? [{ label: 'Move right', hint: '⌥⇧→', action: () => moveTab(id, rtl ? -1 : 1) } as MenuItem] : []),
+          ]
+        : []),
+      { separator: true },
+      { label: 'Close tab', icon: 'x', action: () => void ws.requestCloseTab(id) },
+      ...(ws.openTabs.length > 1
+        ? [{
+            label: 'Close others',
+            icon: 'x',
+            action: () => void ws.requestCloseTabs(ws.openTabs.filter((t) => t !== id)),
+          }]
+        : []),
+      ...(tabIdx < ws.openTabs.length - 1
+        ? [{
+            label: 'Close to the right',
+            icon: 'x',
+            action: () => void ws.requestCloseTabs(ws.openTabs.slice(tabIdx + 1)),
+          }]
+        : []),
+      ...(ws.openTabs.length > 1
+        ? [{
+            label: 'Close all tabs',
+            icon: 'x',
+            action: () => void ws.requestCloseTabs([...ws.openTabs]),
+          }]
+        : []),
+      ...(ws.recentlyClosed.length > 0
+        ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
+        : []),
+      ...(id !== DB_PANE_ID ? sessionRows(id) : []),
+      { separator: true },
+      { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
+      {
+        label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
+        icon: ws.viewMode === 'tiled' ? 'square' : 'grid',
+        action: () => ws.setViewMode(ws.viewMode === 'tiled' ? 'tabs' : 'tiled'),
+      },
+      {
+        label: ws.viewMode === 'mission' ? 'Exit Work Queue' : 'Work Queue',
+        icon: 'gauge',
+        action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
+      },
+    ]);
   }
 
   // One session vocabulary (lib/status.ts): the tab's dot/↻ and tooltip line
@@ -233,6 +310,9 @@
 >
   <div class="tabs" class:overflowing bind:this={tabsEl} onscroll={measureOverflow} role="tablist" aria-label="Session tabs">
     {#each ws.openTabs as id, tabIdx (id)}
+      <!-- The tab is the main <button role="tab">; the × is its SIBLING (a
+           button inside a tab is a nested control screen readers can't
+           reach). The wrapper only draws the shared chrome. -->
       <div
         class="tab"
         class:active={ws.activeSessionId === id}
@@ -241,94 +321,15 @@
         class:unread={ws.unread[id] === true}
         class:drag-over={dragOverId === id}
         data-tab-id={id}
-        draggable={id !== DB_PANE_ID}
-        role="tab"
-        tabindex="0"
-        aria-selected={ws.activeSessionId === id}
-        onclick={() => activate(id)}
-        onkeydown={(e) => onTabKeydown(e, id)}
-        ondblclick={() => startRename(id)}
-        ondragstart={(e) => onDragStart(e, id)}
-        ondragover={(e) => onDragOver(e, id)}
-        ondragleave={() => onDragLeave(id)}
-        ondrop={(e) => onDrop(e, id)}
-        ondragend={onDragEnd}
-        onauxclick={(e) => {
-          if (e.button === 1) {
-            e.preventDefault();
-            void ws.requestCloseTab(id);
-          }
-        }}
-        oncontextmenu={(e) => ctxMenu.show(e, tidy([
-          ...(id !== DB_PANE_ID && ws.myRole !== 'viewer'
-            ? [{ label: 'Rename', icon: 'edit', action: () => startRename(id) } as MenuItem]
-            : []),
-          ...(id !== DB_PANE_ID
-            ? [{ label: 'Share…', icon: 'share', action: () => (shareSessionId = id) } as MenuItem]
-            : []),
-          ...(id === DB_PANE_ID
-            ? popoutItems('database', 'Database')
-            : popoutItems(`agents/${id}`, ws.getSession(id)?.title)),
-          { separator: true },
-          { label: 'Close tab', icon: 'x', action: () => void ws.requestCloseTab(id) },
-          ...(ws.openTabs.length > 1
-            ? [{
-                label: 'Close others',
-                icon: 'x',
-                action: () => void ws.requestCloseTabs(ws.openTabs.filter((t) => t !== id)),
-              }]
-            : []),
-          ...(tabIdx < ws.openTabs.length - 1
-            ? [{
-                label: 'Close to the right',
-                icon: 'x',
-                action: () => void ws.requestCloseTabs(ws.openTabs.slice(tabIdx + 1)),
-              }]
-            : []),
-          ...(ws.openTabs.length > 1
-            ? [{
-                label: 'Close all tabs',
-                icon: 'x',
-                action: () => void ws.requestCloseTabs([...ws.openTabs]),
-              }]
-            : []),
-          ...(ws.recentlyClosed.length > 0
-            ? [{ label: 'Reopen closed tab', icon: 'refresh', action: () => ws.reopenClosedTab() }]
-            : []),
-          ...(id !== DB_PANE_ID ? sessionRows(id) : []),
-          { separator: true },
-          { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
-          {
-            label: ws.viewMode === 'tiled' ? 'Switch to tabbed view' : 'Switch to tiled view',
-            icon: ws.viewMode === 'tiled' ? 'square' : 'grid',
-            action: () => ws.setViewMode(ws.viewMode === 'tiled' ? 'tabs' : 'tiled'),
-          },
-          {
-            label: ws.viewMode === 'mission' ? 'Exit Work Queue' : 'Work Queue',
-            icon: 'gauge',
-            action: () => ws.setViewMode(ws.viewMode === 'mission' ? 'tabs' : 'mission'),
-          },
-        ]))}
       >
-        {#if id === DB_PANE_ID}
-          <Icon name="db" size={11} />
-        {:else}
-          {@const st = tabState(id)}
-          {#if st.resumable}
-            <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-              <Icon name="refresh" size={9} />
-            </span>
-          {:else}
-            <StatusDot state={st} size={6} />
-          {/if}
-        {/if}
         {#if renamingId === id}
+          {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
           <!-- svelte-ignore a11y_autofocus -->
           <input
             class="tab-rename"
             bind:value={draft}
             autofocus
-            onclick={(e) => e.stopPropagation()}
+            aria-label="Session name"
             onblur={commitRename}
             onkeydown={(e) => {
               if (e.key === 'Enter') commitRename();
@@ -336,22 +337,56 @@
             }}
           />
         {:else}
-          <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
-          {#if needsYou(id)}
-            <span class="tab-needs-you" title="Waiting on you" aria-label="Needs you">
-              <Icon name="bell" size={9} />
-            </span>
-          {:else if ws.unread[id] === true}
-            <span class="tab-unread" title="New activity since you last looked" aria-label="Unread activity"></span>
-          {/if}
+          <button
+            class="tab-main"
+            role="tab"
+            aria-selected={ws.activeSessionId === id}
+            tabindex={ws.activeSessionId === id ? 0 : -1}
+            draggable={id !== DB_PANE_ID}
+            aria-keyshortcuts="Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Backspace Delete"
+            onclick={() => activate(id)}
+            onkeydown={(e) => onTabKeydown(e, id)}
+            ondblclick={() => startRename(id)}
+            ondragstart={(e) => onDragStart(e, id)}
+            ondragover={(e) => onDragOver(e, id)}
+            ondragleave={() => onDragLeave(id)}
+            ondrop={(e) => onDrop(e, id)}
+            ondragend={onDragEnd}
+            onauxclick={(e) => {
+              if (e.button === 1) {
+                e.preventDefault();
+                void ws.requestCloseTab(id);
+              }
+            }}
+            oncontextmenu={(e) => ctxMenu.show(e, tabMenu(id, tabIdx))}
+          >
+            {#if id === DB_PANE_ID}
+              <Icon name="db" size={11} />
+            {:else}
+              {@const st = tabState(id)}
+              {#if st.resumable}
+                <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
+                  <Icon name="refresh" size={9} />
+                </span>
+              {:else}
+                <StatusDot state={st} size={6} />
+              {/if}
+            {/if}
+            <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
+            {#if needsYou(id)}
+              <span class="tab-needs-you" title="Waiting on you" role="img" aria-label="Needs you">
+                <Icon name="bell" size={9} />
+              </span>
+            {:else if ws.unread[id] === true}
+              <span class="tab-unread" title="New activity since you last looked" role="img" aria-label="Unread activity"></span>
+            {/if}
+          </button>
         {/if}
         <button
-          class="tab-close"
-          onclick={(e) => {
-            e.stopPropagation();
-            void ws.requestCloseTab(id);
-          }}
-          aria-label="Close tab"
+          class="tab-close reveal-on-hover"
+          tabindex={ws.activeSessionId === id ? 0 : -1}
+          onclick={() => void ws.requestCloseTab(id)}
+          aria-label="Close {title(id)}"
           title={ws.closeTabTitle(id)}
         >
           <Icon name="x" size={9} />
@@ -364,8 +399,8 @@
   <button
     class="icon-btn history-btn"
     onclick={() => router.go('history')}
-    title="History — every past Claude/Codex conversation, resumable"
-    aria-label="History"
+    title="Session history"
+    aria-label="Session history"
     data-testid="agents-history-btn"
   >
     <Icon name="clock" size={14} />
@@ -384,7 +419,7 @@
       class:active={ws.viewMode === 'tiled'}
       aria-pressed={ws.viewMode === 'tiled'}
       onclick={() => ws.setViewMode('tiled')}
-      title="Tiled view — see all sessions at once"
+      title="Tiled view"
       aria-label="Tiled view"
     >
       <Icon name="grid" size={12} />
@@ -402,7 +437,7 @@
   <button
     class="icon-btn new-tab"
     onclick={() => (ui.newSessionOpen = true)}
-    title="New session (⌘T)"
+    title="New session" aria-keyshortcuts="Meta+T"
     aria-label="New session"
   >
     <Icon name="plus" size={13} />
@@ -460,9 +495,10 @@
   .tab {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 4px;
     height: 28px;
-    padding-block: 0; padding-inline: 10px 6px;
+    padding-block: 0;
+    padding-inline: 0 6px;
     border-radius: var(--radius-s);
     border: 1px solid transparent;
     color: var(--text-dim);
@@ -538,19 +574,59 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    opacity: 0;
     transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
     flex-shrink: 0;
   }
-  .tab:hover .tab-close,
-  .tab.active .tab-close,
-  .tab:focus-visible .tab-close,
-  .tab-close:focus-visible {
+  /* Hidden until the tab is hovered / focused (global .reveal-on-hover, which
+     also keeps it visible on touch screens); the active tab always shows it. */
+  .tab.active .tab-close {
     opacity: 1;
   }
-  .tab:focus-visible {
+  /* Touch: a ≥ 36 px hit area around the 16 px glyph, without moving it. */
+  @media (pointer: coarse) {
+    .tab-close {
+      position: relative;
+    }
+    .tab-close::after {
+      content: '';
+      position: absolute;
+      inset: -10px;
+    }
+    .view-toggle button {
+      position: relative;
+    }
+    .view-toggle button::after {
+      content: '';
+      position: absolute;
+      inset-block: -7px;
+      inset-inline: -5px;
+    }
+  }
+  /* The tab proper: dot + title, fills the chrome up to the ×. */
+  .tab-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding-block: 0;
+    padding-inline: 10px 2px;
+    border: none;
+    border-radius: var(--radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tab-main:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
+  }
+  .tab:has(.tab-rename) {
+    padding-inline-start: 10px;
+    gap: 8px;
   }
   .tab-close:focus-visible {
     outline: 1px solid var(--accent-text);
@@ -571,6 +647,8 @@
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);
     color: var(--text);
   }
+  /* The shared .icon-btn already grows its hit area to 36 px on a coarse
+     pointer (app.css); keep it from shrinking into the overflowing tab strip. */
   .new-tab {
     flex-shrink: 0;
   }
@@ -580,7 +658,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 0 5px;
+    padding: 0 6px;
     max-width: 150px;
     outline: none;
   }

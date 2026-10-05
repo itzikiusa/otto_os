@@ -86,20 +86,17 @@
     return out;
   }
 
+  /** Inline validation, next to each field (never a toast). */
+  let nameError = $state<string | null>(null);
+  let commandError = $state<string | null>(null);
+  let urlError = $state<string | null>(null);
+
   async function save(): Promise<void> {
     if (!auth.isRoot) return;
-    if (!name.trim()) {
-      toasts.error('A server name is required');
-      return;
-    }
-    if (transport === 'stdio' && !command.trim()) {
-      toasts.error('A stdio server needs a command');
-      return;
-    }
-    if (transport === 'http' && !url.trim()) {
-      toasts.error('An http server needs a URL');
-      return;
-    }
+    nameError = name.trim() ? null : 'Give the server a name.';
+    commandError = transport === 'stdio' && !command.trim() ? 'A stdio server needs a command.' : null;
+    urlError = transport === 'http' && !url.trim() ? 'An HTTP server needs a URL.' : null;
+    if (nameError || commandError || urlError) return;
     const body: CreateMcpControlServerReq = {
       name: name.trim(),
       transport,
@@ -159,7 +156,8 @@
 
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="e.g. linear, github, web-fetch" />
+      <input bind:value={name} placeholder="github" aria-invalid={nameError != null} oninput={() => (nameError = null)} />
+      {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
     </label>
 
     <label class="field">
@@ -172,12 +170,13 @@
 
     {#if transport === 'stdio'}
       <p class="warn">
-        ⚠ A stdio server runs an arbitrary command <strong>as the Otto daemon</strong>. Registering
+        <Icon name="warning" size={12} /> A stdio server runs an arbitrary command <strong>as the Otto daemon</strong>. Registering
         one requires the owner and is audited.
       </p>
       <label class="field">
         <span>Command</span>
-        <input bind:value={command} placeholder="npx" class="mono" />
+        <input bind:value={command} placeholder="npx" class="mono" aria-invalid={commandError != null} oninput={() => (commandError = null)} />
+        {#if commandError}<span class="field-error" role="alert">{commandError}</span>{/if}
       </label>
       <label class="field">
         <span>Arguments <em>(one per line)</em></span>
@@ -194,7 +193,8 @@
     {:else}
       <label class="field">
         <span>URL</span>
-        <input bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" />
+        <input bind:value={url} placeholder="https://mcp.example.com/rpc" class="mono" aria-invalid={urlError != null} oninput={() => (urlError = null)} />
+        {#if urlError}<span class="field-error" role="alert">{urlError}</span>{/if}
       </label>
       <label class="field">
         <span>Headers <em>(Name=value, one per line)</em></span>
@@ -340,5 +340,9 @@
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
     border-radius: var(--radius-s);
     padding: 8px 10px;
+  }
+  .field-error {
+    font-size: var(--fs-xs);
+    color: var(--danger);
   }
 </style>

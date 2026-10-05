@@ -17,6 +17,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { renderMermaid } from '../canvas/mermaid';
   import { renderD2 } from '../canvas/d2';
   import type { CanvasDoc, CanvasFormat, CanvasScene, CanvasSceneSummary } from '../canvas/types';
@@ -238,12 +239,6 @@
     return s.section ? `${s.section.replace(/\//g, ' / ')} · ${s.title}` : s.title;
   }
 
-  function onRefKeydown(e: KeyboardEvent, ref: CanvasSceneSummary): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      void togglePreview(ref);
-    }
-  }
 </script>
 
 {#if !session}
@@ -255,49 +250,37 @@
 {:else}
   <div class="canvas-panel">
     <div class="cp-list">
-      {#if loading && refs.length === 0}
-        <p class="empty-line dim">Loading canvases…</p>
-      {:else if loadError}
-        <div class="load-error" role="alert">
-          <div class="error-head"><Icon name="warning" size={13} /> Couldn’t load this session's canvases</div>
-          <div class="error-detail">{loadError}</div>
-          <button class="btn small" onclick={() => void load()}>
-            <Icon name="refresh" size={12} /> Retry
-          </button>
-        </div>
-      {:else if refs.length === 0}
-        <EmptyState
-          icon="shapes"
-          title="No canvases referenced"
-          body="Attach one below, or ask the agent to draw a diagram."
-        />
-      {:else}
+      <!-- First load: skeleton; a failed refresh keeps the list under a slim
+           stale bar; only a failure with nothing loaded replaces it. -->
+      <LoadState what="this session’s canvases" variant="compact" {loading} error={loadError} empty={refs.length === 0} onretry={() => void load()}>
+        {#snippet emptyView()}
+          <EmptyState
+            icon="shapes"
+            title="No canvases referenced"
+            body="Attach one below, or ask the agent to draw a diagram."
+          />
+        {/snippet}
         <ul class="refs">
           {#each refs as ref (ref.id)}
             <li class="ref-row">
-              <!-- Mouse: the whole row toggles. Keyboard/AT: the title block is the
-                   toggle (it can't wrap the row's own action buttons). -->
-              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-              <div class="ref-main" onclick={() => togglePreview(ref)}>
-                <span class="ref-chevron">
-                  {#if formatOf(ref) !== 'excalidraw'}
-                    <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={11} />
-                  {/if}
-                </span>
-                <div
-                  class="ref-body"
-                  role="button"
-                  tabindex="0"
-                  aria-expanded={!!expanded[ref.id]}
-                  onkeydown={(e) => onRefKeydown(e, ref)}
-                >
-                  <div class="ref-title">{label(ref)}</div>
-                  <div class="ref-meta">
-                    <span class="chip fmt-{formatOf(ref)}">{FORMAT_LABEL[formatOf(ref)]}</span>
-                    <span class="ref-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
-                  </div>
-                </div>
-                <div class="ref-actions" onclick={(e) => e.stopPropagation()} role="presentation">
+              <!-- One real toggle button (chevron + title + meta); the row's own
+                   actions are its siblings, never nested inside it. -->
+              <div class="ref-main">
+                <button class="ref-body" aria-expanded={!!expanded[ref.id]} onclick={() => void togglePreview(ref)}>
+                  <span class="ref-chevron">
+                    {#if formatOf(ref) !== 'excalidraw'}
+                      <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={11} />
+                    {/if}
+                  </span>
+                  <span class="ref-text">
+                    <span class="ref-title">{label(ref)}</span>
+                    <span class="ref-meta">
+                      <span class="chip fmt-{formatOf(ref)}">{FORMAT_LABEL[formatOf(ref)]}</span>
+                      <span class="ref-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
+                    </span>
+                  </span>
+                </button>
+                <div class="ref-actions">
                   <button class="icon-btn" title="Open in Canvas" aria-label="Open in Canvas" onclick={() => openInCanvas(ref.id)}>
                     <Icon name="shapes" size={13} />
                   </button>
@@ -333,7 +316,7 @@
             </li>
           {/each}
         </ul>
-      {/if}
+      </LoadState>
     </div>
 
     <div class="cp-footer">
@@ -346,13 +329,8 @@
             bind:value={attachQuery}
             spellcheck="false"
           />
-          {#if attachLoading}
-            <p class="empty-line dim">Loading scenes…</p>
-          {:else if attachError}
-            <p class="empty-line attach-error" role="alert">
-              Couldn’t load scenes.
-              <button class="btn ghost small" onclick={() => void loadAllScenes()}>Retry</button>
-            </p>
+          {#if attachLoading || attachError}
+            <LoadState what="scenes" variant="compact" loading={attachLoading} error={attachError} empty onretry={() => void loadAllScenes()} />
           {:else if attachCandidates.length === 0}
             <p class="empty-line dim">
               {attachQuery.trim()
@@ -423,11 +401,6 @@
   .ref-main:hover {
     background: var(--surface-2);
   }
-  .ref-body:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: 2px;
-    border-radius: var(--radius-s);
-  }
   .ref-chevron {
     flex-shrink: 0;
     width: 12px;
@@ -435,8 +408,24 @@
     color: var(--text-dim);
   }
   .ref-body {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     min-width: 0;
     flex: 1;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-s);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .ref-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
   }
   .ref-title {
     font-size: var(--fs-s);
@@ -492,34 +481,6 @@
     padding: 10px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-
-  .load-error {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .error-head {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text);
-  }
-  .error-head :global(svg) {
-    color: var(--danger);
-  }
-  .error-detail {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    word-break: break-word;
-  }
-  .attach-error {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text);
   }
 
   .cp-footer {

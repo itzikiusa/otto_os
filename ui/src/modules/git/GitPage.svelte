@@ -19,6 +19,7 @@
   import RepoView from './RepoView.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from './gitBridge.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -53,6 +54,16 @@
   // add repo sheet
   let addOpen = $state(false);
   let addMode: 'register' | 'clone' | 'browse' = $state('register');
+
+  // ⌘K: adding a repository (the header no longer carries its own button —
+  // the + tab and the empty state do). The open repo's verbs come from
+  // GitToolbar.
+  $effect(() =>
+    registry.register('git', [
+      { id: 'git.add-local', title: 'Add a local repository…', group: 'Git', keywords: 'register folder repo', run: () => { addMode = 'register'; addOpen = true; } },
+      { id: 'git.clone', title: 'Clone a repository…', group: 'Git', keywords: 'remote url github bitbucket gitlab', run: () => { addMode = 'clone'; addOpen = true; } },
+    ]),
+  );
   let addPath = $state('');
   let addUrl = $state('');
   let addName = $state('');
@@ -345,11 +356,10 @@
             onclick={(e) => repoView?.openMoreMenu(e)}
           ><Icon name="more" size={16} /></button>
         {:else if !landingFocus && git.allRepos.length > 0}
+          <!-- Adding a repository lives in the + tab (and the empty state) —
+               no second "Add repository" primary here. -->
           <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
             <Icon name="zap" size={14} /> Focus
-          </button>
-          <button class="btn primary" onclick={() => (addOpen = true)}>
-            <Icon name="plus" size={14} /> Add repository
           </button>
         {/if}
       {/snippet}

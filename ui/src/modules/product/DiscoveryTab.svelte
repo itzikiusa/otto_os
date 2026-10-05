@@ -7,6 +7,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { runStatus } from '../../lib/status';
   import { loadErrorText } from '../../lib/loadError';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -106,7 +107,7 @@
     running = true;
     try {
       await product.discover(targetSwarmId ? { swarm_id: targetSwarmId } : {});
-      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      toasts.success('Discovery started', 'The swarm is now analyzing the story.');
       await loadRuns();
     } catch (e) {
       toastError('Couldn’t run discovery', e);
@@ -190,29 +191,31 @@
   {#if (loading || loadError) && runs.length === 0}
     <LoadState what="discovery runs" loading={loading} error={loadError} empty onretry={() => void loadRuns()} />
   {:else if runs.length === 0}
-    <div class="empty-state">
-      <p>No discovery runs yet.</p>
-      <p>Run discovery to have a swarm analyse this story and report its findings here.</p>
-    </div>
+    <EmptyState
+      icon="search"
+      title="No discovery runs yet"
+      body="Run discovery to have a swarm analyze this story and report its findings here."
+    />
   {:else}
     <div class="run-list">
       {#each runs as summary (summary.run.id)}
         {@const isOpen = expandedId === summary.run.id}
         <div class="run-card" class:open={isOpen}>
           <!-- ── Run header ──────────────────────────────────────────── -->
-          <div class="run-header" role="button" tabindex="0" aria-expanded={isOpen}
-            onclick={() => toggleRun(summary.run.id)}
-            onkeydown={(e) => { if (e.target !== e.currentTarget) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void toggleRun(summary.run.id); } }}
-          >
-            <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
-            <span class="status-badge"><StatusBadge status={runStatus(summary.derived_status)} /></span>
-            <span class="run-date">{relDate(summary.run.created_at)}</span>
-            <span class="run-progress">
-              {summary.done_count}/{summary.task_count} tasks
-            </span>
+          <!-- The toggle is ONE real button; "Open in Swarm" is its sibling
+               (never a control nested inside another control). -->
+          <div class="run-head-row">
+            <button class="run-header" aria-expanded={isOpen} onclick={() => toggleRun(summary.run.id)}>
+              <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+              <span class="status-badge"><StatusBadge status={runStatus(summary.derived_status)} /></span>
+              <span class="run-date">{relDate(summary.run.created_at)}</span>
+              <span class="run-progress">
+                {summary.done_count}/{summary.task_count} tasks
+              </span>
+            </button>
             <button
               class="view-swarm-btn"
-              onclick={(e) => { e.stopPropagation(); void viewInSwarm(summary); }}
+              onclick={() => void viewInSwarm(summary)}
               title="Open in Swarm"
             >
               Open in Swarm <Icon name="chevronRight" size={12} />
@@ -341,17 +344,6 @@
   .inner-pad {
     padding: 12px 14px;
   }
-  .empty-state {
-    padding: 40px 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
-  }
-
   /* ── Run list ─────────────────────────────────────────────────────── */
   .run-list {
     display: flex;
@@ -372,21 +364,32 @@
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   }
 
+  .run-head-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-inline-end: 12px;
+    transition: background var(--dur-fast);
+  }
+  .run-head-row:hover {
+    background: var(--hover);
+  }
   .run-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
-    padding: 9px 12px;
+    flex: 1;
+    min-width: 0;
+    padding-block: 8px;
+    padding-inline: 12px 0;
+    border: 0;
     background: transparent;
     color: var(--text);
     cursor: pointer;
+    font: inherit;
     font-size: var(--fs-s);
-    transition: background var(--dur-fast);
+    text-align: start;
     user-select: none;
-  }
-  .run-header:hover {
-    background: var(--hover);
   }
   .coll-arrow {
     display: inline-flex;

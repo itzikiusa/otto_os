@@ -69,7 +69,7 @@
 
   async function runReplay() {
     if (running || blockReason) {
-      if (blockReason) toasts.error('Replay', blockReason);
+      if (blockReason) toasts.error('Can’t replay yet', blockReason);
       return;
     }
     const ok = await confirmProd({

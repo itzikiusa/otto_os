@@ -269,7 +269,7 @@
           {:else}
             <input
               type="checkbox"
-              class="sel"
+              class="sel reveal-on-hover"
               class:vis={selected.size > 0}
               checked={selected.has(n.entry.path)}
               aria-label="Select for group agent actions"
@@ -439,14 +439,22 @@
     height: 12px;
     margin: 0;
     flex-shrink: 0;
-    visibility: hidden;
+    opacity: 0;
     accent-color: var(--accent);
     cursor: pointer;
   }
-  .row:hover .sel,
+  /* Revealed on row hover / keyboard focus (opacity keeps it in the tab
+     order); always shown on a touch screen, which has no hover. */
+  .row:is(:hover, :focus-within) .sel,
+  .sel:focus-visible,
   .sel.vis,
   .sel:checked {
-    visibility: visible;
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .sel {
+      opacity: 1;
+    }
   }
   .row.checked {
     background: color-mix(in srgb, var(--accent) 12%, transparent);

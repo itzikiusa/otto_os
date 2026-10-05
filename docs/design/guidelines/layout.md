@@ -44,7 +44,7 @@ The parts of the shell:
   [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
   exception is **Agents**, whose session `TabBar` is its top row; it has a
-  right panel (⌘J) for Browser, Outputs and similar.
+  **Session panel** (⌘J; Git, Files, Notes, Activity, Outputs, Browser and similar).
 - **Overlays.** The floating bar (§7, ⌘K on desktop), the `Palette` sheet
   (phone/tablet, ⌘I), the `?` `ShortcutsOverlay`, `Modal` sheets, the
   global `ContextMenu` and `Toasts` are all mounted once in `shell/App.svelte`.
@@ -54,6 +54,26 @@ The parts of the shell:
   floating command bar (§7), which docks out of the way.
 - **Phone.** A mobile top bar (44 px, title from `moduleLabel()`), the content,
   and `BottomNav` (56 px). The `Drawer` holds the Navigator.
+
+### 1.1 What lives where
+
+Several modules hold notes, drawings or "rooms". Put a feature, a link or a
+help sentence in the one place that owns the thing, and name that place:
+
+| The user wants to… | It lives in | Not in |
+|---|---|---|
+| Keep durable docs: markdown, wikilinks, an Obsidian vault, OKF bundles | **Vault** | Workbench |
+| Draft a script, snippet or scratch note and run it somewhere | **Workbench** (per user, full edit history; *Save as note* moves a file into the Vault) | Vault |
+| Jot workspace notes beside a running session | the **Session panel → Notes** tab (⌘J) | Vault |
+| Annotate a design (frame, site, 3D scene, brand kit) | the artifact's notes in **Design Hall** | Vault |
+| Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — one module, two doors | a separate "whiteboard" |
+| Invite people into a running session | **Rooms** (session rooms: up to three guests, the host moderates) | Personal agents |
+| Watch personal agents message each other | **Personal agents → Rooms** (agent rooms, always visible to you) | the Rooms module |
+| Browse, edit, review or evaluate skills | **Skills Lab** (Skills · Review · Evaluator); bundled skills install from **Settings → Skills**; the files live in each provider's skill folder (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`) | Settings |
+
+Copy follows the table: "Agent rooms" for the personal-agents view and
+"Session rooms" (or just "Rooms") for the module, never both called "Rooms" on
+one screen.
 
 ## 2. Sidebar
 

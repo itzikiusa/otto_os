@@ -55,6 +55,8 @@
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
   import { findInPage } from '../../lib/findinpage.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
 
   interface Props {
     sessionId: string;
@@ -257,6 +259,16 @@
         ? `${agentWho} asked to drive Otto (you denied it earlier). Click to allow it for this session.`
         : `Allow UI control — let ${agentWho} open and drive Otto beside this session, where you can see it`,
   );
+  /** Which UI-control answer is in flight (ApprovalActions' busy label). */
+  let uiAct = $state<'approve' | 'deny' | null>(null);
+  async function runUiAct(kind: 'approve' | 'deny', run: () => Promise<unknown>): Promise<void> {
+    uiAct = kind;
+    try {
+      await run();
+    } finally {
+      uiAct = null;
+    }
+  }
   function toggleUiControl(): void {
     void uiControl.setGrant(sessionId, !uiGranted);
   }
@@ -302,20 +314,6 @@
     ['chat', 'Chat', 'comment'],
   ];
   const viewLabel = (m: SessionViewMode): string => (m === 'chat' ? 'Chat' : 'Terminal');
-  /** ←/→ (Home/End) move between the Terminal · Chat tabs, like any tablist;
-   *  focus follows the selection (roving tabindex). */
-  function onViewTabKey(e: KeyboardEvent): void {
-    let next: SessionViewMode | null = null;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = otherSessionView(view);
-    else if (e.key === 'Home') next = 'terminal';
-    else if (e.key === 'End') next = 'chat';
-    if (!next) return;
-    e.preventDefault();
-    setView(next);
-    const list = e.currentTarget as HTMLElement;
-    const target = next;
-    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${target}"]`)?.focus());
-  }
   $effect(() => {
     if (!isAgent) return;
     const onKey = (e: KeyboardEvent): void => {
@@ -602,7 +600,7 @@
       {
         id: 'terminal.redraw',
         title: 'Redraw terminal',
-        group: 'Sessions',
+        group: 'Session',
         keywords: 'garbled repaint refresh screen broken tui',
         run: () => termRef?.redraw(),
       },
@@ -858,7 +856,7 @@
     </button>
     <span class="grow"></span>
     {#if isAgent}
-      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
+      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onTabKey}>
         {#each VIEW_META as [m, label, icon] (m)}
           <button
             role="tab"
@@ -868,7 +866,8 @@
             tabindex={view === m ? 0 : -1}
             data-view={m}
             onclick={() => setView(m)}
-            title={m === 'chat' ? 'Chat — the conversation rebuilt from the transcript (⌘⇧C)' : 'Terminal (⌘⇧C)'}
+            title={label}
+            aria-keyshortcuts="Meta+Shift+C"
           ><Icon name={icon} size={12} /><span class="head-lbl">{label}</span></button>
         {/each}
       </div>
@@ -877,7 +876,8 @@
         class="icon-btn view-flip"
         data-view-toggle
         aria-label="Switch to {viewLabel(otherSessionView(view))} view"
-        title="Switch to {viewLabel(otherSessionView(view))} view (⌘⇧C)"
+        title="Switch to {viewLabel(otherSessionView(view))} view"
+        aria-keyshortcuts="Meta+Shift+C"
         onmousedown={(e) => e.stopPropagation()}
         onclick={toggleView}
       ><Icon name={otherSessionView(view) === 'chat' ? 'comment' : 'terminal'} size={13} /></button>
@@ -901,8 +901,9 @@
       data-testid="pane-find"
       onmousedown={(e) => e.stopPropagation()}
       onclick={openSessionFind}
-      title="{findLabel} (⌘F)"
+      title={findLabel}
       aria-label={findLabel}
+      aria-keyshortcuts="Meta+F"
     ><Icon name="search" size={13} /></button>
     {#if showZoom}
       <button
@@ -947,8 +948,18 @@
         <strong>{agentWho}{session?.title ? ` · ${session.title}` : ''} wants to drive Otto</strong> — {uiAskWhat}. Everything it does shows beside this session, and writes still ask you.
       </span>
       <span class="ui-ask-actions">
-        <button class="btn small" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.deny(sessionId)} disabled={uiBusy} data-testid="ui-control-deny">Deny</button>
-        <button class="btn small primary" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.allow(sessionId)} disabled={uiBusy} data-testid="ui-control-allow">Allow for this session</button>
+        <!-- The shared approval shape (patterns §5). Deny is remembered on this
+             device with nowhere to record a reason, so it fires at once. -->
+        <ApprovalActions
+          approveLabel="Allow for this session"
+          approveBusyLabel="Allowing…"
+          askReason={false}
+          busy={uiAct}
+          disabled={uiBusy && uiAct === null}
+          onapprove={() => runUiAct('approve', () => uiControl.allow(sessionId))}
+          ondeny={() => runUiAct('deny', () => uiControl.deny(sessionId))}
+          testid="ui-control-actions"
+        />
       </span>
     </div>
   {/if}

@@ -13,6 +13,7 @@
   // it once nothing is active.
   import { onMount } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Switch from '../../lib/components/Switch.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { api } from '../../lib/api/client';
@@ -169,7 +170,7 @@
     if (r.review.state === 'clean') return 'Review complete';
     if (r.review.state === 'exhausted') return 'Review limit reached';
     if (r.review.state === 'error') return 'Review failed';
-    if (r.review.state === 'cancelled') return 'Review cancelled';
+    if (r.review.state === 'cancelled') return 'Review canceled';
     if (r.review.state === 'interrupted') return 'Review interrupted';
     if (r.review.state === 'pending') return 'Review queued';
     return `Review round ${Math.max(r.review.current_iteration, 1)} of ${r.review.max_iterations}`;
@@ -468,17 +469,17 @@
 
     {#if !run}
       <!-- ── form ─────────────────────────────────────────────────────────── -->
-      <div class="fld">
-        <span>Prepared prompt (optional)</span>
+      <div class="field">
+        <label for="da-template">Prepared prompt (optional)</label>
         <div class="tpl-row">
-          <select bind:value={tplId}>
+          <select id="da-template" class="input" bind:value={tplId}>
             <option value="">— pick a template —</option>
             {#each DOCS_TEMPLATES as t (t.id)}
               <option value={t.id}>{t.label}</option>
             {/each}
           </select>
           {#if tpl?.needsRepo}
-            <PathField bind:value={tplRepo}><input class="tpl-repo" bind:value={tplRepo} placeholder="~/path/to/repo" /></PathField>
+            <PathField bind:value={tplRepo}><input class="input tpl-repo" bind:value={tplRepo} placeholder="e.g. ~/code/payments-service" aria-label="Repository folder" /></PathField>
           {/if}
           <button
             class="tpl-use"
@@ -500,29 +501,31 @@
         {/if}
       </div>
 
-      <label class="fld">
-        <span>What should be documented?</span>
+      <div class="field">
+        <label for="da-prompt">What should be documented?</label>
         <textarea
+          id="da-prompt"
+          class="input da-prompt"
           bind:value={prompt}
           rows="4"
           placeholder="e.g. Document the deploy pipeline: triggers, stages, rollback, and the runbook for a failed release."
         ></textarea>
-      </label>
-      <label class="fld">
-        <span>Target folder (vault-relative, blank = root)</span>
-        <input bind:value={targetDir} placeholder="runbooks/deploys" />
-      </label>
+      </div>
+      <div class="field">
+        <label for="da-target">Target folder (vault-relative, blank = root)</label>
+        <input id="da-target" class="input" bind:value={targetDir} placeholder="e.g. runbooks/deploys" />
+      </div>
 
-      <div class="fld">
-        <span>Writer agents ({agents.length}/4)</span>
+      <div class="field" role="group" aria-labelledby="da-writers">
+        <span class="field-caption" id="da-writers">Writer agents ({agents.length}/4)</span>
         {#each agents as agent, i (i)}
           <div class="agent-row">
-            <select bind:value={agent.provider} aria-label={`Writer agent ${i + 1} provider`}>
+            <select class="input" bind:value={agent.provider} aria-label={`Writer agent ${i + 1} provider`}>
               {#each providers as p (p)}
                 <option value={p}>{p}</option>
               {/each}
             </select>
-            <input class="model" bind:value={agent.model} placeholder="model (optional)" aria-label={`Writer agent ${i + 1} model`} />
+            <input class="input model" bind:value={agent.model} placeholder="Model (optional)" aria-label={`Writer agent ${i + 1} model`} />
             <button
               class="icon-btn"
               title="Remove agent" aria-label="Remove agent"
@@ -539,14 +542,14 @@
       </div>
 
       {#if agents.length > 1}
-        <label class="fld">
-          <span>Summarizer (consolidates the {agents.length} drafts into final notes)</span>
-          <select class="sum-select" bind:value={sumProvider}>
+        <div class="field">
+          <label for="da-summarizer">Summarizer (consolidates the {agents.length} drafts into final notes)</label>
+          <select id="da-summarizer" class="input sum-select" bind:value={sumProvider}>
             {#each providers as p (p)}
               <option value={p}>{p}</option>
             {/each}
           </select>
-        </label>
+        </div>
       {/if}
 
       <section class="review-config" class:enabled={reviewEnabled}>
@@ -555,10 +558,7 @@
             <strong>Review outcomes</strong>
             <span>Independent agents check the final bundle before the run finishes.</span>
           </div>
-          <label class="switch">
-            <input type="checkbox" bind:checked={reviewEnabled} aria-label="Review outcomes" />
-            <span aria-hidden="true"></span>
-          </label>
+          <Switch checked={reviewEnabled} onchange={(next) => (reviewEnabled = next)} label="Review outcomes" />
         </div>
 
         {#if reviewEnabled}
@@ -568,6 +568,7 @@
               <label class="iteration-field">
                 Maximum review iterations
                 <input
+                  class="input iteration-input"
                   type="number"
                   min="1"
                   max="10"
@@ -582,17 +583,18 @@
                 <span class="reviewer-number">{i + 1}</span>
                 <div class="reviewer-fields">
                   <div class="reviewer-main-fields">
-                    <select bind:value={reviewer.provider} aria-label="Reviewer provider">
+                    <select class="input" bind:value={reviewer.provider} aria-label="Reviewer provider">
                       {#each providers as p (p)}
                         <option value={p}>{p}</option>
                       {/each}
                     </select>
                     <input
+                      class="input"
                       bind:value={reviewer.model}
-                      placeholder="model (optional)"
+                      placeholder="Model (optional)"
                       aria-label="Reviewer model"
                     />
-                    <select class="review-method" bind:value={reviewer.skill} aria-label="Review method">
+                    <select class="input review-method" bind:value={reviewer.skill} aria-label="Review method">
                       {#each REVIEW_METHODS as method (method.value)}
                         <option value={method.value}>{method.label}</option>
                       {/each}
@@ -608,7 +610,7 @@
                     </button>
                   </div>
                   <input
-                    class="review-focus"
+                    class="input review-focus"
                     bind:value={reviewer.focus}
                     placeholder="Optional focus — e.g. request/response bodies"
                     aria-label="Review focus"
@@ -627,8 +629,8 @@
       </section>
 
       {#if runSkills.length > 0}
-        <div class="fld">
-          <span>Skills injected into this run — click to view</span>
+        <div class="field" role="group" aria-labelledby="da-skills">
+          <span class="field-caption" id="da-skills">Skills injected into this run — click to view</span>
           <div class="skill-chips">
             {#each runSkills as s (s)}
               <button class="skill-chip" title="Open {s}" onclick={() => void viewSkill(s)}>
@@ -1015,7 +1017,7 @@
             </button>
             {#if !isActive(r)}
               <button
-                class="run-del"
+                class="run-del reveal-on-hover"
                 title="Delete this run from history" aria-label="Delete this run from history"
                 disabled={deleting === r.id}
                 onclick={() => void deleteRun(r)}
@@ -1136,30 +1138,19 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: var(--fs-xs);
+  /* Shared .field/.input; .field's own bottom margin is dropped — .inner's
+     gap spaces the form. Group captions (a span over several controls) read
+     like the label of a single-control field. */
+  .docs-agents .field {
+    margin-bottom: 0;
+  }
+  .field-caption {
+    font-size: var(--fs-s);
+    font-weight: 500;
     color: var(--text-dim);
   }
-  .fld textarea,
-  .fld input,
-  .fld select,
-  .agent-row select,
-  .agent-row input {
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-m);
-    padding: 8px 10px;
-    font-family: inherit;
-  }
-  .fld textarea {
-    resize: vertical;
+  .da-prompt {
     min-height: 72px;
-    line-height: 1.5;
   }
   .agent-row {
     display: flex;
@@ -1207,54 +1198,6 @@
     font-size: var(--fs-xs);
     line-height: 1.35;
   }
-  .switch {
-    position: relative;
-    flex: none;
-    width: 34px;
-    height: 20px;
-  }
-  .switch input {
-    position: absolute;
-    inset: 0;
-    z-index: 2;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    opacity: 0;
-    cursor: pointer;
-  }
-  .switch span {
-    position: absolute;
-    inset: 0;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 24%, transparent);
-    border: 1px solid var(--border);
-    cursor: pointer;
-    transition: background var(--dur-enter) ease;
-  }
-  .switch span::after {
-    content: '';
-    position: absolute;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    inset-inline-start: 2px;
-    top: 2px;
-    background: var(--text-dim);
-    transition: inset-inline-start var(--dur-enter) ease, background var(--dur-enter) ease;
-  }
-  .switch input:focus-visible + span {
-    outline: 2px solid var(--accent-text);
-    outline-offset: 2px;
-  }
-  .switch input:checked + span {
-    background: var(--accent);
-    border-color: transparent;
-  }
-  .switch input:checked + span::after {
-    inset-inline-start: 16px;
-    background: var(--accent-contrast);
-  }
   .review-settings {
     display: flex;
     flex-direction: column;
@@ -1275,9 +1218,8 @@
     align-items: center;
     gap: 7px;
   }
-  .iteration-field input {
-    width: 54px;
-    padding: 5px 7px;
+  .iteration-input {
+    width: 56px;
   }
   .reviewer-config-row {
     display: flex;
@@ -1294,7 +1236,7 @@
     border-radius: 50%;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     color: var(--accent-text);
-    font: 700 var(--fs-xs) var(--font-mono);
+    font: 600 var(--fs-xs) var(--font-mono);
   }
   .reviewer-fields {
     flex: 1;
@@ -1308,18 +1250,10 @@
     grid-template-columns: minmax(90px, 0.8fr) minmax(100px, 0.9fr) minmax(180px, 1.6fr) auto;
     gap: 5px;
   }
-  .reviewer-main-fields select,
-  .reviewer-main-fields input,
-  .review-focus,
-  .iteration-field input {
+  .reviewer-main-fields > select,
+  .reviewer-main-fields > input,
+  .iteration-input {
     min-width: 0;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-family: inherit;
-    font-size: var(--fs-s);
-    padding: 7px 8px;
   }
   .review-focus {
     width: 100%;
@@ -1330,23 +1264,6 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.4;
-  }
-  .icon-btn {
-    display: inline-flex;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text-dim);
-    padding: 7px 8px;
-    cursor: pointer;
-  }
-  .icon-btn:hover:not(:disabled) {
-    color: var(--danger);
-    border-color: var(--danger);
-  }
-  .icon-btn:disabled {
-    opacity: 0.35;
-    cursor: default;
   }
   .add-agent {
     align-self: flex-start;
@@ -1790,13 +1707,23 @@
     border: none;
     color: var(--text-dim);
     border-radius: var(--radius-s);
-    padding: 5px;
+    padding: 4px;
     cursor: pointer;
-    visibility: hidden;
+    opacity: 0;
+    transition: opacity var(--dur-fast);
     flex-shrink: 0;
   }
-  .run-row-wrap:hover .run-del {
-    visibility: visible;
+  /* Revealed on row hover / keyboard focus (opacity, not visibility, so it
+     stays in the tab order); always shown on a touch screen. */
+  .run-row-wrap:hover .run-del,
+  .run-row-wrap:focus-within .run-del,
+  .run-del:focus-visible {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .run-row-wrap .run-del {
+      opacity: 1;
+    }
   }
   .run-del:hover {
     color: var(--danger);

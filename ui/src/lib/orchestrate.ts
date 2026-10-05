@@ -317,7 +317,6 @@ export function describeAction(a: Action): string {
   }
 }
 
-/** Plural helper for outcome copy. */
-export function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? '' : 's'}`;
-}
+/** Plural helper for outcome copy — the shared one (lib/plural.ts),
+ *  re-exported for existing importers. */
+export { plural } from './plural';

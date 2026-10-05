@@ -10,7 +10,8 @@
   // The left pane only lists things; whatever you EDIT (a request, the
   // environments, an automation) opens in the main area. A brand-new
   // workspace shows an onboarding empty state instead of an empty editor.
-  import { paneResizer, pxWide, RESIZE_TITLE, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth, paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
@@ -205,19 +206,12 @@
   let gitOpen = $state(false);
 
   // ── drag-to-resize: sidebar width + builder height (both persisted) ────────
+  // The sidebar is the shared list pane (PaneDivider + LIST_PANE); it keeps the
+  // old storage key so a width saved before the switch carries over (clamped).
   // Overlay cursor + one size write per frame + one localStorage write on
-  // release (lib/dragCursor.ts) — no per-mousemove persist, no body.style
-  // restyle of the whole app.
-  function startSideResize(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = ui.apiSideWidth;
-    const rtl = document.documentElement.dir === 'rtl';
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setApiSideWidth(startW + (rtl ? startX - ev.clientX : ev.clientX - startX), false),
-      onEnd: () => ui.setApiSideWidth(ui.apiSideWidth),
-    });
-  }
+  // release (lib/dragCursor.ts) — no per-mousemove persist.
+  const SIDE_W_KEY = 'otto_api_side_width';
+  let sideW = $state(loadPaneWidth(SIDE_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let builderEl: HTMLDivElement | null = $state(null);
   function startBuilderResize(e: MouseEvent): void {
     const startY = e.clientY;
@@ -304,7 +298,7 @@
     {:else}
       <div class="api-page">
         {#if showList}
-          <aside class="api-side" style:width={viewport.isPhone ? null : `${ui.apiSideWidth}px`} aria-label="Collections, automations and history">
+          <aside class="api-side" style:width={viewport.isPhone ? null : `${sideW}px`} aria-label="Collections, automations and history">
             <div class="segmented side-seg" role="tablist" aria-label="Show">
               {#each SIDES as s (s.id)}
                 <button role="tab" aria-selected={side === s.id} class:active={side === s.id} tabindex={side === s.id ? 0 : -1}
@@ -325,18 +319,7 @@
           </aside>
 
           {#if !viewport.isPhone}
-            <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds the keys). -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-            <div
-              class="resizer col"
-              role="separator"
-              tabindex="0"
-              aria-label="Resize the sidebar"
-              title={RESIZE_TITLE}
-              onmousedown={startSideResize}
-              ondblclick={() => ui.setApiSideWidth(280)}
-              use:paneResizer={{ value: ui.apiSideWidth, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => ui.setApiSideWidth(w), onReset: () => ui.setApiSideWidth(280), text: pxWide }}
-            ></div>
+            <PaneDivider bind:width={sideW} storageKey={SIDE_W_KEY} label="Resize the sidebar" />
           {/if}
         {/if}
 
@@ -477,7 +460,6 @@
     gap: 10px;
     min-height: 0;
     padding: 12px 10px 10px;
-    border-inline-end: 1px solid var(--border);
     background: var(--bg);
     container-type: inline-size;
   }
@@ -635,14 +617,6 @@
     border: none;
     background: transparent;
     flex-shrink: 0;
-  }
-  .resizer.col {
-    width: 6px;
-    margin-inline-start: -3px;
-    margin-inline-end: -3px;
-    cursor: col-resize;
-    position: relative;
-    z-index: 2;
   }
   .resizer.row {
     height: 6px;

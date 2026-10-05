@@ -118,7 +118,7 @@
       if (at === 'next_restart') {
         toasts.success('Compaction scheduled', `Runs at the next daemon start (≈${secs(r.estimated_offline_ms)} s).`);
       } else {
-        toasts.success('Scheduled compaction cancelled');
+        toasts.success('Scheduled compaction canceled');
       }
       await load();
     } catch (e) {

@@ -8,6 +8,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
@@ -180,19 +181,6 @@
       busy = false;
     }
   }
-  function sourceKey(e: KeyboardEvent): void {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const button = e.currentTarget as HTMLButtonElement;
-    const tabs = Array.from(button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
-    const rtl = getComputedStyle(button).direction === 'rtl';
-    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-    const i = tabs.indexOf(button);
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
-    tabs[j]?.click();
-    tabs[j]?.focus();
-  }
-
 </script>
 
 <Modal title={existing ? 'Edit cluster' : step === 1 ? 'Add cluster' : 'Cluster details'} width={580} {onclose}>
@@ -200,9 +188,9 @@
     {#if !auth.isRoot}<p class="hint">Owner manages credentials and native cluster settings. You can edit the name.</p>{/if}
     {#if step === 1}
       <div class="segmented modes" role="tablist" aria-label="Cluster source">
-        <button role="tab" aria-selected={mode === 'contexts'} tabindex={mode === 'contexts' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'contexts'} onclick={() => (mode = 'contexts')}>From kubeconfig</button>
-        <button role="tab" aria-selected={mode === 'paste'} tabindex={mode === 'paste' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'paste'} onclick={() => (mode = 'paste')}>Paste kubeconfig</button>
-        <button role="tab" aria-selected={mode === 'eks'} tabindex={mode === 'eks' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'eks'} onclick={() => (mode = 'eks')}>From EKS</button>
+        <button role="tab" aria-selected={mode === 'contexts'} tabindex={mode === 'contexts' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'contexts'} onclick={() => (mode = 'contexts')}>From kubeconfig</button>
+        <button role="tab" aria-selected={mode === 'paste'} tabindex={mode === 'paste' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'paste'} onclick={() => (mode = 'paste')}>Paste kubeconfig</button>
+        <button role="tab" aria-selected={mode === 'eks'} tabindex={mode === 'eks' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'eks'} onclick={() => (mode = 'eks')}>From EKS</button>
       </div>
 
       {#if mode === 'contexts'}

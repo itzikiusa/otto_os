@@ -4,7 +4,7 @@
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpTokensApi } from '../../lib/api/mcp';
-  import { api, baseUrl } from '../../lib/api/client';
+  import { api, ApiError, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -49,11 +49,17 @@
     }
   }
 
+  /** The owner list failed to load: the picker falls back to "Me" and says why. */
+  let usersError = $state<string | null>(null);
   async function loadUsers(): Promise<void> {
     try {
       users = await api.get<User[]>('/users');
-    } catch {
+      usersError = null;
+    } catch (e) {
       users = [];
+      // Only the owner may list users (403 otherwise): then "Me" is the whole
+      // list by design, not a failure.
+      usersError = e instanceof ApiError && e.status === 403 ? null : loadErrorText(e);
     }
   }
 
@@ -211,16 +217,22 @@
       <div class="frow">
         <label class="fld">
           <span class="lbl">Owner</span>
-          <select class="inp" bind:value={fOwner}>
+          <select class="inp" bind:value={fOwner} aria-describedby={usersError ? 'mcp-token-owner-err' : undefined}>
             <option value="">Me ({auth.me?.username ?? 'self'})</option>
             {#each users as u (u.id)}
               <option value={u.id}>{u.username}</option>
             {/each}
           </select>
+          {#if usersError}
+            <span class="fld-note" id="mcp-token-owner-err">
+              Couldn’t load other users — the token can only be yours.
+              <button type="button" class="btn small ghost" onclick={() => void loadUsers()}>Retry</button>
+            </span>
+          {/if}
         </label>
         <label class="fld">
           <span class="lbl">Label</span>
-          <input class="inp" placeholder="e.g. ci-readonly" bind:value={fLabel} />
+          <input class="inp" placeholder="ci-readonly" bind:value={fLabel} />
         </label>
         <label class="fld">
           <span class="lbl">Workspace pin (optional)</span>
@@ -349,6 +361,14 @@
   .lbl {
     font-size: var(--fs-xs);
     color: var(--text-dim);
+  }
+  .fld-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    font-size: var(--fs-xs);
+    color: var(--warning);
   }
   .inp {
     font-size: var(--fs-s);

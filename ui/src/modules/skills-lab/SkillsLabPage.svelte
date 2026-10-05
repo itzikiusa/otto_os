@@ -30,6 +30,20 @@
     { id: 'review', label: 'Review' },
     { id: 'evaluator', label: 'Evaluator' },
   ];
+  // The Evaluator's own views ride in the SAME header tab row (after the
+  // section tabs) instead of a second strip inside the body. Routed as
+  // `#/skills-eval/evaluator[/golden|/matrix]`; SkillsEvalPage reads it.
+  type EvalView = 'runs' | 'golden' | 'matrix';
+  const EVAL_VIEWS: { id: EvalView; label: string; icon: 'zap' | 'target' | 'grid' }[] = [
+    { id: 'runs', label: 'Runs', icon: 'zap' },
+    { id: 'golden', label: 'Golden tasks', icon: 'target' },
+    { id: 'matrix', label: 'Matrix', icon: 'grid' },
+  ];
+  const evalView = $derived<EvalView>(router.parts[2] === 'golden' ? 'golden' : router.parts[2] === 'matrix' ? 'matrix' : 'runs');
+  function goEval(v: EvalView): void {
+    if (v === evalView) return;
+    router.go(v === 'runs' ? 'skills-eval/evaluator' : `skills-eval/evaluator/${v}`);
+  }
 
   // Cross-tab intent: "Review this skill" from the Skills tab pre-fills the
   // Review form and switches tabs.
@@ -71,7 +85,7 @@
 </script>
 
 <div class="skills-lab">
-  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined}>
+  <PageHeader title="Skills Lab" subtitle={tab === 'skills' ? 'Every skill your agents can load, in one place' : undefined} tabsPlacement={tab === 'evaluator' ? 'below' : 'inline'}>
     {#snippet leading()}
       {#if ((tab === 'skills') || (tab === 'evaluator' && evalListable)) && !viewport.isPhone}
         {@const what = tab === 'skills' ? 'skills' : 'evaluations'}
@@ -82,17 +96,29 @@
       {/if}
     {/snippet}
     {#snippet tabs()}
-      <div class="segmented" role="tablist" aria-label="Skills Lab section" data-testid="lab-tabs" tabindex="-1" onkeydown={onTabKey}>
-        {#each TABS as t (t.id)}
-          <button
-            role="tab"
-            aria-selected={tab === t.id}
-            tabindex={tab === t.id ? 0 : -1}
-            class:active={tab === t.id}
-            onclick={() => go(t.id)}
-            data-testid="tab-{t.id}">{t.label}</button
-          >
-        {/each}
+      <div class="lab-tabs">
+        <div class="segmented" role="tablist" aria-label="Skills Lab section" data-testid="lab-tabs" tabindex="-1" onkeydown={onTabKey}>
+          {#each TABS as t (t.id)}
+            <button
+              role="tab"
+              aria-selected={tab === t.id}
+              tabindex={tab === t.id ? 0 : -1}
+              class:active={tab === t.id}
+              onclick={() => go(t.id)}
+              data-testid="tab-{t.id}">{t.label}</button
+            >
+          {/each}
+        </div>
+        {#if tab === 'evaluator'}
+          <span class="lab-tabs-sep" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
+          <div class="segmented" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" onkeydown={onTabKey}>
+            {#each EVAL_VIEWS as v (v.id)}
+              <button role="tab" aria-selected={evalView === v.id} aria-controls="eval-panel" tabindex={evalView === v.id ? 0 : -1} class:active={evalView === v.id} onclick={() => goEval(v.id)} data-testid="tab-{v.id}">
+                <Icon name={v.icon} size={12} /> {v.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/snippet}
     {#snippet actions()}
@@ -126,6 +152,20 @@
     flex-direction: column;
     height: 100%;
     min-height: 0;
+  }
+  /* Section tabs, then (on the Evaluator) its views: one header tab row. */
+  .lab-tabs {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+  .lab-tabs-sep {
+    display: inline-flex;
+    color: var(--text-dim);
+  }
+  :global([dir='rtl']) .lab-tabs-sep {
+    transform: scaleX(-1);
   }
   .lab-body {
     flex: 1;

@@ -45,6 +45,25 @@ const GRAPH_DEBOUNCE_MS = 800;
 const GRAPH_MAX_WAIT_MS = 3000;
 
 
+
+/** What a bulk task operation left undone: the tasks whose request failed and
+ *  the first failure's reason (null when every task went through). */
+export interface BulkTaskResult {
+  failed: SwarmTask[];
+  error: string | null;
+}
+
+function bulkResult(tasks: SwarmTask[], results: PromiseSettledResult<unknown>[]): BulkTaskResult {
+  const failed: SwarmTask[] = [];
+  let error: string | null = null;
+  results.forEach((r, i) => {
+    if (r.status !== 'rejected') return;
+    failed.push(tasks[i]);
+    error ??= loadErrorText(r.reason);
+  });
+  return { failed, error };
+}
+
 class SwarmStore {
   swarms: Swarm[] = $state([]);
   detail: SwarmDetail | null = $state(null);
@@ -586,22 +605,26 @@ class SwarmStore {
     await this.refreshGraph();
   }
 
-  /** Apply the same patch to many tasks (bulk move/assign), reloading once. */
-  async bulkUpdateTasks(tasks: SwarmTask[], patch: Partial<SwarmTask>): Promise<void> {
-    if (!tasks.length) return;
-    await Promise.all(
-      tasks.map((t) => api.patch<SwarmTask>(`/swarm/tasks/${t.id}`, patch).catch(() => null)),
-    );
+  /** Apply the same patch to many tasks (bulk move/assign), reloading once.
+   *  Every task is tried (allSettled): the result names the ones that failed
+   *  and the first reason, so the board can say "Couldn’t move 2 of 5 tasks"
+   *  instead of reporting success over a partial failure. */
+  async bulkUpdateTasks(tasks: SwarmTask[], patch: Partial<SwarmTask>): Promise<BulkTaskResult> {
+    if (!tasks.length) return { failed: [], error: null };
+    const results = await Promise.allSettled(tasks.map((t) => api.patch<SwarmTask>(`/swarm/tasks/${t.id}`, patch)));
     await this.loadTasks(tasks[0].project_id);
     await this.refreshGraph();
+    return bulkResult(tasks, results);
   }
 
-  /** Delete many tasks (bulk delete / clear board), reloading once. */
-  async bulkDeleteTasks(tasks: SwarmTask[]): Promise<void> {
-    if (!tasks.length) return;
-    await Promise.all(tasks.map((t) => api.del(`/swarm/tasks/${t.id}`).catch(() => null)));
+  /** Delete many tasks (bulk delete / clear board), reloading once — same
+   *  partial-failure result as {@link bulkUpdateTasks}. */
+  async bulkDeleteTasks(tasks: SwarmTask[]): Promise<BulkTaskResult> {
+    if (!tasks.length) return { failed: [], error: null };
+    const results = await Promise.allSettled(tasks.map((t) => api.del(`/swarm/tasks/${t.id}`)));
     await this.loadTasks(tasks[0].project_id);
     await this.refreshGraph();
+    return bulkResult(tasks, results);
   }
 
   /** Reload the dependency graph for the open swarm (the Graph tab reads it, so

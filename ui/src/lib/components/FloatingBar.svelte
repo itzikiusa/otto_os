@@ -41,6 +41,7 @@
   import { describeAction } from '../orchestrate';
   import { barStore } from '../stores/bar.svelte';
   import { auth } from '../stores/auth.svelte';
+  import { plugins } from '../stores/plugins.svelte';
   import { ui } from '../stores/ui.svelte';
   import { isForeground, visibleOnThisDevice, ws } from '../stores/workspace.svelte';
   import { router } from '../router.svelte';
@@ -138,39 +139,58 @@
       return;
     }
     const go = (route?: string) => () => openInOtto(route);
-    const mods = availableModules((f) => auth.can(f, 'view'), []);
-    const base: Command[] = [
-      { id: 'bar.open-otto', title: 'Open Otto', group: 'Otto', keywords: 'main window app show', run: go() },
-      ...goToEntries(mods).map((e) => ({
-        id: e.id,
-        title: e.title,
-        group: 'Navigate',
-        detail: e.detail,
-        keywords: e.keywords,
-        run: go(e.route),
-      })),
-      { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', keywords: 'preferences appearance', run: go('settings/appearance') },
-    ];
-    windowCommands = base;
+    // Go-to rows for every module the user may open — plugins included, like
+    // the in-app list (App.svelte). Built at once from what is known, rebuilt
+    // when the plugin list arrives (fetched alongside the workspaces).
+    const buildBase = (): Command[] => {
+      const pluginEntries = plugins.list
+        .filter((p) => auth.canPlugin(p.slug, 'view'))
+        .map((p) => ({ id: `plugin/${p.slug}`, icon: p.icon, label: p.name }));
+      const mods = availableModules((f) => auth.can(f, 'view'), pluginEntries);
+      return [
+        { id: 'bar.open-otto', title: 'Open Otto', group: 'Navigate', keywords: 'main window app show', run: go() },
+        ...goToEntries(mods).map((e) => ({
+          id: e.id,
+          title: e.title,
+          group: 'Navigate',
+          detail: e.detail,
+          keywords: e.keywords,
+          run: go(e.route),
+        })),
+        { id: 'core.go-settings', title: 'Go to Settings', group: 'Navigate', keywords: 'preferences appearance', run: go('settings/appearance') },
+      ];
+    };
+    windowCommands = buildBase();
+    const pluginsLoaded = plugins.load();
     try {
       workspaces = await api.get<WorkspaceWithRole[]>('/workspaces');
     } catch {
       workspaces = [];
     }
+    await pluginsLoaded;
+    const base = buildBase();
+    windowCommands = base;
     const wsId = spaceWorkspace;
     if (!wsId) return;
+    // A failed fetch must not look like "no sessions": one disabled row says
+    // so (the Go-to list above still works).
+    let failed = false;
     const [sessions, repos] = await Promise.all([
-      api.get<Session[]>(`/workspaces/${wsId}/sessions?archived=false`).catch(() => [] as Session[]),
-      api.get<Repo[]>(`/workspaces/${wsId}/repos`).catch(() => [] as Repo[]),
+      api.get<Session[]>(`/workspaces/${wsId}/sessions?archived=false`).catch(() => ((failed = true), [] as Session[])),
+      api.get<Repo[]>(`/workspaces/${wsId}/repos`).catch(() => ((failed = true), [] as Repo[])),
     ]);
     windowCommands = [
       ...base,
+      ...(failed
+        ? [{ id: 'bar.load-failed', title: 'Couldn’t load sessions and repositories', group: 'Session', keywords: 'session repo focus open', disabled: true, run: () => {} }]
+        : []),
       ...sessions
         .filter((s) => !s.archived && isForeground(s) && visibleOnThisDevice(s))
         .map((s) => ({
           id: `session.${s.id}`,
-          title: `Focus session: ${s.title}`,
-          group: 'Sessions',
+          title: `Focus ${s.title}`,
+          detail: 'Session',
+          group: 'Session',
           keywords: s.provider,
           run: go(`agents/${s.id}`),
         })),
@@ -283,12 +303,13 @@
   }
 
   async function runCommand(cmd: Command): Promise<void> {
+    if (cmd.disabled) return;
     recordUsage(cmd.id);
     closeBar();
     try {
       await cmd.run();
     } catch (e) {
-      addTurn('', { tone: 'error', text: `“${cmd.title}” failed.`, detail: e instanceof Error ? e.message : String(e), source: 'Otto' });
+      addTurn('', { tone: 'error', text: `Couldn’t run “${cmd.title}”.`, detail: e instanceof Error ? e.message : String(e), source: 'Otto' });
     }
   }
 
@@ -686,8 +707,9 @@
       <button
         class="dock"
         onclick={() => void openBar()}
-        title="Ask Otto or run a command (⌘K)"
+        title="Ask Otto or run a command"
         aria-label="Open the Otto bar"
+        aria-keyshortcuts="Meta+K"
       >
         <Icon name="sparkle" size={12} />
         <span>Ask Otto</span>
@@ -855,8 +877,10 @@
                     class="opt"
                     class:ask={row.kind === 'ask'}
                     class:sel={i === selected}
+                    class:disabled={row.kind === 'cmd' && row.cmd.disabled}
                     role="option"
                     aria-selected={i === selected}
+                    aria-disabled={row.kind === 'cmd' && row.cmd.disabled ? 'true' : undefined}
                     onmousedown={(e) => e.preventDefault()}
                     onmousemove={() => (selected = i)}
                     onclick={() => runRow(row)}
@@ -1068,7 +1092,7 @@
     gap: 6px;
     height: 46px;
     flex-shrink: 0;
-    padding-inline: 8px 7px;
+    padding-inline: 8px;
     min-width: 0;
   }
   .compact .pill {
@@ -1138,7 +1162,7 @@
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 3px 5px;
+    padding: 4px 6px;
     flex-shrink: 0;
   }
   .sep {
@@ -1150,10 +1174,10 @@
   .fb-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     height: 28px;
     max-width: 150px;
-    padding-inline: 8px 7px;
+    padding-inline: 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: color-mix(in srgb, var(--surface) 70%, transparent);
@@ -1217,7 +1241,7 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     height: 20px;
     padding-inline: 8px 4px;
     border: 1px solid var(--border);
@@ -1261,7 +1285,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
+    padding: 8px 12px;
     border-radius: var(--radius-m);
     background: var(--warning-soft);
     color: var(--text);
@@ -1280,7 +1304,7 @@
     gap: 1px;
   }
   .sec {
-    padding: 6px 10px 3px;
+    padding: 6px 12px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: .06em;
@@ -1292,7 +1316,7 @@
     align-items: center;
     gap: 8px;
     min-height: 32px;
-    padding: 0 10px;
+    padding: 0 12px;
     border-radius: var(--radius-m);
     font-size: var(--fs-m);
     cursor: pointer;
@@ -1300,6 +1324,10 @@
   }
   .opt.sel {
     background: var(--accent-soft);
+  }
+  .opt.disabled {
+    color: var(--text-dim);
+    cursor: default;
   }
   .opt-ic {
     display: grid;
@@ -1344,7 +1372,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px 12px;
-    padding: 6px 10px 2px;
+    padding: 6px 12px 2px;
     border-block-start: 1px solid var(--border);
     font-size: var(--fs-xs);
     color: var(--text-dim);
@@ -1394,13 +1422,13 @@
     gap: 6px;
   }
   .turn {
-    padding: 10px 12px;
+    padding: 12px;
     border-radius: var(--radius-l);
     background: color-mix(in srgb, var(--surface) 72%, transparent);
     border: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
     font-size: var(--fs-m);
     line-height: 1.45;
   }
@@ -1482,7 +1510,7 @@
   .editor {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
     padding: 4px 6px 2px;
   }
   .ed-head {
@@ -1498,7 +1526,7 @@
   .ed-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px 12px;
+    gap: 12px;
     align-items: start;
   }
   .ed-field {

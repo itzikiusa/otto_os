@@ -10,6 +10,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import type { CanvasFormat, CanvasSceneSummary } from '../canvas/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
 
   interface Props {
     storyId: string;
@@ -21,13 +23,17 @@
   let creating = $state(false);
   let picking = $state(false);
   let linkingId = $state('');
+  /** A failed load — inline with Retry (never a silent "No canvases linked"). */
+  let loadError = $state<string | null>(null);
 
   async function load(): Promise<void> {
     loading = true;
     try {
       scenes = await api.get<CanvasSceneSummary[]>(`/product/stories/${storyId}/linked-canvases`);
-    } catch {
-      scenes = [];
+      loadError = null;
+    } catch (e) {
+      // Keep the last good list (LoadState shows a stale bar over it).
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -168,11 +174,10 @@
       {/if}
     </div>
   {/if}
-  {#if loading && !scenes.length}
-    <p class="lc-empty">Loading linked canvases…</p>
-  {:else if !scenes.length}
-    <p class="lc-empty">No canvases linked yet. Create one to design this story visually.</p>
-  {:else}
+  <LoadState what="linked canvases" variant="compact" rows={2} {loading} error={loadError} empty={!scenes.length} onretry={() => void load()}>
+    {#snippet emptyView()}
+      <p class="lc-empty">No canvases linked yet. Create one to design this story visually.</p>
+    {/snippet}
     <ul class="lc-list">
       {#each scenes as s (s.id)}
         <li>
@@ -191,7 +196,7 @@
         </li>
       {/each}
     </ul>
-  {/if}
+  </LoadState>
 </div>
 
 <style>

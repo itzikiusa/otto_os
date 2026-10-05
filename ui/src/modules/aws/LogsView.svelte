@@ -638,7 +638,7 @@
           {/if}
           <button class="btn small" onclick={() => void saveQuery()} disabled={!query.trim()}>Save</button>
           {#if iRunning}
-            <button class="btn small danger" onclick={() => void stopInsights()}><Icon name="stop" size={12} /> Stop</button>
+            <button class="btn small" onclick={() => void stopInsights()} title="Stop the Insights query"><Icon name="stop" size={12} /> Stop</button>
           {:else}
             <button class="btn small primary" onclick={() => void runInsights()} disabled={!insightGroups.length || !query.trim()} title={!insightGroups.length ? 'Tick at least one log group' : 'Run the query (billed per GB scanned)'}><Icon name="play" size={12} /> Run</button>
           {/if}

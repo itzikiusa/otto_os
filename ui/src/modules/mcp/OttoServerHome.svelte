@@ -535,8 +535,8 @@
 </div>
 
 <style>
+  /* The gutter comes from the padded PageBody around it (McpPage). */
   .otto {
-    padding: 18px 20px 40px;
     display: flex;
     flex-direction: column;
     gap: 14px;

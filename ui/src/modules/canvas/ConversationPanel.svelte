@@ -6,6 +6,7 @@
   // shows live output regardless of whether the session is in the workspace store.
   import { onMount } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -129,7 +130,7 @@
         {/each}
       </select>
     {/if}
-    {#if working}<span class="working">working…</span>{/if}
+    {#if working}<span class="working" role="status"><LiveWorkingDot label="Working…" /></span>{/if}
     <button
       class="hist-btn history"
       onclick={restorePrevious}
@@ -208,9 +209,11 @@
     text-transform: capitalize;
   }
   .working {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-xs);
-    color: var(--accent-text);
-    font-weight: 600;
+    color: var(--text-dim);
   }
   .close {
     margin-inline-start: auto;

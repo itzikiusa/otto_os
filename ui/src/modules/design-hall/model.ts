@@ -5,6 +5,7 @@
 //
 // Contract: docs/contracts/api.md § Design Hall; docs/features/design-hall.md.
 
+import { badgeTone, designStatus } from '../../lib/status.ts';
 import type {
   DesignArtifact,
   DesignLink,
@@ -263,29 +264,15 @@ export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 
 export const STATUS_ORDER: DesignStatus[] = ['draft', 'review', 'approved', 'shipped'];
 
+// The status vocabulary lives in lib/status.ts (`designStatus`) so the pill,
+// the status menu and the activity log read the same words and tones.
 export function statusLabel(s: DesignStatus | string): string {
-  const m: Record<string, string> = {
-    draft: 'Draft',
-    review: 'In review',
-    approved: 'Approved',
-    shipped: 'Shipped',
-    archived: 'Archived',
-  };
-  return m[s] ?? s;
+  return designStatus(s).label;
 }
 
-/** One place maps a status to a tone (the McpPill pattern). */
+/** One place maps a status to a tone (lib/status `designStatus`). */
 export function statusTone(s: DesignStatus | string): Tone {
-  switch (s) {
-    case 'review':
-      return 'warn';
-    case 'approved':
-      return 'ok';
-    case 'shipped':
-      return 'info';
-    default:
-      return 'neutral';
-  }
+  return badgeTone(designStatus(s).tone) as Tone;
 }
 
 // ── Links ───────────────────────────────────────────────────────────────────

@@ -434,6 +434,9 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
 // Cheat-sheet data — the single source of truth for the `?` overlay
 // (ShortcutsOverlay.svelte). Keep these rows in sync with the chords handled
 // above so the overlay stays accurate; the overlay derives entirely from this.
+// The Help guide's tables (modules/help/sections/keyboard-shortcuts.md) carry
+// the SAME groups and rows — unit/keymapHelp.test.ts fails on any drift, so
+// add a chord in both places (md: `⌃1` – `⌃4` ranges, backticked keys).
 // ---------------------------------------------------------------------------
 
 export interface ShortcutBinding {
@@ -450,88 +453,132 @@ export interface ShortcutGroup {
 
 export const KEYMAP: ShortcutGroup[] = [
   {
-    category: 'General',
+    category: 'App and navigation',
     bindings: [
-      { keys: '⌘K', label: 'Floating bar — commands & Ask Otto (palette on phone/tablet)' },
-      { keys: '⌃1…⌃4', label: 'In the floating bar: switch space' },
-      { keys: '⌘I', label: 'Ask Otto (plain English; not in a code editor)' },
-      { keys: '⌘⇧B', label: 'Broadcast to sessions' },
-      { keys: '⌘U / ⌘⇧U', label: 'Update all agent CLIs (asks first; not in a text field)' },
-      { keys: '⌘⇧S', label: 'Snip — capture screen region & annotate' },
-      { keys: '⌘⇧R', label: 'Hard reload — refresh UI (sessions kept)' },
-      { keys: '⌘⇧N', label: 'New window (desktop app: File ▸ New Window)' },
-      { keys: '⌘,', label: 'Settings' },
-      { keys: '?', label: 'Keyboard shortcuts (this sheet)' },
+      { keys: '⌘K', label: 'Floating bar — commands and Ask Otto (the palette sheet on phone, tablet, in a pop-out or with the bar hidden)' },
+      { keys: '⌘I', label: 'Ask Otto in plain English (not in a code editor)' },
+      { keys: '⌘,', label: 'Open Settings' },
+      { keys: '?', label: 'Show the keyboard shortcut sheet' },
+      { keys: '⌘1', label: 'Show or hide the sidebar' },
+      { keys: '⌘J', label: 'Show or hide the Session panel' },
+      { keys: '⌘⇧← / ⌘⇧→', label: 'Go back / forward through the pages you visited (not while typing in a field)' },
+      { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
+      { keys: '⌥-click', label: 'On a sidebar item: open it side by side' },
+      { keys: '⌥↑ / ⌥↓', label: 'In the sidebar: move a Favorite up / down (any row while customizing)' },
+      { keys: '⌘F', label: 'Find: in the focused terminal or query editor, else in the active session\'s terminal, otherwise on the page' },
+      { keys: '⌘⇧R', label: 'Reload the UI. Sessions keep running in the daemon' },
+      { keys: '⌘U / ⌘⇧U', label: 'Update all installed agent CLIs (asks first; not in a text field)' },
+      { keys: '⌘⇧S', label: 'Take a snip: capture a screen region and annotate it' },
+      { keys: '⌘⇧B', label: 'Broadcast a message to your sessions' },
     ],
   },
   {
-    category: 'Sessions',
+    category: 'Command bar',
+    bindings: [
+      { keys: '↑ / ↓', label: 'Move through the results' },
+      { keys: '↵', label: 'Run the selected row' },
+      { keys: '⌘↵', label: 'Ask Otto with what you typed' },
+      { keys: '⌃1…⌃4', label: 'Switch space (while the bar has focus)' },
+      { keys: 'Esc', label: 'Close space settings, clear the text, then close the bar' },
+      { keys: '⇥', label: 'In the palette sheet: switch between Commands and Plain English' },
+      { keys: '⌘↵', label: 'In Plain English mode: plan the request' },
+    ],
+  },
+  {
+    category: 'Sessions and tabs',
     bindings: [
       { keys: '⌘T', label: 'New session' },
-      { keys: '⌘W', label: 'Close tab' },
-      { keys: '⌘⇧T', label: 'Reopen closed tab' },
-      { keys: '⌃⇧T / ⌃⇧W', label: 'New session / close tab — aliases for ⌘T / ⌘W when Otto runs in a browser tab' },
-      { keys: '⌘⇧C', label: 'Flip an agent session between Terminal and Chat' },
-      { keys: '⌃Tab', label: 'Next tab' },
-      { keys: '⌃⇧Tab', label: 'Previous tab' },
-      { keys: '⌘]', label: 'Next session (not in a code editor)' },
-      { keys: '⌘[', label: 'Previous session (not in a code editor)' },
-      { keys: '⌃1…⌃9', label: 'Jump to session N' },
+      { keys: '⌃⇧T', label: 'New session, when Otto runs in a browser tab (the browser keeps ⌘T)' },
+      { keys: '⌘W', label: 'Close the current tab' },
+      { keys: '⌃⇧W', label: 'Close the current tab, when Otto runs in a browser tab' },
+      { keys: '⌘⇧T', label: 'Reopen the last closed tab' },
+      { keys: '⌃⇥ / ⌃⇧⇥', label: 'Next / previous tab' },
+      { keys: '⌘] / ⌘[', label: 'Next / previous session (not in a code editor)' },
+      { keys: '⌃1…⌃9', label: 'Jump to session tab 1–9' },
+      { keys: '← / →', label: 'Move between tabs when a tab has focus (Home / End for the first / last)' },
+      { keys: '⌥⇧← / ⌥⇧→', label: 'Move the focused tab left / right (also in the tab\'s right-click menu)' },
+      { keys: '⌫', label: 'Close the focused tab' },
+      { keys: '⌘⇧C', label: 'Toggle the focused agent session between the terminal and chat views' },
+    ],
+  },
+  {
+    category: 'New session dialog',
+    bindings: [
+      { keys: '← / →', label: 'Choose a provider' },
+      { keys: '+ / -', label: 'Add or remove one more session of the selected provider' },
+      { keys: '⌘↵', label: 'Create the sessions' },
+    ],
+  },
+  {
+    category: 'Split panes',
+    bindings: [
       { keys: '⌘D', label: 'Split vertically (not in a code editor)' },
       { keys: '⌘⇧D', label: 'Split horizontally' },
-      { keys: '⌘⌥←', label: 'Move pane left (in a Database pane: previous query tab)' },
-      { keys: '⌘⌥→', label: 'Move pane right (in a Database pane: next query tab)' },
-      { keys: '⌘⌥↑', label: 'Move pane up' },
-      { keys: '⌘⌥↓', label: 'Move pane down' },
-      { keys: '⌘⌥S', label: 'Swap pane with next' },
-      { keys: '⌘F', label: 'Find (terminal / page)' },
+      { keys: '⌘⌥← / ⌘⌥→', label: 'Move the focused pane left / right' },
+      { keys: '⌘⌥↑ / ⌘⌥↓', label: 'Move the focused pane up / down' },
+      { keys: '⌘⌥S', label: 'Swap the focused pane with the next one' },
     ],
   },
   {
-    category: 'API client (on the API page)',
+    category: 'Terminal',
     bindings: [
-      { keys: '⌘↵', label: 'Send the request' },
-      { keys: '⌘S', label: 'Save the request' },
-      { keys: '⌘T', label: 'New request tab (instead of a new session)' },
-      { keys: '⌘D', label: 'Duplicate the request (instead of a split)' },
+      { keys: '⇧↵', label: 'New line in an agent\'s prompt instead of sending it' },
+      { keys: '⌘C', label: 'Copy the selected terminal text (⌃C still interrupts)' },
+      { keys: '⌘V', label: 'Paste' },
+      { keys: '⌘F', label: 'Search the scrollback (also the pane header\'s search button)' },
+      { keys: '↵ / ⇧↵', label: 'In terminal search: older / newer match' },
+      { keys: '↑ / ↓', label: 'In terminal search: step through the full-scrollback results list' },
+      { keys: '⌘+ / ⌘- / ⌘0', label: 'Terminal font bigger / smaller / reset (while the terminal has focus)' },
     ],
   },
   {
-    category: 'Vault (on the Vault page)',
+    category: 'Find on page',
     bindings: [
-      { keys: '⌘O', label: 'Open or switch vault' },
-      { keys: '⌘N', label: 'New note' },
-    ],
-  },
-  {
-    category: 'Database (on the Database page)',
-    bindings: [
-      { keys: '⌘B', label: 'Collapse or restore the schema sidebar' },
-      { keys: '⌥⌘V', label: 'Paste from the clipboard ring (copies made in Otto)' },
-    ],
-  },
-  {
-    category: 'Browser (live tab)',
-    bindings: [{ keys: '⌘R', label: 'Reload the page (instead of reloading Otto)' }],
-  },
-  {
-    category: 'View',
-    bindings: [
-      { keys: '⌘1', label: 'Toggle sidebar' },
-      { keys: '⌘J', label: 'Toggle right panel' },
-      { keys: '⌘⇧←', label: 'Navigate back' },
-      { keys: '⌘⇧→', label: 'Navigate forward' },
-      { keys: '⌘\\', label: 'Open or close the side-by-side pane' },
-      { keys: '⌥-click', label: 'A sidebar item: open it side by side' },
-      { keys: '⌥↑ / ⌥↓', label: 'Sidebar: move a Favorite (any row while customizing)' },
+      { keys: '↵ / ⇧↵', label: 'Next / previous match' },
+      { keys: 'Esc', label: 'Close find' },
     ],
   },
   {
     category: 'Zoom',
     bindings: [
-      { keys: '⌘+', label: 'Zoom in (app / terminal font)' },
-      { keys: '⌘-', label: 'Zoom out (app / terminal font)' },
+      { keys: '⌘+', label: 'Zoom in (the terminal font when a terminal has focus)' },
+      { keys: '⌘-', label: 'Zoom out' },
       { keys: '⌘0', label: 'Reset zoom' },
+    ],
+  },
+  {
+    category: 'Desktop app menus',
+    bindings: [
+      { keys: '⌘⇧N', label: 'New window' },
+      { keys: '⌘Q', label: 'Quit Otto and remember your windows for next launch' },
+      { keys: '⌘H', label: 'Hide Otto' },
+      { keys: '⌘M', label: 'Minimise the window' },
+      { keys: '⌃⌘F', label: 'Enter or exit full screen' },
+      { keys: '⌘A', label: 'Select all' },
+    ],
+  },
+  {
+    category: 'System-wide (desktop app, work in any app)',
+    bindings: [
+      { keys: '⌥Space', label: 'Show or hide the Otto bar over any app' },
+      { keys: '⌘⌃⇧2', label: 'Take a snip' },
+    ],
+  },
+  {
+    category: 'Page shortcuts',
+    bindings: [
+      { keys: '⌘S', label: 'Save what you are editing: a Vault note, a skill, a Design Hall artifact, a brand kit, an API request or a database query' },
+      { keys: '⌘E', label: 'In a Vault note: switch between editing and reading' },
+      { keys: '⌘O / ⌘N', label: 'On the Vault page: open or switch vault / new note' },
+      { keys: '⌘F', label: 'In the Git graph: search commits instead of the page' },
+      { keys: '⌘B', label: 'In a Database query: collapse or restore the schema sidebar' },
+      { keys: '⌥⌘V', label: 'In a Database query: paste from the clipboard ring (copies made in Otto)' },
+      { keys: '⌘R', label: 'In a live browser tab: reload the page instead of Otto' },
+      { keys: '⌘↵', label: 'On the API page: send the request' },
+      { keys: '⌘T', label: 'On the API page: new request tab instead of a new session' },
+      { keys: '⌘D', label: 'On the API page: duplicate the request instead of splitting' },
+      { keys: '⌘⌥← / ⌘⌥→', label: 'In a Database pane: previous / next query tab instead of moving the pane' },
+      { keys: '?', label: 'In a Kubernetes cluster view: that view\'s own key hints instead of this sheet' },
     ],
   },
 ];

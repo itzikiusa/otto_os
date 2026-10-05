@@ -33,7 +33,7 @@
       if (tool === 'pointer') { kbSend([{...kb}]); kbNote = 'Pointer placed.'; }
       else if (!anchor) { anchor = {...kb}; kbNote = 'First corner set. Move to the opposite corner and press Enter.'; }
       else { kbSend([anchor, {...kb}]); anchor = null; kbNote = 'Highlight placed.'; }
-    } else if (event.key === 'Escape' && anchor) { event.preventDefault(); event.stopPropagation(); anchor = null; kbNote = 'Placement cancelled.'; }
+    } else if (event.key === 'Escape' && anchor) { event.preventDefault(); event.stopPropagation(); anchor = null; kbNote = 'Placement canceled.'; }
   }
   function position(event: PointerEvent) { return normalizedPoint(event.clientX, event.clientY, event.currentTarget instanceof SVGElement ? event.currentTarget.getBoundingClientRect() : {left: 0, top: 0, width: 0, height: 0}, source.width, source.height); }
   function begin(event: PointerEvent) {

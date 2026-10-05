@@ -68,7 +68,7 @@ You can **mark** elements on a page, add a note to each mark, and ask an agent a
 - The agent dock under the page shows the agent's real terminal; you can type to it directly. Drag its top edge to resize it, or collapse it with the chevron. **Detach** leaves the session running in Agents.
 - **New agent** starts an ordinary agent session (it also appears in Agents) with Otto's browser tools enabled. With more than one provider you can pick which agent to start.
 - The ask bar sends the page URL, your question and, by default, the page's newest 20 marks (untick the marks chip to leave them out). Marking an element focuses the ask bar.
-- The same Browser is available inside an agent session's right panel (**Browser** tab, **v2**), where the ask bar targets that session.
+- The same Browser is available inside an agent session's Session panel (**Browser** tab, **v2**), where the ask bar targets that session.
 
 **Page tools**
 - **Summarize** — one short agent turn condenses the page into a few sentences.

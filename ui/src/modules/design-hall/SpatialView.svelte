@@ -208,7 +208,7 @@
     border: 0;
     border-radius: var(--radius-s);
     background: var(--border-strong);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow);
     cursor: pointer;
     transition: transform var(--dur-fast) ease-out;
   }
@@ -238,7 +238,7 @@
     height: 72px;
     border-radius: var(--radius-s);
     overflow: hidden;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--shadow);
     transform: perspective(300px) rotateY(-14deg);
   }
   .base {

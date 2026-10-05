@@ -266,7 +266,7 @@
       const followers = usage?.consumers.filter((c) => c.policy === 'follow_approved').length ?? 0;
       toasts.success(
         `Saved ${artifact?.title ?? 'the kit'} v${res.version.seq}`,
-        followers ? `${followers} ${followers === 1 ? 'design follows' : 'designs follow'} the approved kit — approve v${res.version.seq} to roll it out.` : undefined,
+        followers ? `${followers} ${followers === 1 ? 'design follows' : 'designs follow'} the approved kit — accept v${res.version.seq} to roll it out.` : undefined,
       );
       if (changes.length) {
         api.captureSignal({
@@ -330,18 +330,18 @@
     if (!artifact || !head || dirty) return;
     const followers = usage?.consumers.filter((c) => c.policy === 'follow_approved').length ?? 0;
     const ok = await confirmer.ask(
-      `Approve v${head.seq} of “${artifact.title}”?` +
+      `Accept v${head.seq} of “${artifact.title}”?` +
         (followers ? ` ${followers} ${followers === 1 ? 'design that follows' : 'designs that follow'} the approved kit will switch to v${head.seq}.` : ''),
-      { title: 'Approve brand kit', confirmLabel: `Approve v${head.seq}`, danger: false },
+      { title: 'Accept brand kit', confirmLabel: `Accept v${head.seq}`, danger: false },
     );
     if (!ok) return;
     try {
       artifact = await api.approveArtifact(id, head.id);
       approved = head;
-      toasts.success(`Approved v${head.seq}`, followers ? 'Following designs re-tint now; pinned ones get an update prompt.' : undefined);
+      toasts.success(`Accepted v${head.seq}`, followers ? 'Following designs re-tint now; pinned ones get an update prompt.' : undefined);
       void loadUsage();
     } catch (e) {
-      toasts.error('Couldn’t approve', errText(e));
+      toasts.error('Couldn’t accept the brand kit', errText(e));
     }
   }
 
@@ -483,7 +483,7 @@
         <Icon name="file" size={12} /> Versions &amp; source
       </button>
       {#if needsApproval && !dirty && canEdit}
-        <button class="btn small" data-overflow="3" onclick={approve} data-testid="brand-approve" data-icon="check"><Icon name="check" size={12} /> Approve v{head?.seq}</button>
+        <button class="btn small" data-overflow="3" onclick={approve} data-testid="brand-approve" data-icon="check"><Icon name="check" size={12} /> Accept v{head?.seq}</button>
       {/if}
       {#if canEdit}
         <button class="btn small primary" onclick={() => void requestSave()} disabled={!dirty || saving || issues.length > 0} data-testid="brand-save" title="Save as a new version (⌘S)">
@@ -555,10 +555,10 @@
             <Icon name="info" size={14} />
             <span>
               v{head.seq} is saved but not approved. Designs that follow the approved kit
-              {approved ? `still use v${approved.seq}` : 'pick it up once you approve it'}.
+              {approved ? `still use v${approved.seq}` : 'pick it up once you accept it'}.
             </span>
             <span class="grow"></span>
-            <button class="btn small" onclick={approve}>Approve v{head.seq}</button>
+            <button class="btn small" onclick={approve}>Accept v{head.seq}</button>
           </div>
         {/if}
 

@@ -580,12 +580,7 @@
 
   @media (prefers-reduced-motion: no-preference) {
     .nb-pop {
-      animation: nb-in 140ms ease-out;
-    }
-  }
-  @keyframes nb-in {
-    from {
-      opacity: 0;
+      animation: otto-fade-in var(--dur-fast) var(--ease-out);
     }
   }
 

@@ -144,7 +144,10 @@
     {/snippet}
   </PageHeader>
 
-  <PageBody padded={false}>
+  <!-- The Otto-server panel is a readable page and takes the shared body
+       gutter; the server and activity sections are full-bleed lists whose own
+       toolbars span the pane, so they manage their edges themselves. -->
+  <PageBody padded={section === 'otto'}>
     {#key accessRevision}
       {#if section === 'otto'}
         <OttoServerHome {wsId} />

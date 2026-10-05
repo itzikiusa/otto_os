@@ -38,6 +38,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
   import type {
@@ -239,12 +240,13 @@
         : []),
       ...(isDb ? popoutItems(`database/${c.id}`, c.name) : []),
       { separator: true },
-      ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
+      ...(connectionAccess(c,'configure','admin') ? [{ label: 'Edit', icon: 'edit', action: () => editConnection(c) }, { label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteConnection(c) }] : []),
       ...(auth.isRoot && connectionAccess(c,'configure','admin') ? [{ label: 'Duplicate without password', icon: 'copy', action: () => void duplicateConnection(c) }] : []),
       ...(auth.isRoot || connectionAccess(c,'manage_access','admin') ? [{ label: 'Access', icon: 'key', action: () => {accessFor=c;} }] : []),
     ]);
   }
 
+  /** A Kafka cluster's menu — its sidebar row and its open tab (right-click or ⋯). */
   function clusterMenu(e: MouseEvent, cl: BrokerCluster): void {
     ctxMenu.show(e, [
       { label: 'Open', icon: 'split', action: () => openCluster(cl) },
@@ -758,39 +760,6 @@
     { id: 'dashboards', label: 'Dashboards', icon: 'chart', show: () => true },
   ];
   const visibleTabs = $derived(mainTabs.filter((t) => t.show()));
-  /** ←/→ (and Home/End) between the workbench views, focus following. */
-  function onSidebarKey(e: KeyboardEvent): void {
-    const bar = e.currentTarget as HTMLElement;
-    const tabs = [...bar.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-    const i = tabs.indexOf(e.target as HTMLButtonElement);
-    if (i < 0) return;
-    let j = i;
-    const forward = getComputedStyle(bar).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
-    if (e.key === forward) j = (i + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + tabs.length) % tabs.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = tabs.length - 1;
-    else return;
-    e.preventDefault();
-    tabs[j].click();
-    tabs[j].focus();
-  }
-
-  function onViewKey(e: KeyboardEvent): void {
-    const i = visibleTabs.findIndex((t) => t.id === database.mainTab);
-    let j = i;
-    const forward = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight';
-    if (e.key === forward) j = (i + 1) % visibleTabs.length;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') j = (i - 1 + visibleTabs.length) % visibleTabs.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = visibleTabs.length - 1;
-    else return;
-    e.preventDefault();
-    database.setMainTab(visibleTabs[j].id);
-    const bar = e.currentTarget as HTMLElement;
-    queueMicrotask(() => bar.querySelectorAll<HTMLButtonElement>('.mt')[j]?.focus());
-  }
-
   // ── DB Assistant split (resizable, persisted) ────────────────────────────────
   // When open, the DB Assistant panel sits BESIDE the editor/results, separated by
   // a draggable divider so the user can enlarge the agent's shell. Mirrors the
@@ -883,6 +852,20 @@
       ? (database.sshTabs.find((t) => t.connId === database.activePane!.id) ?? null)
       : null,
   );
+  // Roving tabindex over the connection strip: the selected tab is the one Tab
+  // stop; with none selected, the first tab is, so the strip stays reachable.
+  const connTabActive = $derived(
+    activeCluster != null ||
+      activeSsh != null ||
+      (database.activePane === null && openConns.some((c) => c.id === database.selectedConnId)),
+  );
+  const firstConnTab = $derived(
+    openConns[0] ? `db:${openConns[0].id}`
+      : brokers.openClusters[0] ? `kafka:${brokers.openClusters[0].id}`
+      : database.sshTabs[0] ? `ssh:${database.sshTabs[0].connId}`
+      : '',
+  );
+  const connTabStop = (on: boolean, key: string): number => (on || (!connTabActive && firstConnTab === key) ? 0 : -1);
 
   // The open-connections strip scrolls sideways with its scrollbar hidden, so a
   // tab opened (or focused) past the right edge would be selected but invisible —
@@ -1012,7 +995,7 @@
             </div>
           {/if}
         </div>
-        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onSidebarKey}>
+        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
           <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema' || database.sideTab === 'connections'} tabindex={database.sideTab === 'schema' || database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
           <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
           <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
@@ -1027,7 +1010,7 @@
       <div class="side-switch">
         <!-- The tabs get their own tablist: the strip also carries plain
              buttons (Refresh, Hide sidebar), which a tablist may not own. -->
-        <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onSidebarKey}>
+        <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
           <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} tabindex={database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('connections')}>Connections</button>
           <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
           <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
@@ -1111,11 +1094,15 @@
       {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
-      <div class="conn-tabs" role="tablist" aria-label="Open connections" bind:this={connTabsEl}>
+      <!-- Each tab is the main <button role="tab">; the status glyph, the ⋯ menu
+           (the right-click menu, reachable without a mouse) and the close button
+           are its siblings inside a presentational wrapper. -->
+      <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}>
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
-          <div class="conn-tab" class:active={database.activePane === null && database.selectedConnId === c.id} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="tab" tabindex="-1" aria-selected={database.activePane === null && database.selectedConnId === c.id} oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
-            <button class="conn-tab-main" onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
+          {@const on = database.activePane === null && database.selectedConnId === c.id}
+          <div class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+            <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
               <span class="conn-tab-name ellipsis">{c.name}</span>
@@ -1128,6 +1115,9 @@
             {:else if st?.phase === 'idle'}
               <span class="conn-tab-idle" title="Not connected yet — opens on click" aria-label="Not connected yet" data-testid="conn-tab-idle"></span>
             {/if}
+            <button class="conn-tab-more" onclick={(e) => connMenu(e, c)} aria-haspopup="menu" aria-label="More actions for {c.name}" title="More actions for {c.name}">
+              <Icon name="more" size={12} />
+            </button>
             <button
               class="conn-tab-close"
               onclick={(e) => {
@@ -1135,36 +1125,36 @@
                 database.closeConnection(c.id);
               }}
               aria-label="Close connection tab"
-              title="Close"
+              title="Close connection tab"
             >
               <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
         {#each brokers.openClusters as cl (cl.id)}
-          <div class="conn-tab" class:active={database.activePane?.kind === 'kafka' && database.activePane.id === cl.id} class:prod={isProdConn(cl)} role="tab" tabindex="-1" aria-selected={database.activePane?.kind === 'kafka' && database.activePane.id === cl.id} oncontextmenu={(e) => { e.preventDefault(); ctxMenu.show(e, [
-              { label: 'Open in Message Brokers page', icon: 'split', action: () => openClusterStandalone(cl) },
-              { separator: true },
-              { label: 'Edit', icon: 'edit', action: () => editCluster(cl) },
-              { label: 'Remove…', icon: 'trash', danger: true, action: () => void deleteCluster(cl) },
-            ]); }}>
-            <button class="conn-tab-main" onclick={() => openCluster(cl)} title={cl.name}>
+          {@const on = database.activePane?.kind === 'kafka' && database.activePane.id === cl.id}
+          <div class="conn-tab" class:active={on} class:prod={isProdConn(cl)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}>
+            <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `kafka:${cl.id}`)} onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
               <span class="conn-tab-name ellipsis">{cl.name}</span>
               {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
             </button>
-            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close">
+            <button class="conn-tab-more" onclick={(e) => clusterMenu(e, cl)} aria-haspopup="menu" aria-label="More actions for {cl.name}" title="More actions for {cl.name}">
+              <Icon name="more" size={12} />
+            </button>
+            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); closeKafkaTab(cl.id); }} aria-label="Close cluster tab" title="Close cluster tab">
               <Icon name="x" size={12} />
             </button>
           </div>
         {/each}
         {#each database.sshTabs as s (s.connId)}
-          <div class="conn-tab" class:active={database.activePane?.kind === 'ssh' && database.activePane.id === s.connId} role="tab" tabindex="-1" aria-selected={database.activePane?.kind === 'ssh' && database.activePane.id === s.connId}>
-            <button class="conn-tab-main" onclick={() => database.focusSsh(s.connId)} title={s.name}>
+          {@const on = database.activePane?.kind === 'ssh' && database.activePane.id === s.connId}
+          <div class="conn-tab" class:active={on} role="presentation">
+            <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `ssh:${s.connId}`)} onclick={() => database.focusSsh(s.connId)} title={s.name}>
               <span class="conn-tab-glyph {s.kind}"><Icon name={engineGlyph(s.kind)} size={12} /></span>
               <span class="conn-tab-name ellipsis">{s.name}</span>
             </button>
-            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close">
+            <button class="conn-tab-close" onclick={(e) => { e.stopPropagation(); void closeSshTerminal(s.connId); }} aria-label="Close terminal tab" title="Close terminal tab">
               <Icon name="x" size={12} />
             </button>
           </div>
@@ -1204,7 +1194,7 @@
       <div class="main-tabs" class:many={visibleTabs.length > 3}>
         <!-- The workbench views: a segmented control (selection = surface
              lift), ←/→ move between them like any tablist. -->
-        <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onViewKey}>
+        <div class="segmented view-switch" role="tablist" aria-label="Workbench view" tabindex="-1" onkeydown={onTabKey}>
           {#each visibleTabs as t (t.id)}
             <button
               class="mt"
@@ -2355,12 +2345,14 @@
     min-width: 0;
     max-width: 220px;
   }
+  .conn-tab-more,
   .conn-tab-close {
     display: grid;
     place-items: center;
     width: 17px;
     height: 17px;
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
+    padding: 0;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -2370,10 +2362,33 @@
     flex-shrink: 0;
     transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
-  .conn-tab:hover .conn-tab-close,
-  .conn-tab.active .conn-tab-close {
+  .conn-tab-more {
+    margin-inline-start: 6px;
+  }
+  .conn-tab-more + .conn-tab-close {
+    margin-inline-start: 0;
+  }
+  /* Revealed on hover, on the active tab and whenever focus is inside the tab;
+     always visible on touch (no hover to reveal them). */
+  .conn-tab:hover :is(.conn-tab-more, .conn-tab-close),
+  .conn-tab:focus-within :is(.conn-tab-more, .conn-tab-close),
+  .conn-tab.active :is(.conn-tab-more, .conn-tab-close),
+  .conn-tab-more:focus-visible,
+  .conn-tab-close:focus-visible {
     opacity: 1;
   }
+  @media (hover: none) {
+    .conn-tab {
+      height: 32px;
+    }
+    .conn-tab-more,
+    .conn-tab-close {
+      opacity: 1;
+      width: 28px;
+      height: 28px;
+    }
+  }
+  .conn-tab-more:hover,
   .conn-tab-close:hover {
     background: var(--hover);
     color: var(--text);

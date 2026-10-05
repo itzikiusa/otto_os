@@ -10,6 +10,9 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import { registry } from '../../lib/commands.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -34,6 +37,9 @@
   import { canFormat, formatContent, validateContent, type ValidationIssue } from './lib/format';
 
   let quickOpen = $state(false);
+  /** The files list width (drag / ←→ on its divider; remembered per device). */
+  const FILES_W_KEY = 'workbench.filesW';
+  let filesW = $state(loadPaneWidth(FILES_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let mobilePane: 'files' | 'editor' = $state('editor');
   let issue: ValidationIssue | null = $state(null);
   /** The issue came from an explicit Format (sticky until the next edit). */
@@ -272,6 +278,16 @@
     if (ok) await workbench.reload(doc.id);
   }
 
+  // ⌘K: the page's verbs (New file creates at once; Open asks which).
+  $effect(() =>
+    registry.register('workbench', wsId
+      ? [
+          { id: 'workbench.new', title: 'New file', group: 'Workbench', keywords: 'create scratch script json note', run: () => void newFile() },
+          { id: 'workbench.open', title: 'Open file…', group: 'Workbench', keywords: 'quick open find scratch', shortcut: '⌘P', run: () => (quickOpen = true) },
+        ]
+      : []),
+  );
+
   function moreMenu(e: MouseEvent): void {
     const has = !!doc;
     const items: MenuItem[] = [
@@ -366,7 +382,7 @@
 </script>
 
 <div class="wb-page">
-  <PageHeader title="Workbench" icon="workbench" subtitle="Scratch files with full history">
+  <PageHeader title="Workbench" subtitle="Scratch files with full history">
     {#snippet actions()}
       {#if workbench.docs.length > 0 || workbench.showTrash}
         <button class="btn small primary" data-testid="wb-new" onclick={() => void newFile()} title="New scratch file">
@@ -425,6 +441,7 @@
         class:phone={isPhone}
         class:with-side={!!doc && workbench.panel !== 'none'}
         class:drag={dragOver}
+        style:--wb-files-w="{filesW}px"
         role="group"
         aria-label="Workbench"
         ondragover={onDragOver}
@@ -436,6 +453,9 @@
           <nav class="wb-col-files" aria-label="Workbench files">
             <FileList onopen={open} onnew={() => void newFile()} onrename={(id) => void rename(id)} />
           </nav>
+        {/if}
+        {#if !isPhone}
+          <PaneDivider bind:width={filesW} storageKey={FILES_W_KEY} label="Resize files list" />
         {/if}
 
         {#if !isPhone || mobilePane === 'editor'}
@@ -648,13 +668,14 @@
   }
   .wb-grid {
     display: grid;
-    grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+    /* files | divider | editor (+ side panel) */
+    grid-template-columns: var(--wb-files-w) auto minmax(0, 1fr);
     height: 100%;
     min-height: 0;
     overflow: hidden;
   }
   .wb-grid.with-side {
-    grid-template-columns: minmax(200px, 250px) minmax(0, 1fr) minmax(260px, 340px);
+    grid-template-columns: var(--wb-files-w) auto minmax(0, 1fr) minmax(260px, 340px);
   }
   .wb-grid.phone,
   .wb-grid.phone.with-side {
@@ -667,8 +688,9 @@
     outline-offset: -4px;
   }
   .wb-col-files {
+    min-width: 0;
     min-height: 0;
-    border-inline-end: 1px solid var(--border);
+    /* The PaneDivider beside it draws the hairline. */
     background: var(--surface);
   }
   .wb-col-main {

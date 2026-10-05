@@ -748,8 +748,9 @@
       class="icon-btn nav-back"
       onclick={() => router.back()}
       disabled={!router.canBack}
-      title="Back (⌘⇧←)"
-      aria-label="Back"
+      title="Go back"
+      aria-label="Go back"
+      aria-keyshortcuts="Meta+Shift+ArrowLeft"
     >
       <Icon name="chevronLeft" size={14} />
     </button>
@@ -757,8 +758,9 @@
       class="icon-btn"
       onclick={() => router.forward()}
       disabled={!router.canForward}
-      title="Forward (⌘⇧→)"
-      aria-label="Forward"
+      title="Go forward"
+      aria-label="Go forward"
+      aria-keyshortcuts="Meta+Shift+ArrowRight"
     >
       <Icon name="chevronRight" size={14} />
     </button>
@@ -882,7 +884,7 @@
               <span class="group-label">{sec.group.label}</span>
               {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
               {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
-                <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
+                <span class="count-chip working" title="Working sessions">{ws.workingCount}</span>
               {/if}
               {#if !pinned}
                 <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
@@ -1018,6 +1020,7 @@
       class:active={router.module === 'walkthroughs'}
       aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
       onclick={() => router.go('walkthroughs')}
+      title="Help"
     >
       <Icon name="info" size={14} />
       <span class="grow">Help</span>
@@ -1027,7 +1030,8 @@
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
-      title="Settings (⌘,)"
+      title="Settings"
+      aria-keyshortcuts="Meta+,"
     >
       <Icon name="gear" size={14} />
       <span class="grow">Settings</span>
@@ -1130,8 +1134,9 @@
         class="row-action mv"
         onclick={() => move(m, -1)}
         disabled={first}
-        title="Move up (⌥↑)"
+        title={`Move ${m.label} up`}
         aria-label={`Move ${m.label} up`}
+        aria-keyshortcuts="Alt+ArrowUp"
       >
         <Icon name="arrowUp" size={12} />
       </button>
@@ -1139,8 +1144,9 @@
         class="row-action mv"
         onclick={() => move(m, 1)}
         disabled={last}
-        title="Move down (⌥↓)"
+        title={`Move ${m.label} down`}
         aria-label={`Move ${m.label} down`}
+        aria-keyshortcuts="Alt+ArrowDown"
       >
         <Icon name="arrowDown" size={12} />
       </button>

@@ -241,7 +241,7 @@
     try {
       const r = await extractRules(w);
       if (r.mode === 'off') toasts.info('Learning is off', 'Turn it on in Settings to get rule proposals.');
-      else if (r.proposed.length) toasts.success(`${r.proposed.length} new rule${r.proposed.length === 1 ? '' : 's'} to review`, 'Nothing applies until you approve it.');
+      else if (r.proposed.length) toasts.success(`${r.proposed.length} new rule${r.proposed.length === 1 ? '' : 's'} to review`, 'Nothing applies until you accept it.');
       else toasts.info('No new rules', `${r.candidates.filter((c) => !c.ready).length} pattern(s) are still forming.`);
       await load();
     } catch (e) {
@@ -457,10 +457,10 @@
             <button class="linkbtn" onclick={() => go('settings')}>Turn it on</button></p>
         {/if}
         {#if tab === 'pending'}
-          <p class="lead dim">Otto proposes rules from what your team applies, rejects and edits. Nothing applies until you approve it.</p>
+          <p class="lead dim">Otto proposes rules from what your team applies, rejects and edits. Nothing applies until you accept it.</p>
           {#if learned.pending.length === 0}
             <EmptyState icon="bulb" title="No rules waiting for you"
-              body="Otto proposes a rule when the same choice repeats 3 times across 2 designs. Approved rules apply to every design turn." />
+              body="Otto proposes a rule when the same choice repeats 3 times across 2 designs. Accepted rules apply to every design turn." />
           {/if}
           {#each learned.pending as e (e.edit_id)}
             <article class="rule-card card" class:sel={selectedKey === e.edit_id} data-testid="design-pending-rule">
@@ -472,10 +472,11 @@
               {#if !e.rules.length}<p class="rule-text">{editHeadline(e)}</p>{/if}
               {#if e.rationale}<p class="ev-line"><Icon name="clock" size={12} /> {e.rationale}</p>{/if}
               <div class="acts">
+                <!-- Proposal vocabulary: Reject (neutral) then Accept (primary). -->
+                <button class="btn small" disabled={!canEdit || busy === e.edit_id} onclick={() => void reject(e)} data-testid="design-rule-reject">Reject</button>
                 <button class="btn small primary" disabled={!canEdit || busy === e.edit_id} onclick={() => void approve(e)} data-testid="design-rule-approve">
-                  <Icon name="check" size={12} /> Approve
+                  <Icon name="check" size={12} /> Accept
                 </button>
-                <button class="btn small ghost" disabled={!canEdit || busy === e.edit_id} onclick={() => void reject(e)} data-testid="design-rule-reject">Reject</button>
                 <span class="grow"></span>
                 <button class="btn small ghost" onclick={() => select(selectedKey === e.edit_id ? null : e.edit_id)} aria-pressed={selectedKey === e.edit_id}>
                   Evidence ({e.evidence.length})
@@ -501,7 +502,7 @@
         {:else}
           {#if learned.active.length === 0}
             <EmptyState icon="book" title="No team rules yet"
-              body="Rules you approve under Pending show here, with the evidence behind them. Otto follows them in every design turn and says so."
+              body="Rules you accept under Pending show here, with the evidence behind them. Otto follows them in every design turn and says so."
               actionLabel={count('pending') ? 'Review pending rules' : undefined}
               onaction={() => go('pending')} />
           {:else}
@@ -512,7 +513,7 @@
                     <span class="rule-sm">{r.rule}</span>
                     <span class="meta">
                       <span class="chip"><Icon name="file" size={11} /> skill: {learned.skill}</span>
-                      {#if r.applied_at}<span class="dim small">approved {rel(r.applied_at)}</span>{/if}
+                      {#if r.applied_at}<span class="dim small">accepted {rel(r.applied_at)}</span>{/if}
                       <span class="dim small">{r.evidence.length} signal{r.evidence.length === 1 ? '' : 's'}</span>
                     </span>
                   </button>

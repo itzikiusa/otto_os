@@ -110,7 +110,7 @@
 
   <!-- Always present: besides the spilled modules it holds Commands (the
        phone's only palette entry off the Agents page) and Settings. -->
-  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreBadge ? `More, ${moreBadge.count} ${moreBadge.needs ? 'need you' : 'active'}` : 'More'} onclick={() => (moreOpen = true)}>
+  <button class="bn-btn" class:active={moreActive} aria-haspopup="dialog" aria-expanded={moreOpen} aria-label={moreBadge ? `More, ${moreBadge.count} ${moreBadge.needs ? 'need you' : 'active'}` : 'More'} title="More" onclick={() => (moreOpen = true)}>
     <span class="bn-icon">
       <Icon name="more" size={20} />
       {#if moreBadge}<span class="bn-badge" class:needs={moreBadge.needs}>{moreBadge.count}</span>{/if}
@@ -125,7 +125,7 @@
   <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules" use:sheetFocus>
     <div class="sheet-header">
       <div class="sheet-grip"></div>
-      <button class="icon-btn sheet-close" onclick={() => (moreOpen = false)} aria-label="Close" title="Close (Esc)">
+      <button class="icon-btn sheet-close" onclick={() => (moreOpen = false)} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
         <Icon name="x" size={14} />
       </button>
     </div>
@@ -201,15 +201,32 @@
     cursor: pointer;
     padding: 4px 2px;
     min-width: 0;
+    position: relative;
   }
+  /* The Rail / Navigator selection language: an accent tint behind the glyph,
+     accent text, and a short accent bar — here along the bar's top edge. */
   .bn-btn.active {
     color: var(--accent-text);
+  }
+  .bn-btn.active::before {
+    content: '';
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline: 30%;
+    block-size: 3px;
+    border-radius: 0 0 2px 2px;
+    background: var(--accent);
   }
   .bn-icon {
     position: relative;
     display: grid;
     place-items: center;
-    height: 22px;
+    height: 24px;
+    padding-inline: 12px;
+    border-radius: 999px;
+  }
+  .bn-btn.active .bn-icon {
+    background: var(--accent-soft);
   }
   .bn-label {
     font-size: var(--fs-xs);
@@ -223,7 +240,8 @@
   .bn-badge {
     position: absolute;
     top: -4px;
-    inset-inline-end: -8px;
+    /* 8 px past the glyph's edge (the pill pads 12 px around it). */
+    inset-inline-end: 4px;
     min-width: 15px;
     height: 15px;
     padding: 0 3px;
@@ -264,7 +282,7 @@
     z-index: calc(var(--z-drawer) + 3);
     background: var(--bg);
     border-top: 1px solid var(--border);
-    border-radius: 14px 14px 0 0;
+    border-radius: var(--radius-l) var(--radius-l) 0 0;
     box-shadow: var(--shadow);
     padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0));
     /* The grid is data-driven (all overflow modules + every installed plugin):
@@ -314,7 +332,8 @@
   }
   .sheet-item.active {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+    /* --accent-soft over the item's own surface (the tint is translucent). */
+    background: linear-gradient(var(--accent-soft), var(--accent-soft)), var(--surface);
   }
   .sheet-item span {
     line-height: 1;

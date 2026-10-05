@@ -18,6 +18,9 @@
     dismissable?: boolean;
   }
   let { title, width = 460, onclose, children, footer, dismissable = true }: Props = $props();
+  /** The dialog is named by its visible <h2> (aria-labelledby), so the
+   *  accessible name and the title can never drift. */
+  const titleId = $props.id();
 
   // A drag that starts inside the sheet (selecting text) and ends on the
   // backdrop fires `click` on the backdrop — only a press that BEGAN on the
@@ -154,12 +157,12 @@
     class="sheet"
     role="dialog"
     aria-modal="true"
-    aria-label={title}
+    aria-labelledby={titleId}
     style="width: min({width}px, calc(100vw - 24px))"
   >
     <header>
-      <h2>{title}</h2>
-      <button class="icon-btn" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close (Esc)">
+      <h2 id={titleId}>{title}</h2>
+      <button class="icon-btn" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
         <Icon name="x" size={14} />
       </button>
     </header>
@@ -178,7 +181,7 @@
     background: var(--scrim);
     display: grid;
     place-items: center;
-    animation: fade-in 140ms ease-out;
+    animation: otto-fade-in var(--dur-fast) var(--ease-out);
   }
   .sheet {
     /* Size relative to the backdrop (which is `inset:0` → window height), NOT
@@ -197,14 +200,14 @@
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
-    animation: sheet-in 160ms ease-out;
+    animation: otto-pop-in var(--dur-enter) var(--ease-out);
   }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 14px 16px 10px;
+    padding: 12px 16px;
   }
   h2 {
     margin: 0;
@@ -229,16 +232,5 @@
     gap: 8px;
     padding: 12px 16px;
     border-top: 1px solid var(--separator);
-  }
-  @keyframes fade-in {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes sheet-in {
-    from {
-      opacity: 0;
-      transform: translateY(8px) scale(0.985);
-    }
   }
 </style>

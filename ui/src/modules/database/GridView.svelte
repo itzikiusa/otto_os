@@ -1161,7 +1161,7 @@
     position: absolute;
     top: 6px;
     bottom: 6px;
-    left: 3px;
+    inset-inline-start: 3px;
     width: 1px;
     background: transparent;
   }

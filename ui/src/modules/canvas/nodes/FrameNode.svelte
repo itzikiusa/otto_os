@@ -73,7 +73,7 @@
   .chip {
     position: absolute;
     top: -11px;
-    left: 8px;
+    inset-inline-start: 8px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

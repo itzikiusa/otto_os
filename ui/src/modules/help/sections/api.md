@@ -34,7 +34,7 @@ Everything is scoped to the current workspace: collections, requests, environmen
 - Tabs show the method, the name (or `METHOD /path`) and a dot while there are unsaved changes. Open tabs survive an app restart on this device.
 - Drag the dividers to resize the sidebar and the editor/response split; double-click a divider to reset it.
 - On a phone, the list and the editor are two screens with a back button.
-- The same editor also lives in the right panel's **API** tab, sharing the same draft as the page.
+- The same editor also lives in the Session panel's **API** tab, sharing the same draft as the page.
 
 **Request types**
 - **HTTP** — `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, `OPTIONS`. REST and GraphQL.

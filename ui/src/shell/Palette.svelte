@@ -640,7 +640,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    animation: fade-in 120ms ease-out;
+    animation: otto-fade-in var(--dur-fast) var(--ease-out);
   }
   /* The 12% top gap and the 60% height cap are percentages of the inset:0
      backdrop (= the window), never vh — in the WKWebView vh resolves to the
@@ -660,7 +660,7 @@
     /* Raised glass (tokens.css .glass-raised), like Spotlight. */
     border-radius: var(--radius-l);
     overflow: hidden;
-    animation: pal-in 150ms ease-out;
+    animation: otto-pop-in var(--dur-enter) var(--ease-out);
   }
   .pal-mode-row {
     display: flex;
@@ -906,16 +906,5 @@
     background: color-mix(in srgb, var(--accent) 15%, transparent);
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  @keyframes fade-in {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes pal-in {
-    from {
-      opacity: 0;
-      transform: translateY(-6px) scale(0.99);
-    }
   }
 </style>

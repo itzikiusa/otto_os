@@ -108,7 +108,7 @@
       if (typeof res.error === 'string' && res.error.startsWith('write_blocked:')) {
         const ok = await confirmGuardedWrite();
         if (!ok) {
-          toasts.info('Import cancelled');
+          toasts.info('Import canceled');
           progress = null;
           return;
         }
@@ -148,7 +148,7 @@
       // A user-initiated cancel isn't a failure. The server-side stream stops
       // when the connection drops; batches already committed stay in the table.
       if (e instanceof DOMException && e.name === 'AbortError') {
-        toasts.info('Import cancelled', 'Batches already written stay in the table.');
+        toasts.info('Import canceled', 'Batches already written stay in the table.');
         progress = null;
         return;
       }

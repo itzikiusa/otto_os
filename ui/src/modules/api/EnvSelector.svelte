@@ -163,17 +163,18 @@
             <div class="var-editor">
               {#each rows as row, i (i)}
                 <div class="var-row">
-                  <input class="input var-key mono" placeholder="key" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
+                  <input class="input var-key mono" placeholder="base_url" aria-label="Variable name" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                   <input
                     class="input var-val mono"
                     class:secret={row.secret}
                     type={row.secret ? 'password' : 'text'}
-                    placeholder={row.secret && !row.touched ? '•••••• stored in Keychain — type to replace' : 'value'}
+                    aria-label="Variable value"
+                    placeholder={row.secret && !row.touched ? '•••••• stored in Keychain — type to replace' : 'https://api.example.com'}
                     value={row.value}
                     oninput={(e) => updateRow(i, { value: (e.currentTarget as HTMLInputElement).value })}
                   />
-                  <button class="icon-btn" class:lock-on={row.secret} title={row.secret ? 'Secret (value in Keychain) — click to make plain' : 'Mark secret (move value to Keychain on save)'} aria-label="Toggle secret" onclick={() => void toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
-                  <button class="icon-btn" title="Remove" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
+                  <button class="icon-btn" class:lock-on={row.secret} title="Keep the value in the Keychain" aria-label="Keep the value in the Keychain" aria-pressed={row.secret} onclick={() => void toggleSecret(i)}><Icon name={row.secret ? 'lock' : 'unlock'} size={12} /></button>
+                  <button class="icon-btn" title="Remove variable" aria-label="Remove variable" onclick={() => removeRow(i)}><Icon name="x" size={12} /></button>
                 </div>
               {/each}
               <div class="var-actions">

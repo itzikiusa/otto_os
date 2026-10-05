@@ -79,6 +79,10 @@
     ...(view ? Object.values(view).flat() as MissionItem[] : []).map((item) => item.repo ?? ''),
   ].filter(Boolean))].sort());
   let showNewViewForm = $state(false);
+  /** A saved view is being created — the Save button reads "Saving…". */
+  let savingView = $state(false);
+  /** Saved views whose delete is in flight, by id (that pill's × disables). */
+  let deletingViews = $state<Record<string, boolean>>({});
 
   /** The active saved view's ID (null = no filter active = show all).
    *  Tracked by id, not by filter-object identity — `load(false)` replaces
@@ -130,7 +134,7 @@
   // ---------------------------------------------------------------------------
 
   async function createView() {
-    if (!wsId || !newViewName.trim()) return;
+    if (!wsId || !newViewName.trim() || savingView) return;
     const owner = wsId;
     const name = newViewName.trim();
     const generation = loadGeneration;
@@ -143,9 +147,10 @@
       };
       if (!filter || typeof filter !== 'object' || Array.isArray(filter)) throw new Error('object required');
     } catch {
-      toasts.error('Filter must be valid JSON');
+      toasts.error('Couldn’t save the view', 'The filter must be a JSON object, like {"bucket":"needs_you"}.');
       return;
     }
+    savingView = true;
     try {
       await api.post(`/workspaces/${owner}/mission/views`, {
         name,
@@ -158,7 +163,9 @@
       showNewViewForm = false;
       await load(false);
     } catch (e: unknown) {
-      toasts.error(e instanceof Error ? e.message : 'Failed to save view');
+      toastError('Couldn’t save the view', e);
+    } finally {
+      savingView = false;
     }
   }
 
@@ -169,14 +176,19 @@
       title: 'Delete saved view?',
       confirmLabel: 'Delete view',
     });
-    if (!ok) return;
+    if (!ok || deletingViews[id]) return;
+    deletingViews = { ...deletingViews, [id]: true };
     try {
       await api.del(`/mission-views/${id}`);
       toasts.success('View deleted', name);
       if (!alive || wsId !== owner) return;
       await load(false);
     } catch (e: unknown) {
-      toasts.error('Couldn’t delete the view', loadErrorText(e));
+      toastError('Couldn’t delete the view', e);
+    } finally {
+      const next = { ...deletingViews };
+      delete next[id];
+      deletingViews = next;
     }
   }
 
@@ -363,7 +375,7 @@
     subtaskBusy = true;
     try {
       await activity.addTask(sid, title);
-      toasts.info('Sub-task queued', `"${title}" is handed to the agent when it is idle.`);
+      toasts.info('Sub-task queued', `“${title}” is handed to the agent when it’s idle.`);
       closeSubtask();
       if (wsId) void activity.loadSummary(wsId);
     } catch (e) {
@@ -423,8 +435,10 @@
         <button
           class="wq-view-del"
           onclick={() => void deleteView(sv.id)}
-          title="Delete view “{sv.name}”"
-          aria-label="Delete view {sv.name}"
+          disabled={deletingViews[sv.id]}
+          aria-busy={deletingViews[sv.id] ? 'true' : undefined}
+          title={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
+          aria-label={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
         ><Icon name="x" size={10} /></button>
       </span>
     {/each}
@@ -453,7 +467,7 @@
       <label class="checkbox-row adv"><input type="checkbox" bind:checked={advancedFilter} /> Advanced (JSON)</label>
       <span class="grow"></span>
       <button class="btn small" onclick={() => (showNewViewForm = false)}>Cancel</button>
-      <button class="btn small primary" onclick={createView} disabled={!newViewName.trim()}>Save view</button>
+      <button class="btn small primary" onclick={createView} disabled={!newViewName.trim() || savingView}>{savingView ? 'Saving…' : 'Save view'}</button>
     </div>
   {/if}
 
@@ -545,7 +559,7 @@
                           aria-label="Sub-task title"
                         />
                         <button class="btn small" onclick={closeSubtask}>Cancel</button>
-                        <button class="btn small primary" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>Add</button>
+                        <button class="btn small primary" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>{subtaskBusy ? 'Adding…' : 'Add'}</button>
                       </div>
                     {/if}
                   {/if}
@@ -668,9 +682,13 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  .wq-view-del:hover {
+  .wq-view-del:hover:not(:disabled) {
     background: var(--surface-2);
     color: var(--danger);
+  }
+  .wq-view-del:disabled {
+    cursor: progress;
+    opacity: 0.5;
   }
 
   /* New-view form */

@@ -9,7 +9,9 @@
    -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
    --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow.
    Also defined here: --glass-* / --separator / --shadow-card (chrome
-   materials), --scrim / --scrim-soft / --scrim-media (overlay backdrops), --cat-1…6 (chart
+   materials), --scrim / --scrim-soft / --scrim-media + --on-scrim (overlay backdrops and
+   the text on them), --shadow-xs, --accent-soft-strong, --control-border, the
+   .otto-force-dark island, --cat-1…6 (chart
    series), --term-bg, --worktree(-text), --studio-*, --z-* (layers), --code-* (syntax + find highlights), --dur-* / --ease-out (motion).
    The full catalogue, with usage rules, is docs/design/guidelines/foundations.md §1.2. */
 
@@ -91,6 +93,9 @@
   --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
   --status-warn-soft: color-mix(in srgb, var(--status-warn) 14%, transparent);
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  /* A stronger accent tint for a selected row that must still read when it
+     also hovers, or a drop target under a drag. */
+  --accent-soft-strong: color-mix(in srgb, var(--accent) 22%, transparent);
   /* Accent as TEXT (links, accent labels): pulled toward --text so it clears
      4.5:1 in every theme, a user-picked custom accent included. */
   --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
@@ -98,6 +103,11 @@
   --accent-solid: color-mix(in srgb, var(--accent) 84%, black);
   --hover: color-mix(in srgb, var(--text) 7%, transparent);
   --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
+  /* The outline of an interactive control (text inputs, selects, input
+     groups): >= 3:1 against --bg, --surface and --surface-2 (WCAG 1.4.11
+     non-text contrast), where the decorative --border is not. Light schemes
+     set a measured value below (unit/tokenContrast.test.ts). */
+  --control-border: color-mix(in srgb, var(--text) 34%, transparent);
 
   /* Design Hall studio identity — the categorical fill of a studio's BADGE
      TILE only (a 16–28px square behind a --studio-glyph icon, always shown
@@ -148,17 +158,19 @@
   accent-color: var(--accent);
 }
 
-/* Light-scheme tones (Pro Dark is always dark, whatever the scheme says). */
+/* Light-scheme tones (Pro Dark is always dark, whatever the scheme says).
+   The status indicators share the text-safe tone where the value is the same,
+   so the two can never drift apart. */
 html[data-scheme='light']:not([data-theme='pro-dark']) {
   color-scheme: light;
   --danger: #b3261e;
   --warning: #8a5100;
   --success: #17702f;
   --info: #0858b8;
-  --status-working: #17702f;
+  --status-working: var(--success);
   --status-idle: #69696e;
-  --status-exited: #b3261e;
-  --status-warn: #8a5100;
+  --status-exited: var(--danger);
+  --status-warn: var(--warning);
   --worktree: #7c3aed;
   --worktree-text: #6d28d9;
   --cat-1: #1f6fd1;
@@ -186,6 +198,7 @@ html[data-theme='native'][data-scheme='light'] {
   --text-dim: #636368;
   --term-bg: #fbfbfd;
   --shadow: var(--glass-shadow);
+  --control-border: #86868b;
 }
 
 html[data-theme='native'][data-scheme='dark'] {
@@ -231,7 +244,11 @@ html[data-theme='warm'][data-scheme='light'] {
   --text-dim: #605c56;
   --term-bg: #fbfaf7;
   --shadow: var(--glass-shadow);
+  --control-border: #87827a;
   --accent: #0f9d58;
+  /* This green needs a firmer pull toward --text to clear 4.5:1 on
+     --surface-3 and on its own --accent-soft tint (tokenContrast.test.ts). */
+  --accent-text: color-mix(in srgb, var(--accent) 50%, var(--text));
 }
 
 html[data-theme='warm'][data-scheme='dark'] {
@@ -293,6 +310,9 @@ html[data-theme='warm'][data-scheme='dark'] {
   --shadow-card:
     0 1px 2px rgba(0, 0, 0, 0.05),
     0 2px 8px rgba(0, 0, 0, 0.03);
+  /* Elevation 0.5: a tiny lift for pins, handles, swatches and knobs that sit
+     ON a surface (not floating over it). */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.14);
   /* Dimmed backdrop behind a modal / drawer / bottom sheet; -soft behind the
      command palette (which stays transparent enough to keep context). */
   --scrim: rgba(0, 0, 0, 0.4);
@@ -300,6 +320,9 @@ html[data-theme='warm'][data-scheme='dark'] {
   /* Gradient/caption veil over an image, video or 3D viewport — the media is
      the backdrop, so the same in both schemes (text on it is white). */
   --scrim-media: rgba(0, 0, 0, 0.6);
+  /* Text and icons ON a scrim / media veil (captions, lightbox controls) —
+     the backdrop is always dark, so this is white in every scheme. */
+  --on-scrim: #ffffff;
 }
 html[data-scheme='dark'],
 html[data-theme='pro-dark'] {
@@ -311,6 +334,53 @@ html[data-theme='pro-dark'] {
     0 2px 10px rgba(0, 0, 0, 0.12);
   --scrim: rgba(0, 0, 0, 0.55);
   --scrim-soft: rgba(0, 0, 0, 0.4);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+/* ---------- Force-dark island ----------
+
+   A widget that is ALWAYS dark whatever the app scheme (the embedded
+   terminal with `forceDark`). In a light scheme its subtree re-declares the
+   dark token set, so everything inside — find bar, overlays, badges, the
+   toolbar — renders dark too, not just the canvas. Derived tokens are
+   re-declared as well: a custom property resolves its var()s where it is
+   DECLARED (on <html>), so the inherited light --hover / --accent-text would
+   otherwise leak in. In a dark scheme nothing changes (the theme's own dark
+   values already apply). */
+html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
+  color-scheme: dark;
+  --bg: #1e1e23;
+  --surface: #2a2a30;
+  --surface-2: #323238;
+  --surface-3: #3a3a41;
+  --border: rgba(255, 255, 255, 0.1);
+  --text: #f2f2f5;
+  --text-dim: #acacb3;
+  --term-bg: #131318;
+  --danger: #ff8a80;
+  --warning: #e3b341;
+  --success: #56d06c;
+  --info: #6cb2ff;
+  --status-working: #28c840;
+  --status-idle: #98989f;
+  --status-exited: #ff5f57;
+  --status-warn: #e0a000;
+  --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
+  --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
+  --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
+  --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
+  --hover: color-mix(in srgb, var(--text) 7%, transparent);
+  --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
+  --control-border: color-mix(in srgb, var(--text) 34%, transparent);
+  --glass-border: color-mix(in srgb, var(--text) 10%, transparent);
+  --glass-shadow:
+    0 0 0 0.5px rgba(0, 0, 0, 0.5),
+    0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow: var(--glass-shadow);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  color: var(--text);
 }
 
 /* Reduced transparency (the system setting, or Settings → Appearance): every

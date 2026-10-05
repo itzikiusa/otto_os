@@ -7,6 +7,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
   let {connectionId,node=null}:{connectionId:string;node?:string|null}=$props();
   let changes:DatabaseChange[]=$state([]);
@@ -21,6 +23,17 @@
   let pending=$state('');
   let generation=0;
   const selected:DatabaseChange|null=$derived.by(()=>detail?.change ?? null);
+  // The unselected main pane summarises the collection instead of a bare "pick one":
+  // "5 changes · 2 awaiting review · 1 approved".
+  const changesSummary=$derived.by(()=>{
+    const count=(status:string)=>changes.filter(c=>c.status===status).length;
+    const parts=[plural(changes.length,'change')];
+    const review=count('awaiting_review'), approved=count('approved'), unknown=count('outcome_unknown');
+    if(review)parts.push(`${review} awaiting review`);
+    if(approved)parts.push(`${approved} approved`);
+    if(unknown)parts.push(`${unknown} outcome unknown`);
+    return parts.join(' · ');
+  });
   const child=$derived((node ?? '').replace(/^db:/,'').split('/')[0] || undefined);
   const owner=$derived(selected?.author_id===auth.me?.id);
   const independent=$derived(selected !== null && ![selected.author_id,selected.real_author_id].includes(auth.me?.id ?? '') && ![selected.author_id,selected.real_author_id].includes(auth.realUser?.id ?? ''));
@@ -242,7 +255,13 @@
             <p>{new Date(event.created_at).toLocaleString()} · {sentenceCase(event.action)} · {event.actor_id}{event.real_actor_id!==event.actor_id ? ` (via ${event.real_actor_id})` : ''}</p>
           {/each}
         </details>
-      {:else}<div class="empty">Choose a change to review its script, approvals, and execution history.</div>{/if}
+      {:else if !loading && !loadError}
+        <EmptyState
+          icon="db"
+          title={changes.length ? changesSummary : 'No database changes yet'}
+          body={changes.length ? 'Select one to review its script, approvals and execution history.' : 'A change carries a reviewed SQL script from draft to approved run.'}
+        />
+      {/if}
     </main>
   </div>
 </div>
@@ -418,10 +437,6 @@
   details code {
     display: block;
     overflow-wrap: anywhere;
-  }
-  .empty {
-    padding: 35px 10px;
-    color: var(--text-dim);
   }
   @media (max-width: 640px) {
     .layout {

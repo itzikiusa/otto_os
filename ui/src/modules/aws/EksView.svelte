@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EKS: clusters table (region switcher) + detail sheet with nodegroups and the
@@ -154,7 +156,7 @@
           <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
-            <td><span class="pill" class:ok={c.status === 'ACTIVE'} class:warn={c.status !== 'ACTIVE'}>{c.status}</span></td>
+            <td><Badge tone={c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(c.status)} /></td>
             <td class="mono">{c.version ?? '—'}</td>
             <td class="mono dim hide-sm" title={c.endpoint ?? ''}>{c.endpoint ?? '—'}</td>
             <td class="dim hide-sm" title={fmtDate(c.created_at)}>{fmtAgo(c.created_at)}</td>
@@ -177,7 +179,7 @@
   <Modal title={d.c.name} width={820} onclose={() => (detail = null)}>
     <div class="dt">
       <div class="dt-top">
-        <span class="pill" class:ok={d.c.status === 'ACTIVE'} class:warn={d.c.status !== 'ACTIVE'}>{d.c.status}</span>
+        <Badge tone={d.c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(d.c.status)} />
         <span class="mono">v{d.c.version ?? '?'}</span>
         <span class="mono dim ell" title={d.c.arn ?? ''}>{d.c.arn ?? ''}</span>
         <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/eks/${d.c.name}/cluster`)}/${encodeURIComponent(rowRegion(d.c))}`)} title="Open the control-plane log group in CloudWatch Logs (needs control-plane logging enabled on the cluster)"><Icon name="text" size={12} /> Control-plane logs</button>
@@ -200,7 +202,7 @@
             {#each d.d.nodegroups as ng (ng.name)}
               <tr>
                 <td class="strong">{ng.name}</td>
-                <td><span class="pill" class:ok={ng.status === 'ACTIVE'} class:warn={ng.status !== 'ACTIVE'}>{ng.status}</span></td>
+                <td><Badge tone={ng.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(ng.status)} /></td>
                 <td class="num mono">{ng.desired ?? '—'}</td>
                 <td class="num mono">{ng.min ?? '—'}</td>
                 <td class="num mono">{ng.max ?? '—'}</td>
@@ -290,23 +292,6 @@
   }
   .err {
     color: var(--danger);
-  }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .pill.ok {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .dt {
     display: flex;

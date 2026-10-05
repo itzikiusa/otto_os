@@ -6,6 +6,7 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
@@ -67,6 +68,13 @@
     } catch (e) {
       console.error('[RewriteTab] poll error', e);
     }
+  }
+
+  /** Stop waiting for the rewrite (neutral: the agent already started keeps
+   *  running, and its suggested version still lands here when it's written). */
+  function stopWaiting(): void {
+    clearPoll();
+    toasts.info('Stopped waiting for the rewrite', 'The agent already started keeps running — its suggested version appears here when it’s ready.');
   }
 
   function startPolling(): void {
@@ -247,6 +255,9 @@
         </button>
 
         {#if pollTimer !== null}
+          <button class="btn" onclick={stopWaiting} title="Stop waiting for the rewrite (the agent already started keeps running)">
+            <Icon name="stop" size={12} /> Stop
+          </button>
           <span class="polling-indicator">checking every 3s…</span>
         {/if}
       </div>

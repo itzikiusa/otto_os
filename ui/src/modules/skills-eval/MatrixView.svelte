@@ -134,6 +134,7 @@
       !(await confirmer.ask(`Stop the matrix "${selected.name}"? Cells still running are abandoned; scored cells are kept.`, {
         title: 'Stop matrix',
         confirmLabel: 'Stop matrix',
+        danger: true,
       }))
     )
       return;
@@ -399,15 +400,15 @@
           </button>
         </div>
       </div>
-    {:else if selectedId && detailError}
-      <div class="mx-detail-err" role="alert">
-        <Icon name="warning" size={22} />
-        <strong>Couldn’t load this matrix</strong>
-        <p>{detailError}</p>
-        <button class="btn small" onclick={() => selectedId && selectMatrix(selectedId)} disabled={detailLoading}><Icon name="refresh" size={12} /> {detailLoading ? 'Retrying…' : 'Retry'}</button>
-      </div>
-    {:else if selectedId && !selected}
-      <div class="mx-muted mx-pad" role="status">Loading matrix…</div>
+    {:else if selectedId && (detailError || !selected)}
+      <LoadState
+        what="this matrix"
+        variant="page"
+        loading={detailLoading || !detailError}
+        error={detailError}
+        empty
+        onretry={() => selectedId && selectMatrix(selectedId)}
+      />
     {:else if selected}
       <div class="mx-detail">
         <div class="mx-detail-head">
@@ -418,8 +419,9 @@
           <span class="grow"></span>
           <StatusBadge status={runStatus(selected.status)} />
           {#if selected.status === 'running'}
-            <button class="btn small" type="button" onclick={cancel}>
-              <Icon name="stop" size={12} /> Stop
+            <!-- Red + "…" + confirm: stopping abandons agent cells mid-run. -->
+            <button class="btn small danger" type="button" onclick={cancel}>
+              <Icon name="stop" size={12} /> Stop matrix…
             </button>
           {/if}
         </div>
@@ -536,28 +538,6 @@
     padding: 16px 8px;
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .mx-detail-err > :global(svg) {
-    color: var(--danger);
-    vertical-align: -1px;
-  }
-  .mx-pad {
-    padding: 30px;
-    text-align: center;
-  }
-  .mx-detail-err {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 40px 20px;
-    text-align: center;
-    overflow-wrap: anywhere;
-  }
-  .mx-detail-err p {
-    margin: 0 0 6px;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .sr-only {
     position: absolute;

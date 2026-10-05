@@ -84,25 +84,38 @@
         (selected.static_report?.findings.length ?? 0) > 0),
   );
 
+  /** Skill sources that failed on the last load ("Library", "Bundled",
+   *  "Provider") — named under the picker with Retry instead of a picker that
+   *  silently lists fewer skills. */
+  let skillsFailed = $state<string[]>([]);
+  let skillsLoading = $state(false);
   async function loadSkills(): Promise<void> {
-    try {
-      const [lib, bundled, provider] = await Promise.all([
-        skillLabApi.listLibrary().catch(() => [] as LibrarySkill[]),
-        skillLabApi.listBundled().catch(() => [] as BundledSkillView[]),
-        skillLabApi.listProvider().catch(() => [] as ProviderSkillInfo[]),
-      ]);
-      const opts: SkillOpt[] = [];
-      for (const s of lib) opts.push({ name: s.name, source: 'library', label: `${s.name} · library` });
-      const libNames = new Set(lib.map((s) => s.name));
-      for (const b of bundled)
-        if (!libNames.has(b.name)) opts.push({ name: b.name, source: 'bundled', label: `${b.name} · bundled` });
-      for (const p of provider)
-        opts.push({ name: p.name, source: p.provider, label: `${p.name} · ${p.provider}` });
-      opts.sort((a, b) => a.name.localeCompare(b.name));
-      skillOpts = opts;
-    } catch {
-      skillOpts = [];
-    }
+    skillsLoading = true;
+    const [libR, bundledR, providerR] = await Promise.allSettled([
+      skillLabApi.listLibrary(),
+      skillLabApi.listBundled(),
+      skillLabApi.listProvider(),
+    ]);
+    skillsLoading = false;
+    const lib = libR.status === 'fulfilled' ? libR.value : ([] as LibrarySkill[]);
+    const bundled = bundledR.status === 'fulfilled' ? bundledR.value : ([] as BundledSkillView[]);
+    const provider = providerR.status === 'fulfilled' ? providerR.value : ([] as ProviderSkillInfo[]);
+    skillsFailed = [
+      libR.status === 'rejected' ? 'Library' : '',
+      bundledR.status === 'rejected' ? 'Bundled' : '',
+      providerR.status === 'rejected' ? 'Provider' : '',
+    ].filter(Boolean);
+    const opts: SkillOpt[] = [];
+    for (const s of lib) opts.push({ name: s.name, source: 'library', label: `${s.name} · library` });
+    const libNames = new Set(lib.map((s) => s.name));
+    for (const b of bundled)
+      if (!libNames.has(b.name)) opts.push({ name: b.name, source: 'bundled', label: `${b.name} · bundled` });
+    for (const p of provider)
+      opts.push({ name: p.name, source: p.provider, label: `${p.name} · ${p.provider}` });
+    opts.sort((a, b) => a.name.localeCompare(b.name));
+    // Keep a pre-filled hand-off target the fresh list doesn't carry.
+    const keep = skillOpts.filter((o) => `${o.source}:${o.name}` === fSkill && !opts.some((n) => n.source === o.source && n.name === o.name));
+    skillOpts = [...keep, ...opts];
   }
 
   async function loadList(): Promise<void> {
@@ -370,6 +383,14 @@
             {/each}
           </select>
         </label>
+        {#if skillsFailed.length > 0}
+          <span class="lr-skills-failed" role="status">
+            <Icon name="warning" size={12} />
+            {skillsFailed.join(', ')} skills didn’t load
+            <span aria-hidden="true">·</span>
+            <button class="btn small ghost" type="button" onclick={() => void loadSkills()} disabled={skillsLoading}>{skillsLoading ? 'Retrying…' : 'Retry'}</button>
+          </span>
+        {/if}
         <fieldset class="lr-field">
           <span>Mode</span>
           <label class="lr-radio"><input type="radio" bind:group={fMode} value="static" /> Static analysis only (fast, no agents)</label>
@@ -593,6 +614,7 @@
   .lr-hint { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5; margin: 0; }
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
   .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
+  .lr-skills-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--warning); }
   .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: var(--fs-s); }
   .lr-textarea { resize: vertical; }
   .lr-instructions {

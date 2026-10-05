@@ -383,7 +383,7 @@
       {/if}
 
       <section class="mr-sec" aria-label="Script">
-        <h3 class="mr-h">Script <span class="mr-dim">· {scriptLines} line{scriptLines === 1 ? '' : 's'}</span></h3>
+        <h3 class="mr-h">Script <span class="mr-dim">· {plural(scriptLines, 'line')}</span></h3>
         <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
         <pre class="mr-code mono" tabindex="0">{statement}</pre>
       </section>
@@ -476,7 +476,7 @@
                   <input type="checkbox" bind:checked={drafts[n].escape} /> esc
                 </label>
               {/if}
-              <span class="mr-dim mr-count">{count} value{count === 1 ? '' : 's'}</span>
+              <span class="mr-dim mr-count">{plural(count, 'value')}</span>
             </div>
             {/if}
           {/each}
@@ -517,9 +517,9 @@
       {/if}
     {:else if stage === 'preview' && plan}
       <p class="mr-lead">
-        <strong>{plan.runs.length}</strong> run{plan.runs.length === 1 ? '' : 's'} on
-        <strong>{plan.targets.length}</strong> target{plan.targets.length === 1 ? '' : 's'}
-        {#if plan.write_count > 0}· <span class="mr-warn-text">{plan.write_count} write{plan.write_count === 1 ? '' : 's'}/DDL</span>{/if}
+        <strong>{plural(plan.runs.length, 'run')}</strong> on
+        <strong>{plural(plan.targets.length, 'target')}</strong>
+        {#if plan.write_count > 0}· <span class="mr-warn-text">{plural(plan.write_count, 'write')}/DDL</span>{/if}
         · {concurrency === 1 ? 'one at a time' : `${concurrency} in parallel`}
         · {stopOnError ? 'stops at the first failure' : 'continues past failures'}
       </p>
@@ -612,7 +612,7 @@
       <div class="mr-danger" role="alert">
         <Icon name="warning" size={14} />
         <span>
-          {guardedRuns.length} run{guardedRuns.length === 1 ? '' : 's'} will WRITE / change the schema on production or
+          {plural(guardedRuns.length, 'run')} will WRITE / change the schema on production or
           read-only targets. This can modify or destroy data. Check every target and statement below.
         </span>
       </div>
@@ -739,7 +739,7 @@
         disabled={!!setupBlocker || planning}
         title={setupBlocker ?? 'Show the final statement for every run before anything executes'}
       >
-        {planning ? 'Preparing…' : `Preview ${runCount} run${runCount === 1 ? '' : 's'}`}
+        {planning ? 'Preparing…' : `Preview ${plural(runCount, 'run')}`}
       </button>
     {:else if stage === 'preview' && plan}
       <button class="btn" onclick={() => (stage = 'setup')}>Back</button>
@@ -750,7 +750,7 @@
         disabled={starting || planning || planStale}
         title={planStale ? 'Update the preview first' : plan.needs_confirm ? 'Writes to production / read-only targets — you will confirm each one' : 'Run every statement shown'}
       >
-        {starting ? 'Starting…' : plan.needs_confirm ? `Review ${guardedRuns.length} guarded write${guardedRuns.length === 1 ? '' : 's'}…` : `Run ${plan.runs.length}`}
+        {starting ? 'Starting…' : plan.needs_confirm ? `Review ${plural(guardedRuns.length, 'guarded write')}…` : `Run ${plan.runs.length}`}
       </button>
     {:else if stage === 'confirm' && plan}
       <button class="btn" onclick={() => (stage = 'preview')}>Back</button>

@@ -1,4 +1,4 @@
-// Human-only decisions on learned team rules — approve / reject a proposal,
+// Human-only decisions on learned team rules — accept / reject a proposal,
 // roll back an approved rule — through otto-improve's edit flow. Every one
 // asks first (what changes, where it lives, that it can be undone) and reports
 // the outcome; the learning page and the lobby rail share them.
@@ -21,7 +21,7 @@ const quote = (s: string) => (s.length > 160 ? `${s.slice(0, 159)}…` : s);
 export async function approveRule(edit: DesignLearnedEdit, skill = 'design-team-style'): Promise<boolean> {
   const ok = await confirmer.ask(
     `Add “${quote(editHeadline(edit))}” to your team rules (skill ${skill})? Otto follows it in every design turn in this workspace. You can roll it back any time.`,
-    { title: 'Approve team rule', confirmLabel: 'Approve rule', danger: false },
+    { title: 'Accept team rule', confirmLabel: 'Accept rule', danger: false },
   );
   if (!ok) return false;
   try {
@@ -29,7 +29,7 @@ export async function approveRule(edit: DesignLearnedEdit, skill = 'design-team-
     toasts.success(`Added to ${skill}`, 'Rollback is available under Rules.');
     return true;
   } catch (e) {
-    toasts.error('Couldn’t approve the rule', why(e));
+    toasts.error('Couldn’t accept the rule', why(e));
     return false;
   }
 }

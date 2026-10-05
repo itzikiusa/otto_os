@@ -174,7 +174,7 @@
       // A user-initiated cancel isn't a failure — the partial file stays where
       // the export was writing it.
       if (e instanceof DOMException && e.name === 'AbortError') {
-        toasts.info('Export cancelled', 'The partially written file was left in place.');
+        toasts.info('Export canceled', 'The partially written file was left in place.');
       } else {
         toastError('Couldn’t export', e);
       }

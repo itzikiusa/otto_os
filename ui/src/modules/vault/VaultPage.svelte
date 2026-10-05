@@ -16,6 +16,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -36,8 +37,8 @@
   const RIGHT_W_KEY = 'otto_vault_right_w';
   // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
   // a full quota, so a private window never blanks the page.
-  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
-  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
+  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let rightOpen = $state(lsGet('otto_vault_right_open') !== '0');
   let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
 
@@ -127,6 +128,17 @@
       openNewNote('');
     }
   }
+
+  // ⌘K: the page's verbs (the same ones the toolbar and ⌘O / ⌘N offer).
+  $effect(() => {
+    const hasVault = !!vault.current;
+    return registry.register('vault', hasVault
+      ? [
+          { id: 'vault.new-note', title: 'New note…', group: 'Vault', keywords: 'create markdown doc page', shortcut: '⌘N', run: () => openNewNote('') },
+          { id: 'vault.open-note', title: 'Open note…', group: 'Vault', keywords: 'quick switcher jump find file', shortcut: '⌘O', run: () => (vault.switcherOpen = true) },
+        ]
+      : []);
+  });
 
   /** Header ⋯: the less-used views (history, trash) and the pane toggles —
    *  the toolbar keeps ≤5 controls (graph, docs agent, switcher, new note, ⋯). */
@@ -375,7 +387,7 @@
           <TagsPanel />
         {/if}
       </aside>
-      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" min={LIST_PANE.min} max={520} />
+      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" />
       {/if}
 
       <main class="center">
@@ -463,7 +475,7 @@
       </main>
 
       {#if rightOpen && vault.centerMode === 'note'}
-        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" min={LIST_PANE.min} max={520} invert /></div>
+        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" invert /></div>
         <aside class="right-pane" style="width:{rightW}px">
           <RightPanel />
         </aside>

@@ -107,6 +107,12 @@ user's terms.
   work."). The **CTA** is the verb from [§2](#2-verbs).
 - **Placeholders** are examples ("Weekly dependency report",
   "https://api.example.com"), not instructions and never the label.
+- **Search vs Filter fields.** "Search …" when the field asks the server or a
+  full-text index for things that aren't on screen ("Search issues…",
+  "Search notes…"); "Filter …" when it narrows the list already shown ("Filter
+  topics…", "Filter sessions…"). Name the thing, and always end with "…". A
+  search that covers only part of the data says so ("Search loaded
+  messages…") with a note and a way to load the rest.
 - **Tooltips** (`title`) name the control or add one fact. For an icon button
   the tooltip equals its `aria-label`. For disabled controls, the tooltip says
   why they are disabled.

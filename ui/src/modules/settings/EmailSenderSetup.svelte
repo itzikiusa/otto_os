@@ -268,9 +268,8 @@
   <div class="section-title">Public link domain</div>
   <div class="card s-card">
     {#if baseUrlError}
-      <div class="inline-error" role="alert">
-        <span>Couldn’t read the saved domain: {baseUrlError}</span>
-        <button class="btn small" onclick={() => void loadBaseUrl()}>Retry</button>
+      <div class="domain-error">
+        <LoadState variant="compact" what="the saved domain" error={baseUrlError} empty onretry={() => void loadBaseUrl()} />
       </div>
     {/if}
     <div class="field">
@@ -394,13 +393,8 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .inline-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .domain-error {
     margin-bottom: 10px;
-    font-size: var(--fs-s);
-    color: var(--danger);
   }
   .smtp-error {
     margin-top: 10px;

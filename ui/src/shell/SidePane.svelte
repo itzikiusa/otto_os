@@ -111,7 +111,7 @@
           class="icon-btn"
           onclick={() => sidePane.close()}
           aria-label="Close side pane"
-          title="Close side pane (⌘\)"
+          title="Close side pane" aria-keyshortcuts="Meta+\"
         >
           <Icon name="x" size={14} />
         </button>

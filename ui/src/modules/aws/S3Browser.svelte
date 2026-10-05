@@ -397,10 +397,10 @@
   }
 
   const PRESIGN_CHOICES = [
-    { label: '1 hour', value: '3600', kind: 'primary' as const },
-    { label: '12 hours', value: '43200' },
-    { label: '24 hours', value: '86400' },
-    { label: '7 days', value: '604800' },
+    { label: 'Copy link · 1 hour', value: '3600', kind: 'primary' as const },
+    { label: 'Copy link · 12 hours', value: '43200' },
+    { label: 'Copy link · 24 hours', value: '86400' },
+    { label: 'Copy link · 7 days', value: '604800' },
   ];
 
   async function presign(o: S3Object): Promise<void> {

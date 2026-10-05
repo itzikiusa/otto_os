@@ -8,6 +8,8 @@
   import { toastError } from '../../lib/toastError';
   import DiffView from '../../lib/components/DiffView.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import type { BrokerCluster } from '../../lib/api/types';
   import type { SchemaVersion, SchemaVersionDetail, CompatCheckResp } from './types';
@@ -121,11 +123,11 @@
 
 <div class="svp">
   {#if loading}
-    <p class="muted pad">Loading versions…</p>
+    <div class="pad"><Skeleton rows={4} label="schema versions" /></div>
   {:else if loadError}
     <LoadState what="schema versions" error={loadError} empty onretry={loadVersions} />
   {:else if versions.length === 0}
-    <p class="muted pad">No versions found.</p>
+    <p class="muted pad">No versions for this subject.</p>
   {:else}
     <!-- Version list -->
     <section class="version-list">
@@ -138,17 +140,19 @@
             <span class="vtype muted">{diffA?.version === v.version ? diffA.schema_type : diffB?.version === v.version ? diffB.schema_type : ''}</span>
             <div class="vbtns">
               <button
-                class="btn small"
-                class:active={selectedA === v.version}
+                class="btn small side-btn"
+                aria-pressed={selectedA === v.version}
                 onclick={() => selectVersion('A', v.version)}
-                title="Set as 'before' side of diff"
-              >A</button>
+                aria-label="Compare side A (before): version {v.version}"
+                title="Compare side A (before): version {v.version}"
+              >{#if selectedA === v.version}<Icon name="check" size={10} />{/if}A</button>
               <button
-                class="btn small"
-                class:active={selectedB === v.version}
+                class="btn small side-btn"
+                aria-pressed={selectedB === v.version}
                 onclick={() => selectVersion('B', v.version)}
-                title="Set as 'after' side of diff"
-              >B</button>
+                aria-label="Compare side B (after): version {v.version}"
+                title="Compare side B (after): version {v.version}"
+              >{#if selectedB === v.version}<Icon name="check" size={10} />{/if}B</button>
             </div>
           </div>
         {/each}
@@ -158,7 +162,7 @@
     {#if detailError}
       <LoadState what="selected schema versions" error={detailError} empty onretry={retryDetails} />
     {:else if (selectedA !== null && !diffA) || (selectedB !== null && !diffB)}
-      <p class="muted pad">Loading selected versions…</p>
+      <div class="pad"><Skeleton rows={2} label="selected versions" /></div>
     {/if}
 
     <!-- Version diff -->
@@ -249,7 +253,14 @@
     display: flex;
     gap: 4px;
   }
-  .btn.active {
+  /* Selected side: aria-pressed (announced) + a check mark + the tint — never
+     colour alone. */
+  .side-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .side-btn[aria-pressed='true'] {
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);

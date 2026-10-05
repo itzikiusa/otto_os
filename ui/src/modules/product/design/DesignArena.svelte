@@ -890,7 +890,7 @@
                     <Icon name="zap" size={12} />
                   </button>
                 {/if}
-                <button class="row-more" onclick={(e) => rowMenu(e, r)} aria-label="Artifact actions" title="Artifact actions">
+                <button class="row-more reveal-on-hover" onclick={(e) => rowMenu(e, r)} aria-label="Artifact actions" title="Artifact actions">
                   <Icon name="more" size={12} />
                 </button>
               </div>
@@ -1268,9 +1268,17 @@
     margin-inline-end: 4px;
     opacity: 0;
   }
+  /* Revealed on row hover / keyboard focus; always shown on a touch screen. */
   .mockup-row:hover .row-more,
-  .mockup-row.active .row-more {
+  .mockup-row:focus-within .row-more,
+  .mockup-row.active .row-more,
+  .row-more:focus-visible {
     opacity: 1;
+  }
+  @media (hover: none) {
+    .row-more {
+      opacity: 1;
+    }
   }
   .refine-btn:hover,
   .row-more:hover {

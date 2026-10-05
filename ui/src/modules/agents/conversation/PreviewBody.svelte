@@ -50,6 +50,15 @@
   let truncated = $state(false);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  /** A failed read can be retried; "images need an artifact" cannot. */
+  let retryable = $state(false);
+  /** Bumped by Retry — in BOTH the side and the full view (the reload
+   *  toolbar exists only in the side view). */
+  let retryKey = $state(0);
+  function retry(): void {
+    if (absPath) reads.delete(absPath);
+    retryKey++;
+  }
   let imageUrl = $state<string | null>(null);
 
   /** An artifact the session produced at this path (images are served there). */
@@ -64,9 +73,11 @@
 
   $effect(() => {
     void reloadKey;
+    void retryKey;
     const r = req;
     const path = absPath;
     error = null;
+    retryable = false;
     truncated = false;
     imageUrl = null;
     if (r.kind === 'code') {
@@ -101,6 +112,7 @@
         (e) => {
           if (!alive) return;
           error = e instanceof Error ? e.message : String(e);
+          retryable = true;
           loading = false;
         },
       );
@@ -131,6 +143,7 @@
       (e) => {
         if (!alive) return;
         error = e instanceof Error ? e.message : String(e);
+        retryable = true;
         loading = false;
       },
     );
@@ -172,8 +185,17 @@
       <EmptyState icon="split" title="No change recorded" body="This conversation has no edit to this file." />
     {/if}
   {:else if error}
-    <div class="pb-err" role="alert">
-      <EmptyState icon="warning" title="Couldn’t open the file" body={error} />
+    <div class="pb-err">
+      <EmptyState
+        icon="warning"
+        tone="error"
+        title="Couldn’t open the file"
+        body={error}
+        actionLabel={retryable ? 'Retry' : undefined}
+        actionIcon="refresh"
+        actionKind="secondary"
+        onaction={retryable ? retry : undefined}
+      />
     </div>
   {:else if loading || (content == null && !imageUrl)}
     <div class="pb-loading" aria-busy="true" aria-label="Loading the file">

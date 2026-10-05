@@ -13,6 +13,7 @@
   import type { NotificationSettings } from '../../lib/api/types';
   import { router } from '../../lib/router.svelte';
   import SettingToggle from './SettingToggle.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   // Load once on mount if the store hasn't fetched yet.
   $effect(() => {
@@ -59,7 +60,7 @@
     },
     {
       key: 'channels.notify_review_done',
-      label: 'Code-review completed',
+      label: 'Code review completed',
       sub: 'Sends a message when a code-review run finishes or fails.',
     },
     {
@@ -70,7 +71,7 @@
     {
       key: 'channels.notify_insight_ready',
       label: 'Insights report ready',
-      sub: 'Sends a message when a daily / weekly / monthly insights report becomes available.',
+      sub: 'Sends a message when a daily, weekly or monthly insights report is ready.',
     },
     {
       key: 'channels.notify_budget_exceeded',
@@ -120,7 +121,7 @@
       await api.put('/settings', { [key]: checked });
     } catch (e) {
       flagValues[key] = !checked; // revert
-      toasts.error("Couldn’t save the channel notification", loadErrorText(e));
+      toasts.error('Couldn’t save the channel notification', loadErrorText(e));
     }
   }
 </script>
@@ -173,13 +174,12 @@
   {#if auth.isRoot}
     <div class="section-title">Channel notifications</div>
     <p class="section-note">
-      Each one posts a one-line message to this workspace's Slack or Telegram channel (set up in
+      Each one posts a one-line message to this workspace’s Slack or Telegram channel (set up in
       <button class="link" onclick={() => router.go('settings/channels')}>Channels</button>). All are off by default.
     </p>
     {#if flagsError}
-      <div class="flags-error" role="alert">
-        <span>Couldn’t load these settings: {flagsError}</span>
-        <button class="btn small" onclick={() => void loadChannelFlags()}>Retry</button>
+      <div class="flags-error">
+        <LoadState variant="compact" what="the channel notification settings" error={flagsError} empty onretry={() => void loadChannelFlags()} />
       </div>
     {/if}
     <div class="card s-card">
@@ -189,7 +189,7 @@
           hint={flag.sub}
           checked={flagValues[flag.key]}
           disabled={flagLoading[flag.key] || !!flagsError}
-          title={flagsError ? "Couldn’t read the current value — Retry above" : undefined}
+          title={flagsError ? 'Couldn’t read the current value — retry above' : undefined}
           onchange={(v) => toggleFlag(flag.key, v)}
         />
       {/each}
@@ -234,12 +234,7 @@
     cursor: pointer;
   }
   .flags-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
     max-width: var(--settings-col);
     margin-bottom: 8px;
-    font-size: var(--fs-s);
-    color: var(--danger);
   }
 </style>

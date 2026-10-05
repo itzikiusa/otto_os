@@ -102,7 +102,7 @@
       await ws.restartSession(id, { quiet: true });
       toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'The session restarted with the new folders.');
     } catch (e) {
-      toasts.error(verb === 'added' ? 'Could not add folder' : 'Could not remove folder', e instanceof Error ? e.message : String(e));
+      toastError(verb === 'added' ? 'Couldn’t add the folder' : 'Couldn’t remove the folder', e);
     }
   }
 

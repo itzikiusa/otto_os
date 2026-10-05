@@ -11,7 +11,7 @@
   //
   // Precedence:
   //   • error + nothing to show  → inline "Couldn’t load {what}" + detail + Retry
-  //   • error + stale data       → the data, with a slim "refresh failed" bar + Retry
+  //   • error + stale data       → the data, with a slim "Couldn’t refresh" bar + Retry
   //   • loading + nothing yet    → Skeleton after a ~150 ms grace (the height is
   //                                reserved at once; a fast load never flashes it)
   //   • empty                    → `emptyView` (or nothing)
@@ -87,7 +87,7 @@
   {#if error}
     <div class="ls-stale" role="status" data-testid="load-stale">
       <Icon name="warning" size={12} />
-      <span class="ls-stale-text" title={error}>Showing the last good load — refresh failed: {error}</span>
+      <span class="ls-stale-text" title={error}>Couldn’t refresh {what} — showing the last good load. {error}</span>
       {#if onretry}<button class="btn small ghost" onclick={onretry} disabled={loading}>Retry</button>{/if}
     </div>
   {/if}

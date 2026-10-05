@@ -5,7 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import { nextTabIndex } from '../../lib/tabKeys';
+  import { tabKeys } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -14,6 +14,8 @@
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
@@ -289,11 +291,59 @@
     untrack(() => {
       autoPickedFor = w;
       if (product.selectedId || viewport.isPhone) return;
+      // A routed story (`#/product/<id>`) opens from the route instead.
+      if (router.parts[0] === 'product' && router.parts[1]) return;
       const last = recallSelection('product');
       const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
       if (pick) void openStory(pick.id);
     });
   });
+  // ── URL-addressable selection: `#/product/<story id>` ─────────────────────
+  // The route drives the selection (a deep link / reload / back lands on that
+  // story) and the selection writes the route back with `router.replace`, so
+  // the URL always names the open story. Opening still goes through
+  // `openStory` (the store's draft guard decides); `routePending` holds the
+  // write-back while a routed open is in flight so it can't clobber the link.
+  let routePending = $state<string | null>(null);
+  $effect(() => {
+    const [mod, storyId] = router.parts;
+    if (mod !== 'product' || !storyId) return;
+    untrack(() => {
+      if (storyId === product.selectedId && product.view === 'stories') return;
+      routePending = storyId;
+      void (async () => {
+        try {
+          if (product.view !== 'stories') await product.changeView('stories');
+          if (product.view !== 'stories') return;
+          await openStory(storyId);
+          if (product.selectedId !== storyId) return;
+          rememberSelection('product', storyId);
+          product.tab = 'overview';
+          mobileSection = 'content';
+        } finally {
+          if (routePending === storyId) routePending = null;
+        }
+      })();
+    });
+  });
+  $effect(() => {
+    const id = product.view === 'stories' ? product.selectedId : null;
+    if (routePending || router.module !== 'product') return;
+    const want = id ? `product/${id}` : 'product';
+    untrack(() => {
+      if (router.parts.join('/') !== want) router.replace(want);
+    });
+  });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('product', [
+      { id: 'product.new-draft', title: 'New draft story', group: 'Product', keywords: 'create story blank discovery', run: () => void createDraft() },
+      { id: 'product.new-epic', title: 'New epic', group: 'Product', keywords: 'create group folder stories', run: () => void createEpic() },
+      { id: 'product.import', title: 'Import story…', group: 'Product', keywords: 'jira confluence issue page', run: () => (importOpen = true) },
+    ]),
+  );
+
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
   const selectedStory = $derived(product.detail?.story ?? null);
   const selectedParent = $derived(product.parentOf(selectedStory));
@@ -404,18 +454,10 @@
     list.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
   }
 
-  function onTabKey(event: KeyboardEvent): void {
-    const list = event.currentTarget as HTMLElement;
-    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled):not([aria-disabled="true"])')];
-    const current = tabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true');
-    if (current < 0) return;
-    const next = nextTabIndex(event.key, current, tabs.length, { rtl: getComputedStyle(list).direction === 'rtl' });
-    if (next < 0) return;
-    event.preventDefault();
-    // The click handler owns async activation and final focus. Moving focus
-    // first would make the discard dialog restore an unaccepted destination.
-    tabs[next].click();
-  }
+  // ←/→/Home/End only CLICK the target tab: the click handler owns async
+  // activation and final focus. Moving focus first would make the discard
+  // dialog restore an unaccepted destination.
+  const onTabKey = tabKeys({ activate: 'click' });
 
   function sourceIcon(kind: string): IconName {
     switch (kind) {
@@ -576,7 +618,7 @@
 <PageHeader
   title={headerTitle}
   crumbs={headerCrumbs}
-  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyse, plan, test, publish back'}
+  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
 >
   {#snippet badge()}
     {#if product.view === 'stories' && selectedStory}
@@ -623,6 +665,12 @@
           <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
         </button>
       {/if}
+      <!-- The ONE import affordance — secondary, before the one primary (the empty state owns it while the list is empty). -->
+      {#if !noStories}
+        <button class="btn" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+          <Icon name="download" size={12} /> Import
+        </button>
+      {/if}
       <button
         class="btn primary"
         onclick={newMenu}
@@ -632,12 +680,6 @@
       >
         <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
       </button>
-      <!-- The ONE import affordance (the empty state owns it while the list is empty). -->
-      {#if !noStories}
-        <button class="btn" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
-          <Icon name="download" size={12} /> Import
-        </button>
-      {/if}
     {/if}
   {/snippet}
 </PageHeader>

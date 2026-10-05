@@ -46,11 +46,13 @@
   ] as const;
   const matchKeysText = matchKeys.join(', ');
   let matchError = $state<string | null>(null);
+  /** Inline validation, next to the field (never a toast). */
+  let nameError = $state<string | null>(null);
   let saving = $state(false);
 
   async function save(): Promise<void> {
     if (!name.trim()) {
-      toasts.error('A policy name is required');
+      nameError = 'Give the policy a name.';
       return;
     }
     let match: unknown = {};
@@ -111,17 +113,23 @@
   <div class="form">
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="e.g. Approve all dangerous writes" />
+      <input
+        bind:value={name}
+        placeholder="Approve all dangerous writes"
+        aria-invalid={nameError != null}
+        oninput={() => (nameError = null)}
+      />
+      {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
     </label>
 
     <div class="row3">
       <label class="field">
         <span>Effect</span>
         <select bind:value={effect}>
-          <option value="allow">allow</option>
-          <option value="deny">deny</option>
-          <option value="require_approval">require_approval</option>
-          <option value="require_dry_run">require_dry_run</option>
+          <option value="allow">Allow</option>
+          <option value="deny">Deny</option>
+          <option value="require_approval">Require approval</option>
+          <option value="require_dry_run">Require dry run</option>
         </select>
       </label>
       <label class="field">

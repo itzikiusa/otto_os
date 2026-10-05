@@ -350,7 +350,7 @@
   .ctx-item {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     width: 100%;
     min-height: 26px;
     padding-block: 0;
@@ -430,7 +430,7 @@
   .ctx-sep {
     height: 1px;
     background: var(--border);
-    margin: 3px 4px;
+    margin: 4px;
     flex-shrink: 0;
   }
 
@@ -443,8 +443,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: -4px -4px 3px;
-    padding: 7px 10px;
+    margin: -4px -4px 4px;
+    padding: 8px 12px;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     color: var(--text-dim);
@@ -460,7 +460,7 @@
     outline: none;
   }
   .ctx-more {
-    padding: 5px 8px 4px;
+    padding: 4px 8px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-align: center;

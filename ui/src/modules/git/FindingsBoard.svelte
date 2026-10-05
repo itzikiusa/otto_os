@@ -7,6 +7,7 @@
   // (GET /findings/{id}). Filters by status + severity; a header with counts and a
   // Proof Pack button. Subscribes to the finding WS bus and refetches on match —
   // the same pattern ReviewPanel uses for review_changed.
+  import { sentenceCase } from '../../lib/labels';
   import Icon from '../../lib/components/Icon.svelte';
   import { listFindings, getFinding } from '../../lib/api/client';
   import type {
@@ -144,11 +145,10 @@
     if (f.line_end != null && f.line_end !== f.line) return `${f.path}:L${f.line}–L${f.line_end}`;
     return `${f.path}:L${f.line}`;
   }
-  function statusLabel(s: string): string {
-    return s.replace(/_/g, ' ');
-  }
+  // Wire values (`false_positive`) never go on screen — lib/labels words them.
+  const statusLabel = sentenceCase;
   function transitionLabel(from: string | null, to: string | null): string {
-    if (from && to) return ` · ${from} → ${to}`;
+    if (from && to) return ` · ${statusLabel(from)} → ${statusLabel(to)}`;
     return '';
   }
 </script>

@@ -15,7 +15,8 @@
     onclick={() => router.back()}
     disabled={!router.canBack}
     aria-label="Go back"
-    title="Back (⌘⇧←)"
+    title="Go back"
+    aria-keyshortcuts="Meta+Shift+ArrowLeft"
   >
     <Icon name="chevronLeft" size={16} />
   </button>
@@ -24,7 +25,8 @@
     onclick={() => router.forward()}
     disabled={!router.canForward}
     aria-label="Go forward"
-    title="Forward (⌘⇧→)"
+    title="Go forward"
+    aria-keyshortcuts="Meta+Shift+ArrowRight"
   >
     <Icon name="chevronRight" size={16} />
   </button>

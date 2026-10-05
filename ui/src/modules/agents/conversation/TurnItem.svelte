@@ -190,7 +190,7 @@
   aria-label={item.role === 'user' ? `You${clock ? `, ${clock}` : ''}` : `${agentName}${clock ? `, ${clock}` : ''}`}
 >
   {#if item.role === 'user'}
-    <div class="bubble" dir="auto">
+    <div class="bubble chat-bubble-end" dir="auto">
       {#each item.blocks as b, i (i)}
         {#if b.kind === 'text'}
           {@const parts = splitAttachments(b.md)}
@@ -308,13 +308,9 @@
     max-width: min(80%, 78ch);
     background: color-mix(in srgb, var(--you) 16%, var(--surface));
     border: 1px solid color-mix(in srgb, var(--you) 34%, var(--border));
-    border-radius: 18px 18px 5px 18px;
     padding: 9px 15px;
     min-width: 0;
     box-shadow: 0 1px 0 color-mix(in srgb, var(--you) 10%, transparent);
-  }
-  :global([dir='rtl']) .bubble {
-    border-radius: 18px 18px 18px 5px;
   }
   .bubble :global(.md) {
     --prose-measure: none;
@@ -367,7 +363,7 @@
     color: var(--text);
   }
   .agent-name {
-    font-weight: 650;
+    font-weight: 600;
   }
   .agent-model {
     font-size: var(--fs-xs);

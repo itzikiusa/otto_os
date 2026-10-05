@@ -131,7 +131,7 @@
       {#if title.dir}<span class="pv-dir mono">{title.dir}</span>{/if}
     </span>
     <button class="icon-btn" onclick={() => (full = true)} aria-label="Full view" title="Full view"><Icon name="maximize" size={13} /></button>
-    <button class="icon-btn" onclick={onclose} aria-label="Close preview" title="Close (Esc)"><Icon name="x" size={13} /></button>
+    <button class="icon-btn" onclick={onclose} aria-label="Close preview" title="Close preview" aria-keyshortcuts="Escape"><Icon name="x" size={13} /></button>
   </header>
   <div class="pv-bar">
     {#if modes.length > 1}

@@ -83,8 +83,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    padding: 14px 16px;
-    margin-bottom: 14px;
+    padding: 12px 16px;
+    margin-block-end: 16px;
   }
   .ring-wrap {
     position: relative;
@@ -194,7 +194,7 @@
   .item-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .item-label {

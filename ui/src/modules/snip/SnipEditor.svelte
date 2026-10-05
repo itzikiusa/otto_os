@@ -774,10 +774,10 @@
       {/each}
     </div>
     <div class="group history">
-      <button class="tb" data-act="undo" title="Undo (⌘Z)" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
+      <button class="tb" data-act="undo" title="Undo" aria-keyshortcuts="Meta+Z" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
         <Icon name="undo" size={13} />
       </button>
-      <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
+      <button class="tb" data-act="redo" title="Redo" aria-keyshortcuts="Shift+Meta+Z" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
         <span class="mirror"><Icon name="undo" size={13} /></span>
       </button>
     </div>

@@ -641,8 +641,8 @@
     height: 18px;
     border-radius: 50%;
     border: 0;
-    background: rgba(0, 0, 0, 0.6);
-    color: #fff; /* on the fixed dark scrim over the image, in every theme */
+    background: var(--scrim-media);
+    color: var(--on-scrim);
     display: grid;
     place-items: center;
     padding: 0;

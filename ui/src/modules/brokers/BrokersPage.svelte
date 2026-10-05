@@ -1,6 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
-  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
+  import { CLUSTER_VIEWS, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -326,9 +326,6 @@
       <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
     {/if}
   {/snippet}
-  {#snippet titleContent()}
-    {#if selected}<span class="name">{selected.name}</span>{:else}Message Brokers{/if}
-  {/snippet}
   {#snippet badge()}
     {#if selected}
       <EnvBadge env={selected.environment} />
@@ -457,7 +454,7 @@
       </div>
     {/if}
     {#if selected}
-      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
         {#each CLUSTER_VIEWS as v (v.id)}
           <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
         {/each}
@@ -819,9 +816,6 @@
     opacity: 1;
     background: var(--hover);
   }
-  .name {
-    font-weight: 600;
-  }
   /* Read-only is a property, not a failure: neutral, matching ClusterViewer. */
   .ro {
     font-size: var(--fs-xs);
@@ -872,10 +866,15 @@
     color: var(--text);
     border-bottom-color: var(--accent);
   }
+  /* The panels size themselves to the tab body (height: 100%) and scroll
+     inside; the body itself scrolls only when a panel's guaranteed minimum (the
+     topics grid, the message panes) doesn't fit — e.g. a phone in landscape —
+     so those rows stay reachable instead of being clipped. No height query. */
   .tab-body {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   .small {
     font-size: var(--fs-xs);
@@ -908,18 +907,6 @@
     cursor: pointer;
     align-items: center;
     flex: none;
-  }
-
-  /* Short viewports (phones in landscape, ~430px tall) keep the desktop
-     two-column layout (they're >640px wide) but the cluster header + tab strips
-     leave the tab body very little room. Let the tab body scroll so panels with
-     a guaranteed min-height (e.g. the topics grid) stay fully reachable instead
-     of being clipped behind the sticky chrome. */
-  @media (max-height: 600px) {
-    .tab-body {
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
   }
 
   @media (max-width: 640px) {

@@ -814,7 +814,7 @@
   .k9s-term {
     flex: 1;
     min-height: 0;
-    background: #000;
+    background: var(--term-bg);
   }
   .hints {
     display: grid;
