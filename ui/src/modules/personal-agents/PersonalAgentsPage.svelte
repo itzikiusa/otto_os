@@ -17,6 +17,7 @@
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -157,6 +158,7 @@
       </div>
     {/snippet}
     {#snippet actions()}
+      <AutomateGuideButton current="personal-agents" />
       <!-- One primary per view: Rooms has its own create (the list's name
            field / the empty state's "Create a channel"). -->
       {#if ws.currentId && sub !== 'rooms' && agents.length > 0}

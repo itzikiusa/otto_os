@@ -21,6 +21,7 @@
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
@@ -1946,6 +1947,7 @@
     {#if current && dirty}<Badge tone="accent" label="Unsaved" title="The canvas has changes that aren’t saved yet" />{/if}
   {/snippet}
   {#snippet actions()}
+    <AutomateGuideButton current="workflows" />
     {#if current}
       <!-- Anatomy: [secondary…][primary][⋯]. Node + Save stay in the bar with the
            primary Run…; Runs, the panel toggles and the one-off tools live in

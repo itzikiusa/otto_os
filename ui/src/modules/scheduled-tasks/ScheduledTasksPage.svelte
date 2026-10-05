@@ -10,6 +10,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -813,6 +814,7 @@
     {/if}
   {/snippet}
   {#snippet actions()}
+    <AutomateGuideButton current="scheduled-tasks" />
     {#if !(creating || editId) && list.length > 0}
       <button class="btn small primary" onclick={startCreate}><Icon name="plus" size={12} /> New task</button>
     {/if}
