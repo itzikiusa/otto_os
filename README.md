@@ -7,14 +7,26 @@ multi-agent code review, Jira/Confluence product workflows, SSH/database
 connections, an HTTP API client, real token-usage tracking, and Slack/Telegram
 bridges so an agent can work a ticket from a chat thread.
 
-> Status: early / actively evolving. macOS-only for now. Expect rough edges.
+**Version 0.2** · macOS (Apple Silicon and Intel) · actively developed, so
+expect rough edges. Prebuilt builds: see [Download](#download-prebuilt-dmg).
 
-> ⚠️ **Vibe coded.** This entire repository was built through conversational AI
-> ("vibe coding") — the code, tests, and documentation were largely AI-generated
-> and have **not** been independently audited or formally reviewed. Treat it as
-> experimental. **Verification is your responsibility**: validate correctness,
-> security, and dependency licensing before relying on any of it. Provided
-> **as-is, with no warranty** — see [LICENSE](./LICENSE).
+### What's new in 0.2
+
+- **One design system, everywhere.** Every page now uses the same shared
+  components: page header, loading, empty and error states with Retry,
+  Badge, Switch, docked drawers and resizable panes. Spacing, accent tints,
+  shadows, motion and type all come from tokens. About 30 automated
+  `ui-guards` ratchets in `npm run check` stop old patterns from coming back.
+- **Keyboard and accessibility.** Every module has ⌘K verbs. Trees, tab strips,
+  comboboxes, charts and splitters work from the keyboard. Dialogs are named by
+  their headings, and the UI works in right-to-left layouts and down to phone
+  width.
+- **Shareable state.** The selected item is in the URL on more pages, including
+  Brokers, API and Workbench. Copy is consistent: "Couldn’t …" errors with the
+  real cause, Filter vs Search wording, and US English throughout.
+- **Session Rooms**, **Design Hall**, detachable panes and multi-window,
+  conversation view v2, and many performance and correctness fixes since 0.1.
+- **A new product tour** in Help → Walkthroughs.
 
 ---
 
@@ -107,6 +119,10 @@ bridges so an agent can work a ticket from a chat thread.
   (`canvas.mermaid`, diagram-as-code). An agent edits the underlying file while
   you converse in an embedded terminal, so a diagram becomes something an agent
   builds *with* you.
+- **Design Hall** — one artifact graph for everything visual a team makes:
+  UI frames, graphics, sites, 3D scenes, whiteboards and brand kits, organised
+  into projects. Each artifact is versioned and linkable, and an agent can
+  help design it. See [`docs/features/design-hall.md`](./docs/features/design-hall.md).
 - **Channels** — bridge a Slack or Telegram thread to an agent session: messages
   (and file attachments) are relayed in, the agent's reply (and any file) is
   relayed back. One agent per ticket, auto-archived when idle.
