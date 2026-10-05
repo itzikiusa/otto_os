@@ -11,7 +11,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use otto_core::{
-    domain::{SessionStatus, WorkspaceRole},
+    domain::WorkspaceRole,
     Error, Id,
 };
 use otto_state::history_page::{self, Candidate, PageRequest};
@@ -184,9 +184,8 @@ pub async fn list(
                 turns: row.and_then(|r| r.turns).map(|n| n.max(0) as u64),
                 status: session.status.as_str().into(),
                 transcript_path: path,
-                resumable: session.provider_session_id.is_some()
-                    && session.status != SessionStatus::Exited
-                    || session.status == SessionStatus::Reconnectable,
+                resumable: transcript::history_resumable(session),
+                archived: session.archived,
             })
         } else {
             candidate.indexed.as_ref().and_then(|row| {
@@ -208,6 +207,7 @@ pub async fn list(
                     status: "on_disk".into(),
                     transcript_path: row.path.clone(),
                     resumable: row.provider_session_id.is_some(),
+                    archived: false,
                 })
             })
         };

@@ -39,7 +39,7 @@ export interface DetentionDeps {
   failed(title: string, e: unknown): void;
 }
 
-type Target = Pick<Student, 'id' | 'title' | 'workspaceName' | 'visual' | 'canManage'>;
+type Target = Pick<Student, 'id' | 'title' | 'workspaceName' | 'visual' | 'canManage'> & Partial<Pick<Student, 'background' | 'source'>>;
 
 /** Confirm copy for kicking `s` out (exported for the tests and the list). */
 export function kickOutPrompt(s: Target): { message: string; opts: ConfirmOpts } {
@@ -48,8 +48,13 @@ export function kickOutPrompt(s: Target): { message: string; opts: ConfirmOpts }
     s.visual === 'working'
       ? ' It is mid-turn right now: the agent is stopped immediately and its in-flight work is lost.'
       : '';
+  // A back-row student belongs to an engine (workflow step, swarm, review…):
+  // deleting it pulls the session out from under that run — say so up front.
+  const engine = s.background
+    ? ` It is a running ${s.source ?? 'engine'} session, not one you started: the ${s.source ?? 'engine'} run that owns it loses it and may fail.`
+    : '';
   return {
-    message: `Kick “${s.title}” out${where}? The session is deleted together with its entire history. This can’t be undone — there is no Undo.${midTurn}`,
+    message: `Kick “${s.title}” out${where}? The session is deleted together with its entire history. This can’t be undone — there is no Undo.${midTurn}${engine}`,
     opts: { title: s.visual === 'working' ? 'Kick out a working agent' : 'Kick out student', confirmLabel: 'Kick out', danger: true },
   };
 }

@@ -75,6 +75,10 @@ export interface SceneHandle {
   setActive(on: boolean): void;
   /** Called after every rendered frame (the host repositions HTML labels). */
   onFrame(fn: () => void): void;
+  /** The browser dropped this scene's WebGL context (WebKit keeps ~16 live
+   *  contexts and silently loses the oldest). The host shows Retry, which
+   *  remounts a fresh scene. */
+  onContextLost(fn: () => void): void;
   destroy(): void;
 }
 
@@ -84,14 +88,39 @@ export interface SceneOptions {
   label: string;
 }
 
-/** Whether this browser can create a WebGL context at all. */
+let webglProbe: boolean | null = null;
+/** Whether this browser can create a WebGL context at all. Probed ONCE per
+ *  page, and the probe's context is released at once — WebKit keeps at most
+ *  16 live contexts and silently loses the oldest (a terminal's, see
+ *  Terminal.svelte's MAX_WEBGL_TERMINALS), so a probe must not hold one until
+ *  garbage collection. */
 export function webglAvailable(): boolean {
+  if (webglProbe !== null) return webglProbe;
   try {
     const c = document.createElement('canvas');
-    return !!(c.getContext('webgl2') ?? c.getContext('webgl'));
+    const gl = (c.getContext('webgl2') ?? c.getContext('webgl')) as WebGLRenderingContext | null;
+    webglProbe = !!gl;
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
   } catch {
-    return false;
+    webglProbe = false;
   }
+  return webglProbe;
+}
+
+/** Settle every in-flight kick-out whose student the new model no longer
+ *  holds: `pose()` only walks ids still seated, so an orphaned kick would never
+ *  reach `p ≥ 1` and its promise (the host's success toast) would hang forever.
+ *  The delete already succeeded — the refetch dropping the row proves it — so
+ *  the walk-out simply ends here. Returns the settled ids. */
+export function settleKicks(kicks: Map<string, { resolve: () => void }>, keep: ReadonlySet<string>): string[] {
+  const settled: string[] = [];
+  for (const [id, k] of kicks) {
+    if (keep.has(id)) continue;
+    kicks.delete(id);
+    k.resolve();
+    settled.push(id);
+  }
+  return settled;
 }
 
 // Figure dimensions (seated).
@@ -237,6 +266,11 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
   let raf = 0;
   let lastAmbient = 0;
   let frameFn: (() => void) | null = null;
+  let lostFn: (() => void) | null = null;
+  /** The canvas rect, read ONCE per rendered frame: the host's `onFrame`
+   *  projects up to ~80 labels, interleaving style writes — a fresh
+   *  `getBoundingClientRect()` per projection forced a layout each time. */
+  let frameRect: DOMRect | null = null;
   const tmp = new T.Object3D();
   const col = new T.Color();
 
@@ -547,7 +581,7 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
   // ── Projection + picking ─────────────────────────────────────────────────
   const v = new T.Vector3();
   function project(x: number, y: number, z: number): ScreenPoint {
-    const rect = canvas.getBoundingClientRect();
+    const rect = frameRect ?? canvas.getBoundingClientRect();
     v.set(x, y, z).project(camera);
     const sx = rect.left + ((v.x + 1) / 2) * rect.width;
     const sy = rect.top + ((1 - v.y) / 2) * rect.height;
@@ -596,7 +630,12 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
     if (needsFrame) {
       needsFrame = false;
       renderer.render(scene, camera);
-      frameFn?.();
+      frameRect = canvas.getBoundingClientRect();
+      try {
+        frameFn?.();
+      } finally {
+        frameRect = null;
+      }
     }
     // `controls.update()` may already have re-armed the loop (its change event).
     if (!raf && (moving || interacting || needsFrame)) raf = requestAnimationFrame(frame);
@@ -633,6 +672,15 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
     }
   };
   document.addEventListener('visibilitychange', onVis);
+  // A lost context leaves a blank stage — report it so the host's Retry
+  // remounts (preventDefault keeps the context restorable at all).
+  const onLost = (e: Event): void => {
+    e.preventDefault();
+    cancelAnimationFrame(raf);
+    raf = 0;
+    lostFn?.();
+  };
+  canvas.addEventListener('webglcontextlost', onLost);
   resize();
 
   function headTop(id: string): { x: number; y: number; z: number } | null {
@@ -648,6 +696,8 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
       // A student the new model no longer holds is truly gone.
       const ids = new Set(m.students.map((s) => s.id));
       for (const id of [...gone]) if (!ids.has(id)) gone.delete(id);
+      // …including one still walking out (the refetch beat the 1.4 s walk).
+      settleKicks(kicks, ids);
       build();
       if (first || !viewed) {
         viewed = true;
@@ -722,6 +772,9 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
     onFrame(fn) {
       frameFn = fn;
     },
+    onContextLost(fn) {
+      lostFn = fn;
+    },
     destroy() {
       destroyed = true;
       cancelAnimationFrame(raf);
@@ -730,6 +783,7 @@ export async function mountClassroomScene(host: HTMLElement, opts: SceneOptions)
       ro.disconnect();
       io.disconnect();
       document.removeEventListener('visibilitychange', onVis);
+      canvas.removeEventListener('webglcontextlost', onLost);
       controls.dispose();
       for (const m of meshes.values()) m.dispose();
       meshes.clear();
