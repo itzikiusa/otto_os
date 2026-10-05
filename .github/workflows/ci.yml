@@ -679,13 +679,14 @@ jobs:
         # which Otto never does. Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
 
-  # Duplicate-version report (deny.toml: multiple-versions = "warn"). Advisory:
-  # it surfaces crates compiled twice at different semver majors so they can be
-  # aligned; licenses/advisories are not gated here (see the audit job).
+  # Duplicate-version gate (deny.toml: multiple-versions = "deny" + a `skip`
+  # list of today's known duplicates). BLOCKING: a PR that adds a second
+  # semver-incompatible copy of a crate fails here — align the pin or, if an
+  # upstream forces it, add a skip with the reason. Licenses/advisories are
+  # not gated here (see the audit job).
   deny:
-    name: cargo deny (duplicates, advisory)
+    name: cargo deny (duplicates)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
 
