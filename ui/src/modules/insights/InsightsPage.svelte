@@ -371,7 +371,8 @@
 
   /** Desktop: a native pop-out window on this report's route. Browser: a new
    *  tab whose only content is the report in a sandboxed, opaque-origin
-   *  iframe — never the report itself at the app's origin. */
+   *  iframe — never the report itself at the app's origin. Popups it opens
+   *  stay sandboxed (no `allow-popups-to-escape-sandbox`). */
   async function openWindow(r: InsightReport): Promise<void> {
     const route = `insights/r/${r.kind}/${r.period_start}/${r.period_end}`;
     try {
@@ -382,7 +383,7 @@
       const wrapper =
         '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
         '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +
-        `<iframe sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc="${attr}"></iframe>`;
+        `<iframe sandbox="allow-scripts allow-popups" srcdoc="${attr}"></iframe>`;
       const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
       // Not revoked: the new tab needs the URL; it's released when the tab closes.
