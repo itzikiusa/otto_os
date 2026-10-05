@@ -1403,7 +1403,7 @@
         </span>
       {:else}
         <span class="qe-script-state warn">
-          mongosh is not installed on the daemon's PATH — <code class="mono">brew install mongosh</code>, then retry.
+          mongosh is not installed on the daemon’s PATH — <code class="mono">brew install mongosh</code>, then retry.
         </span>
         <button
           class="qe-script-retry"
@@ -1473,12 +1473,10 @@
   </div>
 
   <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     class="qe-splitter"
     class:resizing
     role="separator"
-    tabindex="0"
     aria-orientation="horizontal"
     aria-label="Resize editor and results"
     title="Drag or use ↑/↓ to resize · double-click or Enter to expand"
@@ -1751,8 +1749,8 @@
     padding: 4px 10px;
     font-size: var(--fs-s);
     color: var(--text);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-faint);
     border-radius: var(--radius-s);
   }
   .qe-script.missing {
@@ -1786,7 +1784,7 @@
     cursor: pointer;
   }
   .qe-script-retry:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .qe-vars-label {
@@ -1857,7 +1855,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     display: flex;
     flex-direction: column;
     gap: 2px;

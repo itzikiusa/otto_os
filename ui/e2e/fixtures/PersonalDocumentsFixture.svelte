@@ -9,7 +9,7 @@
 </script>
 <AgentDocuments agentId="a" workspaceId="w" kind={params.get('kind') === 'context' ? 'context' : 'memory'} editable={!params.has('viewer')} sharedWorkspace />
 <form onsubmit={(e) => { e.preventDefault(); submitted = true; }}>
-  <PathField bind:value={path}><input aria-label="Working directory" bind:value={path} /></PathField>
+  <PathField bind:value={path}><input aria-label="Working folder" bind:value={path} /></PathField>
   <output>{submitted ? 'submitted' : 'not submitted'}</output>
 </form>
 

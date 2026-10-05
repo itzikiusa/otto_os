@@ -228,7 +228,7 @@
     const board = pid;
     if (
       await confirmer.ask(
-        `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project's feed is cleared too. This cannot be undone.`,
+        `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project’s feed is cleared too. This cannot be undone.`,
         { title: 'Clear board', confirmLabel: 'Clear board', danger: true },
       )
     ) {
@@ -529,7 +529,7 @@
     <EmptyState
       icon="note"
       title="No projects yet"
-      body="A project holds the board's tasks and its goal. Create one, then add tasks or plan them from the goal."
+      body="A project holds the board’s tasks and its goal. Create one, then add tasks or plan them from the goal."
       actionLabel={onnewproject ? 'New project' : undefined}
       actionIcon="plus"
       onaction={onnewproject}
@@ -554,7 +554,7 @@
             <span>{COLUMN_LABEL[col]}</span>
             <span class="count" aria-label={plural(colTasks.length, 'task')}>{colTasks.length}</span>
           </div>
-          <div class="col-body">
+          <div class="col-body" role="list">
             {#each visibleIn(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
               {@const gs = goalSummary(t.id)}
@@ -562,9 +562,9 @@
                    the select checkbox, the title button (Enter / click → the
                    task's actions; x toggles selection) and the meta buttons.
                    Never a control nested inside a role="button" card. -->
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="card kb-card"
+                role="listitem"
                 class:dragging={draggingId === t.id}
                 class:selected={selected.has(t.id)}
                 draggable="true"
@@ -597,7 +597,7 @@
                   {/if}
                   <span class="grow"></span>
                   {#if t.status === 'verifying'}
-                    <span class="vchip" title="The Coordinator is checking this task's goals">Verifying</span>
+                    <span class="vchip" title="The Coordinator is checking this task’s goals">Verifying</span>
                   {/if}
                   {#if gs}
                     <button
@@ -870,7 +870,7 @@
   .vchip {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     padding: 0 6px;
     animation: otto-pulse 1.4s ease-in-out infinite;

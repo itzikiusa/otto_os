@@ -110,11 +110,7 @@
       {#if needsBodies && !bodies.plan && (bodyLoading || bodyError)}
         <!-- An older iteration's plan is read on expand: name the wait, and a
              failure stays inline with Retry. -->
-        {#if bodyLoading}
-          <p class="fb" role="status">Loading this iteration’s plan…</p>
-        {:else}
-          <LoadState what="this iteration’s plan" variant="compact" error={bodyError} empty onretry={() => bodyRetry++} />
-        {/if}
+        <LoadState what="this iteration’s plan" variant="compact" loading={bodyLoading} error={bodyError} empty onretry={() => bodyRetry++} />
       {/if}
       {#if bodies.plan}
         <section>

@@ -220,7 +220,7 @@
           {/if}
         </video>
         {#if status === 'loading'}
-          <div class="film-loading" role="status">Loading the tour…</div>
+          <div class="film-loading" role="status" aria-label="Loading the tour"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
         {/if}
       </div>
     {/if}

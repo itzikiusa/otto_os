@@ -103,7 +103,7 @@
   }
   .hint code {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 0 2px;
     border-radius: var(--radius-s);
     background: var(--surface-2);

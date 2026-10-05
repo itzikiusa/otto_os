@@ -256,7 +256,7 @@
       },
       { separator: true },
       {
-        label: 'Move to trash',
+        label: 'Move to trash', // ui-guards: allow — reversible (restore from the trash), so no confirm
         icon: 'trash',
         danger: true,
         action: () => void vault.trash(n.entry.path),

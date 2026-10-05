@@ -5,6 +5,7 @@
   // images/PDF display inline, and everything else falls back to
   // syntax-highlighted code. Content is loaded by the store (vault.openFile).
   import { onMount } from 'svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import { formatHtml } from '../../lib/formatHtml';
@@ -271,7 +272,7 @@
 
   <div class="body">
     {#if vault.fileLoading}
-      <div class="notice" role="status">Loading file…</div>
+      <LoadState what="the file" loading empty />
     {:else if vault.fileError}
       <div class="notice err">{vault.fileError}</div>
     {:else if isImage && vault.fileBlobUrl}

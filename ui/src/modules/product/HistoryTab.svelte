@@ -115,7 +115,7 @@
         {/each}
       </select>
       {#if product.loadingEvents}
-        <span class="dim">Loading events…</span>
+        <span class="spinner" role="status" aria-label="Loading events" title="Loading events"></span>
       {:else}
         <span class="dim">{plural(events.length, 'event')}</span>
       {/if}

@@ -324,7 +324,7 @@
       {#if a.title}<span class="title dim">{a.title}</span>{/if}
     </button>
     {#if a.schedule?.enabled}
-      <span class="badge" role="img" aria-label="Runs on a schedule" title="Runs on a schedule"><Icon name="clock" size={12} /></span>
+      <span class="sched-icon" role="img" aria-label="Runs on a schedule" title="Runs on a schedule"><Icon name="clock" size={12} /></span>
     {/if}
     {#if running > 0}
       <span class="chip runs-chip" title={plural(running, 'active run')}><StatusDot state={agentDot(running)} size={6} />{running}</span>
@@ -439,7 +439,7 @@
   }
   .drop-zone.drop-active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   .add-top-btn {
@@ -541,7 +541,7 @@
     background: var(--surface-2);
     color: var(--text-dim);
   }
-  .badge {
+  .sched-icon {
     color: var(--text-dim);
     display: grid;
     place-items: center;

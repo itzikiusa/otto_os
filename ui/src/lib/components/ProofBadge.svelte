@@ -58,7 +58,7 @@
   .proof-badge.accent {
     color: var(--accent-text);
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
   }
   .proof-badge.warn {
     color: var(--warning);

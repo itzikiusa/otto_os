@@ -323,8 +323,8 @@
     font-size: var(--fs-s);
     line-height: 1.5;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 10px;
   }

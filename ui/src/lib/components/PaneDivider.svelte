@@ -50,18 +50,15 @@
   }
 </script>
 
-<!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds the keys). -->
-<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+<!-- The ARIA window splitter: paneResizer makes it focusable and adds the
+     keys, the drag (startDrag) and the double-click reset. -->
 <div
   class="pane-divider"
   role="separator"
-  tabindex="0"
   aria-orientation="vertical"
   aria-label={label}
   title={RESIZE_TITLE}
-  onmousedown={startDrag}
-  ondblclick={() => set(defaultWidth)}
-  use:paneResizer={{ value: width, min, max, invert, step: 10, bigStep: 40, onChange: set, onReset: () => set(defaultWidth), text: pxWide }}
+  use:paneResizer={{ value: width, min, max, invert, step: 10, bigStep: 40, onChange: set, onReset: () => set(defaultWidth), onDragStart: startDrag, text: pxWide }}
 ></div>
 
 <style>
@@ -85,7 +82,7 @@
   .pane-divider:hover::after,
   .pane-divider:focus-visible::after {
     inset-inline: 3px;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   .pane-divider:focus-visible {
     outline: none;

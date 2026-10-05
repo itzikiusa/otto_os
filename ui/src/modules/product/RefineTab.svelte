@@ -159,7 +159,7 @@
           <select
             class="picker"
             bind:value={selectedRunId}
-            title="Seed the thread with a discovery run's findings"
+            title="Seed the thread with a discovery run’s findings"
           >
             <option value="">New from discovery run…</option>
             {#each discoveryRuns as dr (dr.run.id)}

@@ -153,7 +153,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-s);
   }
   .banner > :global(svg) {
@@ -209,7 +209,7 @@
     border: 0;
     border-radius: var(--radius-s);
     background: var(--border-strong);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     cursor: pointer;
     transition: transform var(--dur-fast) ease-out;
   }
@@ -239,7 +239,7 @@
     height: 72px;
     border-radius: var(--radius-s);
     overflow: hidden;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     transform: perspective(300px) rotateY(-14deg);
   }
   .base {
@@ -287,7 +287,7 @@
     border-radius: var(--radius-l);
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sr {
     position: absolute;

@@ -1005,7 +1005,7 @@
 {#if dirsOpen}
   <Modal title="Additional directories" onclose={() => (dirsOpen = false)}>
     <div class="field">
-      <label for="sv-extra-dir">Directories the agent may access <span class="dim">(beyond its working dir)</span></label>
+      <label for="sv-extra-dir">Folders the agent may access <span class="dim">(beyond its working folder)</span></label>
       {#if extraDirs.length > 0}
         <ul class="dir-list">
           {#each extraDirs as dir (dir)}
@@ -1114,7 +1114,7 @@
     container: pane / inline-size;
   }
   .pane.focused {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .pane-head {
     position: relative;
@@ -1295,7 +1295,7 @@
   }
   .handover-crumb:hover {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .handover-pending {
     display: inline-flex;

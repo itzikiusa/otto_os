@@ -410,7 +410,7 @@ function waitlist(title: string): SiteDoc {
         {
           eyebrow: 'Coming this winter',
           headline: 'Plan trips together,\nwithout the group chat.',
-          subhead: `${name} keeps everyone's dates, budgets and must-sees in one calm place — and finds the plan that works for all of you.`,
+          subhead: `${name} keeps everyone’s dates, budgets and must-sees in one calm place — and finds the plan that works for all of you.`,
           primary_label: 'Join the waitlist',
           primary_href: '#waitlist',
           secondary_label: '',

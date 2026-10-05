@@ -267,7 +267,7 @@
     onclick={() => void doPull()}
     title={detached
       ? 'HEAD is detached — check out a branch to pull'
-      : "Pull from upstream using the repo's configured mode"}
+      : "Pull from upstream using the repo’s configured mode"}
   >
     <Icon name="arrowDown" size={12} />
     {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}

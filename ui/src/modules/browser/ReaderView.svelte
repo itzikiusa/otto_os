@@ -359,7 +359,7 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     display: flex;
     flex-direction: column;
     gap: 6px;

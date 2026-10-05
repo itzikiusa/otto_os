@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../lib/plural';
+  import Skeleton from '../lib/components/Skeleton.svelte';
   // Notification center bell: unread badge + an anchored popover of notices.
   //
   // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
@@ -387,7 +388,7 @@
             {:else if !notifications.loaded}
               <div class="panel-empty" aria-busy="true">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
-                <p>Loading notifications…</p>
+                <Skeleton rows={3} height={36} label="notifications" />
               </div>
             {:else if notifications.rows.length === 0}
               <div class="panel-empty">

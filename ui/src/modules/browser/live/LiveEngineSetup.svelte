@@ -58,7 +58,7 @@
   const body = $derived(
     `Live tabs run in a Chromium browser on the Mac running Otto and stream here, so they work from any device, including your phone. ` +
       `Otto downloads ${lighter ? 'the lighter Chromium engine' : 'Chrome for Testing'} once (about ${formatBytes(browserLive.downloadBytes(build))}) and checks it against a pinned checksum. ` +
-      `Every request the pages make goes through Otto's network guard.`,
+      `Every request the pages make goes through Otto’s network guard.`,
   );
 </script>
 

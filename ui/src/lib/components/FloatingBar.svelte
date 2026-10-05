@@ -1026,7 +1026,7 @@
     color: var(--text);
     background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
     border-radius: 999px;
-    transition:
+    transition: /* ui-guards: allow — the bar's own compact↔full morph, not a data bar */
       width var(--dur-enter) ease,
       border-radius var(--dur-enter) ease,
       box-shadow var(--dur-fast) ease,
@@ -1038,7 +1038,7 @@
   .app .surface {
     width: min(720px, 100%);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     /* The raised-glass token, so Settings → Reduce transparency (not only
        the OS media query) drops the re-blur over live content (r3-03-18). */
     backdrop-filter: var(--glass-blur-raised);
@@ -1053,8 +1053,8 @@
   .app .surface.focused {
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
     box-shadow:
-      var(--shadow),
-      0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+      var(--glass-shadow),
+      0 0 0 3px var(--accent-soft-strong);
   }
   .surface.expanded {
     border-radius: calc(var(--radius-l) + 6px);

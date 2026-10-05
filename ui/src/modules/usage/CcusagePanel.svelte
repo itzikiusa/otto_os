@@ -54,7 +54,7 @@
     </div>
   </div>
   <p class="dim small intro">
-    Runs <span class="mono">npx ccusage</span> on this Mac and puts its numbers next to Otto's for the same days, with
+    Runs <span class="mono">npx ccusage</span> on this Mac and puts its numbers next to Otto’s for the same days, with
     every session counted on both sides. The first run may download ccusage through npx and take up to 2 minutes.
     Nothing is sent anywhere. ccusage also counts tools Otto doesn’t track (for example Hermes), so those rows only
     appear on its side.

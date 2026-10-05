@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { scrollRegion } from './scroll-region';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   // "Run on…" — the SAME script on several targets (connections × databases)
   // and/or once per parameter value. Four stages in one sheet:
@@ -385,8 +387,7 @@
 
       <section class="mr-sec" aria-label="Script">
         <h3 class="mr-h">Script <span class="mr-dim">· {plural(scriptLines, 'line')}</span></h3>
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-        <pre class="mr-code mono" tabindex="0">{statement}</pre>
+        <pre class="mr-code mono" use:scrollRegion={'Statement'}>{statement}</pre>
       </section>
 
       <section class="mr-sec" aria-label="Targets">
@@ -407,7 +408,7 @@
                 {#if on}
                   <div class="mr-scopes">
                     {#if sc === 'loading'}
-                      <span class="mr-dim">Loading databases…</span>
+                      <span class="mr-dim"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading databases…</span>
                     {:else if sc && 'error' in sc}
                       <span class="mr-err">Couldn’t list databases: {sc.error}</span>
                       <button class="btn small ghost" onclick={() => loadScopes(c.id)}>Retry</button>
@@ -598,8 +599,7 @@
                   {#if r.needs_confirm}<Badge tone="bad" label="Needs confirm" />{/if}
                   {#if r.on_cluster?.length}<Badge tone="info" label={`ON CLUSTER ×${r.on_cluster.length}`} />{/if}
                 </summary>
-                <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                <pre class="mr-code mono" tabindex="0">{r.statement}</pre>
+                <pre class="mr-code mono" use:scrollRegion={`Statement for ${r.label}`}>{r.statement}</pre>
                 {#each r.cluster_skipped ?? [] as s (s)}
                   <p class="mr-dim mr-small">Not rewritten: {s}</p>
                 {/each}
@@ -626,8 +626,7 @@
               <span class="mr-name">{r.label}</span>
               <EnvBadge env={t.environment} readOnly={t.read_only} />
             </div>
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-            <pre class="mr-code mono" tabindex="0">{r.statement}</pre>
+            <pre class="mr-code mono" use:scrollRegion={`Statement for ${r.label}`}>{r.statement}</pre>
           </li>
         {/each}
       </ul>
@@ -691,18 +690,16 @@
                 {#if detailError}
                   <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{detailError}</span></div>
                 {:else if !detail}
-                  <span class="mr-dim">Loading result details…</span>
+                  <Skeleton rows={3} height={20} label="result details" />
                 {:else}
-                  <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                  <pre class="mr-code mono" tabindex="0">{detail.statement}</pre>
+                  <pre class="mr-code mono" use:scrollRegion={'Final statement'}>{detail.statement}</pre>
                   <div class="mr-detail-actions">
                     <button class="btn small ghost" onclick={() => openInTab(detail!.statement)} title="Open this final statement in a new query tab">
                       <Icon name="external" size={12} /> Open in a new tab
                     </button>
                   </div>
                   {#if detail.result && detail.result.columns.length > 0}
-                    <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                    <div class="mr-table-wrap" tabindex="0" role="region" aria-label="Result of run {it.index + 1}">
+                    <div class="mr-table-wrap" use:scrollRegion={`Result of run ${it.index + 1}`}>
                       <table class="mr-table mono">
                         <thead>
                           <tr>{#each detail.result.columns as col (col.name)}<th>{col.name}</th>{/each}</tr>

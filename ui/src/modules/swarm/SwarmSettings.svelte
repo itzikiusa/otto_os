@@ -218,7 +218,7 @@
   </div>
 
   {#if tab === 'goals'}
-    <p class="hint">Standing goals are the swarm's quality bar — verified on every task in addition to the task's own goals.</p>
+    <p class="hint">Standing goals are the swarm’s quality bar — verified on every task in addition to the task’s own goals.</p>
     <div class="bar">
       <button class="btn small" onclick={addGoal}><Icon name="plus" size={12} /> Add standing goal</button>
       <span class="grow"></span>
@@ -248,7 +248,7 @@
       </div>
     {/if}
   {:else if tab === 'skills'}
-    <p class="hint">Team skills are added to every agent in this swarm, on top of each agent's own skills.</p>
+    <p class="hint">Team skills are added to every agent in this swarm, on top of each agent’s own skills.</p>
     <SkillPicker selected={teamSkills} onchange={setTeamSkills} />
   {:else if tab === 'triggers'}
     <p class="hint">Triggers auto-launch swarm work when a matching message arrives on a channel.</p>

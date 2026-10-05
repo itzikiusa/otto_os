@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // Builder state survives unmount (tab switch, "Open in editor") and
   // connection flips: each connection gets its own snapshot here, restored
   // when the builder remounts or the user switches back. Module-level on
@@ -731,7 +732,7 @@
         action: () => (edges = edges.map((x) => (x.id === id ? { ...x, type: t } : x))),
       })),
       { separator: true },
-      { label: 'Remove join', icon: 'trash', danger: true, action: () => (edges = edges.filter((x) => x.id !== id)) },
+      { label: 'Remove join', icon: 'trash', action: () => (edges = edges.filter((x) => x.id !== id)) },
     ]);
   }
 
@@ -855,7 +856,7 @@
   <EmptyState
     icon="layers"
     title="Builder unavailable"
-    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar's More menu."
+    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar’s More menu."
   />
 {:else}
   <div class="builder" style="--qb-palette-w:{paletteW}px">
@@ -882,7 +883,7 @@
       </div>
       <div class="pal-list">
         {#if paletteLoading}
-          <div class="pal-hint">Loading tables…</div>
+          <div class="pal-hint"><Skeleton rows={6} height={22} label="tables" /></div>
         {:else if paletteTables.length === 0}
           <div class="pal-hint">No tables in {dbName(selectedDb) || 'this database'}.</div>
         {:else if filteredPalette.length === 0}
@@ -908,11 +909,9 @@
     </aside>
 
     <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
-      tabindex="0"
       aria-orientation="vertical"
       aria-label="Resize table list"
       title="Drag or use ←/→ to resize · double-click or Enter to reset"
@@ -924,12 +923,11 @@
     <div class="main" bind:this={mainEl}>
       <!-- ── Canvas ──────────────────────────────────────────────────────── -->
       <div class="canvas" style={canvasH ? `flex: 0 0 ${canvasH}px` : ''}>
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="canvas-scroll"
           class:dragging={dragUid !== null || pending !== null}
           role="application"
-          aria-label="Join canvas — drag from one column's dot to another table's column to join"
+          aria-label="Join canvas — drag from one column’s dot to another table’s column to join"
           bind:this={canvasEl}
           onpointermove={onCanvasMove}
           onpointerup={onCanvasUp}
@@ -967,8 +965,9 @@
             {#each tables as t, ti (t.uid)}
               {@const nSel = clauses.select.filter((s) => s.kind === 'column' && s.ref.alias === t.alias).length}
               <div class="node" class:base={ti === 0} style="left:{cardX(t)}px; top:{cardY(t)}px; width:{CARD_W}px">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="node-head" onpointerdown={(e) => startDrag(e, t.uid)}>
+                <!-- Pointer-only move handle (the canvas lays cards out on its own;
+                     moving is cosmetic), so the head stays presentational. -->
+                <div class="node-head" role="presentation" onpointerdown={(e) => startDrag(e, t.uid)}>
                   <input
                     class="node-all"
                     type="checkbox"
@@ -995,14 +994,15 @@
                 </div>
                 <div class="node-body" use:cardBody={t.uid}>
                   {#if !t.columns}
-                    <div class="node-loading">Loading columns…</div>
+                    <div class="node-loading"><Skeleton rows={3} height={16} label="columns" /></div>
                   {:else}
                     {#each t.columns as c (c.name)}
                       {@const pk = t.pk.includes(c.name)}
                       {@const fk = t.fks.some((f) => f.columns.includes(c.name))}
                       <div class="col-row" data-uid={t.uid} data-col={c.name} style="height:{ROW_H}px">
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <span class="handle l" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'l')}></span>
+                        <!-- Drag-to-join dots are a pointer shortcut; the keyboard path is
+                             the "Add join" designer and the FK suggestions. -->
+                        <span class="handle l" role="presentation" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'l')}></span>
                         <input
                           class="col-cb"
                           type="checkbox"
@@ -1013,8 +1013,7 @@
                         <span class="col-name mono" class:pk class:fk title={c.name}>{c.name}</span>
                         <span class="col-ty mono" title={c.type}>{c.type}</span>
                         {#if pk}<span class="col-badge pk" title="Primary key">PK</span>{:else if fk}<span class="col-badge fk" title="Foreign key">FK</span>{:else}<span class="col-badge"></span>{/if}
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <span class="handle r" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'r')}></span>
+                        <span class="handle r" role="presentation" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'r')}></span>
                       </div>
                     {/each}
                   {/if}
@@ -1048,12 +1047,10 @@
         {/if}
       </div>
 
-      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ↑/↓, Home/End). -->
       <div
         class="split"
         role="separator"
-        tabindex="0"
         aria-orientation="horizontal"
         aria-label="Resize canvas"
         title="Drag or use ↑/↓ to resize"
@@ -1416,7 +1413,7 @@
   .side-resizer:hover,
   .side-resizer:focus-visible {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
 
   /* ── Palette ── */
@@ -1451,7 +1448,7 @@
     color: var(--text-dim);
   }
   .pal-search:focus-within {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .pal-search-input {
     flex: 1;
@@ -1564,7 +1561,7 @@
   .edges {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the canvas is dir="ltr" (physical coordinates) */
     pointer-events: none;
     z-index: 1;
   }
@@ -1612,7 +1609,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: hidden;
   }
   .node.base {
@@ -1656,7 +1653,7 @@
   }
   .alias-input:focus {
     border-color: var(--accent-text);
-    background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .node-src {
     flex: 1;
@@ -1686,8 +1683,6 @@
   }
   .node-loading {
     padding: 6px 12px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .col-row {
     position: relative;
@@ -1744,16 +1739,16 @@
     margin-top: -5px; /* ui-guards: allow — centres the 10 px handle */
     border-radius: 50%;
     background: var(--surface);
-    border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1.5px solid var(--accent-line-strong);
     cursor: crosshair;
     z-index: 3;
   }
   /* Physical on purpose: the canvas is dir="ltr" (see the markup). */
   .handle.l {
-    left: -5px;
+    left: -5px; /* ui-guards: allow */
   }
   .handle.r {
-    right: -5px;
+    right: -5px; /* ui-guards: allow */
   }
   .col-row:hover .handle,
   .handle:hover {
@@ -1762,7 +1757,7 @@
   .canvas-hint {
     position: absolute;
     top: 50%;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with the translate below: the same in RTL */
     transform: translate(-50%, -50%);
     display: flex;
     flex-direction: column;
@@ -1825,7 +1820,7 @@
     height: 22px;
     padding: 0 8px;
     border-radius: 999px;
-    border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px dashed var(--accent-line);
     background: transparent;
     color: var(--accent-text);
     font-size: var(--fs-xs);

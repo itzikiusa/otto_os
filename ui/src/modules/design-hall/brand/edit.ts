@@ -60,7 +60,7 @@ export function tokenMenu(e: MouseEvent, group: BrandTokenGroup, name: string, a
   if (!readonly && (actions.rename || actions.describe || actions.remove)) items.push({ separator: true });
   if (!readonly && actions.rename) items.push({ label: 'Rename…', icon: 'edit', action: actions.rename });
   if (!readonly && actions.describe) items.push({ label: 'Describe…', icon: 'note', action: actions.describe });
-  if (!readonly && actions.remove) items.push({ label: `Delete ${tokenLabel(name).toLowerCase()}`, icon: 'trash', danger: true, action: actions.remove });
+  if (!readonly && actions.remove) items.push({ label: `Delete ${tokenLabel(name).toLowerCase()}`, icon: 'trash', danger: true, action: actions.remove }); // ui-guards: allow — an unsaved kit edit (Revert undoes it), so no confirm
   ctxMenu.show(e, items);
 }
 

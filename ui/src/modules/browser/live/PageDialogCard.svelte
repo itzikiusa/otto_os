@@ -88,7 +88,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     color: var(--text);
     font-size: var(--fs-m);
   }

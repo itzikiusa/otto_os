@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // The "new evaluation" form: pick a skill (library / provider / a path or
   // archive), describe the task, choose the implementation CLI + iterations,
   // add validation dimensions (each fanned across one or more agent CLIs), and
@@ -230,13 +231,16 @@
   <section class="card block">
     <div class="field">
       <label class="field-label" for="se-source">Skill under test</label>
-      <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
-        {#if !loaded}<option value="custom">Loading skills…</option>{/if}
-        {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
-          <option value={i}>{sourceLabel(s)}</option>
-        {/each}
-        <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
-      </select>
+      {#if !loaded && !loadError}
+        <Skeleton rows={1} height={27} label="skills" />
+      {:else}
+        <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
+          {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
+            <option value={i}>{sourceLabel(s)}</option>
+          {/each}
+          <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
+        </select>
+      {/if}
 
       {#if sourceSel === 'custom'}
         <div class="row">
@@ -539,7 +543,7 @@
   }
   .chip-toggle.on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   /* Visually hidden but still focusable (display:none dropped the chips out

@@ -147,7 +147,7 @@
         'Handover started',
         briefText
           ? `Delivering your brief to ${where}.`
-          : `Preparing the brief for ${where} — it'll arrive shortly.`,
+          : `Preparing the brief for ${where} — it’ll arrive shortly.`,
       );
     } catch (e) {
       toastError('Couldn’t hand over the session', e);
@@ -330,7 +330,7 @@
     font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     border-radius: var(--radius-s);
     padding: 6px 8px;
   }
@@ -359,7 +359,7 @@
   .seg-btn.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .seg-btn:disabled {
     opacity: 0.45;

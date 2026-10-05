@@ -29,6 +29,6 @@ test('folder errors identify the attempted path and keep the last folder recover
   await picker.getByRole('button',{name:'Retry',exact:true}).click();
   await expect(picker.locator('.crumb')).toHaveAttribute('data-path','/fixture/.ssh');
   await picker.getByRole('button',{name:'Use this folder',exact:true}).click();
-  await expect(page.getByLabel('Working directory')).toHaveValue('/fixture/.ssh');
+  await expect(page.getByLabel('Working folder')).toHaveValue('/fixture/.ssh');
   expect(visited.filter((path) => path === '/fixture/.ssh')).toHaveLength(3);
 });

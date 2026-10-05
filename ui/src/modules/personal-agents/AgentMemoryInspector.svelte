@@ -141,7 +141,7 @@
   .hint { color: var(--text-dim); font-size: var(--fs-s); margin: 0 0 8px; }
   .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
   .pa-filter { cursor: pointer; font: inherit; font-size: var(--fs-s); }
-  .pa-filter.active { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--accent-soft); }
+  .pa-filter.active { color: var(--accent-text); border-color: var(--accent-line); background: var(--accent-soft); }
   .pa-filter:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
   .item { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--fs-m); flex-wrap: wrap; }

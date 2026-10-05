@@ -1234,7 +1234,7 @@
     letter-spacing: 0;
   }
   .mini-btn:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .idx-builder {
@@ -1282,7 +1282,7 @@
   .ib-search:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* A real list, not a tag cloud: a Mongo collection routinely samples 60+ dotted
      paths, and wrapped chips make those unscannable. Selected fields pin to the
@@ -1354,7 +1354,7 @@
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: var(--radius-s);
     cursor: pointer;
   }
@@ -1428,7 +1428,7 @@
   .ib-cond input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .ib-cond-hint {
     font-size: var(--fs-xs);
@@ -1470,7 +1470,7 @@
   .ib-name input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .ib-editing {
     font-size: var(--fs-s);
@@ -1563,7 +1563,7 @@
     vertical-align: top;
   }
   .tbl tbody tr:hover td {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
   .cn {
     font-weight: 600;
@@ -1632,7 +1632,7 @@
     min-width: 0;
   }
   .idx-row:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .idx {
     display: flex;
@@ -1793,7 +1793,7 @@
     font-size: inherit;
     text-decoration: underline;
     text-underline-offset: 2px;
-    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    text-decoration-color: var(--accent-line);
   }
   .fk-ref-btn:hover {
     text-decoration-color: var(--accent);

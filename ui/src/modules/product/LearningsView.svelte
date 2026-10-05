@@ -655,7 +655,7 @@
     padding: 4px 8px;
     box-sizing: border-box;
   }
-  .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong); }
   .field-textarea {
     width: 100%;
     min-height: 70px;
@@ -670,7 +670,7 @@
     font-family: inherit;
     line-height: 1.5;
   }
-  .field-textarea:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .field-textarea:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong); }
   .field-textarea.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .mini-select {
     background: var(--surface);
@@ -715,7 +715,7 @@
   }
   .pattern-header {
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .avoid-header {
@@ -916,7 +916,7 @@
   .md-body :global(li) { margin-bottom: 0.15em; }
   .md-body :global(code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-s);

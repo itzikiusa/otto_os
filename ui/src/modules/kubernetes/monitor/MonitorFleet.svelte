@@ -792,7 +792,7 @@
       {#if reqs.enabled_on.length === 0}
         <div class="note card" data-testid="k8s-fleet-requests-off">
           <b>No cluster keeps request path labels yet.</b>
-          <span class="dim">Per-route drill-down needs <em>Keep request path labels</em> in a cluster's Monitor settings (it multiplies request rows per pod by the number of routes — enable it where you need it).</span>
+          <span class="dim">Per-route drill-down needs <em>Keep request path labels</em> in a cluster’s Monitor settings (it multiplies request rows per pod by the number of routes — enable it where you need it).</span>
           <span class="links">
             {#each reqs.disabled_on as c (c.id)}
               <button class="btn small ghost" onclick={() => router.go(`kubernetes/${encodeURIComponent(c.id)}/monitor/settings`)}>{c.name} settings</button>
@@ -1053,7 +1053,7 @@
   }
   .vt-row:focus-visible {
     outline: none;
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   .vt-td {
     padding: 0 10px;
@@ -1066,7 +1066,7 @@
     cursor: pointer;
   }
   .wl-row:hover {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: var(--accent-faint);
   }
   .num {
     text-align: end;

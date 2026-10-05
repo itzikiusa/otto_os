@@ -325,7 +325,7 @@
     height: 100%;
     border-radius: 2px;
     background: var(--status-exited);
-    transition: width var(--dur-enter) ease-out, background var(--dur-enter) ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .strength-fill.s2 {
     background: var(--status-warn);

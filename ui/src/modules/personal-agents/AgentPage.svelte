@@ -426,7 +426,7 @@
           <dt>Delivery</dt><dd class="clip" title={deliveryLabel()}>{deliveryLabel()}</dd>
           <dt>Browser use</dt><dd>{agent.browser ? 'On' : 'Off'}</dd>
           <dt>Status</dt><dd>{agent.enabled ? 'Enabled' : 'Paused — schedules don’t fire'}</dd>
-          <dt>Working dir</dt>
+          <dt>Working folder</dt>
           {#if agent.cwd}
             <dd class="mono path" dir="ltr" title={agent.cwd}>{agent.cwd}</dd>
           {:else}
@@ -655,7 +655,7 @@
 <style>
   .agent-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
   .prov { max-width: 260px; }
-  .pa-accent { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
   .clip-chip { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .prov :global(svg) { flex-shrink: 0; }
   .mono { font-family: var(--font-mono); }

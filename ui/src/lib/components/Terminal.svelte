@@ -3102,12 +3102,12 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     max-width: calc(100% - 32px);
   }
   .find-bar:focus-within {
     border-color: var(--accent-text);
-    box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: var(--glass-shadow), 0 0 0 3px var(--accent-soft-strong);
   }
   .find-bar input {
     width: 180px;
@@ -3141,7 +3141,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     width: 340px;
     max-width: calc(100% - 32px);
     max-height: 200px;

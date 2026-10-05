@@ -390,7 +390,7 @@
         {/if}
       </div>
       {#if catLoading && !catalog}
-        <div class="pad" role="status"><p class="load-note">Loading the data catalog…</p><Skeleton rows={6} /></div>
+        <div class="pad"><Skeleton rows={6} label="the data catalog" /></div>
       {:else if catError && !catalog}
         <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t load the catalog" body={awsErrorText(catError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
       {:else}
@@ -521,7 +521,7 @@
           <ResultsGrid {result} error={resultError} statement={ranSql} connectionId={null} running={running} oncancel={() => void cancel()} />
         {/if}
       {:else if historyLoading && history.length === 0}
-        <div class="pad" role="status"><p class="load-note">Loading query history…</p><Skeleton rows={6} /></div>
+        <div class="pad"><Skeleton rows={6} label="query history" /></div>
       {:else if historyError}
         <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load query history" body={awsErrorText(historyError)} actionLabel="Retry" onaction={() => void loadHistory()} />
       {:else if history.length === 0}
@@ -552,11 +552,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .ath {
     flex: 1;
     min-height: 0;
@@ -603,7 +598,7 @@
   }
   .tf:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .tf input {
     flex: 1;

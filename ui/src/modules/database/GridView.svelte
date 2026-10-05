@@ -867,8 +867,9 @@
                   <span class="th-type">{c.type_hint ?? ' '}</span>
                 </span>
               </button>
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Pointer-only refinement: columns size to their content by default (double-click restores that). -->
               <span
+                role="presentation"
                 class="th-resize"
                 class:active={dragName === c.name}
                 title="Drag to resize · double-click to fit"
@@ -1202,7 +1203,7 @@
   }
   .col-filter:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .grid :global(td) {
     padding: 4px 10px;
@@ -1404,13 +1405,13 @@
   }
   .grid :global(.cell-expand:hover) {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .grid :global(.cell.editable) {
     cursor: text;
   }
   .grid :global(.cell.editable:hover) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+    box-shadow: inset 0 0 0 1px var(--accent-line);
   }
   .grid :global(.cell.editing) {
     padding: 0;
@@ -1442,7 +1443,7 @@
     opacity: 0.6;
   }
   .grid :global(td mark) {
-    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--accent-line);
     color: var(--text);
     border-radius: 2px;
   }

@@ -148,10 +148,10 @@ label in `--status-working`; use `--success`.
   graphics only: bars, segments, legend swatches — never text or status).
   Always pair a series with its legend label. Other kinds (sources, features)
   are told apart by icon and label on a neutral chip.
-- **Proposed:** an `--agent` identity colour for agent-authored accents (the
-  Design Hall mockup uses violet). It isn't defined, so don't use it. See
-  [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content)
-  for the interim rule.
+- **Agent identity has no colour token.** An agent is told apart by its
+  provider icon and name (`AgentChip`, `AgentByline`) on neutral chrome — never
+  by the accent or an extra hue — so there is no `--agent` token. See
+  [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content).
 
 ### 1.4 Contrast: measured values
 
@@ -238,8 +238,8 @@ Two families only:
 | `--fs-m` | 13 | **Body default** (`body`), buttons, inputs, list rows |
 | `--fs-l` | 15 | The page title (`PageHeader` h1), page-level empty-state title |
 | `--fs-xl` | 18 | Hero numbers in KPI tiles, rare in-content headings |
-| `--fs-2xl` | 22 | Dashboard hero figures; the top heading of long-form **content** (a walkthrough step, an article in the browser's reader view) — never chrome |
-| `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens only — never body or page titles |
+| `--fs-2xl` | 22 | Dashboard hero figures; the top heading of long-form **content** (a walkthrough step, an article in the browser's reader view); a number card's empty dash — never chrome |
+| `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens; the single big number of a data-viz number card (`database/Chart`) — never body or page titles |
 
 Rules:
 
@@ -255,6 +255,13 @@ Rules:
   | 11.5 px | `--fs-xs` or `--fs-s` |
   | 12.5 px | `--fs-s` or `--fs-m` |
   | 14 px | `--fs-m` or `--fs-l` |
+  | 16–18 px | `--fs-l` or `--fs-xl` |
+  | `0.85–0.95em` (inline code in prose) | `--fs-s` |
+
+  `npm run check` ratchets every px/em/rem font-size of 11 px or more that
+  isn't a `--fs-*` step (`font-size-literal`). The one exception: a text
+  input set to `16px` so iOS Safari doesn't zoom on focus, marked with
+  `ui-guards: allow` on the line.
 - **One title size.** Every page title is `--fs-l`/600 in `PageHeader`. Don't
   give a page a bigger h1. (Legacy `.page-header h1` is aligned to `--fs-l`.)
 - **Content exception.** Rendered long-form content — a walkthrough step
@@ -351,8 +358,8 @@ There are three levels, each with one token:
   and above the ambient backdrop on Home. Don't add a stronger shadow to "lift"
   a card; change its surface step or its border (`--border-strong`) instead.
 - Floating layers share one family: `--glass-border` + `--glass-shadow`, whether
-  the surface is glass (menus, palette) or opaque (Modal). `--shadow` remains
-  for older floating UI (toasts, legacy popovers) until they move over.
+  the surface is glass (menus, palette) or opaque (Modal). The legacy
+  `--shadow` alias is retired; toasts and popovers use `--glass-shadow` too.
 - A selected segment in `.segmented` has a 1 px micro-shadow. That is the only
   other in-flow shadow.
 
@@ -515,7 +522,11 @@ Rules:
 - Continuous animation is **only for live state**: something is working right
   now, or loading. A finished or failed item stops animating.
 - Don't animate data changes: rows arriving, numbers ticking. Update them in
-  place.
+  place. **Data bars and meters** (usage bars, progress fills, the done-contract
+  ring) show their value — no `transition` on `width`, `inline-size`,
+  `flex-basis` or `stroke-dasharray` (`data-bar-transition` ratchet). Chrome
+  that changes size because the user dragged it, or a bar morphing between
+  its own states (the floating command bar), is marked `ui-guards: allow`.
 - **Reduced motion.** `app.css` has one global
   `@media (prefers-reduced-motion: reduce)` override that collapses every
   animation and transition to an instant change. A component that needs a
@@ -531,7 +542,8 @@ Rules:
   Examples in the tree: `shell/Drawer.svelte`,
   `run-with-otto/RunStageRail.svelte`.
 - **Shared primitives.** `app.css` owns `@keyframes otto-spin` and
-  `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`). Use them
+  `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`); a
+  component never spins its own ring (`local-spinner` ratchet). Use them
   instead of a new `@keyframes`. `otto-pulse` ends on its fully-lit frame, so
   the global reduced-motion override leaves a live dot "on". Under reduced
   motion `.spinner` becomes a static dotted ring, so "busy" is still shown

@@ -87,3 +87,10 @@ test('status-* tokens are not used for text in shared components', () => {
     assert.doesNotMatch(read(`src/lib/components/${f}.svelte`), /(^|\s)color:\s*var\(--status-/m, f);
   }
 });
+
+test('Modal names its dialog by the visible title and keeps aria-label for locators', () => {
+  const src = read('src/lib/components/Modal.svelte');
+  assert.match(src, /const titleId = \$props\.id\(\);/);
+  assert.match(src, /role="dialog"[\s\S]*?aria-labelledby=\{titleId\}[\s\S]*?aria-label=\{title\}/);
+  assert.match(src, /<h2 id=\{titleId\}>\{title\}<\/h2>/);
+});

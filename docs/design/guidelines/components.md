@@ -351,7 +351,7 @@ dropdown, popover or typeahead that positions itself with coordinates must:
 
 A popover with real content (a form, a preview) that can't be a menu:
 
-- sits on `--surface` with `--border`, `--radius-l` and `--shadow`
+- sits on `--surface` with `--border`, `--radius-l` and `--glass-shadow`
 - closes on Esc and on an outside click
 - returns focus to its trigger
 - follows the same clamp and cap rules

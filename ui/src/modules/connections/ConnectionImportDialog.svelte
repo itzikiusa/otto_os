@@ -211,7 +211,7 @@
   {#if step === 'pick'}
     <div class="imp">
       <p class="imp-hint">
-        Otto reads each tool's config from its standard location on this machine — no
+        Otto reads each tool’s config from its standard location on this machine — no
         file to pick. Choose a tool to see the connections it has. Passwords are never
         imported; you set those after.
       </p>

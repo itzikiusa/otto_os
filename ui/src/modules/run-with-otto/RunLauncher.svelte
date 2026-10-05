@@ -401,7 +401,7 @@
   .big-input:focus-visible {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* detect line on the start, the one primary on the end — the button sits
      directly under the input it launches. */

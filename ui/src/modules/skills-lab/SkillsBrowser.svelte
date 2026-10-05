@@ -348,7 +348,7 @@
   {#if loading}
     <div class="split">
       <aside class="list-pane" aria-busy="true"><div class="pad"><Skeleton rows={10} height={40} /></div></aside>
-      <section class="detail-pane"><p class="dim pad" role="status">Loading skills…</p></section>
+      <section class="detail-pane"><div class="pad"><Skeleton rows={6} height={28} announce={false} /></div></section>
     </div>
   {:else if loadError}
     <LoadState what="skills" variant="page" loading={retrying} error={loadError} empty={true} onretry={retryLoad} />
@@ -546,7 +546,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* The focus ring is drawn on the .search wrapper (:focus-within above). */
   .search input {
@@ -583,7 +583,7 @@
   }
   .fchip.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .fchip.warn {
@@ -634,7 +634,7 @@
   }
   .row.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    border-color: var(--accent-soft-strong);
   }
   .row-main {
     flex: 1;

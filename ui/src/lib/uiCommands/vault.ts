@@ -126,7 +126,7 @@ registerUiCommands('vault', {
       vault.onDraftChange(args.content);
       void highlightWhenReady(ctx, '.note-view');
       ok = await ctx.confirmWrite({
-        what: `Replace the note's text (${original.length} → ${args.content.length} chars; shown in the editor)`,
+        what: `Replace the note’s text (${original.length} → ${args.content.length} chars; shown in the editor)`,
         where,
         connId: `vault:${v.id}`,
         verb: 'Save',

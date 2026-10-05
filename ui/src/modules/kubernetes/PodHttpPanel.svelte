@@ -324,7 +324,7 @@
         {/each}
       </ul>
     {:else}
-      <div class="dim small">Pick a preset or type a path, then Send. Calls go through the cluster API server's pod proxy; nothing is exposed outside this Mac.</div>
+      <div class="dim small">Pick a preset or type a path, then Send. Calls go through the cluster API server’s pod proxy; nothing is exposed outside this Mac.</div>
     {/if}
   </section>
 </div>

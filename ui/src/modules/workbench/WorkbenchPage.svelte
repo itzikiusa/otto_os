@@ -340,7 +340,7 @@
       { label: 'Download', icon: 'download', disabled: !has || isImage, action: download },
       { separator: true },
       { label: workbench.showTrash ? 'Back to files' : 'Show trash', icon: 'trash', action: toggleTrash },
-      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() },
+      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() }, // ui-guards: allow — reversible (restore from the trash), so no confirm
     ];
     ctxMenu.show(e, items);
   }

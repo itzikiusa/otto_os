@@ -3,6 +3,7 @@
   // with its author (agents marked). Clicking chips selects up to two for
   // Compare; versions are the undo model, so nothing here ever deletes.
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import type { DesignVersion } from '../../lib/api/types';
   import { stripOrder, versionAuthor } from './model';
@@ -59,7 +60,7 @@
   <span class="label"><Icon name="clock" size={14} /> Versions</span>
   <div class="chips scroll-thin" bind:this={scroller} role="group" aria-label="Versions">
     {#if loading && !versions.length}
-      <span class="dim">Loading versions…</span>
+      <div class="strip-skel"><Skeleton rows={1} height={22} label="versions" /></div>
     {:else if error && !versions.length}
       <LoadState what="versions" variant="compact" {loading} {error} empty={true} {onretry} />
     {:else}
@@ -151,7 +152,7 @@
   }
   .vchip.sel {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .av {
     width: 8px;
@@ -202,5 +203,9 @@
     .hint {
       display: none;
     }
+  }
+  .strip-skel {
+    flex: none;
+    inline-size: 200px;
   }
 </style>

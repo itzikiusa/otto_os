@@ -104,7 +104,7 @@
 
   <LoadState what="runs" loading={swarm.runsLoading} error={swarm.runsError} empty={swarm.runs.length === 0} onretry={reload}>
     {#snippet emptyView()}
-      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
+      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent’s menu in Org." />
     {/snippet}
     {#if filtered.length === 0}
       <EmptyState
@@ -145,7 +145,7 @@
               </span>
               <span class="c-act">
                 {#if r.session_id}
-                  <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                  <button class="icon-btn" title="Open this run’s session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
                     <Icon name="terminal" size={14} />
                   </button>
                 {/if}

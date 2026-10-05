@@ -603,7 +603,7 @@
     border-radius: var(--radius-m); padding: 6px 8px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
   }
   .lr-item:hover { background: var(--hover); }
-  .lr-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
+  .lr-item.active { border-color: var(--accent-soft-strong); background: var(--accent-soft); }
   .lr-item-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .lr-item-name { flex: 1; min-width: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-item-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }

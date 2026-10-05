@@ -540,7 +540,7 @@
       { label: 'Tidy', icon: 'grid', title: 'Tidy layout into rows', action: tidy },
     );
     if (selectedId) {
-      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected });
+      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected }); // ui-guards: allow — an unsaved canvas edit (Discard reverts it), no confirm
     }
     ctxMenu.show(e, items);
   }
@@ -2156,7 +2156,7 @@
             </button>
           </div>
           <p class="instructions-hint">
-            Standing rules every step follows by the letter — distinct from the workflow's description.
+            Standing rules every step follows by the letter — distinct from the workflow’s description.
           </p>
           <textarea
             class="ri-text mono"
@@ -2229,20 +2229,15 @@
         <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
              right column) drags the left edge to change width. Double-click
              resets. (R6) -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="insp-grip"
           class:side={sideDock}
           role="separator"
-          tabindex="0"
-          aria-orientation={sideDock ? 'vertical' : 'horizontal'}
           aria-label="Resize node inspector"
           title="Drag or use arrow keys to resize · double-click or Enter to reset"
-          onmousedown={startInspResize}
-          ondblclick={resetInsp}
           use:paneResizer={sideDock
-            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, text: pxText }
-            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, text: (v) => `${Math.round(v)} pixels tall` }}
+            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, onDragStart: startInspResize, text: pxText }
+            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, onDragStart: startInspResize, text: (v) => `${Math.round(v)} pixels tall` }}
         ></div>
         <div
           class="inspector"
@@ -2838,7 +2833,7 @@
             {:else if selectedNode.kind === 'review_run'}
               <p class="insp-note">
                 Leave Repository and Base on “inherit” to review exactly where the implementer worked
-                (the run's working folder + base). Set them only to override.
+                (the run’s working folder + base). Set them only to override.
               </p>
               <label for="np-repo">Repository (optional — inherits from the implementer)</label>
               {@render repoPicker('np-repo', 'Inherit from the working folder')}
@@ -3126,7 +3121,7 @@
             {:else if selectedNode.kind === 'git_pr'}
               <p class="insp-note">
                 Leave Repository and Base empty to <strong>inherit the reference</strong> the
-                implementer/reviewer used (the run's working folder and base, or the upstream
+                implementer/reviewer used (the run’s working folder and base, or the upstream
                 review). Set them only to override. A run that changed several repos opens
                 <strong>one PR per repo</strong> (from fanned-in reviews, or enable “detect changed”).
               </p>
@@ -3156,10 +3151,10 @@
               </label>
             {:else if selectedNode.kind === 'self_improve'}
               <p class="insp-note">
-                Reflects on the workspace's recent agent sessions and <strong>offers</strong>
+                Reflects on the workspace’s recent agent sessions and <strong>offers</strong>
                 skill/memory improvements. They are <strong>queued for approval</strong> in
                 Self-Improvement — never auto-applied — and the offered list is posted to the
-                trigger's chat thread.
+                trigger’s chat thread.
               </p>
               <span class="np-label">Providers — the agent(s) that reflect (override Self-Improvement settings)</span>
               <div class="rv-provs">
@@ -3317,16 +3312,12 @@
        no second full-height rail beside the app shell's right rail. Resizable. -->
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
     <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="ctx-resize"
         role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
         aria-label="Resize context panel"
         title="Drag or use ←/→ to resize"
-        onmousedown={startCtxResize}
-        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), text: pxText }}
+        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), onDragStart: startCtxResize, text: pxText }}
       ></div>
       <div class="ctx-head">
         <div class="ctx-tabs" role="tablist" aria-label="Context panel sections">
@@ -3552,7 +3543,7 @@
   textarea:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
      `rows` alone loses to the inspector's own scroll: a 3-row box holding a
@@ -3913,7 +3904,7 @@
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .grow {
     flex: 1;
@@ -4024,7 +4015,7 @@
   .insp-grip:focus-visible {
     background: linear-gradient(
       to bottom,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4136,7 +4127,7 @@
   .inspector input[type='number']:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .inspector select {
     width: 100%;
@@ -4152,7 +4143,7 @@
   .inspector select:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .err {
     color: var(--danger);
@@ -4317,7 +4308,7 @@
     background: linear-gradient(
       to right,
       transparent,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4431,7 +4422,7 @@
   }
   .json-zoom:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* Runs history popover */

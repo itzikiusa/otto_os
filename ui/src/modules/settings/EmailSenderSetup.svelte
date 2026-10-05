@@ -170,7 +170,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('sharing')} subtitle="Emails one-time codes to guests of shared sessions" />
   <PageBody width="readable">
-  <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest's mailbox.</SectionIntro>
+  <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest’s mailbox.</SectionIntro>
 
   <!-- ── Gmail sender: status + setup form in one card ── -->
   <div class="section-title">Gmail sender</div>

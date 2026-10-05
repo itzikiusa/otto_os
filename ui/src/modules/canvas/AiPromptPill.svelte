@@ -70,8 +70,7 @@
 
 <div class="prompt-wrap">
   <!-- keydown on the wrapper so Esc closes even when a mode/Draw button is focused -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="prompt-bar" class:busy onkeydown={onkeydown}>
+  <div class="prompt-bar" class:busy role="toolbar" aria-label="Ask Otto to draw" tabindex="-1" {onkeydown}>
     <Icon name="zap" />
     <input
       bind:value={prompt}

@@ -208,13 +208,13 @@
     {/snippet}
     {#snippet actions()}
       {#if FILM && !showFilm && showArticle && !viewport.isPhone}
-        <button class="btn ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
+        <button class="btn small ghost" onclick={watchTour} data-label="Watch the tour" data-icon="play">
           <Icon name="play" size={12} /> Watch the tour
         </button>
       {/if}
       {#if selected?.route && showArticle}
         <button
-          class="btn primary"
+          class="btn small primary"
           disabled={!openAllowed}
           title={openAllowed ? `Go to ${selected.title}` : `You don’t have access to ${selected.title}. Ask an admin for access.`}
           onclick={() => selected?.route && router.go(selected.route)}
@@ -247,8 +247,8 @@
                 bind:this={searchEl}
                 bind:value={query}
                 type="search"
-                placeholder="Search guides and shortcuts…"
-                aria-label="Search guides"
+                placeholder="Filter guides and shortcuts…"
+                aria-label="Filter guides"
                 autocomplete="off"
                 spellcheck="false"
                 data-testid="guide-search"
@@ -372,7 +372,7 @@
   }
   .rail-search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .phone .rail-search {
     height: 38px;

@@ -12,7 +12,9 @@
   import { toasts } from '../../lib/toast.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, type BadgeTone } from '../../lib/status';
+  import { sentenceCase, severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
 
   interface Props {
     review: Review;
@@ -97,6 +99,10 @@
       stopping = { ...stopping, [index]: false };
     }
   }
+
+  /** Agent finding severity / lifecycle state → the shared Badge tone. */
+  const SEV_TONE: Record<string, BadgeTone> = { info: 'info', warn: 'warn', bug: 'bad' };
+  const STATE_TONE: Record<string, BadgeTone> = { fixing: 'warn', resolved: 'ok', regressed: 'bad' };
 </script>
 
 <div class="rp-agents" class:rp-agents-done={view === 'done'}>
@@ -188,11 +194,11 @@
         <ul class="rp-agent-findings">
           {#each agent.findings as f (f.fingerprint ?? f.body)}
             <li class="rp-finding">
-              <span class="severity-chip sev-{f.severity}">{f.severity}</span>
+              <Badge tone={SEV_TONE[f.severity] ?? 'neutral'} label={severityLabel(f.severity)} />
               {#if f.path}<span class="mono rp-loc">{f.path}{f.line ? ':' + f.line : ''}</span>{/if}
               <!-- Lifecycle state chip (A1): shown when a persisted state is available. -->
               {#if f.state && f.state !== 'open'}
-                <span class="chip rp-state-chip rp-state-{f.state}" title="Finding state">{f.state}</span>
+                <Badge tone={STATE_TONE[f.state] ?? 'neutral'} label={sentenceCase(f.state)} title="Finding state" />
               {/if}
               <span class="rp-finding-body">{f.body}</span>
             </li>
@@ -291,44 +297,10 @@
     max-width: 280px;
   }
 
-  .severity-chip {
-    display: inline-block;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-  }
-  .sev-info {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .sev-warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .sev-bug {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
 
   .grow { flex: 1; }
   .mono { font-family: var(--font-mono); }
 
-  /* A1: finding lifecycle state chips */
-  .rp-state-chip {
-    font-size: var(--fs-xs);
-    padding: 1px 4px;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: .06em;
-    flex-shrink: 0;
-  }
-  .rp-state-fixing    { background: var(--warning-soft); color: var(--warning); }
-  .rp-state-resolved  { background: var(--success-soft); color: var(--success); }
-  .rp-state-regressed { background: var(--danger-soft); color: var(--danger); }
-  .rp-state-declined  { background: color-mix(in srgb, var(--text-dim) 12%, transparent); color: var(--text-dim); }
 
   /* ── Mobile + tablet (≤1024px) ──────────────────────────────────────────────
      The per-agent header is a dense row of name + chip + Open/Retry/findings

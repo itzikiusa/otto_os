@@ -160,9 +160,9 @@
   <PageHeader title={name}>
     {#snippet actions()}
       {#if probe === 'ok'}
-        <!-- A plugin page can wedge or go stale like any web page: reload it
-             in place (re-probes, re-sends otto:init) without leaving. -->
-        <button class="icon-btn" data-icon="refresh" onclick={() => void check()} aria-label="Reload {name}" title="Reload {name}">
+        <!-- A plugin page can wedge or go stale like any web page: restart it
+             in place (re-probes, reloads the frame, re-sends otto:init). -->
+        <button class="icon-btn" data-icon="refresh" onclick={() => void check()} aria-label="Restart {name}" title="Restart {name}">
           <Icon name="refresh" size={14} />
         </button>
       {/if}

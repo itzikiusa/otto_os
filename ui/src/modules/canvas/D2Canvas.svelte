@@ -603,7 +603,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sketch-toggle,
   .code-toggle {
@@ -618,7 +618,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sketch-toggle:hover,
   .sketch-toggle.on,
@@ -639,7 +639,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zoombar button {
     display: inline-flex;

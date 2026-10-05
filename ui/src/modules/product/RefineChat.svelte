@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
@@ -113,15 +114,10 @@
 <div class="refine-chat">
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
   <div class="messages-area">
-    {#if loading && messages.length === 0}
-      <div class="muted center-hint">Loading messages…</div>
-    {:else if loadError && messages.length === 0}
-      <LoadState what="this thread" error={loadError} empty onretry={() => void loadThread(tid)} />
+    {#if (loading || loadError) && messages.length === 0}
+      <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
-      <div class="empty-state">
-        <p>No messages yet.</p>
-        <p>Type a message below to start the conversation with the agent.</p>
-      </div>
+      <EmptyState icon="comment" title="No messages yet" body="Type a message below to start the conversation with the agent." />
     {:else}
       {#each messages as m (m.id)}
         {@const meta = m.role === 'agent' ? parseMeta(m.meta_json) : {}}
@@ -215,20 +211,6 @@
     font-size: var(--fs-m);
     font-style: italic;
   }
-  .center-hint {
-    text-align: center;
-    padding: 24px 0;
-  }
-  .empty-state {
-    padding: 32px 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
-  }
 
   /* ── Bubbles ────────────────────────────────────────────────────────────── */
   .bubble-row {
@@ -251,7 +233,7 @@
   }
   .bubble-user {
     background: var(--accent-soft-strong);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-bottom-right-radius: 3px;
   }
   .bubble-agent {
@@ -298,7 +280,7 @@
   }
   :global(.bubble-body code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
     padding: 1px 4px;
@@ -321,7 +303,7 @@
     align-self: flex-start;
     margin-top: 4px;
     padding: 2px 8px;
-    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    border: 1px solid var(--accent-line-strong);
     border-radius: 999px;
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -374,7 +356,7 @@
     outline: none;
   }
   .msg-input:focus {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
     opacity: 0.55;

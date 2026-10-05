@@ -195,7 +195,7 @@
       <EmptyState
         icon="zap"
         title="No bundle built yet"
-        body="Build / Preview assembles all of this story's context into one bundle, so an agent can start coding immediately."
+        body="Build / Preview assembles all of this story’s context into one bundle, so an agent can start coding immediately."
       />
     {/if}
   </div>
@@ -276,7 +276,7 @@
   }
   .cwd-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
 
   /* Sections */

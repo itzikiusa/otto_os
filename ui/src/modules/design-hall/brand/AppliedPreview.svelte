@@ -163,7 +163,7 @@
   .hero b {
     font-family: var(--pv-font-display);
     font-weight: var(--pv-display-weight);
-    font-size: 17px;
+    font-size: var(--fs-xl);
     line-height: 1.08;
     letter-spacing: -0.01em;
     color: var(--pv-ink);
@@ -194,7 +194,7 @@
     border-radius: var(--pv-radius);
     background: linear-gradient(135deg, var(--pv-primary), color-mix(in srgb, var(--pv-primary) 62%, var(--pv-ink)));
     transform: rotate(-9deg);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
 
   /* ── Social tile ── */
@@ -218,7 +218,7 @@
   .social b {
     font-family: var(--pv-font-display);
     font-weight: var(--pv-display-weight);
-    font-size: 14px;
+    font-size: var(--fs-l);
     line-height: 1.1;
     color: var(--pv-on-primary);
     max-width: 80%;
@@ -243,7 +243,7 @@
     border-radius: var(--pv-radius);
     background: color-mix(in srgb, var(--pv-primary) 70%, var(--pv-ink));
     transform: rotate(-10deg);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
 
   /* ── 3D card swatch ── */
@@ -265,7 +265,7 @@
     aspect-ratio: 1.6;
     border-radius: calc(var(--pv-radius) * 0.7);
     background: linear-gradient(135deg, color-mix(in srgb, var(--pv-primary) 78%, var(--pv-surface)), var(--pv-primary) 55%, color-mix(in srgb, var(--pv-primary) 60%, var(--pv-ink)));
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     padding: 8px;
     display: flex;
     flex-direction: column;

@@ -326,9 +326,12 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The pan / zoom surface: a pointer-driven application region (every step
+     and port inside it is a real button with its own keys). -->
 <div
   class="canvas"
+  role="application"
+  aria-label="Workflow canvas"
   bind:this={surface}
   onpointerdown={startPan}
   onpointermove={onMove}
@@ -381,7 +384,6 @@
       <!-- The card is a plain box: the node itself is the button inside it
            (select / move / delete), the output port a sibling button — never
            one control nested in another. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="node"
         class:invalid={invalidNodes.includes(n.id)}
@@ -389,11 +391,13 @@
         class:loop={n.kind === 'loop'}
         data-status={st}
         style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
-        onpointerdown={(e) => startNode(e, n)}
       >
+        <!-- The press that selects / starts a move belongs to the node's own
+             button (it fills the card), not to the box around it. -->
         <button
           type="button"
           class="node-main"
+          onpointerdown={(e) => startNode(e, n)}
           aria-label={`Edit ${nodeLabel(n)}`}
           aria-pressed={selectedId === n.id}
           aria-describedby={editable ? `${hintId}-node` : undefined}
@@ -550,7 +554,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     cursor: grab;
     user-select: none;
     transition: border-color var(--dur-fast) ease-out;
@@ -653,7 +657,7 @@
   }
   .node.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow);
+    box-shadow: 0 0 0 2px var(--accent-line), var(--glass-shadow);
   }
   /* Run status uses the shared run vocabulary (lib/status.ts): running is
      info-blue and pulses, succeeded is green — they used to share one green,
@@ -778,7 +782,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zbtn {
     display: grid;

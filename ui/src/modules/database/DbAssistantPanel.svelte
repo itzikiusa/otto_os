@@ -186,7 +186,7 @@
           <p class="sub warn">This is taking longer than usual — the agent may be stuck.
             You can Stop (top right) and ask again.</p>
         {/if}
-        <p class="sub">The agent's live shell appears here once it starts — you then
+        <p class="sub">The agent’s live shell appears here once it starts — you then
           keep the conversation going by typing directly in it.</p>
       </div>
     {/if}
@@ -361,7 +361,7 @@
     outline: none;
   }
   .da-ask textarea:focus {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .da-send {
     align-self: center;

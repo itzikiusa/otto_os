@@ -496,12 +496,10 @@
 
       {#if drawerOpen && sel}
         {#if !detailSheet}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
           <div
             class="splitter"
             role="separator"
-            tabindex="0"
             aria-orientation="vertical"
             aria-label="Resize details"
             title={RESIZE_TITLE}
@@ -640,7 +638,7 @@
   }
   .filter:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .filter-in {
     flex: 1;
@@ -713,8 +711,7 @@
   .kinds-mobile {
     position: absolute;
     top: 6px;
-    left: 10px;
-    right: 10px;
+    inset-inline: 10px;
     z-index: 2;
   }
   .kinds-mobile {

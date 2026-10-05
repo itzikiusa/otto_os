@@ -336,7 +336,7 @@
         {#if compareError}
           <p class="compare-err" role="alert">{compareError}</p>
         {:else if compareBefore == null || compareAfter == null}
-          <p class="dim" role="status">Loading both copies…</p>
+          <LoadState what="both copies" loading empty />
         {:else}
           <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
         {/if}
@@ -498,7 +498,7 @@
   }
   .variant.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .vdot {

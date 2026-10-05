@@ -40,7 +40,7 @@ test('pointer-opened nested sheets return focus to Browse after Escape',async ({
   const session=page.getByRole('dialog',{name:'New session',exact:true});
   const browse=session.getByRole('button',{name:'Browse…'}).first();
   await browse.click();
-  const picker=page.getByRole('dialog',{name:'Choose working directory'});
+  const picker=page.getByRole('dialog',{name:'Choose working folder'});
   await expect(picker).toBeVisible(); await expectFullyInViewport(page,picker);
   await page.keyboard.press('Escape');
   await expect(picker).toBeHidden(); await expect(browse).toBeFocused();

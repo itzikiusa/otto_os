@@ -1,8 +1,9 @@
 // Shared helpers for the Kubernetes console: the kinds rail, formatting of
-// ages / bytes / millicores, and health → CSS class (the environment pill is the shared
-// <EnvBadge>).
+// ages / bytes / millicores, and health → Badge tone (the environment pill is the
+// shared <EnvBadge>).
 
 import { now } from '../../lib/stores/now.svelte';
+import type { BadgeTone } from '../../lib/status';
 import type {
   K8sCapabilities,
   K8sCluster,
@@ -134,6 +135,13 @@ export function healthClass(h: K8sHealth | null | undefined, status?: string): s
   if (/crash|error|fail|backoff|evicted|degraded|notready|unknown/.test(s)) return 'health-bad';
   if (/pending|creating|init|progress|terminating|waiting/.test(s)) return 'health-progressing';
   return '';
+}
+
+/** Health → the shared Badge tone (status cells and the drawer header);
+ *  `info` is the in-progress state, which the Badge pulses (`live`). */
+export function healthTone(h: K8sHealth | null | undefined, status?: string): BadgeTone {
+  const c = healthClass(h, status);
+  return c === 'health-ok' ? 'ok' : c === 'health-bad' ? 'bad' : c === 'health-warn' ? 'warn' : c === 'health-progressing' ? 'info' : 'neutral';
 }
 
 export function clusterLabel(c: K8sCluster | null): string {

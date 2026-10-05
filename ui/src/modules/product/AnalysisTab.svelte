@@ -472,7 +472,7 @@
         {/each}
       </select>
       {#if loadingHistory}
-        <span class="dim-sm">Loading past runs…</span>
+        <span class="spinner" role="status" aria-label="Loading past runs" title="Loading past runs"></span>
       {:else if historyError}
         <span class="dim-sm hist-error" role="alert" title={historyError}><Icon name="warning" size={12} /> Couldn’t load past runs</span>
         <button class="btn small ghost" onclick={() => void loadHistory()}>Retry</button>
@@ -914,7 +914,7 @@
   }
   .focus-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .focus-input:disabled {
     opacity: 0.5;

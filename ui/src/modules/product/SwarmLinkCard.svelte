@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // Cross-link card: shows the swarm project created from this product story
   // (via Plan → Swarm), including task counts, run count, and accumulated cost.
   // Calls GET /product/stories/{sid}/swarm on mount and whenever the story id
@@ -61,7 +62,7 @@
 </script>
 
 {#if loading}
-  <div class="swarm-link-card dim">Loading swarm link…</div>
+  <div class="swarm-link-card"><Skeleton rows={1} height={20} label="the swarm link" /></div>
 {:else if error}
   <!-- silently swallow errors — the card is supplementary, not load-blocking -->
 {:else if hasData && link}

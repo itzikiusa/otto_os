@@ -418,16 +418,13 @@
                 <RequestBuilder bind:tab={builderTab} />
               </div>
               {#if !viewport.isPhone}
-                <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+                <!-- paneResizer makes it the focusable window splitter and wires the drag + double-click reset. -->
                 <div
                   class="resizer row"
                   role="separator"
-                  tabindex="0"
                   aria-label="Resize the request and response panes"
                   title={RESIZE_TITLE_VERTICAL}
-                  onmousedown={startBuilderResize}
-                  ondblclick={() => ui.resetApiBuilderHeight()}
-                  use:paneResizer={{ value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
+                  use:paneResizer={{ onDragStart: startBuilderResize, value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
                 ></div>
               {/if}
               <section class="resp-pane" aria-label="Response">
@@ -664,7 +661,7 @@
   }
   .resizer:hover,
   .resizer:focus-visible {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-line);
   }
 
   @media (max-width: 640px) {

@@ -85,7 +85,7 @@
       onclick={openRecent}
       aria-haspopup="menu"
       aria-label="Recent agent actions"
-      title="This window's recent agent actions"
+      title="This window’s recent agent actions"
       data-testid="agent-driving-recent"
     ><Icon name="clock" size={12} /><span class="adb-btn-label">Recent</span></button>
     <button

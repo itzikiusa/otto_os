@@ -254,7 +254,7 @@
           />
         {:else if routeLogs}
           {#if !logsAllowed}
-            <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account's CloudWatch (metrics) permission. Ask an administrator for a grant." />
+            <EmptyState variant="page" icon="lock" title="No access" body="Reading CloudWatch Logs needs the account’s CloudWatch (metrics) permission. Ask an administrator for a grant." />
           {:else}
             {#key `${account.id}/logs/${aws.accessRevision}`}
               <LogsView {account} onsignin={() => void signIn(account)} />

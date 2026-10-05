@@ -19,6 +19,7 @@
 
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // The right-hand pane of Insights → Reports: one report, rendered.
   //
   //   header   — period chip · date · generated-at, the one-line headline, and
@@ -218,7 +219,7 @@
           <button class="btn small" onclick={() => report.html_path && loadHtml(report.html_path)}>Retry</button>
         </div>
       {:else if html == null || htmlLoading}
-        <p class="dim r-loading" role="status">Loading the HTML report…</p>
+        <div class="r-loading"><Skeleton rows={6} height={28} label="the HTML report" /></div>
       {:else}
         <!-- Sandboxed: scripts run (charts), but never same-origin. -->
         <iframe
@@ -337,7 +338,7 @@
           <div class="md-body report-md" data-testid="report-rendered">{@html bodyHtml}</div>
         </section>
       {/if}
-      <p class="dim r-attrib"><Icon name="sparkle" size={12} /> Written by the <code>insights</code> skill from your agent transcripts. Figures are the agent's reading; open HTML for the charts.</p>
+      <p class="dim r-attrib"><Icon name="sparkle" size={12} /> Written by the <code>insights</code> skill from your agent transcripts. Figures are the agent’s reading; open HTML for the charts.</p>
     </div>
   {/if}
 </article>

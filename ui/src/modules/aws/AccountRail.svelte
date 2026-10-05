@@ -90,8 +90,7 @@
     {@const open = !collapsed[a.id]}
     {@const note = sessionNote(a)}
     <div class="acct" class:active={a.id === activeId}>
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="acct-row" oncontextmenu={(e) => menu(e, a)}>
+      <div class="acct-row" role="group" aria-label={a.name} oncontextmenu={(e) => menu(e, a)}>
         <button
           class="acct-toggle"
           aria-expanded={open}

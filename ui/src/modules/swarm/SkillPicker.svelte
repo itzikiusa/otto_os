@@ -3,6 +3,7 @@
   // (swarm config) and project skills. Loads the library on mount; renders the
   // current selection as removable chips with an autocompleting add input.
   import { swarm } from '../../lib/stores/swarm.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { untrack } from 'svelte';
@@ -67,10 +68,15 @@
     <button class="btn small" onclick={() => add(draft)} disabled={!draft.trim()}>Add</button>
   </div>
 
-  {#if swarm.librarySkillsLoading}
-    <p class="dim none" role="status">Loading skill suggestions…</p>
-  {:else if swarm.librarySkillsError}
-    <p class="none" role="alert">{swarm.librarySkillsError} <button class="btn small" onclick={() => void swarm.loadLibrarySkills(true)}>Retry</button></p>
+  {#if swarm.librarySkillsLoading || swarm.librarySkillsError}
+    <LoadState
+      what="skill suggestions"
+      variant="compact"
+      loading={swarm.librarySkillsLoading}
+      error={swarm.librarySkillsError}
+      empty
+      onretry={() => void swarm.loadLibrarySkills(true)}
+    />
   {:else if swarm.librarySkillsLoaded && swarm.librarySkills.length === 0}
     <p class="dim none">The skill library is empty. You can still add a known skill name.</p>
   {/if}

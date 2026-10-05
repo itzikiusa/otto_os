@@ -8,7 +8,6 @@
 <script lang="ts">
   import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
   import Badge from '../../lib/components/Badge.svelte';
-  import type { BadgeTone } from '../../lib/status';
   import { onTabKey } from '../../lib/tabKeys';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
@@ -31,7 +30,7 @@
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
-  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers, rowAge } from './k8s-util';
+  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthTone, kindDef, podContainers, rowAge } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
@@ -259,11 +258,7 @@
     return out;
   });
 
-  // Status → Badge tone (the same health buckets the table's dot uses).
-  const statusTone = $derived.by((): BadgeTone => {
-    const h = row ? healthClass(row.health, row.status) : '';
-    return h === 'health-ok' ? 'ok' : h === 'health-bad' ? 'bad' : h === 'health-warn' ? 'warn' : h === 'health-progressing' ? 'info' : 'neutral';
-  });
+  const statusTone = $derived(row ? healthTone(row.health, row.status) : 'neutral');
 
 </script>
 

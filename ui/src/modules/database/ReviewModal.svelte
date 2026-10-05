@@ -49,8 +49,8 @@
 </script>
 
 <Modal {title} width={640} onclose={close} dismissable={!running}>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="review-modal" onkeydown={onReviewKeydown}>
+  <!-- A keydown catcher (⌘↩ runs) around the dialog's own controls. -->
+  <div class="review-modal" role="presentation" onkeydown={onReviewKeydown}>
     <div class="review-body">
       {#if lines.length > 0}
         <div class="review-diff-wrap">
@@ -208,7 +208,7 @@
     overflow: auto;
   }
   .review-sql:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .review-sql:disabled {
     opacity: 0.6;

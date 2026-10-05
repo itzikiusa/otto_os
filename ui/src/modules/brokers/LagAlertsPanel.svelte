@@ -93,7 +93,7 @@
 <div class="lag-alerts">
   <h5>Lag Alerts</h5>
   <p class="muted small">
-    Alerts fire when the group's lag for a topic exceeds the threshold.
+    Alerts fire when the group’s lag for a topic exceeds the threshold.
     Breach status is evaluated each time metrics are refreshed and shown here.
   </p>
 

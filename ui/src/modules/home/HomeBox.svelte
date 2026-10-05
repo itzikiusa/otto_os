@@ -184,7 +184,7 @@
         },
       })),
       { separator: true },
-      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
+      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) }, // ui-guards: allow — instant, no confirm (the widget re-adds from Add widget)
     ]);
   }
 </script>
@@ -260,7 +260,7 @@
   }
   .hbox.resizing {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+    box-shadow: 0 0 0 2px var(--accent-line);
     user-select: none;
   }
   .hbox.drag-over {

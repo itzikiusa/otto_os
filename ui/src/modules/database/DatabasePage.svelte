@@ -1051,7 +1051,7 @@
         {:else}
           <!-- Not a dead end: hand the user the two ways forward. -->
           <div class="side-empty">
-            <div class="list-empty">Open a connection to browse its schema.</div>
+            <EmptyState icon="file" title="No connection open" body="Open a connection to browse its schema." />
             <div class="side-empty-actions">
               <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
               <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection} title={auth.isRoot ? undefined : 'Only the owner can create connections'}>New connection</button>
@@ -1278,12 +1278,10 @@
           {/key}
         </div>
         {#if database.assistOpen}
-          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End). -->
-          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ←/→, Home/End). -->
           <div
             class="assist-divider"
             role="separator"
-            tabindex="0"
             aria-orientation="vertical"
             aria-label="Resize assistant"
             title="Drag or use ←/→ to resize the assistant"
@@ -1315,8 +1313,9 @@
   {#if nodeVisible(node)}
     <!-- The whole header toggles (the caret button stays the keyboard/AT
          control); clicks on its own buttons — caret, row actions — don't. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+    <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
     <div
+      role="presentation"
       class="sec-head"
       onclick={(e) => {
         if (!(e.target as Element).closest('button')) toggleCollapse(node.sec.id);
@@ -1379,8 +1378,9 @@
 
 {#snippet connRow(c: Connection, depth: number)}
   {@const isDb = database.connections.some((x) => x.id === c.id)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={c.name}
     class="conn-row"
     class:active={database.selectedConnId === c.id}
     class:open={database.openConnIds.includes(c.id)}
@@ -1416,8 +1416,9 @@
 {/snippet}
 
 {#snippet clusterRow(cl: BrokerCluster, depth: number)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={cl.name}
     class="conn-row"
     class:dragging={draggedClusterId === cl.id}
     style="padding-inline-start: {depth * 14}px"
@@ -1508,7 +1509,7 @@
     </div>
   {:else if connFilter.trim()}
     {#if connMatches.length === 0 && clusterMatches.length === 0}
-      <div class="list-empty">No connections match “{connFilter.trim()}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No connections match “${connFilter.trim()}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (connFilter = '')} />
     {:else}
       {#each connMatches as c (c.id)}
         {@render connRow(c, 0)}
@@ -1525,8 +1526,9 @@
     {#if sections.length > 0}
       {#if !(filtering && !dragReveal && ungrouped.length + ungroupedClusters.length === 0)}
         <!-- Ungrouped doubles as the root / no-section drop target. -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          role="group"
+          aria-label="Ungrouped"
           class="sec-head plain"
           class:drop-target={draggedConnId || draggedClusterId || draggedSectionId}
           ondragover={(e) => {
@@ -1566,21 +1568,21 @@
       <Icon name="search" size={12} />
       <input
         class="list-search-input"
-        placeholder="Search saved…"
+        placeholder="Filter saved queries…"
         bind:value={savedSearch}
-        aria-label="Search saved queries"
+        aria-label="Filter saved queries"
       />
       {#if savedSearch}
-        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (savedSearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="saved queries" variant="compact" loading={database.savedQueriesLoading} error={database.savedQueriesError} empty={database.savedQueries.length === 0} onretry={() => database.loadSavedQueries()} />
     {#if database.savedQueries.length === 0 && (database.savedQueriesLoading || database.savedQueriesError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
     {:else if database.savedQueries.length === 0}
-      <div class="list-empty">No saved queries. Save one from the Query tab.</div>
+      <EmptyState icon="file" title="No saved queries" body="Save one from the Query tab." />
     {:else if filteredSaved.length === 0}
-      <div class="list-empty">No saved queries match “{savedSearch}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No saved queries match “${savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (savedSearch = '')} />
     {:else}
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
@@ -1622,21 +1624,21 @@
       <Icon name="search" size={12} />
       <input
         class="list-search-input"
-        placeholder="Search history…"
+        placeholder="Filter history…"
         bind:value={historySearch}
-        aria-label="Search query history"
+        aria-label="Filter query history"
       />
       {#if historySearch}
-        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
+        <button class="icon-btn" onclick={() => (historySearch = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
       {/if}
     </div>
     <LoadState what="query history" variant="compact" loading={database.historyLoading} error={database.historyError} empty={database.history.length === 0} onretry={() => database.loadHistory()} />
     {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
     {:else if database.history.length === 0}
-      <div class="list-empty">No query history yet.</div>
+      <EmptyState icon="clock" title="No query history yet" body="Queries you run show up here." />
     {:else if filteredHistory.length === 0}
-      <div class="list-empty">No history matches “{historySearch}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No history matches “${historySearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (historySearch = '')} />
     {:else}
       {#each filteredHistory as h (h.id)}
         <!-- Bounded previews: a history row can hold a whole pasted script. -->
@@ -1813,12 +1815,6 @@
     color: var(--text);
   }
   .conn-empty,
-  .list-empty {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    padding: 8px 6px;
-    line-height: 1.5;
-  }
   /* Schema-tab empty state with its way-forward buttons. */
   .side-empty {
     display: flex;
@@ -1851,7 +1847,7 @@
   }
   .list-search-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .rename-input {
     flex: 1;
@@ -1956,7 +1952,7 @@
   .sec-head.drop-target {
     outline: 1px dashed color-mix(in srgb, var(--accent-text) 55%, transparent);
     outline-offset: -1px;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .sec-name {
     font-size: var(--fs-xs);
@@ -2263,7 +2259,7 @@
   }
   .type-chip.on {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     background: var(--accent-soft);
   }
   /* Prod / guarded connection tabs get a tinted edge. */

@@ -439,7 +439,7 @@
       {#if shortCwd}<span class="sep sep-cwd">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
       {#if branch}<span class="sep sep-branch">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
       {#if model}<span class="sep sep-model">·</span><span class="mono model" title="Model">{model}</span>{/if}
-      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent's own status line">{termStatus}</span>{/if}
+      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent’s own status line">{termStatus}</span>{/if}
     </div>
   {/if}
 </div>

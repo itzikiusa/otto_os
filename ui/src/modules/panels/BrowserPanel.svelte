@@ -474,7 +474,6 @@
       {#each tabs as t (t.id)}
         <!-- The tab and its close are TWO real buttons (no control nested in a
              role=tab); ←/→/Home/End move between tabs (roving tabindex). -->
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="btab"
           class:active={t.id === activeId}
@@ -918,7 +917,7 @@
   }
   .quick-link:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
   }
   .ql-text {
     display: flex;
@@ -967,7 +966,7 @@
     background: var(--accent-soft);
     padding: 4px 6px;
     border-radius: var(--radius-s);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 1px solid var(--accent-line);
   }
   .popover-textarea {
     width: 100%;

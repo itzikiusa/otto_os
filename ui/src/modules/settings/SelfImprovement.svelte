@@ -347,7 +347,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>Otto periodically reviews this workspace's recent agent sessions and improves its memory and handling skills. <strong>Safe edits apply automatically; risky ones wait for your approval below.</strong></SectionIntro>
+  <SectionIntro>Otto periodically reviews this workspace’s recent agent sessions and improves its memory and handling skills. <strong>Safe edits apply automatically; risky ones wait for your approval below.</strong></SectionIntro>
 
   {#if !wsId}
     <!-- No workspace selected -->

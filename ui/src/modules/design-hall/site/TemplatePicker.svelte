@@ -101,7 +101,7 @@
   }
   .tpl:hover:not(:disabled) {
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     transform: translateY(-2px);
   }
   .tpl:focus-visible {

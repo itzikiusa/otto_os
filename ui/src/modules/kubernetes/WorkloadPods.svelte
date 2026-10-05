@@ -7,13 +7,14 @@
   import { untrack } from 'svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sRow } from '../../lib/api/types';
   import type { K8sDrawerTab } from '../../lib/stores/k8s.svelte';
-  import { formatAge, formatBytes, formatMillicores, healthClass, rowAge } from './k8s-util';
+  import { formatAge, formatBytes, formatMillicores, healthTone, rowAge } from './k8s-util';
 
   interface Props {
     clusterId: string;
@@ -103,13 +104,14 @@
         <span class="num">Age</span><span></span>
       </div>
       {#each pods as p (p.name)}
+        {@const tone = healthTone(p.health, p.status)}
         <!-- The row itself is not interactive: the pod name is the open control (a
              real <button>, Enter + Space), and Logs / Shell are its siblings —
              never nested inside another interactive element. -->
-        <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics}>
+        <div class="wp-row" class:metrics={hasMetrics}>
           <button type="button" class="wp-name mono ell" title="Open {p.name}" onclick={() => onopenpod(p.name)}>{p.name}</button>
           <span class="num mono">{p.ready ?? ''}</span>
-          <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
+          <span class="wp-status"><Badge {tone} dot live={tone === 'info'}><span class="ell">{p.status}</span></Badge></span>
           <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
           {#if hasMetrics}
             <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
@@ -175,7 +177,7 @@
   }
   .wp-row:hover,
   .wp-row:focus-within {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .wp-name {
     display: block;
@@ -219,42 +221,13 @@
   .wp-row:focus-within .acts {
     opacity: 1;
   }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  /* The status Badge shrinks to its grid column; the inner .ell ellipsizes. */
+  .wp-status {
     min-width: 0;
+    display: flex;
   }
-  .hdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .health-ok {
-    color: var(--success);
-  }
-  .health-ok .hdot {
-    background: var(--success);
-  }
-  .health-bad {
-    color: var(--danger);
-  }
-  .health-bad .hdot {
-    background: var(--status-exited);
-  }
-  .health-progressing {
-    color: var(--accent-text);
-  }
-  .health-progressing .hdot {
-    background: var(--accent);
-  }
-  .health-warn {
-    color: var(--warning);
-  }
-  .health-warn .hdot {
-    background: var(--status-warn);
+  .wp-status :global(.badge) {
+    max-width: 100%;
   }
   .dim {
     color: var(--text-dim);

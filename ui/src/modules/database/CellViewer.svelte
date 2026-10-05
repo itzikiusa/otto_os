@@ -92,7 +92,7 @@
 <style>
   /* The Raw/Formatted toggle's pressed state (the button itself is the shared .btn.small). */
   .cv-toggle.active {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     background: var(--accent-soft);
     color: var(--accent-text);
   }

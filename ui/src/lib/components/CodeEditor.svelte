@@ -61,10 +61,10 @@
       '.cm-content': { caretColor: 'var(--text)' },
       '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--text)' },
       '.cm-selectionBackground': {
-        backgroundColor: 'color-mix(in srgb, var(--accent) 30%, transparent)',
+        backgroundColor: 'var(--accent-line)',
       },
       '&.cm-focused .cm-selectionBackground': {
-        backgroundColor: 'color-mix(in srgb, var(--accent) 40%, transparent)',
+        backgroundColor: 'var(--accent-line)',
       },
       '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--text-dim) 8%, transparent)' },
       '.cm-gutters': { backgroundColor: 'transparent', color: 'var(--text-dim)', border: 'none' },

@@ -353,7 +353,7 @@
       },
       { separator: true },
       {
-        label: inStaged ? 'Discard' : 'Discard unstaged changes',
+        label: inStaged ? 'Discard…' : 'Discard unstaged changes…',
         icon: 'trash',
         danger: true,
         action: () => void discardPaths([c.path], c.path, section),
@@ -378,7 +378,7 @@
       },
       { separator: true },
       {
-        label: `Discard ${node.name}/ (${n})`,
+        label: `Discard ${node.name}/ (${n})…`,
         icon: 'trash',
         danger: true,
         action: () => void discardPaths(paths, `${node.path}/ (${n})`, section),
@@ -1203,7 +1203,7 @@
     padding-inline-end: 6px;
   }
   .wp-folder:hover {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    background: var(--accent-faint);
   }
   .wp-fold-name {
     display: flex;
@@ -1420,11 +1420,11 @@
       padding: 6px 6px;
     }
     .subject-input {
-      font-size: 16px;
+      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
       height: 38px;
     }
     .body-input {
-      font-size: 16px;
+      font-size: 16px; /* ui-guards: allow — 16px stops iOS zoom-on-focus */
       line-height: 1.45;
     }
     .wp-composer .btn.primary {

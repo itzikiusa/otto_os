@@ -111,6 +111,16 @@ export async function expectFullyInViewport(
   what = 'floating element',
 ): Promise<void> {
   await expect(locator).toBeVisible();
+  // Measure where the element SETTLES: an entrance animation (a drawer sliding
+  // in, a menu popping in) moves it through off-screen positions on the way.
+  await locator.evaluate((el) =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((a) => a.playState === 'running' && a.effect instanceof KeyframeEffect && a.effect.target instanceof Element && a.effect.target.contains(el))
+        .map((a) => a.finished.catch(() => undefined)),
+    ),
+  );
   const box = await locator.boundingBox();
   const viewport = page.viewportSize()!;
   expect(box, `${what} should render`).not.toBeNull();

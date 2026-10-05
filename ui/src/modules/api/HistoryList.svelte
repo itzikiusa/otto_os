@@ -195,7 +195,7 @@
     </div>
   {/if}
 
-  {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
+  {#if apiClient.historyLoadingId}<div class="state" role="status"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
 
   {#if apiClient.history.length === 0 && (apiClient.historyLoadError || !apiClient.historyLoaded)}
     <LoadState
@@ -289,7 +289,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search input {
     flex: 1;

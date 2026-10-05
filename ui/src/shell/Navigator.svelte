@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../lib/plural';
+  import Skeleton from '../lib/components/Skeleton.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
@@ -369,7 +370,7 @@
   }
 
   async function changeWorkspaceDir(w: WorkspaceWithRole): Promise<void> {
-    const root = await confirmer.promptText('Working directory (absolute path, ~ ok)', {
+    const root = await confirmer.promptText('Working folder (absolute path, ~ ok)', {
       title: `Change folder of “${w.name}”`,
       browseFolder: true,
       confirmLabel: 'Change',
@@ -727,17 +728,13 @@
 </script>
 
 <nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style="width:{ui.railWidth}px">
-  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <!-- The window splitter (paneResizer: focus, ←/→, Home/End, Enter, drag, double-click reset). -->
   <div
     class="rail-resize"
     role="separator"
-    tabindex="0"
     aria-label="Resize the navigator"
-    onmousedown={startResize}
-    ondblclick={() => ui.setRailWidth(240)}
     title={RESIZE_TITLE}
-    use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), text: pxWide }}
+    use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), onDragStart: startResize, text: pxWide }}
   ></div>
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
@@ -796,8 +793,8 @@
         <Icon name="search" size={12} />
         <input
           class="nav-search-input"
-          placeholder="Search all sessions…"
-          aria-label="Search all sessions"
+          placeholder="Filter sessions…"
+          aria-label="Filter sessions"
           bind:value={sessionQuery}
           onkeydown={(e) => {
             if (e.key !== 'Escape') return;
@@ -864,8 +861,10 @@
           ondragleave={secMovable ? () => { if (secDragOverId === sec.group.id) secDragOverId = null; } : undefined}
           ondrop={secMovable ? (e) => onSecDrop(e, sec.group.id) : undefined}
         >
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- Drag to reorder is the pointer path (presentation); the keyboard
+               path is the header menu’s "Move section up/down". -->
           <div
+            role="presentation"
             class="group-head-row"
             draggable={secMovable}
             ondragstart={secMovable ? (e) => onSecDragStart(e, sec.group.id) : undefined}
@@ -1093,8 +1092,9 @@
 
 {#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
   {@const fav = isFav(m.id)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Drag is the pointer path (presentation); the row’s ↑/↓ buttons and ⌥↑/⌥↓ reorder from the keyboard. -->
   <div
+    role="presentation"
     class="edit-row"
     class:hidden-row={isHidden(m.id)}
     class:dragging={dragId === m.id}
@@ -1443,7 +1443,7 @@
                 oncontextmenu={(e) => ctxMenu.show(e, [
                   ...(ws.canEditSession(s) ? [
                     { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
-                    { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
+                    { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
                   ] : []),
                   { separator: true },
                   { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
@@ -1474,7 +1474,7 @@
               <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
             </div>
           {:else if ws.archivedLoading}
-            <div class="arch-state" aria-live="polite">Loading archived sessions…</div>
+            <div class="arch-state"><Skeleton rows={2} height={22} label="archived sessions" /></div>
           {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
             <div class="arch-state">No archived sessions.</div>
           {:else if ws.archivedHasMore}
@@ -1494,8 +1494,10 @@
   {@const st = sessionState(s, status, needsYou, { stale: staleEvents })}
   {@const resumable = st.resumable}
   {@const dnd = rowsDraggable && reorderable}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A drag source/target for reordering sessions (presentation); the row's
+       own button and menu carry every action for the keyboard. -->
   <div
+    role="presentation"
     class="nested-row"
     class:needs-you={st.key === 'needs-you'}
     class:selected={agentSelMode && agentSel.has(s.id)}
@@ -1545,7 +1547,7 @@
               ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
-            { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
+            { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
           ] : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
@@ -1634,8 +1636,8 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      color-mix(in srgb, var(--accent) 40%, transparent) 45%,
-      color-mix(in srgb, var(--accent) 40%, transparent) 55%,
+      var(--accent-line) 45%,
+      var(--accent-line) 55%,
       transparent 100%
     );
   }

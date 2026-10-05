@@ -249,7 +249,7 @@
           </div>
         {/each}
       </div>
-      <p class="usage-note">Otto revokes a managed session's token when the session is deleted or replaced on restart. Older label-only tokens can be reviewed and revoked here.</p>
+      <p class="usage-note">Otto revokes a managed session’s token when the session is deleted or replaced on restart. Older label-only tokens can be reviewed and revoked here.</p>
     {/if}
   </LoadState>
 

@@ -58,7 +58,7 @@ for(const unavailable of ['removed','inert']) test(`nested sheet restores usable
   await page.addInitScript(()=>localStorage.setItem('otto_firstrun_dismissed','1'));
   await page.goto('/#/agents');await expect(page.locator('.shell')).toBeVisible();await page.keyboard.press('Meta+t');
   const parent=page.getByRole('dialog',{name:'New session',exact:true});const browse=parent.getByRole('button',{name:'Browse…'}).first();await browse.click();
-  const picker=page.getByRole('dialog',{name:'Choose working directory'});await expect(picker).toBeVisible();
+  const picker=page.getByRole('dialog',{name:'Choose working folder'});await expect(picker).toBeVisible();
   await browse.evaluate((el,unavailable)=>{if(unavailable==='removed')el.remove();else el.setAttribute('inert','');},unavailable);
   await page.keyboard.press('Escape');await expect(picker).toBeHidden();
   await expect.poll(()=>parent.evaluate(el=>el.contains(document.activeElement)&&!(document.activeElement as HTMLElement)?.closest('[inert]'))).toBe(true);

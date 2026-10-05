@@ -243,20 +243,20 @@ test('"Always delete" set in Settings: Delete from the tab menu, pane ⋯ and si
   // 1. Tab context menu → Delete.
   const kaka = await openTab(page, 'Kaka');
   await kaka.click({ button: 'right' });
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Kaka), { timeout: 15_000 }).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // 2. The session pane's ⋯ menu → Delete.
   await openTab(page, 'Nesta');
   await page.locator('button[title="More…"]').first().click();
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Nesta), { timeout: 15_000 }).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
   // 3. Sidebar row → Delete.
   await page.locator('.nav-item.nested-item', { hasText: 'Maldini' }).first().click({ button: 'right' });
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   await expect.poll(() => exists(idByTitle.Maldini), { timeout: 15_000 }).toBe(false);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
@@ -267,7 +267,7 @@ test('"Always delete" set in Settings: Delete from the tab menu, pane ⋯ and si
 test('default preference: an explicit Delete still asks, and Cancel keeps the session', async ({ page }) => {
   const tab = await openTab(page, 'Gattuso');
   await tab.click({ button: 'right' });
-  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete', exact: true }).click();
+  await page.locator('.ctx-menu').getByRole('menuitem', { name: 'Delete…', exact: true }).click();
   const dlg = page.getByRole('dialog', { name: 'Delete session' });
   await expect(dlg).toContainText('Delete “Gattuso”');
   await dlg.getByRole('button', { name: 'Cancel' }).click();

@@ -2276,7 +2276,7 @@
        tap height. */
     .rp-history-toggle { padding: 6px 0; min-height: 36px; }
     /* 16px input text prevents iOS Safari from auto-zooming on focus. */
-    .rp-context-input { font-size: 16px; }
+    .rp-context-input { font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
   }
   @media (max-width: 640px) {
     .rp-header .btn,

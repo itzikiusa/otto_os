@@ -6,6 +6,7 @@
   // When `files` is true, files are shown and can be picked directly (for
   // identity-file selection etc.); directories still navigate on click.
   import { untrack, onDestroy, onMount, tick } from 'svelte';
+  import Skeleton from './Skeleton.svelte';
   import Badge from './Badge.svelte';
   import { emptyHistory, recordFolder, historyTarget, folderCrumbs, emptyShortcuts, parseShortcuts, rememberFolder, toggleFavorite } from './folderNavigation';
   import { auth } from '../stores/auth.svelte';
@@ -237,7 +238,7 @@
     </aside>
   <div class="browser">
     {#if loading}
-      <div class="dim pad" role="status">Loading folders…</div>
+      <div class="pad"><Skeleton rows={4} height={28} label="folders" /></div>
     {:else if error}
       <div class="err pad" role="alert">
         <div>Could not open <code data-testid="attempted-folder">{lastAttempt.path || '~'}</code></div>
@@ -430,7 +431,7 @@
   }
   .file-row:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .use-file {
     font-size: var(--fs-xs);

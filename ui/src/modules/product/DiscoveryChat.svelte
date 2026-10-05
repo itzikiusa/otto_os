@@ -162,10 +162,8 @@
 <div class="discovery-chat">
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
   <div class="messages-area" bind:this={messagesEl}>
-    {#if loading && messages.length === 0}
-      <div class="muted center-hint">Loading messages…</div>
-    {:else if loadError && messages.length === 0}
-      <LoadState what="this chat" error={loadError} empty onretry={() => void loadChat(cid)} />
+    {#if (loading || loadError) && messages.length === 0}
+      <LoadState what="this chat" {loading} error={loadError} empty onretry={() => void loadChat(cid)} />
     {:else if messages.length === 0}
       <!-- EMPTY STATE — figure out what to build before writing anything. -->
       <div class="empty-wrap">
@@ -281,10 +279,6 @@
     font-size: var(--fs-m);
     font-style: italic;
   }
-  .center-hint {
-    text-align: center;
-    padding: 24px 0;
-  }
 
   /* ── Empty state ────────────────────────────────────────────────────────── */
   .empty-wrap {
@@ -325,7 +319,7 @@
   }
   .starter-chip:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .see-hint {
     margin: 6px 0 0;
@@ -356,7 +350,7 @@
   }
   .bubble-user {
     background: var(--accent-soft-strong);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-bottom-right-radius: 3px;
   }
   .bubble-agent {
@@ -406,7 +400,7 @@
   }
   :global(.bubble-body code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
     padding: 1px 4px;
@@ -461,7 +455,7 @@
     outline: none;
   }
   .msg-input:focus {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
     opacity: 0.55;

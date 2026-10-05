@@ -260,7 +260,7 @@
   <div class="picker-field">
     <label class="picker-label" for="ss-project">Project</label>
     {#if listLoading}
-      <div class="picker-loading">Loading projects…</div>
+      <Skeleton rows={1} height={27} label="projects" />
     {:else}
       <select id="ss-project" class="picker-select" bind:value={selectedProjectKey}>
         <option value="">All projects</option>
@@ -274,7 +274,7 @@
   <div class="picker-field">
     <label class="picker-label" for="ss-space">Space</label>
     {#if listLoading}
-      <div class="picker-loading">Loading spaces…</div>
+      <Skeleton rows={1} height={27} label="spaces" />
     {:else}
       <select id="ss-space" class="picker-select" bind:value={selectedSpaceKey}>
         <option value="">All spaces</option>
@@ -372,11 +372,6 @@
     padding: 4px 8px;
     box-sizing: border-box;
   }
-  .picker-loading {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 4px 0;
-  }
   .picker-results {
     margin-top: 4px;
     display: flex;
@@ -401,7 +396,7 @@
   }
   .issue-row:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
   }
   .issue-left {
     display: flex;
@@ -442,13 +437,13 @@
     font-weight: 600;
     color: var(--accent-text);
     background: transparent;
-    border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px dashed var(--accent-line);
     border-radius: var(--radius-s);
     cursor: pointer;
     transition: background var(--dur-fast) ease-out;
   }
   .load-more-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .load-more-btn:disabled {
     opacity: 0.55;

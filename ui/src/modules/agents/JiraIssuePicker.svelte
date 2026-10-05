@@ -170,7 +170,7 @@
   <div class="picker-field">
     <label class="picker-label" for="jp-project">Project</label>
     {#if projectsLoading}
-      <div class="picker-loading">Loading projects…</div>
+      <div class="picker-loading"><Skeleton rows={3} height={28} label="projects" /></div>
     {:else}
       <select id="jp-project" class="picker-select" bind:value={selectedProjectKey}>
         <option value="">All projects</option>
@@ -290,7 +290,7 @@
   }
   .issue-row:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
   }
   .issue-left {
     display: flex;

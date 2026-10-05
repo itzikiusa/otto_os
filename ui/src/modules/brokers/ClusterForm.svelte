@@ -328,8 +328,8 @@
     margin-top: 2px;
     padding: 12px;
     border-radius: var(--radius-m);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-faint);
   }
   .file-input-row {
     display: flex;
@@ -367,7 +367,7 @@
     .field select {
       width: 100%;
       box-sizing: border-box;
-      font-size: 16px; /* ≥16px prevents iOS Safari zoom-on-focus */
+      font-size: 16px; /* ui-guards: allow — ≥16px prevents iOS Safari zoom-on-focus */
       padding: 10px 10px;
     }
     .check {

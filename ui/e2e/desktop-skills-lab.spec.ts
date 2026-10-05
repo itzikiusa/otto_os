@@ -190,7 +190,7 @@ test('UI: Skills Lab tabs, skills browser, and preserved evaluator', async ({ pa
   await expect(page.locator('[data-testid="tpl-bundled"]')).toBeVisible();
   await expect(page.locator('[data-testid="tpl-import"]')).toBeVisible();
   await page.locator('[data-testid="new-skill-name"]').fill(SKILL);
-  await expect(page.getByText(`A skill named "${SKILL}" already exists`)).toBeVisible();
+  await expect(page.getByText(`A skill named “${SKILL}” already exists`)).toBeVisible();
   await expect(page.locator('[data-testid="create-skill"]')).toBeDisabled();
   await page.locator('[data-testid="new-skill-name"]').fill(`${SKILL}-two`);
   await page.locator('[data-testid="create-skill"]').click();

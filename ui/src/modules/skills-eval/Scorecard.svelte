@@ -3,6 +3,7 @@
   // signals that feed it) and, on demand, the assembled proof pack. Read-only —
   // it never mutates the eval; rating happens elsewhere.
   import type { EvalScore } from '../../lib/api/types';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
   import { kindLabel } from '../../lib/labels';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
@@ -145,7 +146,7 @@
       {#if expanded}
         <div class="pack">
           {#if loading}
-            <div class="pmsg" role="status">Loading proof pack…</div>
+            <Skeleton rows={2} height={24} label="the proof pack" />
           {:else if artifacts.length === 0}
             <div class="pmsg">No proof artifacts were captured for this iteration.</div>
           {:else}

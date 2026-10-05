@@ -43,7 +43,7 @@
       <span class="cf-stat mono"><span class="add">+{add}</span> <span class="del">−{del}</span></span>
       <span class="cf-show">{open ? 'Hide files' : 'Show files'}</span>
     </button>
-    <button class="btn small cf-diff" onclick={() => openDiff()} title="Open this response's changes in the side panel"><Icon name="split" size={12} /> Open diff</button>
+    <button class="btn small cf-diff" onclick={() => openDiff()} title="Open this response’s changes in the side panel"><Icon name="split" size={12} /> Open diff</button>
   </div>
   {#if open}
     <ul class="cf-list">

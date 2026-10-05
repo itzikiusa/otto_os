@@ -244,7 +244,7 @@ textarea.input {
 .input:focus {
   outline: none;
   border-color: var(--accent-text);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft-strong);
 }
 .input::placeholder {
   /* Full --text-dim: the old 75% mix was 2.9:1 on --surface-2. */
@@ -269,7 +269,7 @@ textarea.input {
 }
 .input-group:focus-within {
   border-color: var(--accent-text);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft-strong);
 }
 .input-group input {
   flex: 1;
@@ -321,7 +321,7 @@ textarea.input {
 }
 .chip.accent {
   color: var(--accent-text);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: var(--accent-line);
   background: var(--accent-soft);
 }
 .chip.warn {
@@ -353,7 +353,7 @@ button.chip:is(.ok, .bad, .warn, .info, .accent):hover:not(:disabled) {
 button.chip[aria-pressed='true'],
 button.chip[aria-selected='true'] {
   color: var(--accent-text);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: var(--accent-line);
   background: var(--accent-soft);
 }
 button.chip:disabled {
@@ -483,7 +483,7 @@ button.chip:focus-visible {
 }
 .pill-toggle.on {
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  border-color: var(--accent-line);
   color: var(--accent-text);
 }
 

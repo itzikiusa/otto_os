@@ -325,8 +325,8 @@
         <div class="attach-picker">
           <input
             class="attach-search"
-            placeholder="Search scenes to attach…"
-            aria-label="Search scenes to attach"
+            placeholder="Filter scenes to attach…"
+            aria-label="Filter scenes to attach"
             bind:value={attachQuery}
             spellcheck="false"
           />
@@ -527,7 +527,7 @@
   }
   .attach-search:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .candidates {
     list-style: none;

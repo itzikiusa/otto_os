@@ -150,7 +150,7 @@
     <div class="field">
       <label for="ns-file">Skill package</label>
       <input id="ns-file" class="input file" type="file" accept=".zip" onchange={(e) => (file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null)} />
-      <span class="hint">The skill's name comes from the package. Existing skills are never overwritten.</span>
+      <span class="hint">The skill’s name comes from the package. Existing skills are never overwritten.</span>
     </div>
   {:else}
     {#if template === 'bundled'}
@@ -229,7 +229,7 @@
   }
   .tpl.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .tpl-icon {
     display: inline-flex;

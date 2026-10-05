@@ -366,7 +366,7 @@
     inset-inline-start: 50%;
     transform: translateX(-50%);
     bottom: 84px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   :global([dir='rtl']) .jump {
     transform: translateX(50%);

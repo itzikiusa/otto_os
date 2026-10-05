@@ -570,7 +570,6 @@
   .stage {
     position: relative;
     margin-inline: auto;
-    transition: width var(--dur-enter) ease-out;
   }
   .frame {
     position: absolute;
@@ -581,7 +580,7 @@
     overflow: hidden;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   :global([dir='rtl']) .frame {
     transform-origin: 100% 0;
@@ -679,7 +678,7 @@
     height: 3px;
     border-radius: 2px;
     background: var(--accent-solid);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .toolbar {
     position: absolute;
@@ -690,7 +689,7 @@
     border-radius: var(--radius-m);
     background: var(--surface);
     border: 1px solid var(--border-strong);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     pointer-events: auto;
     white-space: nowrap;
   }
@@ -796,7 +795,7 @@
     font-weight: 600;
     line-height: 1.3;
     white-space: nowrap;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .os-edit :global(.os-edit-badge--warn) {
     background: var(--warning);

@@ -308,7 +308,6 @@
     {#if agents.length === 0}
       <EmptyState icon="user" title="No team yet" body="Recruit agents and they’ll appear here as a live org graph." />
     {:else}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="canvas"
         bind:this={wrapEl}
@@ -479,7 +478,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .node.act-working {
     border-color: color-mix(in srgb, var(--status-working) 55%, var(--border));
@@ -670,7 +669,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .task-list {
     overflow-y: auto;

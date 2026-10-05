@@ -190,7 +190,7 @@
         <ModelPicker
           provider={cfg.provider || defaultAgentProvider()}
           value={modelDraft}
-          hint="Model the report agent runs with (blank = the provider's default)."
+          hint="Model the report agent runs with (blank = the provider’s default)."
           onchange={onModelChange}
         />
       </div>

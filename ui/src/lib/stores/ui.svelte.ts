@@ -231,10 +231,11 @@ class UiStore {
   railWidth = $state(clampRail(Number(lsGet(LS.railWidth)) || 240));
   // DB dock: the DB Explorer docked beside the agent panes (side-by-side).
   dbDockOpen = $state(lsGet(LS.dbDock) === '1');
-  /** Agent-mode right panel: which Browser implementation to show. Defaults
-   *  to v1 (the pre-existing behaviour) until the two browsers converge. */
+  /** Agent-mode right panel: which Browser implementation to show (Settings →
+   *  Browser). The Browser module (v2) by default; a device that explicitly
+   *  chose the classic per-session panel (a stored 'v1') keeps it. */
   browserPanelVersion: BrowserPanelVersion = $state(
-    lsGet(LS.browserPanelVersion) === 'v2' ? 'v2' : 'v1',
+    lsGet(LS.browserPanelVersion) === 'v1' ? 'v1' : 'v2',
   );
   /** Browser page: the embedded agent dock (terminal + ask bar) is expanded. */
   browserAgentOpen = $state(lsGet(LS.browserAgentOpen) !== '0'); // default open

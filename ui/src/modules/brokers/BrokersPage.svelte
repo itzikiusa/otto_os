@@ -418,8 +418,9 @@
              sections at all it is just noise, so it only shows once a section
              exists (or while something is being dragged). -->
         {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          role="group"
+          aria-label="Ungrouped"
           class="sec-head plain"
           class:drop={draggedClusterId || draggedSectionId}
           ondragover={(e) => {
@@ -530,8 +531,9 @@
   {@const isOpen = !collapsed[node.sec.id]}
   <!-- The whole header toggles (the caret button stays the keyboard/AT
        control); clicks on its own buttons don't. -->
-  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
   <div
+    role="presentation"
     class="sec-head"
     onclick={(e) => {
       if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
@@ -581,8 +583,9 @@
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
   <!-- The row drags; its name button opens the cluster and ⋯ holds the same
        menu as right-click (no button nested inside a button). -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={c.name}
     class="cluster"
     class:sel={brokers.selectedId === c.id}
     style="padding-inline-start: {depth * 14 + 6}px"

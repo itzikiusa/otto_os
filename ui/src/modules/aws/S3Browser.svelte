@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -416,7 +417,7 @@
       toasts.success('Presigned link copied', `Expires ${fmtDate(r.expires_at)}`);
       if (r.warning) toasts.warn('Link may expire early', r.warning);
     } catch (e) {
-      toasts.error('Couldn’t create the link', awsErrorText(e instanceof Error ? e.message : String(e)));
+      toasts.error('Couldn’t create the link', awsErrorText(loadErrorText(e)));
     }
   }
 
@@ -574,7 +575,7 @@
     onrefresh={() => loadBuckets()}
   />
   {#if bucketsLoading && !buckets}
-    <div class="pad" role="status"><p class="load-note">Loading buckets…</p><Skeleton rows={6} /></div>
+    <div class="pad"><Skeleton rows={6} label="buckets" /></div>
   {:else if bucketsError}
     <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list buckets" body={awsErrorText(bucketsError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadBuckets()} />
   {:else if bucketsShown.length === 0}
@@ -633,8 +634,10 @@
     </nav>
   </ViewToolbar>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- The listing doubles as the upload drop zone. -->
   <div
+    role="group"
+    aria-label="Objects — drop files here to upload"
     class="split"
     class:with-drawer={preview !== null && !viewport.isMobile}
     class:drag-over={dragOver}
@@ -644,7 +647,7 @@
   >
     <div class="tbl-wrap" bind:this={objWrap} bind:clientHeight={tw.viewH} onscroll={tw.onscroll}>
       {#if objLoading && objects.length === 0 && prefixes.length === 0}
-        <div class="pad" role="status"><p class="load-note">Loading objects…</p><Skeleton rows={8} /></div>
+        <div class="pad"><Skeleton rows={8} label="objects" /></div>
       {:else if objError}
         <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list objects" body={awsErrorText(objError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadObjects()} />
       {:else if rowsShown.length === 0 && objFilter && (nextToken || search)}
@@ -860,7 +863,7 @@
   }
   .trow:hover,
   .trow:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
     outline: none;
   }
   .trow.sel {
@@ -956,7 +959,7 @@
     justify-content: center;
     gap: 8px;
     pointer-events: none;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     color: var(--accent-text);
     font-size: var(--fs-m);
     font-weight: 600;

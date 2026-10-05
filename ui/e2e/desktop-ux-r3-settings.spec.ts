@@ -55,12 +55,12 @@ test('installed PluginFrame loads, reloads, retries and explains unavailable pag
  await page.goto('/#/plugin/synthetic-plugin'); await expect(page.getByTestId('load-error')).toContainText('503'); status = 200;
  await page.getByRole('button', { name: 'Retry', exact: true }).click(); const frame = page.frameLocator('iframe[data-plugin]');
  await expect(frame.getByRole('heading')).toHaveText('Synthetic plugin dashboard'); await expect(frame.locator('#state')).toContainText('theme connected');
- await page.getByRole('button', { name: /^Reload Synthetic/ }).click(); await expect(frame.locator('#state')).toContainText('theme connected');
+ await page.getByRole('button', { name: /^Restart Synthetic/ }).click(); await expect(frame.locator('#state')).toContainText('theme connected');
  await frame.getByRole('button', { name: 'Open command palette' }).click();
  await expect(page.getByRole('combobox', { name: 'Ask Otto or search commands' }).or(page.getByRole('combobox', { name: 'Search commands', exact: true }))).toBeFocused();
  await page.keyboard.press('Escape');
  await page.screenshot({ path: '/tmp/otto-ux-r3-settings-plugin-frame.png' }); status = 404;
- await page.getByRole('button', { name: /^Reload Synthetic/ }).click(); await expect(page.getByText(/isn’t available/)).toBeVisible();
+ await page.getByRole('button', { name: /^Restart Synthetic/ }).click(); await expect(page.getByText(/isn’t available/)).toBeVisible();
  await expect(page.getByText(/disabled, uninstalled/)).toBeVisible(); await page.getByRole('button', { name: 'Open plugin settings' }).click(); await expect(page).toHaveURL(/settings\/plugins/);
 });
 

@@ -275,7 +275,7 @@
 {:else}
   <div class="topics">
     <div class="toolbar">
-      <input class="search" bind:value={query} placeholder="Search topics…" aria-label="Search topics" />
+      <input class="search" bind:value={query} placeholder="Filter topics…" aria-label="Filter topics" />
       <label class="chk"><input type="checkbox" bind:checked={showInternal} /> Show internal</label>
       {#if cleanupOptions.length}
         <select bind:value={cleanupFilter} title="Cleanup policy">
@@ -499,7 +499,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    background: var(--accent-faint);
   }
   .create input {
     padding: 6px 8px;

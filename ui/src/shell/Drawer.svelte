@@ -134,7 +134,7 @@
     display: flex;
     flex-direction: column;
     background: var(--bg);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: hidden;
   }
   .drawer.inline {

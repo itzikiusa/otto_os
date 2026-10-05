@@ -297,7 +297,7 @@
     stroke-width: 1.5;
   }
   .edge.review {
-    stroke: color-mix(in srgb, var(--accent) 60%, transparent);
+    stroke: var(--accent-line-strong);
     stroke-dasharray: 4 3;
   }
   .node {

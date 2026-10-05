@@ -126,12 +126,12 @@
     const cur = browserLive.renderer;
     ctxMenu.show(e, [
       {
-        label: "This Mac's web view",
+        label: "This Mac’s web view",
         icon: cur === 'native' ? 'check' : 'globe',
         action: () => browserLive.setPref('native'),
       },
       {
-        label: "Otto's Chromium (streams anywhere, agents can drive it)",
+        label: "Otto’s Chromium (streams anywhere, agents can drive it)",
         icon: cur === 'remote' ? 'check' : 'compass',
         action: () => browserLive.setPref('remote'),
       },
@@ -754,8 +754,8 @@
           onclick={chooseRenderer}
           aria-label="Live engine"
           title={browserLive.renderer === 'native'
-            ? "Live engine: this Mac's web view"
-            : "Live engine: Otto's Chromium"}
+            ? "Live engine: this Mac’s web view"
+            : "Live engine: Otto’s Chromium"}
         >
           <Icon name="chevronDown" size={14} />
         </button>

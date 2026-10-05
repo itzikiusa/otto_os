@@ -382,7 +382,7 @@
     text-decoration: none;
     font-family: var(--font-mono);
     font-size: var(--fs-s);
-    border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent);
+    border-bottom: 1px dotted var(--accent-line-strong);
     direction: ltr;
     unicode-bidi: isolate;
   }
@@ -393,7 +393,7 @@
   .md :global(a.file-ref.code code) {
     color: var(--accent-text);
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-soft-strong);
   }
   .md :global(a.file-ref:hover),
   .md :global(a.file-ref:hover code) {
@@ -482,7 +482,7 @@
     font-weight: 600;
   }
   .md :global(a[href^='http']:not(.ref-chip)) {
-    text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    text-decoration-color: var(--accent-line);
     text-underline-offset: 2px;
   }
   .md :global(a[href^='http']:not(.ref-chip)::after) {
