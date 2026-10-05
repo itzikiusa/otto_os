@@ -44,6 +44,11 @@
   let loading = $state(true);
   let loadError = $state('');
   let saving = $state(false);
+  let toggling = $state(false);
+  let toggleError = $state('');
+  // The switch updates the persisted config only; other fields remain drafts.
+  let savedConfig: K8sMonitorConfig | null = null;
+  let loadGeneration = 0;
   let running = $state(false);
   let errors = $state<Record<string, string>>({});
   let nsText = $state('');
@@ -58,18 +63,49 @@
   const NEEDS_NS = $derived(!cluster.default_namespace);
 
   async function load(): Promise<void> {
+    const generation = ++loadGeneration;
+    const id = cluster.id;
     loading = true;
+    toggling = false;
+    saving = false;
+    testBusy = false;
+    testOpen = false;
+    toggleError = '';
+    savedConfig = null;
+    cfg = null;
     try {
-      const r = await k8sApi.monitor(cluster.id);
+      const r = await k8sApi.monitor(id);
+      if (generation !== loadGeneration || id !== cluster.id) return;
+      savedConfig = structuredClone(r.config);
       cfg = r.config;
       status = r.status;
       presets = r.presets;
       nsText = r.config.namespaces.join(', ');
       loadError = '';
     } catch (e) {
-      loadError = loadErrorText(e);
+      if (generation === loadGeneration && id === cluster.id) loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (generation === loadGeneration && id === cluster.id) loading = false;
+    }
+  }
+
+  async function setEnabled(enabled: boolean): Promise<void> {
+    if (!savedConfig || !cfg || saving || toggling || testBusy) return;
+    const id = cluster.id;
+    const generation = loadGeneration;
+    toggling = true;
+    toggleError = '';
+    try {
+      const r = await k8sApi.monitorSave(id, { ...savedConfig, enabled });
+      if (id !== cluster.id || generation !== loadGeneration || !cfg) return;
+      savedConfig = structuredClone(r.config);
+      cfg.enabled = r.config.enabled;
+      status = r.status;
+      onsaved?.(r.config, r.status);
+    } catch (e) {
+      if (id === cluster.id && generation === loadGeneration) toggleError = loadErrorText(e);
+    } finally {
+      if (id === cluster.id && generation === loadGeneration) toggling = false;
     }
   }
 
@@ -116,25 +152,29 @@
   }
 
   async function save(): Promise<void> {
-    if (!cfg) return;
+    if (!cfg || toggling || testBusy) return;
     syncNamespaces();
     errors = validate(cfg);
     if (Object.keys(errors).length) {
       toasts.error('Check the form', Object.values(errors)[0]);
       return;
     }
+    const id = cluster.id;
+    const generation = loadGeneration;
     saving = true;
     try {
-      const r = await k8sApi.monitorSave(cluster.id, cfg);
+      const r = await k8sApi.monitorSave(id, cfg);
+      if (id !== cluster.id || generation !== loadGeneration) return;
+      savedConfig = structuredClone(r.config);
       cfg = r.config;
       status = r.status;
       nsText = r.config.namespaces.join(', ');
       toasts.success('Monitoring saved', r.config.enabled ? 'The collector picks the change up within 15 s.' : 'Monitoring is off for this cluster.');
       onsaved?.(r.config, r.status);
     } catch (e) {
-      toastError('Couldn’t save the monitor settings', e);
+      if (id === cluster.id && generation === loadGeneration) toastError('Couldn’t save the monitor settings', e);
     } finally {
-      saving = false;
+      if (id === cluster.id && generation === loadGeneration) saving = false;
     }
   }
 
@@ -152,6 +192,9 @@
   }
 
   async function runTest(): Promise<void> {
+    if (saving || toggling || testBusy) return;
+    const id = cluster.id;
+    const generation = loadGeneration;
     testBusy = true;
     testError = '';
     testResult = null;
@@ -159,15 +202,19 @@
       // Test what is on screen: save first so the daemon sees the same probes.
       if (cfg) {
         syncNamespaces();
-        const r = await k8sApi.monitorSave(cluster.id, cfg);
+        const r = await k8sApi.monitorSave(id, cfg);
+        if (id !== cluster.id || generation !== loadGeneration) return;
+        savedConfig = structuredClone(r.config);
         cfg = r.config;
         status = r.status;
+        onsaved?.(r.config, r.status);
       }
-      testResult = await k8sApi.monitorTest(cluster.id, { pod: testPod.trim() || undefined });
+      const result = await k8sApi.monitorTest(id, { pod: testPod.trim() || undefined });
+      if (id === cluster.id && generation === loadGeneration) testResult = result;
     } catch (e) {
-      testError = loadErrorText(e);
+      if (id === cluster.id && generation === loadGeneration) testError = loadErrorText(e);
     } finally {
-      testBusy = false;
+      if (id === cluster.id && generation === loadGeneration) testBusy = false;
     }
   }
 
@@ -257,18 +304,20 @@
         <!-- A <label> around the switch makes its text a click target too (a
              <button> is labelable); the switch keeps its own accessible name. -->
         <label class="toggle">
-          <span class="sw-slot" data-testid="k8s-monitor-enabled"><Switch checked={cfg.enabled} onchange={(v) => { if (cfg) cfg.enabled = v; }} label="Monitoring" disabled={!canEdit} /></span>
-          <span class="strong">Monitoring {cfg.enabled ? 'on' : 'off'}</span>
+          <span class="sw-slot" data-testid="k8s-monitor-enabled"><Switch checked={cfg.enabled} onchange={(v) => void setEnabled(v)} label="Monitoring" disabled={!canEdit || saving || toggling || testBusy} /></span>
+          <span class="strong">{toggling ? 'Updating monitoring…' : `Monitoring ${cfg.enabled ? 'on' : 'off'}`}</span>
         </label>
         <div class="row">
           {#if canEdit}
             <button class="btn small" onclick={() => void runNow()} disabled={running || saving} title="Run one collection cycle now"><Icon name="play" size={12} /> {running ? 'Running…' : 'Run once'}</button>
             <button class="btn small" onclick={() => { testOpen = true; testResult = null; testError = ''; }} disabled={!cfg.probes.length}><Icon name="zap" size={12} /> Test probes</button>
-            <button class="btn small primary" onclick={() => void save()} disabled={saving} data-testid="k8s-monitor-save">{saving ? 'Saving…' : 'Save'}</button>
+            <button class="btn small primary" onclick={() => void save()} disabled={saving || toggling || testBusy} data-testid="k8s-monitor-save">{saving ? 'Saving…' : 'Save'}</button>
           {/if}
         </div>
       </div>
       <div class="dim status">{collectorLine(status, cfg.enabled)}</div>
+      <div class="dim">The switch saves immediately. Use Save for changes to the settings below.</div>
+      {#if toggleError}<p class="error" role="alert">Couldn’t update monitoring: {toggleError} Try the switch again.</p>{/if}
       {#if rbacMessage(status?.metrics_server)}
         <div class="rbac"><strong>metrics-server denied.</strong> Ask your cluster admin for: <code>{rbacMessage(status?.metrics_server)}</code></div>
       {/if}
@@ -390,7 +439,7 @@
     <div class="test">
       <div class="row">
         <input dir="ltr" aria-label="Test pod name" class="input mono" placeholder="pod name (blank = first running pod)" bind:value={testPod} />
-        <button class="btn primary" onclick={() => void runTest()} disabled={testBusy}>{testBusy ? 'Testing…' : 'Run'}</button>
+        <button class="btn primary" onclick={() => void runTest()} disabled={testBusy || saving || toggling}>{testBusy ? 'Testing…' : 'Run'}</button>
       </div>
       <p class="dim help">Saves the current form, then fetches every probe from one pod and shows what parsed. Nothing is written to the metrics store.</p>
       {#if testError}<div class="error">{testError}</div>{/if}

@@ -629,7 +629,7 @@ class GitStore {
     while (this.fetchCount < 2 && this.fetchQueue.length) this.fetchQueue.shift()!();
   }
 
-  /** Shell lifetime, independent of which module is currently shown. */
+  /** Owned by the shell while its visible module is Git. */
   startAutoFetch(): void {
     if (this.autoFetchRunning) return;
     this.autoFetchRunning = true;

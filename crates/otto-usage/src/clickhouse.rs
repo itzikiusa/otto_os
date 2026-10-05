@@ -423,7 +423,10 @@ impl ClickHouse {
                 .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
         }
         let ok = resp.status().is_success();
-        let body = resp.text().await.unwrap_or_default();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| Error::Internal(format!("clickhouse response body: {e}")))?;
         if ok {
             Ok(body)
         } else {
@@ -467,7 +470,10 @@ impl ClickHouse {
         // DDL/ALTER are fast, but OPTIMIZE … FINAL can take many minutes — allow up
         // to 30m per statement (the engine also wraps OPTIMIZE in its own timeout).
         for stmt in split_statements(sql) {
-            self.post(stmt, "", Duration::from_secs(1800)).await?;
+            // Buffer the (normally empty) result until execution finishes. A
+            // streamed HTTP 200 can otherwise precede a server-side failure.
+            self.post(stmt, "wait_end_of_query=1", Duration::from_secs(1800))
+                .await?;
         }
         Ok(())
     }
@@ -993,6 +999,55 @@ fn parse_status_pid(text: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exec_rejects_truncated_success_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&request[..n]).into_owned()
+        });
+        let ch = ClickHouse {
+            bin: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            http: reqwest::Client::new(),
+            proc: Mutex::new(Proc {
+                child: None,
+                base_url: format!("http://{addr}"),
+                parked: false,
+                inflight: 0,
+                last_use: std::time::Instant::now(),
+            }),
+            life: tokio::sync::Mutex::new(()),
+            parks: Default::default(),
+            restarts: Default::default(),
+            queries: Default::default(),
+            rows_read: Default::default(),
+            wake_hook: std::sync::OnceLock::new(),
+        };
+        let result = ch
+            .exec("CREATE TABLE example (n UInt64) ENGINE=Memory")
+            .await;
+        let request = server.await.unwrap();
+        assert!(
+            result.is_err(),
+            "a lost response body must not acknowledge a migration step"
+        );
+        assert!(
+            request.contains("wait_end_of_query=1"),
+            "exec must wait for query completion before HTTP success"
+        );
+    }
 
     #[test]
     fn server_config_logs_to_console_not_files() {

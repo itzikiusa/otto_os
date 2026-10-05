@@ -192,7 +192,7 @@
     class="git-autofetch"
     class:on={git.autoFetchEnabled}
     title={git.autoFetchEnabled
-      ? `Auto-fetch on — selected repo every 30s, other open repos every ${git.autoFetchIntervalSec}s while this window is focused. Click to pause.`
+      ? `Auto-fetch on — selected repo every 30s, other open repos every ${git.autoFetchIntervalSec}s while Git is open and this window is focused. Click to pause.`
       : 'Auto-fetch paused. Click to fetch open repos automatically.'}
     aria-label="Toggle auto-fetch for open repositories"
     aria-pressed={git.autoFetchEnabled}
