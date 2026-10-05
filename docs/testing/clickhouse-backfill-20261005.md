@@ -14,8 +14,8 @@ is not evidence that ordinary telemetry insertion consumes two CPU cores.
 
 ## Evidence (installed build f1f503f1, 2026-10-05)
 
-All investigation was read-only. No production settings, retention policies or
-tables were changed. Times below are UTC (local time is UTC+3).
+The diagnosis below was read-only. Subsequent user-authorized cleanup and the
+implemented repair are recorded in [the follow-up report](telemetry-followup-20261005.md). Times below are UTC (local time is UTC+3).
 
 | Migration start | Failure | Error / next retry | Telemetry CPU peaks |
 |---|---|---|---|
@@ -68,15 +68,14 @@ CPU exceeds one core despite `max_threads=1` on the backfill query.
   Cost is repeated scans/aggregation of the historical partitions, plus writes
   and cleanup of discarded partial rollups; the success marker is never reached.
 
-## Repair direction — not implemented by this diagnostic change
+## Repair implemented in the follow-up branch
 
-Partition the backfill into smaller, bounded units and make successful progress
-restartable without duplicating aggregates. Preserve the 1 GiB embedded-server
-budget and existing raw data. Simply increasing the query-memory limit trades
-this failure for desktop memory pressure and does not bound future cardinality.
+The follow-up streams singleton aggregate values through bounded insert blocks
+into staging tables, then atomically exchanges each completed tier and installs
+its materialized view as a checkpoint. Retries preserve completed tiers. A
+protocol marker distinguishes these checkpoints from unsafe partial legacy
+migrations. The query limit remains 384 MiB and the embedded server limit 1 GiB.
 
-An isolated regression must reproduce high-cardinality label-map data under the
-production memory limits, verify raw-versus-rollup equivalence at time boundaries,
-and cover failure/restart without doubled counts. Measure CPU/RSS over the
-migration and its subsequent idle period before deploying the repair. Do not
-run destructive migration experiments against the user's database.
+Isolated tests cover high-cardinality data, interrupted inserts, lost acknowledgements,
+legacy partial views, restart counts and raw-versus-rollup equivalence. See the
+[follow-up measurements and limits](telemetry-followup-20261005.md).
