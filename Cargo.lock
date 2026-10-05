@@ -3745,6 +3745,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-agent-run"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "otto-core",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-telemetry",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-apiclient"
 version = "0.2.0"
 dependencies = [
@@ -4254,6 +4269,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-review"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "otto-agent-run",
+ "otto-context",
+ "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-product",
+ "otto-sessions",
+ "otto-skills",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-sandbox"
 version = "0.2.0"
 dependencies = [
@@ -4278,6 +4314,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-vision",
+ "otto-agent-run",
  "otto-apiclient",
  "otto-aws",
  "otto-brokers",
@@ -4301,6 +4338,7 @@ dependencies = [
  "otto-product",
  "otto-pty",
  "otto-rbac",
+ "otto-review",
  "otto-sandbox",
  "otto-server",
  "otto-sessions",
