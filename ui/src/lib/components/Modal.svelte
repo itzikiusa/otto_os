@@ -101,7 +101,16 @@
       els.find((el) => !el.closest('header') && !el.classList.contains('sheet-body')) ??
       els[0]
     )?.focus();
-    return restoreFocus;
+    // Only hand focus back if it is still ours to give: in the sheet (now
+    // detached) or dropped on <body>. A sheet whose action moved focus on
+    // purpose — New Session's launched terminal takes the keyboard on mount —
+    // must not have it yanked back to the trigger as the sheet unmounts.
+    const sheet = untrack(() => sheetEl);
+    return () =>
+      queueMicrotask(() => {
+        const active = document.activeElement;
+        if (!active || active === document.body || sheet?.contains(active)) restoreFocus();
+      });
   });
 
   function onKeydown(e: KeyboardEvent) {
