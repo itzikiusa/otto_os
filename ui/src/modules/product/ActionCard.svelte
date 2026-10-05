@@ -23,6 +23,7 @@
   import { api } from '../../lib/api/client';
   import DiffView from '../../lib/components/DiffView.svelte';
   import { renderMermaid } from '../canvas/mermaid';
+  import { ui } from '../../lib/stores/ui.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import type { DiscoveryAction, UpdateDraftReq } from './types';
 
@@ -50,17 +51,23 @@
 
   async function applyDraft(): Promise<void> {
     if (applying || action.type !== 'apply_draft') return;
+    // Claim the card BEFORE the confirmation: a double-click used to queue two
+    // applies (S18-15).
+    applying = true;
     const current = currentDraftBody;
-    // Snapshot BEFORE applying so Undo can restore the exact prior text.
-    priorDraftBody = current;
     if (current.trim()) {
       const ok = await confirmer.ask(
         'Replace the current draft? This overwrites your text.',
         { confirmLabel: 'Replace', danger: true },
       );
-      if (!ok) return;
+      if (!ok) {
+        applying = false;
+        return;
+      }
     }
-    applying = true;
+    // Snapshot the user's text once so Undo restores THEIR original, never
+    // the agent's text from an earlier apply.
+    if (priorDraftBody === null) priorDraftBody = current;
     try {
       await product.applyDiscoveryAction(cid, action);
       await product.loadDetail();
@@ -84,6 +91,7 @@
       };
       await product.updateDraft(req);
       applied = false;
+      priorDraftBody = null; // restored — a later apply snapshots afresh
       toasts.success('Draft restored');
     } catch (e) {
       toastError('Couldn’t undo', e);
@@ -188,12 +196,24 @@
   let canvasThumbErr = $state<string | null>(null);
   let thumbId = `actcard-mmd-${Math.random().toString(36).slice(2)}`;
 
+  // The SVG is agent-written: it renders in a sandbox="" iframe (no scripts,
+  // no same-origin), like MockupViewer — never inlined into the app origin,
+  // so a Mermaid/DOMPurify bypass can't reach the daemon (S18-08).
+  function svgDoc(svg: string): string {
+    return `<!doctype html><html><head><meta charset="utf-8">` +
+      `<style>html,body{margin:0;padding:0;background:transparent;overflow:hidden;}` +
+      `svg{max-width:100%;max-height:146px;height:auto;display:block;margin:0 auto;}</style></head>` +
+      `<body>${svg}</body></html>`;
+  }
+
   $effect(() => {
     if (action.type !== 'create_canvas') return;
     const src = action.mermaid?.trim();
     if (!src) return;
+    // Re-render on a theme flip — the light palette is unreadable on dark.
+    const dark = ui.resolvedScheme === 'dark';
     let alive = true;
-    void renderMermaid(thumbId, src).then((r) => {
+    void renderMermaid(thumbId, src, { dark }).then((r) => {
       if (!alive) return;
       if (r.svg) canvasSvg = r.svg;
       else canvasThumbErr = r.error ?? 'Diagram error';
@@ -355,7 +375,15 @@
       {#if action.mermaid}
         <div class="card-body">
           {#if canvasSvg}
-            <div class="mmd-thumb">{@html canvasSvg}</div>
+            <div class="mmd-thumb">
+              <iframe
+                class="mmd-frame"
+                title="Diagram preview"
+                sandbox=""
+                referrerpolicy="no-referrer"
+                srcdoc={svgDoc(canvasSvg)}
+              ></iframe>
+            </div>
           {:else if canvasThumbErr}
             <div class="mmd-err">Diagram preview unavailable</div>
           {:else}
@@ -512,9 +540,12 @@
     display: flex;
     justify-content: center;
   }
-  .mmd-thumb :global(svg) {
-    max-width: 100%;
-    height: auto;
+  .mmd-frame {
+    inline-size: 100%;
+    block-size: 146px;
+    border: 0;
+    display: block;
+    background: transparent;
   }
   .mmd-err,
   .mmd-loading {

@@ -38,6 +38,7 @@
   } from '../../lib/api/vault';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { kindLabel, runStateLabel, severityLabel } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import type { BadgeTone } from '../../lib/status';
@@ -331,6 +332,11 @@
   async function cancel(): Promise<void> {
     const r = vault.docsRun;
     if (!r || cancelling) return;
+    // Stopping a multi-agent run throws away its in-progress work — ask first.
+    const ok = await confirmer.ask('Stop this documentation run? Agents still working stop now and their unfinished work is discarded.', {
+      title: 'Stop the run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true,
+    });
+    if (!ok || vault.docsRun?.id !== r.id) return;
     cancelling = true;
     try {
       await cancelDocsRun(r.id);
@@ -376,6 +382,10 @@
 
   async function deleteRun(r: VaultDocsRun): Promise<void> {
     if (deleting) return;
+    const ok = await confirmer.ask('Delete this run from the history? Its log and findings go with it; documents it already wrote are kept.', {
+      title: 'Delete the run?', confirmLabel: 'Delete', danger: true,
+    });
+    if (!ok || deleting) return;
     deleting = r.id;
     try {
       await deleteDocsRun(r.id);

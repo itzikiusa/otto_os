@@ -11700,6 +11700,9 @@ export interface WorkbenchUpdateReq {
   /** Opaque per-window id echoed in the WS event so a window can ignore its
    *  own writes. */
   client_id?: string;
+  /** Precondition for a `content` write: the `content_hash` the buffer was
+   *  based on. Mismatch → 409 (another window saved). Omit to overwrite. */
+  if_hash?: string;
 }
 
 export interface WorkbenchRevision {
@@ -11764,6 +11767,8 @@ export interface WorkbenchDocChangedEvent {
   doc_id: Id;
   action: 'created' | 'updated' | 'trashed' | 'restored' | 'deleted';
   rev: number;
+  /** Content hash after the change (a coalesced autosave keeps `rev`). */
+  content_hash: string;
   updated_at: string;
   client_id?: string | null;
 }

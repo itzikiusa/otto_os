@@ -1150,6 +1150,7 @@ mod tests {
                 doc_id: "d1".into(),
                 action: "updated".into(),
                 rev: 1,
+                content_hash: "h".into(),
                 updated_at: "t".into(),
                 client_id: None,
             },

@@ -361,7 +361,6 @@ const INTERVAL_ALLOW = new Set([
   'src/modules/vault/KnowledgeMetadata.svelte',
   'src/modules/agents/conversation/ConversationView.svelte', // touch keep-alive
   'src/modules/share/SharePage.svelte', // 60 s token refresh
-  'src/modules/canvas/PresentMode.svelte',
   'src/modules/browser/live/RemoteLiveView.svelte', // fps meter
   'src/modules/database/ResultsGrid.svelte', // running-query elapsed clock
   'src/modules/rooms/RoomAnnotations.svelte', // local expiry clock; effect cleanup clears it

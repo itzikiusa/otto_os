@@ -12,6 +12,21 @@ let worker: Worker | null = null;
 let seq = 0;
 const pending = new Map<number, { resolve: (html: string) => void; reject: (e: Error) => void }>();
 
+/** A render that hasn't answered by then is treated as a hung worker: base
+ *  budget plus 2 s per MB of note (S18-26). */
+export function renderTimeoutMs(bytes: number): number {
+  return 10_000 + Math.ceil(bytes / 1_048_576) * 2_000;
+}
+
+/** Kill the worker and fail every waiter (each falls back to the main-thread
+ *  render); the next call starts a fresh worker. */
+function resetWorker(reason: string): void {
+  for (const p of pending.values()) p.reject(new Error(reason));
+  pending.clear();
+  worker?.terminate();
+  worker = null;
+}
+
 function getWorker(): Worker | null {
   if (worker) return worker;
   if (typeof Worker === 'undefined') return null;
@@ -27,14 +42,9 @@ function getWorker(): Worker | null {
     if ('html' in e.data) p.resolve(sanitizeHtml(e.data.html));
     else p.reject(new Error(e.data.error));
   };
-  worker.onerror = () => {
-    // A worker that failed to load: fail every waiter (callers fall back to
-    // the main-thread render) and let the next call try a fresh one.
-    for (const p of pending.values()) p.reject(new Error('note render worker failed'));
-    pending.clear();
-    worker?.terminate();
-    worker = null;
-  };
+  // A worker that failed to load: fail every waiter (callers fall back to
+  // the main-thread render) and let the next call try a fresh one.
+  worker.onerror = () => resetWorker('note render worker failed');
   return worker;
 }
 
@@ -48,7 +58,15 @@ export function renderNoteOffThread(raw: string, outgoing: VaultOutgoingLink[]):
   if (!w) return Promise.resolve(fallback());
   const id = ++seq;
   return new Promise<string>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    // A hung worker used to leave the note on its plain preview forever (and
+    // the caller's in-flight key pinned): time out, recycle, fall back.
+    const timer = setTimeout(() => {
+      if (pending.has(id)) resetWorker('note render worker timed out');
+    }, renderTimeoutMs(raw.length));
+    pending.set(id, {
+      resolve: (html) => { clearTimeout(timer); resolve(html); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
     w.postMessage({ id, raw, outgoing: plainLinks(outgoing) } satisfies NoteRenderIn);
   }).catch(() => fallback());
 }

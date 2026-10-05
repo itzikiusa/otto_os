@@ -772,6 +772,10 @@ pub enum Event {
         /// `created` | `updated` | `trashed` | `restored` | `deleted`.
         action: String,
         rev: i64,
+        /// The doc's content hash after the change — a coalesced autosave
+        /// keeps `rev`, so `rev` alone can't tell a window its copy is stale.
+        #[serde(default)]
+        content_hash: String,
         updated_at: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
@@ -989,6 +993,7 @@ mod tests {
                 doc_id: "d".into(),
                 action: "updated".into(),
                 rev: 2,
+                content_hash: "h".into(),
                 updated_at: "2026-10-03T00:00:00Z".into(),
                 client_id: None,
             },

@@ -23,6 +23,7 @@ import {
 } from '../../lib/api/workbench';
 import type { WorkbenchDoc, WorkbenchDocFull, WorkbenchUpdateReq } from '../../lib/api/types';
 import { loadErrorText } from '../../lib/loadError';
+import { ApiError } from '../../lib/api/client';
 import { onLive, appLive } from '../../lib/live';
 
 /** This window's id: echoed back in `workbench_doc_changed` so we can ignore
@@ -129,6 +130,8 @@ class WorkbenchStore {
   /** A save is in flight for this id; `rerun` → save again after it. */
   private inflight = new Set<string>();
   private rerun = new Map<string, boolean>();
+  /** Ids whose next content save skips the `if_hash` precondition ("Keep mine"). */
+  private forceNext = new Set<string>();
   private unlisten: (() => void) | null = null;
   private listTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -229,8 +232,11 @@ class WorkbenchStore {
       return;
     }
     const rev = Number(ev.rev ?? 0);
-    if (o.doc && rev <= o.doc.rev) return;
-    if (this.isDirty(id)) o.remoteChanged = true;
+    // A coalesced autosave in another window keeps `rev` — compare the content
+    // hash when the event carries one, `rev` only as the fallback.
+    const hash = typeof ev.content_hash === 'string' ? ev.content_hash : '';
+    if (o.doc && (rev < o.doc.rev || (hash ? hash === o.doc.content_hash : rev === o.doc.rev))) return;
+    if (this.isDirty(id)) this.markRemoteChanged(id);
     else void this.reload(id);
   }
 
@@ -384,12 +390,29 @@ class WorkbenchStore {
   }
 
   /** "Keep mine": dismiss the banner and save the local buffer over it (the
-   *  other window's version stays in the history). */
+   *  other window's version stays in the history) — the one save that goes
+   *  out WITHOUT the `if_hash` precondition. */
   keepMine(id: string): void {
     const o = this.open[id];
     if (!o) return;
     o.remoteChanged = false;
+    this.forceNext.add(id);
     void this.save(id, true);
+  }
+
+  /** Another window changed this doc while ours is dirty: show the banner and
+   *  STOP autosaving until the user picks Reload or Keep mine — the pending
+   *  timer (and every later keystroke) used to overwrite the other window's
+   *  save before the choice was made (S18-06). */
+  private markRemoteChanged(id: string): void {
+    const o = this.open[id];
+    if (!o) return;
+    o.remoteChanged = true;
+    const t = this.timers.get(id);
+    if (t) {
+      clearTimeout(t);
+      this.timers.delete(id);
+    }
   }
 
   // ── editing + autosave ─────────────────────────────────────────────────────
@@ -463,8 +486,12 @@ class WorkbenchStore {
       this.rerun.set(id, checkpoint || (this.rerun.get(id) ?? false));
       return;
     }
+    // Held while the remote-change banner is up (the buffer stays backed up
+    // locally); only Reload / Keep mine resolves it.
+    if (o.remoteChanged) return;
     const content = o.buffer;
     if (content === o.saved && !checkpoint) return;
+    const force = this.forceNext.has(id);
     // A checkpoint of unchanged content still goes out: the daemon SEALS the
     // open autosave burst (its revision becomes a checkpoint), so the next
     // edit starts a new revision instead of folding into this one.
@@ -473,7 +500,11 @@ class WorkbenchStore {
     try {
       const body: WorkbenchUpdateReq = { content, client_id: WB_CLIENT_ID };
       if (checkpoint) body.checkpoint = true;
+      // Optimistic concurrency: the daemon 409s if another window saved since
+      // our buffer's base (even a coalesced autosave that kept `rev`).
+      if (!force) body.if_hash = o.doc.content_hash;
       const meta = await updateWorkbenchDoc(ws, id, body);
+      this.forceNext.delete(id);
       const cur = this.open[id];
       if (cur && cur.doc) {
         cur.saved = content;
@@ -486,7 +517,11 @@ class WorkbenchStore {
       if (this.ws === ws) this.upsertMeta(meta);
     } catch (e) {
       const cur = this.open[id];
-      if (cur) cur.saveError = loadErrorText(e);
+      if (cur && e instanceof ApiError && e.status === 409 && !force) {
+        // Someone else's save won the race: ask (banner) instead of erroring.
+        this.markRemoteChanged(id);
+        this.rerun.delete(id);
+      } else if (cur) cur.saveError = loadErrorText(e);
     } finally {
       this.inflight.delete(id);
       const cur = this.open[id];
