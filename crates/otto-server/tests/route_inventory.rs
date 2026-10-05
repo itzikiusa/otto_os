@@ -66,6 +66,190 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The source of every `*.rs` file under `crates/` that the DAEMON compiles,
+/// with test-only code removed: `#[cfg(test)]` items are cut out of each file
+/// and the files of out-of-line `#[cfg(test)] mod x;` modules are dropped.
+///
+/// Unit tests stand up mock upstream servers with real `.route(…)` calls (the
+/// Telegram Bot API, Jira/Confluence REST fakes, …); those are not daemon
+/// routes and must not be held to the api.md contract or the RBAC table.
+/// Shared with `policy_coverage` so both guards see the same route set.
+pub(crate) fn daemon_sources(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    rust_files(&root.join("crates"), &mut files);
+    let mut sources = Vec::new();
+    let mut test_only: Vec<PathBuf> = Vec::new();
+    for f in files {
+        let src = std::fs::read_to_string(&f).unwrap_or_default();
+        let (kept, out_of_line) = strip_cfg_test_items(&src);
+        let dir = f.parent().unwrap_or(Path::new("")).to_path_buf();
+        // `mod x;` resolves next to `lib.rs`/`main.rs`/`mod.rs`, else in the
+        // directory named after the declaring file.
+        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let mod_dir = if matches!(stem, "lib" | "main" | "mod") {
+            dir.clone()
+        } else {
+            dir.join(stem)
+        };
+        for m in out_of_line {
+            match m {
+                TestModule::Path(p) => test_only.push(dir.join(p)),
+                TestModule::Name(n) => {
+                    test_only.push(mod_dir.join(format!("{n}.rs")));
+                    test_only.push(mod_dir.join(n));
+                }
+            }
+        }
+        sources.push((f, kept));
+    }
+    sources.retain(|(f, _)| !test_only.iter().any(|t| f == t || f.starts_with(t)));
+    sources
+}
+
+/// An out-of-line `#[cfg(test)]` module: `#[path = "…"]` or a plain name.
+enum TestModule {
+    Path(String),
+    Name(String),
+}
+
+/// Remove every `#[cfg(test)]` item from `src` (its attribute lines plus the
+/// item through its closing `}` or `;`) and report out-of-line test modules.
+/// Attributes are expected one per line, as rustfmt writes them.
+fn strip_cfg_test_items(src: &str) -> (String, Vec<TestModule>) {
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let mut keep = vec![true; lines.len()];
+    let mut modules = Vec::new();
+    let is_attr = |l: &str| l.trim_start().starts_with("#[");
+    let mut i = 0;
+    while i < lines.len() {
+        if !keep[i] || lines[i].trim() != "#[cfg(test)]" {
+            i += 1;
+            continue;
+        }
+        // The attribute block around `#[cfg(test)]`.
+        let mut first = i;
+        while first > 0 && is_attr(lines[first - 1]) {
+            first -= 1;
+        }
+        let mut item = i + 1;
+        while item < lines.len() && is_attr(lines[item]) {
+            item += 1;
+        }
+        let path_attr = lines[first..item].iter().find_map(|l| {
+            let l = l.trim();
+            let rest = l.strip_prefix("#[path = \"")?;
+            Some(rest.strip_suffix("\"]")?.to_string())
+        });
+        // The item ends at the first `;` or at the `}` matching its first `{`.
+        let body: String = lines[item..].concat();
+        let (end, braced) = item_end(&body);
+        let header = body[..end].trim();
+        if !braced {
+            if let Some(p) = path_attr {
+                modules.push(TestModule::Path(p));
+            } else if let Some(name) = header.split_whitespace().skip_while(|w| *w != "mod").nth(1)
+            {
+                modules.push(TestModule::Name(name.trim_end_matches(';').to_string()));
+            }
+        }
+        // Drop whole lines from the attribute block to the item's last line.
+        let mut consumed = 0;
+        let mut last = item;
+        while last < lines.len() {
+            consumed += lines[last].len();
+            if consumed > end {
+                break;
+            }
+            last += 1;
+        }
+        for k in keep
+            .iter_mut()
+            .take((last + 1).min(lines.len()))
+            .skip(first)
+        {
+            *k = false;
+        }
+        i = last + 1;
+    }
+    let kept = lines
+        .iter()
+        .zip(&keep)
+        .filter(|(_, k)| **k)
+        .map(|(l, _)| *l)
+        .collect();
+    (kept, modules)
+}
+
+/// Byte offset of the char that ends the item starting `body` (its first
+/// top-level `;`, or the `}` closing its first `{`), and whether it was braced.
+/// String, raw-string and char literals and comments are skipped, so a route
+/// template like `"/x/{id}"` never unbalances the count.
+fn item_end(body: &str) -> (usize, bool) {
+    let b = body.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'r' if matches!(b.get(i + 1), Some(b'#') | Some(b'"'))
+                && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')) =>
+            {
+                let mut j = i + 1;
+                while b.get(j) == Some(&b'#') {
+                    j += 1;
+                }
+                if b.get(j) == Some(&b'"') {
+                    let hashes = j - i - 1;
+                    let close = format!("\"{}", "#".repeat(hashes));
+                    match body[j + 1..].find(&close) {
+                        Some(off) => i = j + 1 + off + close.len() - 1,
+                        None => return (b.len().saturating_sub(1), depth > 0),
+                    }
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            // A char literal (`'{'`, `'\''`), not a lifetime (`'a`).
+            b'\'' if b.get(i + 2) == Some(&b'\'') => i += 2,
+            b'\'' if b.get(i + 1) == Some(&b'\\') => {
+                i += 2;
+                while i < b.len() && b[i] != b'\'' {
+                    i += 1;
+                }
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return (i, true);
+                }
+            }
+            b';' if depth == 0 => return (i, false),
+            _ => {}
+        }
+        i += 1;
+    }
+    (b.len().saturating_sub(1), depth > 0)
+}
+
 const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "WS", "ANY"];
 
 /// Normalise a route path for comparison (see the module docs). Returns every
@@ -288,15 +472,12 @@ fn extract_routes(src: &str) -> Vec<(String, BTreeSet<String>)> {
 /// Collect the canonical registered `(METHOD, PATH)` set from the crates
 /// source tree, keyed back to the literal path for readable failures.
 fn registered_routes(root: &Path) -> BTreeMap<(String, String), String> {
-    let mut files = Vec::new();
-    rust_files(&root.join("crates"), &mut files);
     let mut set = BTreeMap::new();
-    for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
+    for (f, src) in &daemon_sources(root) {
         if !src.contains(".route(") {
             continue;
         }
-        for (p, methods) in extract_routes(&src) {
+        for (p, methods) in extract_routes(src) {
             // Test-only seed routes (gated by OTTO_E2E, policy-exempt) are not part
             // of the public API contract and are intentionally absent from api.md.
             if p.contains("__e2e") {
@@ -437,6 +618,49 @@ fn route_extractor_reads_method_routers() {
             ("/p/{slug}/{*rest}".to_string(), m(&["ANY"])),
         ]
     );
+}
+
+#[test]
+fn cfg_test_items_are_stripped_before_route_extraction() {
+    // Unit-test mock servers (Telegram/Jira fakes) are not daemon routes; a
+    // route template's `{` inside a string or char literal must not end the
+    // test module early, and code after the module must survive.
+    let src = r##"
+pub fn router() -> Router {
+    Router::new().route("/real/{id}", get(h::read))
+}
+
+#[cfg(test)]
+#[path = "x_tests.rs"]
+mod x_tests;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod inline {
+    fn mock() {
+        let _ = Router::new().route("/botTOKEN/sendMessage", post(ok));
+        let _ = ('{', "{ unbalanced", r#"} also"#); // } comment
+        let _ = Router::new().route("/rest/api/3/search/jql", get(ok));
+    }
+}
+
+pub fn after() -> Router {
+    Router::new().route("/after", post(h::write))
+}
+"##;
+    let (kept, modules) = strip_cfg_test_items(src);
+    let paths: Vec<String> = extract_routes(&kept).into_iter().map(|r| r.0).collect();
+    assert_eq!(paths, vec!["/real/{id}".to_string(), "/after".to_string()]);
+    let names: Vec<String> = modules
+        .into_iter()
+        .map(|m| match m {
+            TestModule::Path(p) => format!("path:{p}"),
+            TestModule::Name(n) => format!("name:{n}"),
+        })
+        .collect();
+    assert_eq!(names, vec!["path:x_tests.rs", "name:tests"]);
 }
 
 #[test]

@@ -9,10 +9,11 @@
 //! gap is caught in CI rather than silently 403-ing in production.
 //!
 //! ## Route enumeration
-//! Reuses the same file-scanner from `route_inventory.rs`: walks every `*.rs`
-//! source file under `crates/` (skipping `target/` and `tests/` dirs, just as
-//! that test does) and extracts the first string argument from each `.route(`
-//! call.  The scanner correctly handles both single-line and multi-line
+//! Reuses the source scanner from `route_inventory.rs`
+//! (`daemon_sources`): every `*.rs` file under `crates/` minus `target/` and
+//! `tests/` dirs and minus `#[cfg(test)]` code (unit tests mount mock upstream
+//! servers — Telegram, Jira, Confluence — whose routes are not daemon routes),
+//! then extracts the first string argument from each `.route(` call.  The scanner correctly handles both single-line and multi-line
 //! `.route(` calls.
 //!
 //! ## Methods tested
@@ -33,8 +34,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-// Re-implement the same helpers as route_inventory.rs so this file compiles
-// independently (Rust integration-test files each compile as a separate crate).
+// `repo_root` mirrors route_inventory.rs; the source walk is shared with it
+// (both suites are modules of the single `it` test binary).
 
 fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -44,25 +45,6 @@ fn repo_root() -> PathBuf {
         }
         if !dir.pop() {
             panic!("could not locate repo root from CARGO_MANIFEST_DIR");
-        }
-    }
-}
-
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let name = path.file_name();
-            if name.map(|n| n == "target" || n == "tests").unwrap_or(false) {
-                continue;
-            }
-            rust_files(&path, out);
-        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-            out.push(path);
         }
     }
 }
@@ -109,15 +91,12 @@ fn extract_route_paths(src: &str) -> Vec<String> {
 }
 
 fn registered_routes(root: &Path) -> BTreeSet<String> {
-    let mut files = Vec::new();
-    rust_files(&root.join("crates"), &mut files);
     let mut set = BTreeSet::new();
-    for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
+    for (_, src) in &super::route_inventory::daemon_sources(root) {
         if !src.contains(".route(") {
             continue;
         }
-        for p in extract_route_paths(&src) {
+        for p in extract_route_paths(src) {
             set.insert(p);
         }
     }
