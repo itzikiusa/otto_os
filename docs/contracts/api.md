@@ -76,7 +76,7 @@ connection library unusable for every non-root account.)
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control` and `meta.client_id` are **server-owned**: a PATCH that changes either is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id` and the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` are **server-owned**: a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, or when the provider's active-conversation guard refuses a fork. Resume errors propagate; this never falls back to an unconditional restart. |
@@ -245,10 +245,19 @@ Notes:
   the Design Hall working copies `design/<artifact>/work/**` (never
   `design/blobs/`) — and the session's own `provider-accounts/<id>` home stay
   writable), and its
-  `secrets.json`, `otto.db*`, `state.db*`, `tls/` and `kube/` are unreadable. Files
-  that make unsandboxed programs run agent-chosen code are write-denied
-  (`~/.claude/settings.json`, `~/.claude/settings.local.json`,
-  `~/.codex/config.toml`, `~/.config/git/`), `/bin/launchctl` cannot be executed,
+  `secrets.json`, `otto.db*`, `state.db*`, `tls/`, `kube/`, `logs/` and every
+  `provider-accounts/*` home except the session's own are unreadable (the data dir
+  is the daemon's configured one — `$OTTO_DATA_DIR`-aware). Files that make
+  unsandboxed programs run agent-chosen code are write-denied
+  (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json`,
+  `~/.claude/{plugins,hooks,agents,commands}/`, `~/.codex/config.toml`,
+  `~/.gemini/settings.json`, `~/.config/git/`, `~/.config/gh/`; the same claude/codex
+  files inside the session's own account home; a repo's `.git/config`,
+  `config.worktree`, `commondir`, `hooks/` and `worktrees/*/gitdir`); of `~/.config`
+  only `configstore/` is writable. A `meta.read_only` session (always confined)
+  additionally cannot write its own folder's `.claude/settings*.json`,
+  `.claude/{hooks,agents,commands}/` or `.mcp.json`. A scheduled `shell` task runs
+  under the same profile when `providers` covers `shell`. `/bin/launchctl` cannot be executed,
   and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
   network configuration + DNS, TLS trust and the keychain) — LaunchServices and
   AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
