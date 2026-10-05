@@ -9,8 +9,9 @@
 //   (2) each release/* branch, `--not target` (release-only commits are few)
 //   (3) `--all` with authors — first_commit_at + per-key non-merge authors
 //       (multi-dev credit)
-//   (4) *-DEPLOYED* tags ascending by creatordate, each `--not prevTags` so
-//       every commit is visited once — earliest prod deployment per key
+//   (4) deploy tags (name contains deployed / hf / hotfix — see isDeployTag)
+//       sorted by tagged-commit date, each `--not previousTag` — earliest
+//       prod deployment per key (hotfix tags are deployments too)
 //
 // Delivery model (matches the team's Bitbucket flow):
 //   done_git_at   = first merge-event on develop|release mentioning the key
@@ -42,16 +43,28 @@ function git(repoPath, args, opts = {}) {
   }
 }
 
-/** First existing target branch on the repo (develop → main → master). */
+// Target preference: the remote develop is the team's real integration branch
+// (local clones often sit on a feature branch with a STALE local develop that
+// silently hides every newer commit). Order: origin/develop → develop →
+// origin/main → main → (any further configured targets, remote first).
+const TARGET_ORDER = ['develop', 'main', 'master'];
+
+/** First existing target ref (remote ref preferred per name). → 'origin/develop' | 'develop' | … | null */
 function resolveTarget(repoPath, targets) {
-  for (const t of targets) {
-    // The REMOTE ref wins: local clones often sit on a feature branch with a
-    // stale local develop, which silently hid every newer commit (and its diff
-    // evidence) from the index. origin/<t> is what was actually merged.
+  const names = [...new Set([...(targets || TARGET_ORDER)])];
+  for (const t of names) {
     if (git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${t}`]) !== null) return `origin/${t}`;
     if (git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${t}`]) !== null) return t;
   }
   return null;
+}
+
+/** Days since the target ref's tip commit (committer date) — flags stale clones. */
+function targetRefAgeDays(repoPath, ref, nowMs = Date.now()) {
+  const out = git(repoPath, ['log', '-1', '--format=%ct', ref]);
+  const ts = out ? parseInt(out.trim(), 10) * 1000 : NaN;
+  if (Number.isNaN(ts)) return null;
+  return Math.max(0, Math.round(((nowMs - ts) / 86400000) * 10) / 10);
 }
 
 /** All release/* + hotfix/* refs (local + origin), deduped by short name. */
@@ -76,22 +89,82 @@ function releaseBranches(repoPath) {
   return refs;
 }
 
-/** Deploy tags (name matches `pattern`, case-insensitive substring), ascending by creatordate. */
-function deployTags(repoPath, pattern) {
-  const out = git(repoPath, ['for-each-ref', 'refs/tags', '--format=%(creatordate:unix)\x1f%(refname:short)']);
+// Deploy-tag rule: a tag is a production deployment when its name contains
+// (case-insensitive) one of `deploy_tag_patterns`. 'deployed' (and any custom
+// pattern) is a plain substring; the short hotfix markers 'hf'/'hotfix' must
+// sit on token boundaries so e.g. 'shf-build' is NOT a deploy.
+const DEFAULT_DEPLOY_TAG_PATTERNS = ['deployed', 'hf', 'hotfix'];
+const HOTFIX_TOKEN_RE = /(^|[^a-z])(hf|hotfix)([^a-z]|$)/i;
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Normalize config → lower-cased pattern list (legacy `deploy_tag_pattern` string merged in). */
+function deployTagPatterns(config = {}) {
+  const list = Array.isArray(config.deploy_tag_patterns) ? [...config.deploy_tag_patterns] : [...DEFAULT_DEPLOY_TAG_PATTERNS];
+  if (typeof config.deploy_tag_pattern === 'string' && config.deploy_tag_pattern.trim()) list.push(config.deploy_tag_pattern);
+  return [...new Set(list.map((p) => String(p).trim().toLowerCase()).filter(Boolean))];
+}
+
+/** Does tag `name` count as a deployment under `patterns`? (pure) */
+function isDeployTag(name, patterns = DEFAULT_DEPLOY_TAG_PATTERNS) {
+  const n = String(name || '');
+  if (!n) return false;
+  const lower = n.toLowerCase();
+  for (const raw of patterns || []) {
+    const p = String(raw).toLowerCase();
+    if (!p) continue;
+    if (p === 'hf' || p === 'hotfix') {
+      if (new RegExp(`(^|[^a-z])${escapeRe(p)}([^a-z]|$)`, 'i').test(n)) return true;
+    } else if (lower.includes(p)) return true;
+  }
+  return false;
+}
+
+/** 'hotfix' when the name carries an hf/hotfix token, else 'regular'. (pure) */
+function tagKind(name) {
+  return HOTFIX_TOKEN_RE.test(String(name || '')) ? 'hotfix' : 'regular';
+}
+
+/**
+ * Deploy tags of a repo, ascending by the commit date of the tagged object
+ * (peeled for annotated tags). `ts` = creatordate (when the deploy was tagged),
+ * `commit_ts` = tagged commit's date, `sha` = tagged commit, `kind` = hotfix|regular.
+ * `patterns` may be an array or a legacy single string.
+ */
+function deployTags(repoPath, patterns) {
+  const pats = Array.isArray(patterns) ? patterns.map((p) => String(p).toLowerCase()) : patterns ? deployTagPatterns({ deploy_tag_pattern: patterns, deploy_tag_patterns: [] }) : DEFAULT_DEPLOY_TAG_PATTERNS;
+  const out = git(repoPath, [
+    'for-each-ref', 'refs/tags',
+    `--format=%(creatordate:unix)${US}%(objectname)${US}%(*objectname)${US}%(committerdate:unix)${US}%(*committerdate:unix)${US}%(refname:short)`,
+  ]);
   if (!out) return [];
-  const needle = String(pattern || 'deployed').toLowerCase();
   const tags = [];
   for (const line of out.split('\n')) {
-    const idx = line.indexOf(US);
-    if (idx <= 0) continue;
-    const ts = parseInt(line.slice(0, idx), 10) * 1000;
-    const name = line.slice(idx + 1).trim();
-    if (Number.isNaN(ts) || !name) continue;
-    if (name.toLowerCase().includes(needle)) tags.push({ name, ts });
+    const p = line.split(US);
+    if (p.length < 6) continue;
+    const ts = parseInt(p[0], 10) * 1000;
+    const name = p.slice(5).join(US).trim();
+    if (Number.isNaN(ts) || !name || !isDeployTag(name, pats)) continue;
+    const sha = p[2] || p[1];
+    const cts = parseInt(p[4] || p[3], 10) * 1000;
+    tags.push({ name, ts, sha, commit_ts: Number.isNaN(cts) ? ts : cts, kind: tagKind(name) });
   }
-  tags.sort((a, b) => a.ts - b.ts);
+  tags.sort((a, b) => a.commit_ts - b.commit_ts || a.ts - b.ts || (a.name < b.name ? -1 : 1));
   return tags;
+}
+
+// tag-range log cache: "<tagSha>..<prevSha>" → raw log lines. Tag SHAs are
+// immutable, so a long-lived worker re-scanning reuses ranges for free.
+const tagRangeCache = new Map();
+function tagRangeLog(repoPath, tag, prev) {
+  const key = `${repoPath}${US}${tag.sha}${US}${prev ? prev.sha : ''}`;
+  if (tagRangeCache.has(key)) return tagRangeCache.get(key);
+  const args = ['log', tag.sha, ...(prev ? ['--not', prev.sha] : []), `--pretty=%H${US}%s`];
+  const out = git(repoPath, args);
+  if (out !== null) {
+    if (tagRangeCache.size > 5000) tagRangeCache.clear();
+    tagRangeCache.set(key, out);
+  }
+  return out;
 }
 
 /** Parse `git log` output where each line is US-joined fields, last field = subject. */
@@ -216,7 +289,8 @@ function featureIndex(repoName, repoPath, target, depth) {
 /**
  * Build the delivery index across registered repos.
  * repos: [{name, path}]
- * config: {target_branches?, git_depth?, git_fetch?, deploy_tag_pattern?,
+ * config: {target_branches?, git_depth?, git_fetch?, deploy_tag_patterns?,
+ *          deploy_tag_pattern? (legacy single string, merged in),
  *          feature_repos?: [name]} — repos listed in `feature_repos` also get
  *          git-only feature extraction (work without Jira stories).
  * → {byKey: Map<key, {first_commit_at, done_git_at, delivered_at, last_fix_at,
@@ -244,6 +318,8 @@ function buildIndex(repos, config = {}) {
   };
   const evidenceSinceArg = config.evidence_since ? [`--since=${config.evidence_since}`] : [];
   const featureRepos = new Set(config.feature_repos || []);
+  const deployTagList = []; // [{repo, name, ts, sha, kind}] — DORA input
+  const targetAge = {}; // repo -> days since the target ref's tip commit
   let hasRepos = false;
 
   const entry = (k) => {
@@ -256,6 +332,8 @@ function buildIndex(repos, config = {}) {
         last_fix_at: null,
         fix_count: 0,
         deployed_at: null,
+        deployed_tag: null, // name of the earliest deploy tag reaching the key
+        deployed_kind: null, // 'hotfix' | 'regular'
         commit_ts: [], // sampled commit timestamps (capped) — the QA-rework check
         authors: new Map(), // "name\x1femail" -> count (converted to array at the end)
       };
@@ -420,31 +498,39 @@ function buildIndex(repos, config = {}) {
       }
     }
 
-    // (4) deploy tags ascending; `--not prev` visits each commit once, so the
-    // first tag that reaches a key (or a feature's merge commit) is its
-    // earliest prod deployment.
-    const tags = deployTags(r.path, config.deploy_tag_pattern);
-    const prev = [];
+    // (4) deploy tags sorted by tagged-commit date; each tag walks only
+    // `tag --not previousTag` (O(T) ranges, not O(T²) --not lists). Tags
+    // off the mainline may re-visit a commit, so each commit/key/feature keeps
+    // the EARLIEST deploy time (min over visits) — the first prod deployment,
+    // hotfix tags included.
+    const tags = deployTags(r.path, deployTagPatterns(config));
+    targetAge[r.name] = targetRefAgeDays(r.path, target);
+    let prevTag = null;
     for (const tag of tags) {
-      const args = ['log', tag.name, ...prev.flatMap((p) => ['--not', p]), `--pretty=%ct${US}%H${US}%s`];
-      const out = git(r.path, args);
-      if (out !== null) {
-        for (const line of out.split('\n')) {
-          const parts = line.split(US);
-          if (parts.length < 3) continue;
-          const hash = parts[1];
-          const feat = featureByMergeHash.get(hash);
-          if (feat && (feat.deployed_at === undefined || feat.deployed_at === null)) feat.deployed_at = tag.ts;
-          const keys = parts.slice(2).join(US).match(KEY_RE);
-          if (!keys) continue;
-          for (const k of new Set(keys)) {
-            if (PLACEHOLDER_RE.test(k)) continue;
-            const e = entry(k);
-            if (e.deployed_at === null || tag.ts < e.deployed_at) e.deployed_at = tag.ts;
+      deployTagList.push({ repo: r.name, name: tag.name, ts: tag.ts, sha: tag.sha, kind: tag.kind });
+      const out = tagRangeLog(r.path, tag, prevTag);
+      prevTag = tag;
+      if (out === null) continue;
+      for (const line of out.split('\n')) {
+        const parts = line.split(US);
+        if (parts.length < 2) continue;
+        const feat = featureByMergeHash.get(parts[0]);
+        if (feat && (feat.deployed_at == null || tag.ts < feat.deployed_at)) {
+          feat.deployed_at = tag.ts;
+          feat.deployed_tag = tag.name;
+        }
+        const keys = parts.slice(1).join(US).match(KEY_RE);
+        if (!keys) continue;
+        for (const k of new Set(keys)) {
+          if (PLACEHOLDER_RE.test(k)) continue;
+          const e = entry(k);
+          if (e.deployed_at === null || tag.ts < e.deployed_at) {
+            e.deployed_at = tag.ts;
+            e.deployed_tag = tag.name;
+            e.deployed_kind = tag.kind;
           }
         }
       }
-      prev.push(tag.name);
     }
   }
 
@@ -500,12 +586,28 @@ function buildIndex(repos, config = {}) {
     unscoped: [...unscoped.values()].sort((a, b) => b.commits - a.commits),
     repo_activity: [...repoActivity.values()].sort((a, b) => b.commits - a.commits),
     target_used: targetUsed,
+    target_ref_age_days: targetAge,
+    deploy_tags: deployTagList.sort((a, b) => a.ts - b.ts),
     fetched,
     hasRepos,
   };
 }
 
-module.exports = { buildIndex, featureIndex, branchOfMerge, KEY_RE, PLACEHOLDER_RE, deployTags, releaseBranches, resolveTarget };
+module.exports = {
+  buildIndex,
+  featureIndex,
+  branchOfMerge,
+  KEY_RE,
+  PLACEHOLDER_RE,
+  DEFAULT_DEPLOY_TAG_PATTERNS,
+  deployTags,
+  deployTagPatterns,
+  isDeployTag,
+  tagKind,
+  releaseBranches,
+  resolveTarget,
+  targetRefAgeDays,
+};
 
 // Worker mode: `node lib/gitscan.js` with {repos, config} JSON on stdin prints
 // the serialized index on stdout. The git walk is all blocking execFileSync —
@@ -560,6 +662,8 @@ if (require.main === module) {
           unscoped: idx.unscoped,
           repo_activity: idx.repo_activity,
           target_used: idx.target_used,
+          target_ref_age_days: idx.target_ref_age_days,
+          deploy_tags: idx.deploy_tags,
           fetched: idx.fetched,
           hasRepos: idx.hasRepos,
         }),

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en" data-masked="{{MASKED}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-{{NONCE}}'; connect-src 'self'">
+<meta name="generator" content="team-performance report {{TEMPLATE_VERSION}}">
+<title>{{TITLE}}</title>
+<style>{{CSS}}</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>{{TITLE}}</h1>
+    <div class="sub">{{SUBTITLE}}</div>
+  </header>
+  <div class="toolbar no-print" role="toolbar" aria-label="Report tools">
+    <nav aria-label="Sections">{{NAV}}</nav>
+    <button type="button" class="btn" id="theme-btn" aria-label="Switch colour theme" title="Switch colour theme">Theme: auto</button>
+    <button type="button" class="btn" id="open-comments" aria-label="Open comments" title="Open comments">Comments (<span id="c-count">0</span>)</button>
+  </div>
+  {{GUARDRAILS}}
+  <main>{{BODY}}</main>
+  <footer class="meta">{{FOOTER}}</footer>
+</div>
+<aside class="cpanel" id="cpanel" aria-label="Comments" aria-hidden="true">
+  <header>
+    <h2>Comments</h2>
+    <button type="button" class="btn" id="c-export" aria-label="Export comments as JSON" title="Export comments as JSON">Export</button>
+    <button type="button" class="btn" id="c-close" aria-label="Close comments" title="Close comments">Close</button>
+  </header>
+  <div class="c-body">
+    <p class="c-status" id="c-status" role="status">Read-only: no comment endpoint configured.</p>
+    <form class="c-form" id="c-form" hidden>
+      <label for="c-text">Comment on <strong id="c-target">this report</strong></label>
+      <textarea id="c-text" maxlength="4000"></textarea>
+      <button type="submit" class="btn primary" id="c-save">Post comment</button>
+    </form>
+    <div id="c-list"></div>
+  </div>
+</aside>
+<script nonce="{{NONCE}}">{{SCRIPT}}</script>
+</body>
+</html>

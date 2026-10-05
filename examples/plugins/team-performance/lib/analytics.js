@@ -334,6 +334,8 @@ function deriveGit(record, gitEntry, opts) {
     late_touches: g.late_touches ?? record.late_touches ?? 0,
     last_fix_at: lastFix,
     deployed_at: deployed,
+    deployed_tag: g.deployed_tag ?? record.deployed_tag ?? null,
+    deployed_kind: g.deployed_kind ?? record.deployed_kind ?? null,
     git_authors: authors,
     git_change: g.change ?? record.git_change ?? null,
     commit_ts: Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts ?? null,
@@ -565,6 +567,15 @@ function analyzeIssue(raw, opts) {
     parent_key: parentKey,
     subtask: isSubtask,
     labels: Array.isArray(f.labels) ? f.labels : [],
+    priority: (f.priority && f.priority.name) || null,
+    // Normalized issue links ({rel, key, type, summary}) — rework + design evidence.
+    links: (Array.isArray(f.issuelinks) ? f.issuelinks : []).flatMap((l) => {
+      const t = (l && l.type) || {};
+      const o = [];
+      if (l && l.outwardIssue && l.outwardIssue.key) o.push({ rel: t.outward || t.name || '', key: l.outwardIssue.key, type: ((l.outwardIssue.fields || {}).issuetype || {}).name || '', summary: (l.outwardIssue.fields || {}).summary || '' });
+      if (l && l.inwardIssue && l.inwardIssue.key) o.push({ rel: t.inward || t.name || '', key: l.inwardIssue.key, type: ((l.inwardIssue.fields || {}).issuetype || {}).name || '', summary: (l.inwardIssue.fields || {}).summary || '' });
+      return o;
+    }),
     type: f.issuetype ? f.issuetype.name : 'Unknown',
     summary: f.summary || '',
     description_snippet: descText ? descText.replace(/\s+/g, ' ').trim().slice(0, 1500) : (raw.description_snippet || ''),
@@ -630,6 +641,8 @@ function reanalyzeRecord(record, opts) {
       last_fix_at: next.last_fix_at ?? null,
       fix_count: next.fix_count ?? 0,
       deployed_at: next.deployed_at ?? null,
+      deployed_tag: next.deployed_tag ?? null,
+      deployed_kind: next.deployed_kind ?? null,
       authors: next.git_authors || [],
       commit_ts: next.commit_ts || [],
     },

@@ -524,7 +524,9 @@ test('report: generate per quarter, saved to the hub, html retrievable', async (
   assert.equal(list.json.reports.length, 1);
   const html = await api('GET', `/report/html?account=acc1&id=${encodeURIComponent(status.report.id)}`);
   assert.ok(html.json.html.startsWith('<!doctype html>'), 'prose stripped, pure html stored');
-  assert.ok(html.json.html.includes('Report for Alice'));
+  // v0.8: deterministic template — numbers come from the model, the agent only fills narrative slots.
+  assert.ok(html.json.html.includes('Alice'), 'person named in the title');
+  assert.ok(html.json.html.includes('How to read'), 'template sections rendered');
 
   const bad = await api('POST', '/report', { account: 'acc1', assignee: 'u-alice', kind: 'quarter', year: 2026, quarter: 9 });
   assert.equal(bad.status, 400);

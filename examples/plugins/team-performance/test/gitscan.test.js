@@ -192,3 +192,89 @@ test('buildIndex: a stray commit long after delivery is NOT a fix (fix window)',
   const wide = buildIndex([{ name: 'fix', path: repoDir }], { git_fetch: false, fix_window_days: 200 }).byKey.get('TP-1');
   assert.equal(wide.fix_count, 2, 'a wider window includes the later commit');
 });
+
+// ---------------------------------------------------------------------------
+// Deploy-tag rule (deployed / hf / hotfix), hotfix-first deployment, target pref
+// ---------------------------------------------------------------------------
+const { isDeployTag, tagKind, deployTags, deployTagPatterns, resolveTarget, targetRefAgeDays } = require('../lib/gitscan.js');
+
+test('isDeployTag: deployed substring, hf/hotfix on token boundaries only', () => {
+  const names = ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3', 'release-1.0', 'shf-build'];
+  assert.deepEqual(names.filter((n) => isDeployTag(n, ['deployed', 'hf', 'hotfix'])), ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3']);
+  assert.deepEqual(names.map(tagKind), ['regular', 'hotfix', 'hotfix', 'regular', 'regular']);
+  assert.equal(isDeployTag('hotfixes-x'), false, 'token must end at a non-letter');
+});
+
+test('deployTagPatterns: legacy single key merged, defaults when absent', () => {
+  assert.deepEqual(deployTagPatterns({}), ['deployed', 'hf', 'hotfix']);
+  assert.deepEqual(deployTagPatterns({ deploy_tag_pattern: 'PROD' }), ['deployed', 'hf', 'hotfix', 'prod']);
+  assert.deepEqual(deployTagPatterns({ deploy_tag_patterns: ['Deployed'], deploy_tag_pattern: 'deployed' }), ['deployed']);
+});
+
+test('deploy tags: exact matches in a fixture repo, hf tag sets deployed_at', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-tags-'));
+  const g = (args, env = {}) =>
+    execFileSync('git', ['-C', dir, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...env },
+    });
+  const c = (msg, when) => {
+    fs.appendFileSync(path.join(dir, 'f.txt'), msg + '\n');
+    g(['add', '.']);
+    g(['commit', '-q', '-m', msg], at(when));
+  };
+  try {
+    g(['init', '-q', '-b', 'develop']);
+    c('ABC-1 first', '2026-06-01T09:00:00Z');
+    g(['tag', '-a', 'v1-DEPLOYED', '-m', 'p'], at('2026-06-02T09:00:00Z'));
+    c('ABC-2 urgent', '2026-06-03T09:00:00Z');
+    g(['tag', '-a', 'rel-HF2', '-m', 'p'], at('2026-06-03T15:00:00Z'));
+    c('ABC-3 more', '2026-06-04T09:00:00Z');
+    g(['tag', 'prod_Hotfix_3'], at('2026-06-04T09:00:00Z')); // lightweight
+    g(['tag', '-a', 'release-1.0', '-m', 'p'], at('2026-06-05T09:00:00Z'));
+    g(['tag', '-a', 'shf-build', '-m', 'p'], at('2026-06-05T09:00:00Z'));
+    c('ABC-4 later', '2026-06-06T09:00:00Z');
+    g(['tag', '-a', 'v2-deployed', '-m', 'p'], at('2026-06-07T09:00:00Z'));
+
+    const tags = deployTags(dir, ['deployed', 'hf', 'hotfix']);
+    assert.deepEqual(tags.map((t) => t.name), ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3', 'v2-deployed']);
+    assert.deepEqual(tags.map((t) => t.kind), ['regular', 'hotfix', 'hotfix', 'regular']);
+
+    const idx = buildIndex([{ name: 'r', path: dir }], { git_fetch: false });
+    const e2 = idx.byKey.get('ABC-2');
+    assert.equal(e2.deployed_at, Date.parse('2026-06-03T15:00:00Z'), 'first reached by the hf tag');
+    assert.equal(e2.deployed_tag, 'rel-HF2');
+    assert.equal(e2.deployed_kind, 'hotfix');
+    assert.equal(idx.byKey.get('ABC-1').deployed_at, Date.parse('2026-06-02T09:00:00Z'));
+    assert.equal(idx.byKey.get('ABC-4').deployed_tag, 'v2-deployed');
+    assert.deepEqual(idx.deploy_tags.map((t) => t.name), ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3', 'v2-deployed']);
+    assert.equal(typeof idx.target_ref_age_days.r, 'number');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('resolveTarget: origin/develop beats a stale local develop; age is recorded', () => {
+  const up = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-up-'));
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-clone-'));
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+  const g = (d, args, e = {}) => execFileSync('git', ['-C', d, ...args], { encoding: 'utf8', env: { ...env, ...e } });
+  try {
+    g(up, ['init', '-q', '-b', 'develop']);
+    fs.writeFileSync(path.join(up, 'a'), '1');
+    g(up, ['add', '.']);
+    g(up, ['commit', '-q', '-m', 'ABC-10 old'], at('2026-01-01T09:00:00Z'));
+    execFileSync('git', ['clone', '-q', up, clone], { env });
+    fs.writeFileSync(path.join(up, 'a'), '2');
+    g(up, ['commit', '-qam', 'ABC-11 new'], at('2026-06-01T09:00:00Z'));
+    g(clone, ['fetch', '-q']); // origin/develop advances; local develop stays stale
+    assert.equal(resolveTarget(clone, ['develop', 'main', 'master']), 'origin/develop');
+    const idx = buildIndex([{ name: 'c', path: clone }], { git_fetch: false });
+    assert.ok(idx.byKey.has('ABC-11'), 'newer remote commit is indexed');
+    const age = targetRefAgeDays(clone, 'origin/develop', Date.parse('2026-06-11T09:00:00Z'));
+    assert.equal(age, 10);
+  } finally {
+    fs.rmSync(up, { recursive: true, force: true });
+    fs.rmSync(clone, { recursive: true, force: true });
+  }
+});

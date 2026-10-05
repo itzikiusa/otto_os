@@ -1,136 +1,287 @@
-// Git rework analysis (worker: JSON {repos:[path], since:'YYYY-MM-DD'} on stdin → JSON on stdout): for every commit tied to a ticket (GS-/GRV- key in the
-// subject) since 2025-10-01, blame the lines it deleted/changed on the parent
-// and classify them: rework of ANOTHER recent ticket (< 120 days old), self
-// churn (same ticket), recent un-keyed code, or older code. Read-only on every
-// repo (git log / diff / blame). Writes rework.json.
+// Git rework analysis — a worker process: JSON on stdin → JSON on stdout.
+//
+// Input: { repos: [path], since?: 'YYYY-MM-DD', from?: 'YYYY-MM-DD',
+//          recent_days?: number, cache_path?: string,
+//          config?: { rework: { since, recent_days } } }
+// argv overrides: --since=YYYY-MM-DD --recent-days=N --cache=PATH
+//
+// For every ticket-keyed commit (ABC-123 style key in the subject) on the
+// repo's MAINLINE (origin/develop, else origin/main, plus release/* and
+// hotfix/* refs — never --all, which drags in abandoned feature branches),
+// blame the lines it deleted/changed on its parent and classify them:
+//   self        — the line was written by the same ticket (iteration, not rework)
+//   reworkOther — written by ANOTHER ticket within recent_days → a pair B>A
+//   recentNoKey — recent but un-keyed code
+//   older       — older than recent_days (maintenance, not rework)
+// Cherry-picks across mainline/release refs are deduplicated by
+// `git patch-id --stable`. Each commit's blame result is cached per SHA in
+// rework-cache.json (independent of recent_days, so a window change needs no
+// re-blame); re-runs only blame new SHAs. Read-only on every repo.
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 
-let REPOS = [];
-let SINCE = '2025-01-01';
-let FROM = 0;
-const RECENT_S = 120 * 86400;
+const CACHE_VERSION = 2;
+const DEFAULT_RECENT_DAYS = 120;
+const DEFAULT_SINCE_DAYS = 365;
+const BLAME_CONCURRENCY = 4;
 const KEY_RE = /\b([A-Z][A-Z0-9]+)-(\d+)\b/g;
 const SKIP = /(^|\/)(vendor|node_modules|dist|build|\.idea|generated|mocks?)\/|_mock\.go$|\.pb\.go$|go\.sum$|package-lock\.json$|yarn\.lock$|\.min\.(js|css)$|\.(png|jpg|jpeg|gif|svg|ico|pdf|zip|jar)$/i;
 const MAX_BLAME_LINES = 2500;
+const PATCH_ID_BATCH = 100;
 
 const git = (cwd, args) => new Promise((res) => execFile('git', args, { cwd, maxBuffer: 1 << 28, timeout: 120000 }, (err, out) => res(err ? null : out)));
 const keysOf = (s) => [...new Set([...String(s).matchAll(KEY_RE)].map((m) => `${m[1]}-${m[2]}`))].filter((k) => !/-0+$/.test(k));
 
-const perKey = {}; // key -> stats
-const pairs = {}; // "B>A" -> {lines, firstAt}
-const K = (k) => (perKey[k] ||= { commits: 0, added: 0, deleted: 0, self: 0, reworkOther: 0, recentNoKey: 0, older: 0, bulk: 0, reworkedBy: 0, reworkedBy90: 0, repos: {} });
+/** Tiny counting semaphore: bounds concurrent `git blame` processes. */
+function limiter(n) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= n || !queue.length) return;
+    active++;
+    const { fn, res } = queue.shift();
+    fn().then(res, () => res(null)).finally(() => { active--; next(); });
+  };
+  return (fn) => new Promise((res) => { queue.push({ fn, res }); next(); });
+}
 
-async function scanRepo(repo) {
-  if (!fs.existsSync(path.join(repo, '.git'))) return;
-  const log = await git(repo, ['log', '--all', '--no-merges', `--since=${SINCE}`, '--format=%H%x1f%at%x1f%s']);
-  if (!log) return;
-  const seen = new Set();
+/** Mainline + release/hotfix refs to scan (remote-tracking preferred over stale locals). */
+async function scanRefs(repo) {
+  const out = await git(repo, ['for-each-ref', '--format=%(refname)', 'refs/remotes/origin/', 'refs/heads/']);
+  if (!out) return [];
+  const all = out.split('\n').filter(Boolean);
+  const has = (r) => all.includes(r);
+  const main = ['refs/remotes/origin/develop', 'refs/remotes/origin/main', 'refs/heads/develop', 'refs/heads/main', 'refs/heads/master'].find(has);
+  const extra = all.filter((r) => /^refs\/remotes\/origin\/(release|hotfix)\//i.test(r));
+  return [...new Set([main, ...extra].filter(Boolean))];
+}
+
+/** sha → patch-id for the given commits (batched `git show | git patch-id --stable`). */
+async function patchIds(repo, shas) {
+  const out = {};
+  for (let i = 0; i < shas.length; i += PATCH_ID_BATCH) {
+    const batch = shas.slice(i, i + PATCH_ID_BATCH);
+    const text = await new Promise((res) => {
+      const show = spawn('git', ['show', '--no-color', '--format=commit %H', ...batch], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'] });
+      const pid = spawn('git', ['patch-id', '--stable'], { cwd: repo, stdio: ['pipe', 'pipe', 'ignore'] });
+      let buf = '';
+      show.stdout.pipe(pid.stdin);
+      show.on('error', () => res(''));
+      pid.on('error', () => res(''));
+      pid.stdout.on('data', (d) => (buf += d));
+      pid.on('close', () => res(buf));
+    });
+    for (const l of text.split('\n')) {
+      const [p, sha] = l.split(' ');
+      if (p && sha) out[sha] = p;
+    }
+  }
+  return out;
+}
+
+/** Blame one commit's rewritten lines → cached per-SHA result (window-independent). */
+async function analyzeCommit(repo, c, blame) {
+  const res = { at: c.at, ks: c.ks, added: 0, deleted: 0, bulk: 0, origins: [] };
+  const diff = await git(repo, ['diff', '-U0', '--no-color', '-M', `${c.h}^`, c.h]);
+  if (diff == null) return res; // root commit / unreadable: nothing rewritten
+  let oldPath = null;
+  let newPath = null;
+  const ranges = new Map(); // oldPath -> [[a,b]]
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('--- ')) { oldPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
+    if (l.startsWith('+++ ')) { newPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
+    const m = l.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (!m) continue;
+    const p = newPath || oldPath;
+    if (!p || SKIP.test(p)) continue;
+    const a = +m[1];
+    const b = m[2] === undefined ? 1 : +m[2];
+    res.added += m[4] === undefined ? 1 : +m[4];
+    if (b > 0 && oldPath) {
+      res.deleted += b;
+      if (!ranges.has(oldPath)) ranges.set(oldPath, []);
+      ranges.get(oldPath).push([a, a + b - 1]);
+    }
+  }
+  const byOrigin = new Map(); // origin sha -> {at, keys, n}
+  await Promise.all([...ranges].map(([file, rs]) => {
+    const total = rs.reduce((x, [a, b]) => x + b - a + 1, 0);
+    if (total > MAX_BLAME_LINES) { res.bulk += total; return null; }
+    const args = ['blame', '--porcelain'];
+    for (const [a, b] of rs) args.push('-L', `${a},${b}`);
+    args.push(`${c.h}^`, '--', file);
+    return blame(() => git(repo, args)).then((out) => {
+      if (!out) return;
+      const info = {};
+      let cur = null;
+      for (const l of out.split('\n')) {
+        const hm = l.match(/^([0-9a-f]{40}) \d+ \d+/);
+        if (hm) {
+          cur = hm[1];
+          info[cur] ||= { at: null, keys: [], n: 0 };
+          info[cur].n++;
+          continue;
+        }
+        if (!cur) continue;
+        if (l.startsWith('author-time ')) info[cur].at = +l.slice(12);
+        else if (l.startsWith('summary ')) info[cur].keys = keysOf(l.slice(8));
+      }
+      for (const [sha, o] of Object.entries(info)) {
+        const e = byOrigin.get(sha) || { at: o.at, keys: o.keys, n: 0 };
+        e.at ??= o.at;
+        if (!e.keys.length) e.keys = o.keys;
+        e.n += o.n;
+        byOrigin.set(sha, e);
+      }
+    });
+  }));
+  res.origins = [...byOrigin.values()];
+  return res;
+}
+
+/** Aggregate cached commit results under the current recent-days window. */
+function aggregate(results, recentS) {
+  const perKey = {};
+  const pairs = {};
+  const K = (k) => (perKey[k] ||= { commits: 0, added: 0, deleted: 0, self: 0, reworkOther: 0, recentNoKey: 0, older: 0, bulk: 0, reworkedBy: 0, reworkedBy90: 0 });
+  for (const c of results) {
+    const w = 1 / c.ks.length;
+    for (const k of c.ks) {
+      const s = K(k);
+      s.commits++;
+      s.added += c.added * w;
+      s.deleted += c.deleted * w;
+      s.bulk += c.bulk * w;
+    }
+    for (const o of c.origins) {
+      const recent = o.at != null && c.at - o.at <= recentS;
+      for (const k of c.ks) {
+        const s = K(k);
+        const lw = o.n * w;
+        if (o.keys.some((x) => c.ks.includes(x))) s.self += lw;
+        else if (recent && o.keys.length) {
+          s.reworkOther += lw;
+          for (const a of o.keys) {
+            const share = lw / o.keys.length;
+            const pr = (pairs[`${k}>${a}`] ||= { lines: 0, at: c.at, originAt: o.at });
+            pr.lines += share;
+            pr.at = Math.min(pr.at, c.at);
+            pr.originAt = Math.min(pr.originAt, o.at);
+            const A = K(a);
+            A.reworkedBy += share;
+            if (c.at - o.at <= 90 * 86400) A.reworkedBy90 += share;
+          }
+        } else if (recent) s.recentNoKey += lw;
+        else s.older += lw;
+      }
+    }
+  }
+  const r2 = (v) => Math.round(v * 10) / 10;
+  for (const st of Object.values(perKey)) for (const f of Object.keys(st)) if (f !== 'commits') st[f] = r2(st[f]);
+  for (const p of Object.values(pairs)) p.lines = r2(p.lines);
+  return { perKey, pairs };
+}
+
+function readCache(p) {
+  if (!p) return { version: CACHE_VERSION, repos: {} };
+  try {
+    const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (c && c.version === CACHE_VERSION && c.repos) return c;
+  } catch { /* missing or corrupt → rebuild */ }
+  return { version: CACHE_VERSION, repos: {} };
+}
+
+function writeCache(p, cache) {
+  if (!p) return;
+  try {
+    const tmp = `${p}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(cache));
+    fs.renameSync(tmp, p);
+  } catch { /* cache is an optimisation only */ }
+}
+
+function parseArgv(argv) {
+  const o = {};
+  for (const a of argv) {
+    const m = a.match(/^--(since|recent-days|cache)=(.*)$/);
+    if (m) o[m[1]] = m[2];
+  }
+  return o;
+}
+
+/** Resolve the effective options: argv > input > input.config.rework > defaults. */
+function resolveOptions(input = {}, argv = []) {
+  const a = parseArgv(argv);
+  const cfg = (input.config && input.config.rework) || {};
+  const recent = Number(a['recent-days'] ?? input.recent_days ?? cfg.recent_days ?? DEFAULT_RECENT_DAYS);
+  const since = a.since || input.since || cfg.since || new Date(Date.now() - DEFAULT_SINCE_DAYS * 86400000).toISOString().slice(0, 10);
+  return {
+    repos: input.repos || [],
+    since,
+    from: Date.parse(input.from || since) / 1000 || 0,
+    recentDays: recent > 0 ? recent : DEFAULT_RECENT_DAYS,
+    cachePath: a.cache || input.cache_path || null,
+  };
+}
+
+async function scanRepo(repo, opts, cache, blame, stats) {
+  if (!fs.existsSync(path.join(repo, '.git'))) return [];
+  const refs = await scanRefs(repo);
+  if (!refs.length) return [];
+  const log = await git(repo, ['log', '--no-merges', `--since=${opts.since}`, '--format=%H%x1f%at%x1f%s', ...refs]);
+  if (!log) return [];
   const commits = [];
   for (const line of log.split('\n')) {
     if (!line) continue;
     const [h, at, subj] = line.split('\x1f');
     const ks = keysOf(subj);
-    if (!ks.length || +at < FROM) continue;
-    const sig = `${at}|${subj}`; // cherry-picks across release branches
-    if (seen.has(sig)) continue;
-    seen.add(sig);
+    if (!ks.length || +at < opts.from) continue;
     commits.push({ h, at: +at, ks });
   }
-  const name = path.basename(repo);
-  for (const c of commits) {
-    const diff = await git(repo, ['diff', '-U0', '--no-color', '-M', `${c.h}^`, c.h]);
-    if (diff == null) continue;
-    let oldPath = null;
-    let newPath = null;
-    const ranges = new Map(); // oldPath -> [[a,b]]
-    let added = 0;
-    let deleted = 0;
-    for (const l of diff.split('\n')) {
-      if (l.startsWith('--- ')) { oldPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
-      if (l.startsWith('+++ ')) { newPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
-      const m = l.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
-      if (!m) continue;
-      const p = newPath || oldPath;
-      if (!p || SKIP.test(p)) continue;
-      const a = +m[1];
-      const b = m[2] === undefined ? 1 : +m[2];
-      const d = m[4] === undefined ? 1 : +m[4];
-      added += d;
-      if (b > 0 && oldPath) {
-        deleted += b;
-        if (!ranges.has(oldPath)) ranges.set(oldPath, []);
-        ranges.get(oldPath).push([a, a + b - 1]);
-      }
-    }
-    for (const k of c.ks) {
-      const s = K(k);
-      s.commits++;
-      s.added += added / c.ks.length;
-      s.deleted += deleted / c.ks.length;
-      s.repos[name] = (s.repos[name] || 0) + 1;
-    }
-    for (const [file, rs] of ranges) {
-      const total = rs.reduce((x, [a, b]) => x + b - a + 1, 0);
-      if (total > MAX_BLAME_LINES) { for (const k of c.ks) K(k).bulk += total / c.ks.length; continue; }
-      const args = ['blame', '--porcelain'];
-      for (const [a, b] of rs) args.push('-L', `${a},${b}`);
-      args.push(`${c.h}^`, '--', file);
-      const out = await git(repo, args);
-      if (!out) continue;
-      const info = {}; // sha -> {at, keys}
-      let cur = null;
-      const lineShas = [];
-      for (const l of out.split('\n')) {
-        const hm = l.match(/^([0-9a-f]{40}) \d+ \d+/);
-        if (hm) { cur = hm[1]; info[cur] ||= {}; lineShas.push(cur); continue; }
-        if (!cur) continue;
-        if (l.startsWith('author-time ')) info[cur].at = +l.slice(12);
-        else if (l.startsWith('summary ')) info[cur].keys = keysOf(l.slice(8));
-      }
-      for (const sha of lineShas) {
-        const o = info[sha] || {};
-        const ok = o.keys || [];
-        const recent = o.at && c.at - o.at <= RECENT_S;
-        for (const k of c.ks) {
-          const s = K(k);
-          const w = 1 / c.ks.length;
-          if (ok.some((x) => c.ks.includes(x))) s.self += w;
-          else if (recent && ok.length) {
-            s.reworkOther += w;
-            for (const a of ok) {
-              const pk = `${k}>${a}`;
-              const pr = (pairs[pk] ||= { lines: 0, at: c.at, originAt: o.at });
-              pr.lines += w / ok.length;
-              const A = K(a);
-              A.reworkedBy += w / ok.length;
-              if (c.at - o.at <= 90 * 86400) A.reworkedBy90 += w / ok.length;
-            }
-          } else if (recent) s.recentNoKey += w;
-          else s.older += w;
-        }
-      }
-    }
+  const prev = cache.repos[repo] || {};
+  const next = {};
+  const fresh = commits.filter((c) => !prev[c.h]);
+  const pids = await patchIds(repo, fresh.map((c) => c.h));
+  for (const c of fresh) {
+    next[c.h] = { pid: pids[c.h] || null, ...(await analyzeCommit(repo, c, blame)) };
+    stats.processed++;
   }
+  for (const c of commits) if (prev[c.h]) { next[c.h] = prev[c.h]; stats.cached++; }
+  cache.repos[repo] = next; // drops SHAs no longer on the scanned refs
+  // Patch-id dedup: the same change cherry-picked onto release/hotfix refs
+  // counts once (earliest authored copy wins).
+  const seen = new Set();
+  const out = [];
+  for (const r of Object.values(next).sort((x, y) => x.at - y.at)) {
+    if (r.pid) {
+      if (seen.has(r.pid)) { stats.duplicates++; continue; }
+      seen.add(r.pid);
+    }
+    out.push(r);
+  }
+  return out;
 }
 
-async function run(input) {
-  REPOS = input.repos || [];
-  SINCE = input.since || SINCE;
-  FROM = Date.parse(input.from || SINCE) / 1000;
-  let i = 0;
-  const lane = async () => { while (i < REPOS.length) { const r = REPOS[i++]; try { await scanRepo(r); } catch { /* skip repo */ } } };
-  await Promise.all(Array.from({ length: 6 }, lane));
-  const r2 = (v) => Math.round(v * 10) / 10;
-  for (const st of Object.values(perKey)) { for (const f of ['added', 'deleted', 'self', 'reworkOther', 'recentNoKey', 'older', 'bulk', 'reworkedBy', 'reworkedBy90']) st[f] = r2(st[f]); delete st.repos; }
-  for (const p of Object.values(pairs)) p.lines = r2(p.lines);
-  return { generated_at: new Date().toISOString(), perKey, pairs };
+async function run(input = {}, argv = []) {
+  const opts = resolveOptions(input, argv);
+  const cache = readCache(opts.cachePath);
+  const blame = limiter(BLAME_CONCURRENCY);
+  const stats = { processed: 0, cached: 0, duplicates: 0 };
+  const results = [];
+  for (const k of Object.keys(cache.repos)) if (!opts.repos.includes(k)) delete cache.repos[k];
+  for (const repo of opts.repos) {
+    try { results.push(...(await scanRepo(repo, opts, cache, blame, stats))); } catch { /* skip repo */ }
+  }
+  writeCache(opts.cachePath, cache);
+  const { perKey, pairs } = aggregate(results, opts.recentDays * 86400);
+  return { generated_at: new Date().toISOString(), since: opts.since, recent_days: opts.recentDays, stats, perKey, pairs };
 }
-module.exports = { run };
+
+module.exports = { run, resolveOptions, aggregate, keysOf };
 if (require.main === module) {
   let buf = '';
   process.stdin.on('data', (d) => (buf += d));
-  process.stdin.on('end', async () => process.stdout.write(JSON.stringify(await run(JSON.parse(buf || '{}')))));
+  process.stdin.on('end', async () => process.stdout.write(JSON.stringify(await run(JSON.parse(buf || '{}'), process.argv.slice(2)))));
 }
