@@ -638,6 +638,15 @@ impl PtyHandle {
         }
     }
 
+    /// Test hook: drop a held PTY's current write connection, as if it were
+    /// mid-reconnect (sends then fail until a reconnect re-establishes it).
+    #[doc(hidden)]
+    pub fn simulate_holder_reconnecting(&self) {
+        if let Backend::Held(conn) = &self.backend {
+            conn.drop_writer();
+        }
+    }
+
     /// The holder's socket path, when held.
     pub fn holder_socket(&self) -> Option<&std::path::Path> {
         match &self.backend {

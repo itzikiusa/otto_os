@@ -848,6 +848,11 @@ const PROVIDER_TITLE_MAX: usize = 60;
 /// transcript that genuinely never carried one (all-system/tool content).
 const PROVIDER_TITLE_SCAN_LINES: usize = 4000;
 
+/// Byte cap on the transcript prefix the auto-namer reads (with
+/// [`PROVIDER_TITLE_SCAN_LINES`]): agent transcripts grow to hundreds of MB
+/// and the sweep runs every 20 s, so only the head is ever read.
+const PROVIDER_TITLE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Collapse a raw provider prompt into a one-line session title: strip control
 /// characters / newlines to single spaces, squeeze runs of whitespace, and clip
 /// to [`PROVIDER_TITLE_MAX`] chars (char-boundary safe, `…` suffix). Returns
@@ -1042,13 +1047,51 @@ fn title_eligible(s: &Session) -> bool {
 /// session title. Dispatches on provider; synchronous (callers run it on the
 /// blocking pool). `None` for unsupported providers, an unreadable file, or a
 /// transcript with no user prompt yet.
-fn read_provider_title(provider: &str, path: &std::path::Path) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    match provider {
+///
+/// Reads at most [`PROVIDER_TITLE_SCAN_LINES`] lines / [`PROVIDER_TITLE_SCAN_BYTES`]
+/// of the file (lossy UTF-8) — never the whole transcript.
+fn read_provider_title(provider: &str, path: &std::path::Path) -> TitleRead {
+    let Some((contents, capped)) = read_transcript_head(path) else {
+        return TitleRead::default();
+    };
+    let title = match provider {
         "claude" => parse_claude_first_prompt(&contents),
         "codex" => parse_codex_first_prompt(&contents),
         _ => None,
+    };
+    TitleRead { title, capped }
+}
+
+/// Result of [`read_provider_title`]. `capped` = the scan hit its line/byte cap,
+/// i.e. the head the first prompt must live in is complete: no title there
+/// means there never will be one, so the session is not probed again.
+#[derive(Debug, Default)]
+struct TitleRead {
+    title: Option<String>,
+    capped: bool,
+}
+
+/// The first [`PROVIDER_TITLE_SCAN_LINES`] lines of `path`, bounded by
+/// [`PROVIDER_TITLE_SCAN_BYTES`], lossily decoded. `.1` is true when either cap
+/// was reached. `None` when the file can't be opened.
+fn read_transcript_head(path: &std::path::Path) -> Option<(String, bool)> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file.take(PROVIDER_TITLE_SCAN_BYTES));
+    let mut head: Vec<u8> = Vec::new();
+    let mut lines = 0usize;
+    loop {
+        if lines >= PROVIDER_TITLE_SCAN_LINES {
+            return Some((String::from_utf8_lossy(&head).into_owned(), true));
+        }
+        match reader.read_until(b'\n', &mut head) {
+            Ok(0) => break,
+            Ok(_) => lines += 1,
+            Err(_) => break,
+        }
     }
+    let capped = head.len() as u64 >= PROVIDER_TITLE_SCAN_BYTES;
+    Some((String::from_utf8_lossy(&head).into_owned(), capped))
 }
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
@@ -1548,6 +1591,26 @@ pub(crate) async fn wait_exit_code(
     }
 }
 
+/// Upper bound a respawn waits for the process it just retired to exit (the
+/// CLIs' SIGHUP shutdown takes ~0.5–0.8 s; the kill escalates to SIGTERM /
+/// SIGKILL on its own). Past it the respawn proceeds anyway — a wedged child
+/// must not make the session unopenable.
+const RETIRED_EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// Wait (bounded by [`RETIRED_EXIT_WAIT`]) for a retired process's exit.
+async fn await_retired_exit(id: &Id, mut rx: tokio::sync::watch::Receiver<Option<i32>>) {
+    if tokio::time::timeout(RETIRED_EXIT_WAIT, wait_exit_code(&mut rx))
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            session = %id,
+            "retired PTY still alive after {}s; respawning anyway",
+            RETIRED_EXIT_WAIT.as_secs()
+        );
+    }
+}
+
 /// RAII guard for a WS terminal attachment: decrements the session's attached-
 /// viewer count when dropped, on every WS `serve_terminal` return path.
 pub struct AttachGuard {
@@ -1618,6 +1681,9 @@ struct TitleProbe {
     /// Terminal state: a title was applied/matched, or the user owns the name.
     /// The first user prompt is stable, so a resolved session never re-reads.
     resolved: bool,
+    /// The capped head of the transcript was read and holds no user prompt:
+    /// it never will, so the session is never read again either.
+    gave_up: bool,
 }
 
 pub struct SessionManager {
@@ -1661,6 +1727,16 @@ pub struct SessionManager {
     /// the user-started one ([`sweep_hold`]). Cleared by any typed / automated
     /// input, an explicit restart, and every teardown path.
     passive_resume: Arc<DashMap<Id, ()>>,
+    /// Exit watch of the process a lifecycle op (suspend / restart) just
+    /// killed. A respawn of the same session waits on it (bounded, see
+    /// [`RETIRED_EXIT_WAIT`]) before starting the next CLI, so two
+    /// incarnations never write one provider conversation at the same time.
+    /// Only the tiny watch receiver is kept, never the handle (its emulator
+    /// and ring must be freed by the suspend).
+    retiring: Arc<DashMap<Id, tokio::sync::watch::Receiver<Option<i32>>>>,
+    /// Serializes the best-effort `meta.pty_cols/pty_rows` writes of
+    /// [`Self::resize_pty`] so they can never land out of order.
+    size_persist: Arc<tokio::sync::Mutex<()>>,
     /// Last time somebody USED each session — typed into it, attached or
     /// detached a terminal, pinged a chat. With the PTY's own last-output time
     /// it orders the live-session cap's least-recently-used eviction.
@@ -1775,6 +1851,8 @@ impl SessionManager {
             suspend_cpu: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
             passive_resume: Arc::new(DashMap::new()),
+            retiring: Arc::new(DashMap::new()),
+            size_persist: Arc::new(tokio::sync::Mutex::new(())),
             last_touch: Arc::new(DashMap::new()),
             repo,
             networks,
@@ -3560,13 +3638,14 @@ impl SessionManager {
                     }
                 }
             }
-            self.restart_locked(id, None).await.map(|_| ())?;
             // A resume-on-open: until real input arrives this process only
             // repainted history for whoever opened it, so it must not earn
             // the user-started idle hold (r3-05-01 — attach-resumed CLIs were
             // pinned forever). Callers that go on to send a turn (channel
-            // bridge, agent_session, assistant) clear this in `input`.
-            self.passive_resume.insert(id.clone(), ());
+            // bridge, agent_session, assistant) clear the flag in `input`.
+            // `restart_locked` sets it BEFORE the handle becomes reachable, so
+            // input that races the resume is never overwritten as passive.
+            self.restart_locked(id, None, true).await.map(|_| ())?;
         } else if session.kind == SessionKind::Agent && session.provider == "shell" {
             // A plain terminal has no provider-side conversation of its own, so
             // the branch above can never bring it back — reopening one used to
@@ -3577,7 +3656,7 @@ impl SessionManager {
             // by [`Self::capture_nested_agents`] — type its resume command back
             // in so the terminal comes back in the state it was left.
             let resume = nested_resume_command(&session);
-            self.restart_locked(id, None).await.map(|_| ())?;
+            self.restart_locked(id, None, false).await.map(|_| ())?;
             if let Some(cmd) = resume {
                 self.type_after_prompt(id, cmd);
             }
@@ -4136,9 +4215,19 @@ impl SessionManager {
         // atomic merge (single UPDATE): the old read-modify-write raced
         // update_meta and could revert a concurrent keep-alive/issue toggle
         // with its stale snapshot.
+        //
+        // Ordering: each resize spawns its own write, and two spawned writes
+        // can land out of order (an older grid overwriting the newest). So the
+        // writes are serialized on `size_persist`, and each one persists the
+        // handle's grid AS OF ITS TURN, not the value it was spawned with —
+        // the last write to run always stores the latest size.
         let repo = self.repo.clone();
         let sid = id.clone();
+        let handle = Arc::clone(handle);
+        let order = Arc::clone(&self.size_persist);
         tokio::spawn(async move {
+            let _turn = order.lock().await;
+            let (cols, rows) = handle.size();
             let patch = serde_json::json!({ "pty_cols": cols, "pty_rows": rows });
             let _ = repo.merge_meta(&sid, &patch).await;
         });
@@ -4195,6 +4284,11 @@ impl SessionManager {
     pub async fn kill_session(&self, id: &Id) -> Result<()> {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
+        self.kill_session_locked(id).await
+    }
+
+    /// [`Self::kill_session`] body; caller MUST hold this session's resume lock.
+    async fn kill_session_locked(&self, id: &Id) -> Result<()> {
         let session = self.repo.get(id).await?;
         self.networks.clear(id);
         if let Some(handle) = self.live_handle(id) {
@@ -4250,6 +4344,33 @@ impl SessionManager {
         self.suspend_inner(id, Some(grace), reason).await
     }
 
+    /// The idle sweep's reap of an UNRESUMABLE background session: the same
+    /// cheap guards as [`Self::suspend_if_idle`] (quiet PTY, no viewer, no
+    /// open engine turn), re-checked under the resume lock right before the
+    /// kill — the sweep's slow transcript reads leave a window in which a user
+    /// may attach or an engine may take a turn, and a kill there is not
+    /// resumable. `Ok(false)` = no longer idle / no longer live; nothing done.
+    async fn kill_if_idle(&self, id: &Id, grace: Duration) -> Result<bool> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
+        if !self.idle_guards_hold(id, grace) {
+            return Ok(false);
+        }
+        self.kill_session_locked(id).await?;
+        Ok(true)
+    }
+
+    /// Cheap idle guards shared by the sweep's suspend and reap; caller holds
+    /// the session's resume lock. False when not live, recently loud, watched
+    /// by a viewer, or inside an engine turn.
+    fn idle_guards_hold(&self, id: &Id, grace: Duration) -> bool {
+        let quiet = self
+            .live
+            .get(id)
+            .map(|h| h.value().last_output_at().elapsed() >= grace);
+        quiet == Some(true) && !self.engine_turn_open(id) && !self.is_watched(id)
+    }
+
     /// `reason` is stamped as `meta.suspended = {reason, at}` (review A4) so
     /// the pane can say why and when it went dormant; a resume clears it.
     async fn suspend_inner(
@@ -4261,20 +4382,18 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         if let Some(grace) = idle_grace {
-            let quiet = self
-                .live
-                .get(id)
-                .map(|h| h.value().last_output_at().elapsed() >= grace);
-            if quiet != Some(true) || self.engine_turn_open(id) || self.is_watched(id) {
+            if !self.idle_guards_hold(id, grace) {
                 return Ok(false);
             }
         }
         let session = self.repo.get(id).await?;
         self.networks.clear(id);
         // Untrack BEFORE the kill: the status task's exit branch then sees a
-        // superseded handle and leaves the status alone.
+        // superseded handle and leaves the status alone. A quick resume waits
+        // on the recorded exit before spawning the next CLI.
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
+            self.retiring.insert(id.clone(), handle.on_exit());
         }
         self.forget_sweep_state(id);
         self.retire_credentials(&session).await;
@@ -4439,7 +4558,11 @@ impl SessionManager {
     /// unchanged transcripts; does the file read on the blocking pool.
     async fn probe_and_apply_title(&self, s: &Session) -> Result<bool> {
         // Already resolved in this daemon's lifetime — never re-read.
-        if self.title_probe.get(&s.id).is_some_and(|p| p.resolved) {
+        if self
+            .title_probe
+            .get(&s.id)
+            .is_some_and(|p| p.resolved || p.gave_up)
+        {
             return Ok(false);
         }
         let Some(path) = self.activity_artifact(&s.id).await else {
@@ -4455,11 +4578,10 @@ impl SessionManager {
         }
         let provider = s.provider.clone();
         let path_owned = path.clone();
-        let title =
-            tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
-                .await
-                .ok()
-                .flatten();
+        let read = tokio::task::spawn_blocking(move || read_provider_title(&provider, &path_owned))
+            .await
+            .unwrap_or_default();
+        let title = read.title;
         // Record the mtime we just parsed at so the next sweep can skip it.
         {
             let mut probe = self.title_probe.entry(s.id.clone()).or_default();
@@ -4468,6 +4590,8 @@ impl SessionManager {
             // way, whether it differs from the current name or already matches.
             if title.is_some() {
                 probe.resolved = true;
+            } else if read.capped {
+                probe.gave_up = true;
             }
         }
         let Some(title) = title else {
@@ -4675,8 +4799,11 @@ impl SessionManager {
                 // Foreground sessions are the user's own live conversation
                 // and are left alone, as before.
                 if should_reap_unresumable(&session, last_output.elapsed()) {
-                    match self.kill_session(&id).await {
-                        Ok(()) => {
+                    match self.kill_if_idle(&id, REAP_UNRESUMABLE_GRACE).await {
+                        Ok(false) => {
+                            tracing::debug!(session = %id, "unresumable reap: session became active or was respawned mid-sweep; skipped");
+                        }
+                        Ok(true) => {
                             suspended += 1;
                             tracing::info!(
                                 session = %id,
@@ -5138,6 +5265,7 @@ impl SessionManager {
         // Drop the per-session disconnect sender; any attached viewers were
         // already evicted by the terminate path before removal.
         self.evict.remove(id);
+        self.retiring.remove(id);
         // Keep the same lock while another lifecycle operation is queued. A
         // waiter will observe the deleted row instead of spawning after removal.
         if Arc::strong_count(&lock) == 2 {
@@ -5161,11 +5289,18 @@ impl SessionManager {
         // An explicit restart is deliberate use, never a passive resume.
         self.passive_resume.remove(id);
         self.touch(id);
-        self.restart_locked(id, spec_override).await
+        self.restart_locked(id, spec_override, false).await
     }
 
     /// [`Self::restart`] body; caller MUST hold this session's resume lock.
-    async fn restart_locked(&self, id: &Id, spec_override: Option<CommandSpec>) -> Result<Session> {
+    /// `passive` marks the new process a passive resume
+    /// ([`Self::passive_resume`]) before it is published in `live`.
+    async fn restart_locked(
+        &self,
+        id: &Id,
+        spec_override: Option<CommandSpec>,
+        passive: bool,
+    ) -> Result<Session> {
         let _mcp_activation = crate::mcp::activation_gate().read().await;
         let session = self.repo.get(id).await?;
         let account = self
@@ -5244,8 +5379,22 @@ impl SessionManager {
         // Keep an existing PTY/tunnel alive if replacement forwarding fails.
         let network = self.networks.prepare(&session).await?;
         self.networks.clear(id);
-        if let Some((_, handle)) = self.live.remove(id) {
-            let _ = handle.kill();
+        // From here on the old process is retired: every failure below must
+        // leave the row resumable instead of `running` with nothing live (the
+        // old status task sees itself superseded and writes nothing).
+        let mut retired = self.retiring.remove(id).map(|(_, rx)| rx);
+        let had_live = match self.live.remove(id) {
+            Some((_, handle)) => {
+                let _ = handle.kill();
+                retired = Some(handle.on_exit());
+                true
+            }
+            None => false,
+        };
+        // Never run two CLIs on one conversation: give the killed one (this
+        // one, or a just-suspended one) a bounded window to actually exit.
+        if let Some(rx) = retired {
+            await_retired_exit(id, rx).await;
         }
         let _ = std::fs::create_dir_all(&session.cwd);
         if session.kind == SessionKind::Agent {
@@ -5284,6 +5433,9 @@ impl SessionManager {
                 let _ = self
                     .revoke_mcp_token(&session.created_by, &session.id)
                     .await;
+                if had_live {
+                    self.respawn_failed(&session).await;
+                }
                 return Err(error);
             }
         }
@@ -5304,11 +5456,17 @@ impl SessionManager {
                 let _ = self
                     .revoke_mcp_token(&session.created_by, &session.id)
                     .await;
+                if had_live {
+                    self.respawn_failed(&session).await;
+                }
                 return Err(e);
             }
         };
         self.networks
             .activate(id.clone(), network, handle.on_exit());
+        if passive {
+            self.passive_resume.insert(id.clone(), ());
+        }
         self.live.insert(id.clone(), Arc::clone(&handle));
         self.repo.update_status(id, SessionStatus::Running).await?;
         let _ = self.events.send(Event::SessionStatus {
@@ -5415,10 +5573,30 @@ impl SessionManager {
                 drop(handle);
                 continue;
             }
-            let session = match self.repo.get(&sid).await {
+            // A transient DB error gets a couple of short retries before the
+            // holder is left alone (see below).
+            let mut lookup = self.repo.get(&sid).await;
+            for backoff_ms in [100, 500] {
+                if matches!(lookup, Ok(_) | Err(Error::NotFound(_))) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                lookup = self.repo.get(&sid).await;
+            }
+            let session = match lookup {
                 Ok(s) => s,
-                Err(_) => {
+                Err(Error::NotFound(_)) => {
                     tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                    drop(handle);
+                    continue;
+                }
+                Err(e) => {
+                    // A transient DB failure (busy, I/O) is no proof the
+                    // session is gone: killing here would end a live agent
+                    // mid-turn. Leave the holder running (detached, not
+                    // killed on drop) for the next adoption pass / restart.
+                    tracing::warn!(session = %sid, "pty holder: session lookup failed ({e}) — leaving it running for a later adoption");
+                    handle.detach();
                     drop(handle);
                     continue;
                 }
@@ -5562,6 +5740,33 @@ impl SessionManager {
             kept_running: adopted.len(),
             suspended: pass.suspended.len(),
         })
+    }
+
+    /// A restart / resume retired the old process and then failed to start the
+    /// new one: nothing is live any more, so the row must not keep saying
+    /// `running`. Agent sessions become `Reconnectable` (stamped like a
+    /// release, so the pane offers Resume); connection sessions — reopened
+    /// only via their connection — become `Exited`.
+    async fn respawn_failed(&self, session: &Session) {
+        let id = &session.id;
+        self.forget_sweep_state(id);
+        let status = if session.kind == SessionKind::Agent {
+            SessionStatus::Reconnectable
+        } else {
+            SessionStatus::Exited
+        };
+        if let Err(e) = self.repo.update_status(id, status).await {
+            tracing::warn!(session = %id, "respawn failed; status write failed too: {e}");
+        }
+        let _ = self.events.send(Event::SessionStatus {
+            session_id: id.clone(),
+            workspace_id: session.workspace_id.clone(),
+            status,
+        });
+        if status == SessionStatus::Reconnectable {
+            self.stamp_suspended(session, Some(SUSPEND_REASON_RELEASED))
+                .await;
+        }
     }
 
     /// Merge `meta.suspended = {reason, at: now}` (or remove it with `None`)
@@ -6071,6 +6276,43 @@ mod tests {
         );
     }
 
+    /// The auto-namer reads only a capped head of the transcript: a prompt in
+    /// the head is found; a head with no prompt reports `capped` (so the probe
+    /// gives up for good) instead of re-reading a huge file every sweep.
+    #[test]
+    fn read_provider_title_reads_a_capped_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let noise = r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#;
+        let prompt = r#"{"type":"user","message":{"role":"user","content":"name me"}}"#;
+        // Prompt inside the head → found, short file → not capped.
+        std::fs::write(&path, format!("{noise}\n{prompt}\n")).unwrap();
+        let read = read_provider_title("claude", &path);
+        assert_eq!(read.title.as_deref(), Some("name me"));
+        assert!(!read.capped);
+        // No prompt yet in a short file → not capped (retry later).
+        std::fs::write(&path, format!("{noise}\n")).unwrap();
+        let read = read_provider_title("claude", &path);
+        assert!(read.title.is_none() && !read.capped);
+        // Prompt only past the line cap → never found, capped → give up.
+        let mut body = format!("{noise}\n").repeat(PROVIDER_TITLE_SCAN_LINES);
+        body.push_str(prompt);
+        body.push('\n');
+        std::fs::write(&path, &body).unwrap();
+        let read = read_provider_title("claude", &path);
+        assert!(read.title.is_none() && read.capped);
+        // One giant line past the byte cap (invalid UTF-8 included) → capped,
+        // read lossily, never the whole file.
+        let mut big = vec![b'x'; (PROVIDER_TITLE_SCAN_BYTES + 1024) as usize];
+        big[10] = 0xff;
+        std::fs::write(&path, &big).unwrap();
+        let read = read_provider_title("claude", &path);
+        assert!(read.title.is_none() && read.capped);
+        // Unreadable file → nothing, not capped.
+        let read = read_provider_title("claude", &dir.path().join("missing"));
+        assert!(read.title.is_none() && !read.capped);
+    }
+
     #[test]
     fn parse_claude_first_prompt_none_when_no_user_turn() {
         let jsonl = r#"{"type":"assistant","message":{"role":"assistant","content":"hi"}}"#;
@@ -6383,6 +6625,54 @@ mod tests {
         ));
         assert!(handle.on_exit().borrow().is_none());
         manager.kill_session(&session.id).await.unwrap();
+    }
+
+    /// A restart that retires the old process and then fails to spawn the new
+    /// one must not leave the row `running` with nothing live: it becomes
+    /// `Reconnectable` (stamped `meta.suspended`), and the old child is dead.
+    #[tokio::test]
+    async fn failed_respawn_after_retiring_marks_session_reconnectable() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let session = repo
+            .create(NewSession {
+                workspace_id: workspace.id.clone(),
+                kind: SessionKind::Agent,
+                provider: "shell".into(),
+                title: "Respawn fixture".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: user,
+                meta: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        let old = Arc::new(
+            PtyHandle::spawn(&CommandSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "exec sleep 30".into()],
+                cwd: Some("/tmp".into()),
+                env: vec![],
+            })
+            .unwrap(),
+        );
+        manager.live.insert(session.id.clone(), Arc::clone(&old));
+        repo.update_status(&session.id, SessionStatus::Running)
+            .await
+            .unwrap();
+        let broken = CommandSpec {
+            program: "/nonexistent/otto-respawn-fixture".into(),
+            args: vec![],
+            cwd: Some("/tmp".into()),
+            env: vec![],
+        };
+        assert!(manager.restart(&session.id, Some(broken)).await.is_err());
+        assert!(!manager.is_live(&session.id));
+        let row = repo.get(&session.id).await.unwrap();
+        assert_eq!(row.status, SessionStatus::Reconnectable);
+        assert!(row.meta.get("suspended").is_some_and(|v| !v.is_null()));
+        // The retired child was waited for (bounded) before the respawn.
+        assert!(old.on_exit().borrow().is_some(), "old child must be dead");
     }
 
     #[tokio::test]
