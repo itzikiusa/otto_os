@@ -723,11 +723,11 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     }
 
     /// Find the active (pending|running) run whose input thread matches this
-    /// inbound message. Workflows are global, so we scan active runs across all
-    /// workspaces and match on the run input's channel/chat/thread (+ origin
+    /// inbound message, matching the run input's channel/chat/thread (+ origin
     /// workspace). An exact thread match wins; a channel/chat match on the same
     /// workspace is the fallback (newest first), so control still finds the run
-    /// when the trigger was a top-level message and the reply is threaded.
+    /// when the trigger was a top-level message and the reply is threaded. The
+    /// match runs in SQL and loads only the winning row (S3-09).
     async fn find_active_run_for_thread(
         &self,
         repo: &WorkflowsRepo,
@@ -736,26 +736,11 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         chat: &str,
         thread: Option<&str>,
     ) -> Option<WorkflowRun> {
-        let ids = repo.list_active_run_ids_global().await.ok()?;
-        let mut fallback: Option<WorkflowRun> = None;
-        for id in ids {
-            let Ok(run) = repo.get_run(&id).await else {
-                continue;
-            };
-            let i = &run.input;
-            let str_at = |k: &str| i.get(k).and_then(Value::as_str);
-            let ws_ok = str_at("origin_workspace_id") == Some(workspace_id)
-                || run.workspace_id == workspace_id;
-            if str_at("channel") == Some(channel) && str_at("chat") == Some(chat) && ws_ok {
-                if str_at("thread") == thread {
-                    return Some(run); // exact thread → best match
-                }
-                if fallback.is_none() {
-                    fallback = Some(run); // channel/chat match → newest-first fallback
-                }
-            }
-        }
-        fallback
+        let id = repo
+            .find_active_run_for_chat(workspace_id, channel, chat, thread)
+            .await
+            .ok()??;
+        repo.get_run(&id).await.ok()
     }
 
     /// A NON-INTRUSIVE status summary built purely from the run's persisted node
@@ -814,8 +799,9 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
 
         // (1) Legacy structured `Action: Workflow` command.
         if let Some(cmd) = parse_workflow_command(text) {
-            // Workflows are a GLOBAL library: resolve by name across all
-            // workspaces, preferring one in the message's own workspace.
+            // Resolved in the receiving integration's workspace ONLY — same
+            // gate as path (3): a channel never starts another workspace's
+            // workflow (S3-03).
             let wf = match repo
                 .find_by_name(&cmd.name, &workspace_id.to_string())
                 .await
