@@ -375,6 +375,9 @@ impl otto_product::ProductRunHost for ServerCtx {
     fn agent_cancels(&self) -> &CancelRegistry {
         &self.product_agent_cancels
     }
+    fn context_library(&self) -> &otto_context::Library {
+        &self.context_library
+    }
     #[allow(clippy::too_many_arguments)]
     fn run_agent_with_recovery(
         &self,

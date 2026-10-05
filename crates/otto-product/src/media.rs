@@ -317,7 +317,7 @@ pub async fn upload_attachment<C: ProductStudioHost>(
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("create attachment dir: {e}"))))?;
-    let full = otto_core::paths::confine_join(&ctx.data_dir(), &rel)
+    let full = otto_core::paths::confine_join(ctx.data_dir(), &rel)
         .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {sid}"))))?;
     tokio::fs::write(&full, &bytes)
         .await
@@ -383,7 +383,7 @@ pub async fn serve_attachment<C: ProductStudioHost>(
     let root = ctx.data_dir().join(ATTACH_ROOT);
     // Confine the stored path's join under the data dir (rust/path-injection)…
     let full =
-        otto_core::paths::confine_join(&ctx.data_dir(), &att.storage_path).ok_or_else(|| {
+        otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path).ok_or_else(|| {
             ApiError(Error::Forbidden(
                 "attachment path escapes the data dir".into(),
             ))
@@ -460,7 +460,7 @@ pub async fn put_attachment_content<C: ProductStudioHost>(
 
     let root = ctx.data_dir().join(ATTACH_ROOT);
     let full =
-        otto_core::paths::confine_join(&ctx.data_dir(), &att.storage_path).ok_or_else(|| {
+        otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path).ok_or_else(|| {
             ApiError(Error::Forbidden(
                 "attachment path escapes the data dir".into(),
             ))
@@ -570,7 +570,7 @@ pub async fn delete_attachment<C: ProductStudioHost>(
     // Path-sandbox: only unlink if the confined (rust/path-injection) resolved
     // path is within the attachments root.
     let root = ctx.data_dir().join(ATTACH_ROOT);
-    if let Some(full) = otto_core::paths::confine_join(&ctx.data_dir(), &att.storage_path) {
+    if let Some(full) = otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path) {
         if path_within(&root, &full) {
             let _ = tokio::fs::remove_file(&full).await;
         }

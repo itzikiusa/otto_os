@@ -604,7 +604,7 @@ async fn build_discovery_brief<C: ProductStudioHost>(
     }
 
     // --- Attachments (absolute paths; never copied) ------------------------
-    s.push_str(&render_attachments_section(&ctx.data_dir(), atts));
+    s.push_str(&render_attachments_section(ctx.data_dir(), atts));
 
     s.trim_end().to_string()
 }

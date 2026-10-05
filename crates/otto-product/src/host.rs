@@ -37,6 +37,8 @@ pub trait ProductRunHost: ProductCtx {
     /// Analysis-agent id → cancel flag; a manual Stop trips it via
     /// [`crate::run::signal_cancel`].
     fn agent_cancels(&self) -> &CancelRegistry;
+    /// The skill library (lens / writer / tests / plan skill bodies).
+    fn context_library(&self) -> &otto_context::Library;
 
     /// Run `provider` as a live agent session in `cwd` with automatic recovery
     /// (fresh session per attempt, up to [`crate::run::MAX_AGENT_ATTEMPTS`]):

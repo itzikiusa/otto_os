@@ -16,13 +16,10 @@
 //! each lens's terminal afterward.
 
 use std::collections::HashSet;
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use otto_core::api::CreateSessionReq;
-use otto_core::domain::SessionKind;
 use otto_core::workref::WorkRef;
 use otto_core::Id;
 use otto_state::{LearningPatch, NewAnalysisAgent, NewEvent, NewLearning, NewQuestion, StoryPatch};
@@ -440,7 +437,7 @@ pub async fn run_analysis<C: ProductRunHost>(
         Err(e) => {
             warn!("product_run: get_story {story_id}: {e}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_analysis_status(&analysis_id, "error", Some("failed to load story"), true)
                 .await;
             return;
@@ -454,7 +451,7 @@ pub async fn run_analysis<C: ProductRunHost>(
     let context_path = std::env::temp_dir().join(format!("otto-product-{analysis_id}-context.md"));
     {
         let context_md = match ctx
-            .product
+            .product()
             .build_agent_context(&story_id, focus.as_deref())
             .await
         {
@@ -513,7 +510,7 @@ pub async fn run_analysis<C: ProductRunHost>(
             // Create the agent row (status = "running"). The display name
             // disambiguates the lens across providers, like review.
             let agent = match ctx
-                .product_repo
+                .product_repo()
                 .add_analysis_agent(NewAnalysisAgent {
                     analysis_id: analysis_id.clone(),
                     name: format!("{} \u{00b7} {}", spec.name, spec.provider),
@@ -541,10 +538,10 @@ pub async fn run_analysis<C: ProductRunHost>(
 
             // Resolve skill body: library first, then bundled, then empty.
             let skill_body = ctx
-                .context_library
+                .context_library()
                 .get_skill(&spec.skill)
                 .map(|s| s.body)
-                .or_else(|| otto_product::skill_body(&spec.skill).map(|s| s.to_string()))
+                .or_else(|| crate::skill_body(&spec.skill).map(|s| s.to_string()))
                 .unwrap_or_default();
 
             // Build the lens prompt (context lives in the context file) +
@@ -608,7 +605,7 @@ pub async fn run_analysis<C: ProductRunHost>(
                     }))
                     .unwrap_or_default();
                     if let Err(e) = ctx
-                        .product_repo
+                        .product_repo()
                         .set_agent_status(&agent_id, "done", Some(&findings_json), None, true)
                         .await
                     {
@@ -638,7 +635,7 @@ pub async fn run_analysis<C: ProductRunHost>(
                     };
                     warn!("product_run: lens '{}' ({}) failed: {err}", spec.name, spec.provider);
                     let _ = ctx
-                        .product_repo
+                        .product_repo()
                         .set_agent_status(&agent_id, "error", None, Some(&err), true)
                         .await;
                     // Surface genuine failures (not user-initiated stops) so an
@@ -684,14 +681,14 @@ pub async fn run_analysis<C: ProductRunHost>(
 
     // 4. Summarizer session: ONE agent consolidates / dedupes / resolves -------
     let summarizer_skill_body = ctx
-        .context_library
+        .context_library()
         .get_skill("po-story-overview")
         .map(|s| s.body)
-        .or_else(|| otto_product::skill_body("po-story-overview").map(|s| s.to_string()))
+        .or_else(|| crate::skill_body("po-story-overview").map(|s| s.to_string()))
         .unwrap_or_default();
 
     let summarizer_agent = ctx
-        .product_repo
+        .product_repo()
         .add_analysis_agent(NewAnalysisAgent {
             analysis_id: analysis_id.clone(),
             name: format!("Summarizer \u{00b7} {summarizer_provider}"),
@@ -710,7 +707,7 @@ pub async fn run_analysis<C: ProductRunHost>(
         // spinner with no openable session).
         if let Some(ref agent) = summarizer_agent {
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent.id,
                     "error",
@@ -770,13 +767,13 @@ pub async fn run_analysis<C: ProductRunHost>(
             match (&parsed, result.errored) {
                 (Some(_), _) => {
                     let _ = ctx
-                        .product_repo
+                        .product_repo()
                         .set_agent_status(&agent.id, "done", result.raw.as_deref(), None, true)
                         .await;
                 }
                 (None, _) => {
                     let _ = ctx
-                        .product_repo
+                        .product_repo()
                         .set_agent_status(
                             &agent.id,
                             "error",
@@ -796,7 +793,7 @@ pub async fn run_analysis<C: ProductRunHost>(
     // The summarizer's deduped questions REPLACE the old per-lens Rust dedup.
     // Fall back to the Rust-side merge only if the summarizer failed.
     let existing_questions = ctx
-        .product_repo
+        .product_repo()
         .list_questions(&story_id)
         .await
         .unwrap_or_default();
@@ -870,7 +867,7 @@ pub async fn run_analysis<C: ProductRunHost>(
             continue;
         }
         let created = ctx
-            .product_repo
+            .product_repo()
             .create_learning(NewLearning {
                 workspace_id: story.workspace_id.clone(),
                 kind: kind.to_string(),
@@ -929,7 +926,7 @@ pub async fn run_analysis<C: ProductRunHost>(
     };
     let final_status = if any_errored { "partial" } else { "done" };
     if let Err(e) = ctx
-        .product_repo
+        .product_repo()
         .set_analysis_status(&analysis_id, final_status, Some(&final_summary), true)
         .await
     {
@@ -945,7 +942,7 @@ pub async fn run_analysis<C: ProductRunHost>(
 
     // 7. Update story stage to "analyzed" -------------------------------------
     if let Err(e) = ctx
-        .product_repo
+        .product_repo()
         .update_story(
             &story_id,
             StoryPatch {
@@ -962,7 +959,7 @@ pub async fn run_analysis<C: ProductRunHost>(
     let summary_event =
         format!("analysis completed: {lens_count} lens agent(s), {question_count} new question(s)");
     if let Err(e) = ctx
-        .product_repo
+        .product_repo()
         .add_event(NewEvent {
             story_id: story_id.clone(),
             section: "analysis".into(),
@@ -1015,7 +1012,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
         Err(e) => {
             warn!("product_run(retry): get_analysis {analysis_id}: {e}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent_id,
                     "error",
@@ -1033,7 +1030,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
         Err(e) => {
             warn!("product_run(retry): get_story {}: {e}", analysis.story_id);
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent_id,
                     "error",
@@ -1049,7 +1046,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
     // 4. Mark the agent row "running" and clear prior error.
     let clear_err: Option<&str> = None;
     if let Err(e) = ctx
-        .product_repo
+        .product_repo()
         .set_agent_status(&agent_id, "running", None, clear_err, false)
         .await
     {
@@ -1084,7 +1081,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
         None => {
             warn!("product_run(retry): unsafe analysis id {analysis_id}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent_id,
                     "error",
@@ -1099,7 +1096,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
     if !context_path.exists() {
         // Context file was cleaned up; rebuild it.
         let context_md = match ctx
-            .product
+            .product()
             .build_agent_context(&analysis.story_id, None)
             .await
         {
@@ -1125,10 +1122,10 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
 
     // 7. Resolve skill body.
     let skill_body = ctx
-        .context_library
+        .context_library()
         .get_skill(&agent.skill)
         .map(|s| s.body)
-        .or_else(|| otto_product::skill_body(&agent.skill).map(|s| s.to_string()))
+        .or_else(|| crate::skill_body(&agent.skill).map(|s| s.to_string()))
         .unwrap_or_default();
 
     // 8. Build prompt + unique out_path (use agent_id for uniqueness). Same
@@ -1141,7 +1138,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
         None => {
             warn!("product_run(retry): unsafe agent id {agent_id}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent_id,
                     "error",
@@ -1207,7 +1204,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
             }))
             .unwrap_or_default();
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(&agent_id, "done", Some(&findings_json), None, true)
                 .await
             {
@@ -1225,7 +1222,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
             };
             warn!("product_run(retry): agent {agent_id} failed: {err}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(&agent_id, "error", None, Some(&err), true)
                 .await;
             if result.reason != Some("stopped") {
@@ -1301,7 +1298,7 @@ pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
 
         if agent.resume_count >= MAX_RESUME_ATTEMPTS {
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .set_agent_status(
                     &agent.id,
                     "error",
@@ -1437,10 +1434,10 @@ pub async fn run_rewrite<C: ProductRunHost>(
     };
 
     let skill_body = ctx
-        .context_library
+        .context_library()
         .get_skill(writer_skill_name)
         .map(|s| s.body)
-        .or_else(|| otto_product::skill_body(writer_skill_name).map(|s| s.to_string()))
+        .or_else(|| crate::skill_body(writer_skill_name).map(|s| s.to_string()))
         .unwrap_or_default();
 
     // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
@@ -1453,7 +1450,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
 
     {
         let mut context_md = match ctx
-            .product
+            .product()
             .build_agent_context(&story_id, focus.as_deref())
             .await
         {
@@ -1470,7 +1467,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
 
         // Append answered questions (important for the writer).
         let answered: Vec<otto_state::ProductQuestion> = ctx
-            .product_repo
+            .product_repo()
             .list_questions(&story_id)
             .await
             .unwrap_or_default()
@@ -1493,7 +1490,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
         // Append latest analysis summary.
         let analysis_summary = {
             let analyses = ctx
-                .product_repo
+                .product_repo()
                 .list_analyses(&story_id)
                 .await
                 .unwrap_or_default();
@@ -1561,7 +1558,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
         Some(findings) => {
             // 8. Persist suggested version
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .add_version(otto_state::NewVersion {
                     story_id: story_id.clone(),
                     kind: "suggested".into(),
@@ -1578,7 +1575,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
 
             // 9. Update story stage to "refined"
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .update_story(
                     &story_id,
                     otto_state::StoryPatch {
@@ -1593,7 +1590,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
 
             // 10. Add event
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "rewrite".into(),
@@ -1628,7 +1625,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
             };
             warn!("product_run(rewrite): {reason}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "rewrite".into(),
@@ -1754,10 +1751,10 @@ pub async fn run_generate_tests<C: ProductRunHost>(
     // 2. Resolve skill body: story-test-cases
     let skill_name = "story-test-cases";
     let skill_body = ctx
-        .context_library
+        .context_library()
         .get_skill(skill_name)
         .map(|s| s.body)
-        .or_else(|| otto_product::skill_body(skill_name).map(|s| s.to_string()))
+        .or_else(|| crate::skill_body(skill_name).map(|s| s.to_string()))
         .unwrap_or_default();
 
     // 3. Build context file (enriched with Jira details, answered Q&A, learnings).
@@ -1766,7 +1763,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
 
     {
         let mut context_md = match ctx
-            .product
+            .product()
             .build_agent_context(&story_id, focus.as_deref())
             .await
         {
@@ -1783,7 +1780,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
 
         // Append answered questions.
         let answered: Vec<otto_state::ProductQuestion> = ctx
-            .product_repo
+            .product_repo()
             .list_questions(&story_id)
             .await
             .unwrap_or_default()
@@ -1806,7 +1803,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
         // Append latest analysis summary.
         let analysis_summary = {
             let analyses = ctx
-                .product_repo
+                .product_repo()
                 .list_analyses(&story_id)
                 .await
                 .unwrap_or_default();
@@ -1872,7 +1869,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
         Some(parsed) => {
             // 8. Create testcase run
             let run = match ctx
-                .product_repo
+                .product_repo()
                 .create_testcase_run(&story_id, &story.created_by)
                 .await
             {
@@ -1880,7 +1877,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
                 Err(e) => {
                     warn!("product_run(generate_tests): create_testcase_run: {e}");
                     let _ = ctx
-                        .product_repo
+                        .product_repo()
                         .add_event(otto_state::NewEvent {
                             story_id: story_id.clone(),
                             section: "tests".into(),
@@ -1923,7 +1920,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
 
             // 10. Update story stage
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .update_story(
                     &story_id,
                     otto_state::StoryPatch {
@@ -1938,7 +1935,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
 
             // 11. Add event
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "tests".into(),
@@ -1969,7 +1966,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
             };
             warn!("product_run(generate_tests): {reason}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "tests".into(),
@@ -2157,10 +2154,10 @@ pub async fn run_generate_plan<C: ProductRunHost>(
     // 2. Resolve skill body: story-task-breakdown
     let skill_name = "story-task-breakdown";
     let skill_body = ctx
-        .context_library
+        .context_library()
         .get_skill(skill_name)
         .map(|s| s.body)
-        .or_else(|| otto_product::skill_body(skill_name).map(|s| s.to_string()))
+        .or_else(|| crate::skill_body(skill_name).map(|s| s.to_string()))
         .unwrap_or_default();
 
     // 3. Build context file (Jira details + answered Q&A + analysis summary +
@@ -2170,7 +2167,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
 
     {
         let mut context_md = match ctx
-            .product
+            .product()
             .build_agent_context(&story_id, focus.as_deref())
             .await
         {
@@ -2187,7 +2184,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
 
         // Append answered questions.
         let answered: Vec<otto_state::ProductQuestion> = ctx
-            .product_repo
+            .product_repo()
             .list_questions(&story_id)
             .await
             .unwrap_or_default()
@@ -2210,7 +2207,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
         // Append latest analysis summary.
         let analysis_summary = {
             let analyses = ctx
-                .product_repo
+                .product_repo()
                 .list_analyses(&story_id)
                 .await
                 .unwrap_or_default();
@@ -2230,7 +2227,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
         // section 4: list_testcase_runs → first → list_testcases → approved).
         let approved: Vec<otto_state::ProductTestcase> = {
             let runs = ctx
-                .product_repo
+                .product_repo()
                 .list_testcase_runs(&story_id)
                 .await
                 .unwrap_or_default();
@@ -2488,7 +2485,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
     match final_plan {
         Some(plan_markdown) => {
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .add_version(otto_state::NewVersion {
                     story_id: story_id.clone(),
                     kind: "plan".into(),
@@ -2505,7 +2502,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
 
             // Update story stage to "planned".
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .update_story(
                     &story_id,
                     otto_state::StoryPatch {
@@ -2520,7 +2517,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
 
             // Add event.
             if let Err(e) = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "plan".into(),
@@ -2546,7 +2543,7 @@ pub async fn run_generate_plan<C: ProductRunHost>(
                 .to_string();
             warn!("product_run(plan): {reason}");
             let _ = ctx
-                .product_repo
+                .product_repo()
                 .add_event(otto_state::NewEvent {
                     story_id: story_id.clone(),
                     section: "plan".into(),

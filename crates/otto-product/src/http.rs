@@ -71,8 +71,10 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
 // Error → response
 // ---------------------------------------------------------------------------
 
+/// `otto_core::Error` as an RFC-7807-ish `Problem` response (same status
+/// mapping as `otto-server`'s `ApiError`).
 #[derive(Debug)]
-pub(crate) struct ApiError(pub Error);
+pub struct ApiError(pub Error);
 
 impl From<Error> for ApiError {
     fn from(e: Error) -> Self {
@@ -104,13 +106,13 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub(crate) type ApiResult<T> = std::result::Result<T, ApiError>;
+pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 /// Extractor for the authenticated user (the [`AuthUser`] extension the
 /// host's auth middleware inserts); rejects with 401 when absent. Mirrors
 /// `otto-server`'s `auth::CurrentUser` for the handlers that moved here.
 #[derive(Debug, Clone)]
-pub(crate) struct CurrentUser(pub otto_core::domain::User);
+pub struct CurrentUser(pub otto_core::domain::User);
 
 impl<S> axum::extract::FromRequestParts<S> for CurrentUser
 where

@@ -454,8 +454,7 @@ async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> Strin
             // Confine the stored path's join under the data dir — a traversing
             // storage_path drops the attachment instead of reading outside it
             // (rust/path-injection).
-            let Some(path) = otto_core::paths::confine_join(&ctx.data_dir(), &a.storage_path)
-            else {
+            let Some(path) = otto_core::paths::confine_join(ctx.data_dir(), &a.storage_path) else {
                 continue;
             };
             let inlined = if is_text_mockup(&a.mime, &a.filename) {

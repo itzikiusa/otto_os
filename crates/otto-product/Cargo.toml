@@ -14,6 +14,7 @@ otto-sessions = { workspace = true }
 otto-improve = { workspace = true }
 otto-orchestrator = { workspace = true }
 otto-swarm = { workspace = true }
+otto-design = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
