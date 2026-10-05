@@ -308,6 +308,23 @@ async fn transport_permit() -> Result<tokio::sync::OwnedSemaphorePermit, String>
         .map_err(|_| "MCP transport admission closed".to_string())
 }
 
+/// Parent variables a stdio MCP server inherits — the MCP SDK's
+/// `getDefaultEnvironment` set (what a program needs to find binaries, a home,
+/// a temp dir and a locale). Everything else ottod holds (provider API keys,
+/// AWS credentials, tokens under `cargo run` / a shell launch) stays out of a
+/// third-party `npx` server; it gets only its configured env + secrets.
+pub(crate) const STDIO_BASE_ENV: &[&str] = &[
+    "HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
+];
+
+/// The allow-listed parent environment (see [`STDIO_BASE_ENV`]).
+pub(crate) fn stdio_base_env() -> Vec<(String, String)> {
+    STDIO_BASE_ENV
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_string(), v)))
+        .collect()
+}
+
 async fn open_stdio(
     command: &str,
     args: &[String],
@@ -316,6 +333,8 @@ async fn open_stdio(
     let permit = transport_permit().await?;
     let mut child = Command::new(command)
         .args(args)
+        .env_clear()
+        .envs(stdio_base_env())
         .envs(env)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -826,6 +845,20 @@ mod tests {
         let answered: Value = serde_json::from_slice(out.trim_ascii()).unwrap();
         assert_eq!(answered["id"], json!(3));
         assert_eq!(answered["result"], json!({}), "ping answered with {{}}");
+    }
+
+    /// S5-12: a stdio server inherits only the allow-listed base — never,
+    /// say, the cargo / provider variables of the daemon's environment.
+    #[test]
+    fn stdio_servers_inherit_only_the_base_environment() {
+        let base = stdio_base_env();
+        assert!(base
+            .iter()
+            .all(|(k, _)| STDIO_BASE_ENV.contains(&k.as_str())));
+        assert!(base.iter().any(|(k, _)| k == "PATH"), "PATH is passed");
+        // cargo sets this for the test process; it must not leak through.
+        assert!(std::env::var("CARGO_MANIFEST_DIR").is_ok());
+        assert!(!base.iter().any(|(k, _)| k == "CARGO_MANIFEST_DIR"));
     }
 
     #[test]
