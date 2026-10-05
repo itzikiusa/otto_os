@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedShellSession } from './seed';
-import { openPage } from './helpers';
+import { openNewSessionSheet, openPage } from './helpers';
 
 // New Session sheet: starting SEVERAL sessions in one go, and pointing them at
 // any folder on the machine without creating a workspace for it.
@@ -35,15 +35,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 });
 
 /** Open the New Session sheet (⌘T, falling back to the TabBar + button). */
-async function openSheet(page: import('@playwright/test').Page) {
-  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
-  await page.keyboard.press('Meta+t');
-  if (!(await dialog.isVisible().catch(() => false))) {
-    await page.getByTitle('New session', { exact: true }).click();
-  }
-  await expect(dialog).toBeVisible();
-  return dialog;
-}
+const openSheet = openNewSessionSheet;
 
 async function sessionCount(): Promise<number> {
   const r = await api!.ctx.get(`${api!.base}/api/v1/workspaces/${wsA}/sessions`);
