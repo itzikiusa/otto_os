@@ -32,7 +32,7 @@ const ADMIN: SettingsGate = { feature: 'settings', level: 'admin' };
 const USERS_ADMIN: SettingsGate = { feature: 'users', level: 'admin' };
 // Providers, Daemon, Trust & safety and Logs read/write root-only handlers
 // (`GET|PUT /settings`, `/audit-log`, `/security-posture`, `/logs/daemon` all
-// `require_root`), so a non-root settings admin only ever saw "Couldn't load".
+// `require_root`), so a non-root settings admin only ever saw "Couldn’t load".
 
 /**
  * Every section, in nav order. `id` is the route (`#/settings/<id>`) and must

@@ -251,7 +251,7 @@
     try {
       // Navigate FIRST and only touch the target page/store once the leave
       // guards let us go: a declined guard used to fall through to a 10 s
-      // port wait and a false "Couldn't open" toast (and, for a swarm, still
+      // port wait and a false "Couldn’t open" toast (and, for a swarm, still
       // switch the global swarm store under the page the user stayed on).
       if (d.kind === 'swarm') {
         const p = await missionControlApi.sourceProject(d.source_id);
