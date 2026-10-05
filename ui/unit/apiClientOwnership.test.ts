@@ -5,6 +5,7 @@ import {runInNewContext} from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import ts from 'typescript';
 import { deferred } from './sourceHarness.ts';
+import { strictRequire } from './strictRequire.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
@@ -19,17 +20,21 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
     $state: Object.assign((v: unknown) => v, {snapshot: (v: unknown) => v, raw: (v: unknown) => v}), $derived: (v: unknown) => v,
     crypto: {randomUUID}, URL, URLSearchParams, AbortController, DOMException, setTimeout, clearTimeout, performance, encodeURIComponent,
     localStorage: {getItem() {return null;},setItem() {}},
-    require: (p: string) => p.endsWith('/client') ? {api, isAbortError: () => false}
-      : p.includes('workspace.svelte') ? {ws}
-      : p.includes('toast') ? {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}
-      : p.endsWith('/apiHistory') ? {HistoryRefresh, HistoryDetail}
-      : p.endsWith('/apiSecretShapes') ? secretShapes
-      : p.endsWith('/scriptRunner') ? {runScript}
-      : p.endsWith('/lazyModule') ? {announceModule() {}}
-      : p.endsWith('/plural') ? {plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`}
-      : p.endsWith('/scripts') ? scriptRuntime
-      : p.endsWith('/importers') ? {isImportedEnvironment: (d: any) => d.format === 'postman-env'}
-      : p.endsWith('/types') ? {isSecretRef: (v: any) => !!v?.$secret} : {},
+    require: strictRequire([
+      ['/api/client', {api, isAbortError: () => false}],
+      ['/workspace.svelte', {ws}],
+      ['/toast.svelte', {toasts: {error: (message: string) => { notices.push(message); },success() {},info() {}}}],
+      // No flow here confirms; a call would be an untested path, so fail loudly.
+      ['/confirm.svelte', {confirmer: new Proxy({}, {get: (_t, k) => () => { throw new Error(`unexpected confirmer.${String(k)}`); }})}],
+      ['/apiHistory', {HistoryRefresh, HistoryDetail}],
+      ['/apiSecretShapes', secretShapes],
+      ['/scriptRunner', {runScript}],
+      ['/lazyModule', {announceModule() {}}],
+      ['/plural', {plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`}],
+      ['/api/scripts', scriptRuntime],
+      ['/importers', {isImportedEnvironment: (d: any) => d.format === 'postman-env'}],
+      ['/api/types', {isSecretRef: (v: any) => !!v?.$secret}],
+    ]),
   };
   runInNewContext(ts.transpileModule(readFileSync(new URL('../src/lib/stores/apiClient.svelte.ts',import.meta.url),'utf8'),
     {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
