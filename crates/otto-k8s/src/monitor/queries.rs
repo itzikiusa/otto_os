@@ -280,6 +280,16 @@ fn ns_filter(ns: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// `AND namespace IN (…)` for a caller limited to some namespaces (S6-05);
+/// `None` = no limit, an empty list matches nothing.
+pub fn ns_in_filter(namespaces: Option<&[String]>) -> String {
+    match namespaces {
+        None => String::new(),
+        Some([]) => " AND 0".to_string(),
+        Some(list) => format!(" AND namespace IN ({})", in_list_owned(list)),
+    }
+}
+
 fn wl_filter(workload: Option<&str>) -> String {
     workload
         .filter(|w| !w.is_empty())
@@ -510,8 +520,25 @@ pub fn series_sql(
     step_secs: u32,
     is_counter: bool,
 ) -> String {
+    series_sql_in_namespaces(
+        cluster_id, None, metric, workload, pod, window, step_secs, is_counter,
+    )
+}
+
+/// [`series_sql`] limited to `namespaces` (see [`ns_in_filter`]).
+#[allow(clippy::too_many_arguments)]
+pub fn series_sql_in_namespaces(
+    cluster_id: &str,
+    namespaces: Option<&[String]>,
+    metric: &str,
+    workload: Option<&str>,
+    pod: Option<&str>,
+    window: Duration,
+    step_secs: u32,
+    is_counter: bool,
+) -> String {
     let step = step_secs.max(10);
-    series_in(
+    series_in_filtered(
         &Span::plan(now_secs(), window.num_seconds(), 0, Some(step)),
         cluster_id,
         metric,
@@ -519,6 +546,7 @@ pub fn series_sql(
         pod,
         step,
         is_counter,
+        &ns_in_filter(namespaces),
     )
 }
 
@@ -531,17 +559,34 @@ pub fn series_in(
     step_secs: u32,
     is_counter: bool,
 ) -> String {
+    series_in_filtered(
+        span, cluster_id, metric, workload, pod, step_secs, is_counter, "",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn series_in_filtered(
+    span: &Span,
+    cluster_id: &str,
+    metric: &str,
+    workload: Option<&str>,
+    pod: Option<&str>,
+    step_secs: u32,
+    is_counter: bool,
+    extra: &str,
+) -> String {
     let step = step_secs.max(10);
     let pod_f = pod
         .filter(|p| !p.is_empty())
         .map(|p| format!(" AND pod = {}", sql_str(p)))
         .unwrap_or_default();
     let filter = format!(
-        " AND cluster_id = {} AND metric = {}{}{}",
+        " AND cluster_id = {} AND metric = {}{}{}{}",
         sql_str(cluster_id),
         sql_str(metric),
         wl_filter(workload),
-        pod_f
+        pod_f,
+        extra
     );
     format!(
         "SELECT {b_utc} AS t, sum(v) AS v FROM (
@@ -1025,6 +1070,18 @@ pub fn events_sql(
     workload: Option<&str>,
     limit: u32,
 ) -> String {
+    events_sql_in_namespaces(cluster_id, None, window, class, workload, limit)
+}
+
+/// [`events_sql`] limited to `namespaces` (see [`ns_in_filter`]).
+pub fn events_sql_in_namespaces(
+    cluster_id: &str,
+    namespaces: Option<&[String]>,
+    window: Duration,
+    class: Option<&str>,
+    workload: Option<&str>,
+    limit: u32,
+) -> String {
     let kind_f = match class.filter(|c| !c.is_empty()) {
         Some("k8s_event") => " AND kind = 'k8s_event'".to_string(),
         Some("version") => " AND kind = 'version'".to_string(),
@@ -1037,13 +1094,14 @@ pub fn events_sql(
     format!(
         "SELECT {ts_utc} AS ts, namespace, workload, pod, container, kind, class, reason, exit_code, detail, actor
          FROM k8s_events
-         WHERE cluster_id = {cid} AND {range}{kind}{wl}
+         WHERE cluster_id = {cid} AND {range}{kind}{wl}{ns}
          ORDER BY ts DESC LIMIT {limit}",
         ts_utc = TS_UTC,
         cid = sql_str(cluster_id),
         range = ts_range(window.num_seconds(), 0),
         kind = kind_f,
         wl = wl_filter(workload),
+        ns = ns_in_filter(namespaces),
         limit = limit.clamp(1, 1000),
     )
 }
@@ -1338,6 +1396,33 @@ mod tests {
         assert!(m.contains("FROM k8s_latest"));
         assert!(m.contains("argMax(last_value, last_ts) AS mem"));
         assert!(m.contains("namespace = 'shop'"));
+    }
+
+    #[test]
+    fn namespace_scope_reaches_series_and_events_sql() {
+        // S6-05: a namespace-scoped caller's reads carry its grant.
+        let shop = vec!["shop".to_string(), "o'k".to_string()];
+        let e = events_sql_in_namespaces("c1", Some(&shop), Duration::hours(1), None, None, 10);
+        assert!(e.contains("AND namespace IN ('shop', 'o\\'k')"), "{e}");
+        let s = series_sql_in_namespaces(
+            "c1",
+            Some(&shop[..1]),
+            "http_requests_total",
+            None,
+            None,
+            Duration::hours(1),
+            60,
+            true,
+        );
+        assert!(s.contains("AND namespace IN ('shop')"), "{s}");
+        assert!(
+            events_sql_in_namespaces("c1", Some(&[]), Duration::hours(1), None, None, 10)
+                .contains(" AND 0")
+        );
+        assert_eq!(
+            events_sql("c1", Duration::hours(1), None, None, 10),
+            events_sql_in_namespaces("c1", None, Duration::hours(1), None, None, 10)
+        );
     }
 
     #[test]

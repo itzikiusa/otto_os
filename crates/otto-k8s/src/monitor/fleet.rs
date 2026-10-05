@@ -98,7 +98,10 @@ pub fn scope_sql(scope: &FleetScope) -> String {
             Some(list) => format!(
                 "(cluster_id = {} AND namespace IN ({}))",
                 sql_str(c),
-                list.iter().map(|n| sql_str(n)).collect::<Vec<_>>().join(", ")
+                list.iter()
+                    .map(|n| sql_str(n))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         })
         .collect();
