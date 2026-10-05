@@ -67,7 +67,7 @@ CREATE INDEX idx_product_stories_parent ON product_stories(parent_id);
   `NewStory` carries them too (so ingest creates children in one insert);
   `StoryPatch`/`UpdateStoryReq` accept them (`parent_id: Option<Option<Id>>` to
   allow clearing). The one exhaustive literal to fix is the `make_story` test
-  helper in `otto-server/src/product_run.rs`.
+  helper in `otto-product/src/run.rs`.
 
 ### 2.2 Attachments — design artifacts (no new table)
 
@@ -361,7 +361,7 @@ the Database Explorer):
 |---|---|
 | `ProductStory { parent_id, tree_kind, folder }`; `NewStory`, `StoryPatch`, `UpdateStoryReq`; `delete_story` re-parents | `otto-state/product.rs`, `otto-product/types.rs`, `ui/src/modules/product/types.ts`, `docs/contracts/api.md` (§ Product rows) |
 | `POST /product/stories/{sid}/children` `{ title, tree_kind, folder }` → `ProductStoryDetail` | `otto-product/http.rs` + `service.rs` |
-| `PUT /product/attachments/{aid}/content` | `otto-server/product_media.rs`, `modules.rs` (with the 40 MB body layer) |
+| `PUT /product/attachments/{aid}/content` | `otto-product/src/media.rs`, `otto-server/src/modules.rs` (with the 40 MB body layer) |
 | `POST /product/stories/{sid}/mockups/assist` `format ∈ html\|mermaid\|excalidraw\|scene3d`, 400 otherwise | `mockup_assist.rs` (+ `DesignFormat` in a new `design_format.rs`) |
 | `GET /product/design/blender`, `POST …/design/{aid}/blender-render`, `GET …/design/{aid}/blender-script` | new `otto-server/src/design_blender.rs`, `design_scene3d.rs`; `otto-sandbox::SandboxPolicy::for_tool` |
 | `otto-product --folder --kind`, `otto-mockup --format --folder`, non-silent failures; ingest resolves the epic | `swarm_workspace.rs`, `routes/swarm_ingest.rs`, `swarm_run.rs` prompt; `otto-state/swarm.rs::update_project` conflict mapping |

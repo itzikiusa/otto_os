@@ -183,7 +183,7 @@ impl ServerCtx {
             mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
             discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
             canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-            product_agent_cancels: crate::product_run::new_cancel_registry(),
+            product_agent_cancels: otto_core::cancel::new_cancel_registry(),
             design_jobs: crate::design_blender::new_job_registry(),
             memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
             vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),

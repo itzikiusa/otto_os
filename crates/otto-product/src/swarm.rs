@@ -35,9 +35,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+use crate::host::ProductStudioHost;
+use crate::http::{ApiError, ApiResult, CurrentUser};
 
 /// Request body for `POST /product/stories/{sid}/to-swarm`.
 #[derive(Debug, Default, Deserialize)]
@@ -131,9 +130,9 @@ fn strip_task_prefix(title: &str) -> String {
 
 /// Build the project goal from the story's most refined content: prefer the
 /// latest `suggested` (rewrite) body, then the `source` body, then the title.
-async fn build_goal_md(ctx: &ServerCtx, story: &ProductStory) -> String {
+async fn build_goal_md<C: ProductStudioHost>(ctx: &C, story: &ProductStory) -> String {
     if let Ok(Some(v)) = ctx
-        .product_repo
+        .product_repo()
         .latest_version_of_kind(&story.id, "suggested")
         .await
     {
@@ -141,7 +140,7 @@ async fn build_goal_md(ctx: &ServerCtx, story: &ProductStory) -> String {
             return v.body_md.trim().to_string();
         }
     }
-    if let Ok(Some(v)) = ctx.product_repo.latest_source_version(&story.id).await {
+    if let Ok(Some(v)) = ctx.product_repo().latest_source_version(&story.id).await {
         if !v.body_md.trim().is_empty() {
             return v.body_md.trim().to_string();
         }
@@ -151,14 +150,14 @@ async fn build_goal_md(ctx: &ServerCtx, story: &ProductStory) -> String {
 
 /// Resolve the target swarm: explicit request id (verified same-workspace),
 /// else the workspace's first swarm, else auto-create a paused default swarm.
-async fn resolve_swarm(
-    ctx: &ServerCtx,
+async fn resolve_swarm<C: ProductStudioHost>(
+    ctx: &C,
     workspace_id: &Id,
     user_id: &Id,
     requested: Option<Id>,
 ) -> ApiResult<Swarm> {
     if let Some(sid) = requested {
-        let swarm = ctx.swarm_repo.get_swarm(&sid).await.map_err(ApiError)?;
+        let swarm = ctx.swarms().get_swarm(&sid).await.map_err(ApiError)?;
         if &swarm.workspace_id != workspace_id {
             return Err(ApiError(Error::NotFound(
                 "swarm not found in workspace".into(),
@@ -167,7 +166,7 @@ async fn resolve_swarm(
         return Ok(swarm);
     }
     let existing = ctx
-        .swarm_repo
+        .swarms()
         .list_swarms(workspace_id)
         .await
         .map_err(ApiError)?;
@@ -175,7 +174,7 @@ async fn resolve_swarm(
         return Ok(first);
     }
     // No swarm yet — auto-create a default one (paused; the user starts it).
-    ctx.swarm_repo
+    ctx.swarms()
         .create_swarm(otto_state::NewSwarm {
             workspace_id: workspace_id.clone(),
             name: "Default Swarm".into(),
@@ -197,15 +196,15 @@ async fn resolve_swarm(
 /// Seed tasks for the new project. Reuse the story's existing plan markdown when
 /// present; otherwise run the swarm planner over the goal to generate tasks.
 /// Returns the list of created tasks (already persisted).
-pub(crate) async fn seed_tasks(
-    ctx: &ServerCtx,
+pub async fn seed_tasks<C: ProductStudioHost>(
+    ctx: &C,
     project: &SwarmProject,
     user_id: &Id,
     goal_md: &str,
 ) -> Vec<SwarmTask> {
     // 1. Reuse an existing plan if the story has one.
     if let Some(story_id) = &project.story_id {
-        if let Ok(Some(plan)) = ctx.product_repo.latest_plan_version(story_id).await {
+        if let Ok(Some(plan)) = ctx.product_repo().latest_plan_version(story_id).await {
             let parsed = parse_plan_tasks(&plan.body_md);
             if !parsed.is_empty() {
                 return create_tasks(ctx, project, user_id, parsed).await;
@@ -215,7 +214,7 @@ pub(crate) async fn seed_tasks(
 
     // 2. No usable plan — fall back to the swarm planner over the goal.
     let agents = ctx
-        .swarm_repo
+        .swarms()
         .list_agents(&project.swarm_id)
         .await
         .unwrap_or_default();
@@ -239,7 +238,7 @@ pub(crate) async fn seed_tasks(
     // Planning is structured-extraction work — run it on the fast/cheap model
     // rather than the default, matching the other planner/recruiter paths.
     let reply = match ctx
-        .orchestrator
+        .orchestrator()
         .run_agent(&prompt, &cwd, Some("haiku"), Duration::from_secs(150))
         .await
     {
@@ -277,8 +276,8 @@ pub(crate) async fn seed_tasks(
 }
 
 /// Persist a list of parsed tasks as `todo` Kanban cards in `project`.
-async fn create_tasks(
-    ctx: &ServerCtx,
+async fn create_tasks<C: ProductStudioHost>(
+    ctx: &C,
     project: &SwarmProject,
     user_id: &Id,
     parsed: Vec<ParsedTask>,
@@ -286,7 +285,7 @@ async fn create_tasks(
     let mut created = Vec::with_capacity(parsed.len());
     for (i, t) in parsed.into_iter().enumerate() {
         match ctx
-            .swarm_repo
+            .swarms()
             .create_task(NewTask {
                 project_id: project.id.clone(),
                 swarm_id: project.swarm_id.clone(),
@@ -305,12 +304,14 @@ async fn create_tasks(
             .await
         {
             Ok(task) => {
-                let _ = ctx.events.send(otto_core::event::Event::SwarmTaskUpdated {
-                    workspace_id: project.workspace_id.clone(),
-                    swarm_id: project.swarm_id.clone(),
-                    project_id: project.id.clone(),
-                    task: serde_json::to_value(&task).unwrap_or(json!({})),
-                });
+                let _ = ctx
+                    .events()
+                    .send(otto_core::event::Event::SwarmTaskUpdated {
+                        workspace_id: project.workspace_id.clone(),
+                        swarm_id: project.swarm_id.clone(),
+                        project_id: project.id.clone(),
+                        task: serde_json::to_value(&task).unwrap_or(json!({})),
+                    });
                 created.push(task);
             }
             Err(e) => warn!("product_swarm: create_task: {e}"),
@@ -321,27 +322,29 @@ async fn create_tasks(
 
 /// `POST /api/v1/product/stories/{sid}/to-swarm` — create a swarm project from a
 /// Product story and seed its tasks from the story's plan. See module docs.
-pub async fn story_to_swarm(
+pub async fn story_to_swarm<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     body: Option<Json<ToSwarmReq>>,
 ) -> ApiResult<Json<ToSwarmResp>> {
     let req = body.map(|b| b.0).unwrap_or_default();
 
     // 1. Resolve the story + role-check via its workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // 2. Idempotent: a project already linked to this story → return it as-is.
-    if let Ok(Some(project)) = ctx.swarm_repo.project_for_story(&story.id).await {
+    if let Ok(Some(project)) = ctx.swarms().project_for_story(&story.id).await {
         let swarm = ctx
-            .swarm_repo
+            .swarms()
             .get_swarm(&project.swarm_id)
             .await
             .map_err(ApiError)?;
         let tasks = ctx
-            .swarm_repo
+            .swarms()
             .list_tasks(&project.id)
             .await
             .map_err(ApiError)?;
@@ -365,13 +368,13 @@ pub async fn story_to_swarm(
 
     // 5. Create the project with the story back-link.
     let order_idx = ctx
-        .swarm_repo
+        .swarms()
         .list_projects(&swarm.id)
         .await
         .map(|p| p.len() as i64)
         .unwrap_or(0);
     let project = match ctx
-        .swarm_repo
+        .swarms()
         .create_project(NewProject {
             swarm_id: swarm.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -389,14 +392,14 @@ pub async fn story_to_swarm(
         // A concurrent hand-off won the race (unique `story_id`, migration 0037):
         // stay idempotent by returning that already-linked project as-is.
         Err(Error::Conflict(_)) => {
-            if let Ok(Some(existing)) = ctx.swarm_repo.project_for_story(&story.id).await {
+            if let Ok(Some(existing)) = ctx.swarms().project_for_story(&story.id).await {
                 let swarm = ctx
-                    .swarm_repo
+                    .swarms()
                     .get_swarm(&existing.swarm_id)
                     .await
                     .map_err(ApiError)?;
                 let tasks = ctx
-                    .swarm_repo
+                    .swarms()
                     .list_tasks(&existing.id)
                     .await
                     .map_err(ApiError)?;
@@ -419,7 +422,7 @@ pub async fn story_to_swarm(
 
     // 7. Record a Product event so the story's history shows the hand-off.
     let _ = ctx
-        .product_repo
+        .product_repo()
         .add_event(otto_state::NewEvent {
             story_id: story.id.clone(),
             section: "plan".into(),
@@ -525,8 +528,8 @@ fn derived_status(tasks: &[SwarmTask], persisted: &str) -> String {
 /// story header, the refined body, bounded context (analysis/notes/transcripts),
 /// and the attachments listed by ABSOLUTE path (no files are copied at launch —
 /// the agent opens them with its file tools; §6.4).
-async fn build_discovery_brief(
-    ctx: &ServerCtx,
+async fn build_discovery_brief<C: ProductStudioHost>(
+    ctx: &C,
     story: &ProductStory,
     atts: &[ProductAttachment],
 ) -> String {
@@ -555,7 +558,7 @@ async fn build_discovery_brief(
     // --- Context (bounded) -------------------------------------------------
     let mut context = String::new();
     if let Ok(Some(v)) = ctx
-        .product_repo
+        .product_repo()
         .latest_version_of_kind(&story.id, "analysis")
         .await
     {
@@ -566,7 +569,7 @@ async fn build_discovery_brief(
             context.push_str("\n\n");
         }
     }
-    if let Ok(notes) = ctx.product_repo.list_notes(&story.id).await {
+    if let Ok(notes) = ctx.product_repo().list_notes(&story.id).await {
         let notes: Vec<&otto_state::ProductNote> = notes
             .iter()
             .filter(|n| !n.body.trim().is_empty())
@@ -580,7 +583,7 @@ async fn build_discovery_brief(
             context.push('\n');
         }
     }
-    if let Ok(transcripts) = ctx.product_repo.list_transcripts(&story.id).await {
+    if let Ok(transcripts) = ctx.product_repo().list_transcripts(&story.id).await {
         let titles: Vec<&str> = transcripts
             .iter()
             .map(|t| t.title.trim())
@@ -601,7 +604,7 @@ async fn build_discovery_brief(
     }
 
     // --- Attachments (absolute paths; never copied) ------------------------
-    s.push_str(&render_attachments_section(&ctx.data_dir, atts));
+    s.push_str(&render_attachments_section(&ctx.data_dir(), atts));
 
     s.trim_end().to_string()
 }
@@ -674,14 +677,14 @@ fn fallback_discovery_tasks() -> Vec<ParsedTask> {
 /// Seed investigation tasks for the discovery project (§6.2). Runs the discovery
 /// planner on the fast model (haiku, like `seed_tasks`); on empty/failure falls
 /// back to a fixed default set. Returns the created tasks (already persisted).
-pub(crate) async fn seed_discovery_tasks(
-    ctx: &ServerCtx,
+pub(crate) async fn seed_discovery_tasks<C: ProductStudioHost>(
+    ctx: &C,
     project: &SwarmProject,
     user_id: &Id,
     brief: &str,
 ) -> Vec<SwarmTask> {
     let agents = ctx
-        .swarm_repo
+        .swarms()
         .list_agents(&project.swarm_id)
         .await
         .unwrap_or_default();
@@ -704,7 +707,7 @@ pub(crate) async fn seed_discovery_tasks(
         .map(otto_core::paths::expand_tilde)
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     let parsed = match ctx
-        .orchestrator
+        .orchestrator()
         .run_agent(&prompt, &cwd, Some("haiku"), Duration::from_secs(150))
         .await
     {
@@ -752,24 +755,26 @@ fn parse_discovery_tasks(reply: &str) -> Vec<ParsedTask> {
 
 /// `POST /api/v1/product/stories/{sid}/discover` — launch a repeatable discovery
 /// swarm for a story. See the section header for the flow.
-pub async fn discover_story(
+pub async fn discover_story<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     body: Option<Json<DiscoverReq>>,
 ) -> ApiResult<Json<DiscoverResp>> {
     let req = body.map(|b| b.0).unwrap_or_default();
 
     // 1. Resolve the story + Editor role-check via its workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // 2. Resolve the target swarm (request → first → auto-create default).
     let swarm = resolve_swarm(&ctx, &story.workspace_id, &user.id, req.swarm_id).await?;
 
     // 3. Gather the story's attachments (referenced by absolute path in the brief).
     let atts = ctx
-        .attachment_repo
+        .attachments()
         .list_for_story(&story.id)
         .await
         .unwrap_or_default();
@@ -781,7 +786,7 @@ pub async fn discover_story(
     //    reserves story_id for the single implementation project; discovery is
     //    repeatable, and its linkage lives in the discovery-run row).
     let existing_runs = ctx
-        .discovery_repo
+        .discovery_repo()
         .list_for_story(&story.id)
         .await
         .map(|r| r.len())
@@ -791,13 +796,13 @@ pub async fn discover_story(
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| format!("Discovery: {} (run {})", story.title, existing_runs + 1));
     let order_idx = ctx
-        .swarm_repo
+        .swarms()
         .list_projects(&swarm.id)
         .await
         .map(|p| p.len() as i64)
         .unwrap_or(0);
     let project = ctx
-        .swarm_repo
+        .swarms()
         .create_project(NewProject {
             swarm_id: swarm.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -817,7 +822,7 @@ pub async fn discover_story(
 
     // 7. Record the discovery-run row (the only story↔project linkage).
     let run = ctx
-        .discovery_repo
+        .discovery_repo()
         .create(NewDiscoveryRun {
             story_id: story.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -831,7 +836,7 @@ pub async fn discover_story(
 
     // 8. Record a Product event so the story history shows the discovery launch.
     let _ = ctx
-        .product_repo
+        .product_repo()
         .add_event(otto_state::NewEvent {
             story_id: story.id.clone(),
             section: "discovery".into(),
@@ -861,7 +866,7 @@ pub async fn discover_story(
     //    start the coordinator, emit the status event. (Starting the swarm runs
     //    ALL ready tasks, which now includes the discovery tasks — intended.)
     {
-        let verdict = crate::routes::usage::check_budget(&ctx, &story.workspace_id, "").await;
+        let verdict = ctx.usage_budget(&story.workspace_id, "").await;
         if verdict.blocked {
             return Err(ApiError(Error::Invalid(format!(
                 "Budget exceeded — swarm blocked: {}",
@@ -869,19 +874,15 @@ pub async fn discover_story(
             ))));
         }
     }
-    ctx.swarm_repo
+    ctx.swarms()
         .set_swarm_status(&swarm.id, "active")
         .await
         .map_err(ApiError)?;
-    crate::swarm_runtime::start_coordinator(ctx.clone(), swarm.id.clone());
-    crate::swarm_runtime::emit_status(&ctx, &story.workspace_id, &swarm.id, "active");
+    ctx.start_swarm_coordinator(swarm.id.clone());
+    ctx.emit_swarm_status(&story.workspace_id, &swarm.id, "active");
 
     // 10. Return the run + swarm + project + seeded tasks.
-    let swarm = ctx
-        .swarm_repo
-        .get_swarm(&swarm.id)
-        .await
-        .map_err(ApiError)?;
+    let swarm = ctx.swarms().get_swarm(&swarm.id).await.map_err(ApiError)?;
     Ok(Json(DiscoverResp {
         run,
         swarm,
@@ -892,23 +893,25 @@ pub async fn discover_story(
 
 /// `GET /api/v1/product/stories/{sid}/discovery-runs` — list a story's discovery
 /// runs (newest first) with their derived status and progress.
-pub async fn list_discovery_runs(
+pub async fn list_discovery_runs<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<DiscoveryRunSummary>>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
 
     let runs = ctx
-        .discovery_repo
+        .discovery_repo()
         .list_for_story(&story.id)
         .await
         .map_err(ApiError)?;
     let mut out = Vec::with_capacity(runs.len());
     for run in runs {
         let tasks = ctx
-            .swarm_repo
+            .swarms()
             .list_tasks(&run.project_id)
             .await
             .unwrap_or_default();
@@ -925,16 +928,18 @@ pub async fn list_discovery_runs(
 
 /// `GET /api/v1/product/stories/{sid}/linked-canvases` — list the Canvas scenes
 /// linked to a story (newest first). Requires Viewer on the story's workspace.
-pub async fn list_linked_canvases(
+pub async fn list_linked_canvases<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<otto_state::CanvasSceneSummary>>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
 
     let scenes = ctx
-        .canvas_repo
+        .canvas_repo()
         .list_for_story(&story.id)
         .await
         .map_err(ApiError)?;
@@ -944,21 +949,23 @@ pub async fn list_linked_canvases(
 /// `GET /api/v1/product/discovery-runs/{rid}` — full detail for one discovery run:
 /// tasks, per-task latest run summaries, discovery board messages, derived status
 /// (and `report_md` on the run itself).
-pub async fn get_discovery_run(
+pub async fn get_discovery_run<C: ProductStudioHost>(
     Path(rid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<DiscoveryRunDetail>> {
     let run = ctx
-        .discovery_repo
+        .discovery_repo()
         .get(&rid)
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("discovery run {rid}"))))?;
-    crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &run.workspace_id, WorkspaceRole::Viewer)
+        .await?;
 
     let tasks = ctx
-        .swarm_repo
+        .swarms()
         .list_tasks(&run.project_id)
         .await
         .unwrap_or_default();
@@ -967,7 +974,7 @@ pub async fn get_discovery_run(
     // ONE lite list for the project (it used to re-read up to 500 full run
     // rows, result blobs included, once PER task — backlog B6).
     let runs = ctx
-        .swarm_repo
+        .swarms()
         .list_runs_lite(&RunFilter {
             swarm_id: Some(run.swarm_id.clone()),
             project_id: Some(run.project_id.clone()),
@@ -987,7 +994,7 @@ pub async fn get_discovery_run(
 
     // Discovery board messages for this project.
     let messages = ctx
-        .swarm_repo
+        .swarms()
         .list_board(&run.swarm_id, Some(&run.project_id), None, 200)
         .await
         .unwrap_or_default()

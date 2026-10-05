@@ -44,7 +44,7 @@ budget is hit, or you pause it.
 | Per-agent cwd + identity + `otto-post` helper | `crates/otto-server/src/swarm_workspace.rs` |
 | Scheduled runs (daily/weekly/interval) | `crates/otto-server/src/swarm_scheduler.rs` |
 | Board ingest (agent → board) | `crates/otto-server/src/routes/swarm_ingest.rs` |
-| Product story → swarm project bridge | `crates/otto-server/src/product_swarm.rs` |
+| Product story → swarm project bridge | `crates/otto-product/src/swarm.rs` |
 | UI section + views | `ui/src/modules/swarm/` |
 | UI store (REST + WS state) | `ui/src/lib/stores/swarm.svelte.ts` |
 | Contracts (authoritative) | `docs/contracts/api.md` (#59–#86, "Swarm lifecycle"), `docs/contracts/ws.md` (Agent Swarm events) |

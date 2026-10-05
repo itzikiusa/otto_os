@@ -336,7 +336,7 @@ pub struct RefineSessionResp {
 // ---------------------------------------------------------------------------
 
 /// One live run: its poll snapshot + the cancel flag the orchestrator checks
-/// between stages (mirrors the `product_run::CancelRegistry` shape).
+/// between stages (mirrors the `otto_product::run::CancelRegistry` shape).
 pub struct RunEntry {
     pub run: VaultDocsRun,
     pub cancel: Arc<AtomicBool>,
@@ -3916,7 +3916,7 @@ pub fn build_revision_prompt(
 fn parse_results(content: &str) -> Option<Vec<String>> {
     let v: Value = serde_json::from_str(content.trim())
         .ok()
-        .or_else(|| crate::product_run::extract_json_block(content))?;
+        .or_else(|| otto_product::run::extract_json_block(content))?;
     let arr = match &v {
         Value::Array(a) => a.clone(),
         Value::Object(_) => v.get("written")?.as_array()?.clone(),

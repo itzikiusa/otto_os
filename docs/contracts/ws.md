@@ -802,7 +802,7 @@ a loop is active, covering any missed event).
 
 ## Product AI-run completion (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs` at the end of every
 AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ```json
@@ -828,7 +828,7 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ## Multi-agent plan kickoff (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs::run_generate_plan` each
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs::run_generate_plan` each
 time a planning (or the summarizer) session is created during a `plan/generate` run, carrying
 the live session ids known so far. Lets the Plan tab tile the planning sessions side-by-side so
 the user can watch them (and answer questions when `interactive`).
@@ -1306,7 +1306,7 @@ instead of waiting for it to finish.
 
 Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` (live
 per-poll while the design agent edits the file, and once with the committed
-result), by `product_media.rs` on every `PUT /product/attachments/{aid}/content`
+result), by `otto_product::media` on every `PUT /product/attachments/{aid}/content`
 save from the UI, by `routes/swarm_ingest.rs` when a swarm agent publishes an
 artifact, and by `design_blender.rs` for each output a Blender render job
 attaches — same shape and timing as the canvas pair above, but for a product

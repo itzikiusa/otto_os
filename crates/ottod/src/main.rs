@@ -770,7 +770,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         mockup_repo,
         discovery_chat_repo,
         canvas_repo,
-        product_agent_cancels: otto_server::product_run::new_cancel_registry(),
+        product_agent_cancels: otto_product::run::new_cancel_registry(),
         design_jobs: otto_server::design_blender::new_job_registry(),
         memory,
         vault,
@@ -1329,7 +1329,7 @@ async fn run(cfg: Config) -> Result<(), String> {
 
     // --- Story watcher (polls watched stories for new comments) ---
     let _watcher_handle = {
-        let watcher = otto_server::product_watcher::WatcherManager::new(
+        let watcher = otto_product::watcher::WatcherManager::new(
             otto_state::ProductRepo::new(pool.clone()),
             Arc::clone(&ctx.product),
             Arc::clone(&orchestrator),
@@ -1391,7 +1391,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     // --- Orphan reaper: auto-resume analysis agents stranded by a restart ---
     // Runs once at startup; any analysis agent still 'running'/'waiting' has no
     // surviving task, so it is re-run (capped) or marked errored + notified.
-    tokio::spawn(otto_server::product_run::reap_orphaned_agents_on_startup(
+    tokio::spawn(otto_product::run::reap_orphaned_agents_on_startup(
         ctx.clone(),
     ));
 

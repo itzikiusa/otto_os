@@ -128,7 +128,7 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
     let start = opts.start;
     let project2 = project.clone();
     tokio::spawn(async move {
-        let _ = crate::product_swarm::seed_tasks(&ctx2, &project2, &creator, &goal).await;
+        let _ = otto_product::swarm::seed_tasks(&ctx2, &project2, &creator, &goal).await;
         if start {
             let _ = ctx2.swarm_repo.set_swarm_status(&swarm_id, "active").await;
             crate::swarm_runtime::set_paused(&ctx2, &swarm_id, false);

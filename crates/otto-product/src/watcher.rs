@@ -11,21 +11,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ProductService;
 use otto_core::domain::ImprovementTrigger;
 use otto_core::event::Event;
 use otto_core::Id;
 use otto_improve::ImprovementEngine;
 use otto_orchestrator::Orchestrator;
-use otto_product::ProductService;
 use otto_state::{NewEvent, NewQuestion, ProductQuestion, ProductRepo, QuestionPatch};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
-use crate::cancel_signal::CancelSignal;
+use otto_core::cancel_signal::CancelSignal;
 use tokio::time::Instant;
 use tracing::warn;
 
-use crate::product_run::{build_improve_narrative_from_clarifications, extract_json_block};
+use crate::run::{build_improve_narrative_from_clarifications, extract_json_block};
 
 // ---------------------------------------------------------------------------
 // Watcher constants
