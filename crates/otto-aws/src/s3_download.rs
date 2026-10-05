@@ -112,7 +112,28 @@ pub fn local_name(key: &str) -> String {
         return "download".into();
     }
     let dots = clean.len() - clean.trim_start_matches('.').len();
-    format!("{}{}", "_".repeat(dots), &clean[dots..])
+    truncate_name(&format!("{}{}", "_".repeat(dots), &clean[dots..]))
+}
+
+/// Longest local name we create, in bytes. APFS/HFS+ cap a name at 255, and
+/// the job's part file appends `.<8 chars>.otto-part` (19 bytes) — an S3 key
+/// segment may be up to 1024 bytes, which would fail the download with
+/// ENAMETOOLONG. Keeps the extension, shortens the stem on a char boundary.
+const MAX_LOCAL_NAME: usize = 200;
+
+fn truncate_name(name: &str) -> String {
+    if name.len() <= MAX_LOCAL_NAME {
+        return name.to_string();
+    }
+    let ext = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 16 => &name[i..],
+        _ => "",
+    };
+    let mut end = MAX_LOCAL_NAME - ext.len();
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{ext}", &name[..end])
 }
 
 /// Is `canon` (an already-canonicalized directory) an acceptable download
@@ -460,6 +481,19 @@ mod tests {
         assert_eq!(local_name("../.."), "download");
         assert_eq!(local_name("x/.."), "download");
         assert_eq!(local_name("we\u{7}ird\\na:me"), "weirdname");
+    }
+
+    #[test]
+    fn local_name_is_bounded_for_the_filesystem() {
+        let long = format!("logs/{}.csv", "é".repeat(400));
+        let n = local_name(&long);
+        assert!(n.len() <= MAX_LOCAL_NAME, "{}", n.len());
+        assert!(n.ends_with(".csv"));
+        // The part-file name stays under the 255-byte name limit too.
+        assert!(format!("{n}.01234567.otto-part").len() <= 255);
+        let no_ext = local_name(&"x".repeat(1000));
+        assert_eq!(no_ext.len(), MAX_LOCAL_NAME);
+        assert_eq!(local_name("a/report.csv"), "report.csv");
     }
 
     #[test]
