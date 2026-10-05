@@ -144,6 +144,14 @@ jobs:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
+      # Every `.config/nextest.toml` override disjunct must still match >=1
+      # test: a crate split / module move otherwise orphans a `timing` or
+      # `processes` entry silently and the wall-clock asserts it protects
+      # run under full contention again. Lists the binaries built above.
+      - name: nextest override filters match tests
+        if: success() || failure()
+        run: python3 scripts/check-nextest-filters.py
+
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
       # vault listing, ~40 s of fixture creation) still gate every PR here. Same
       # build as above (--workspace), so this only lists + runs; no recompile.
@@ -205,6 +213,10 @@ jobs:
       - name: Test Insights collector calendar boundaries
         working-directory: .
         run: python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
+
+      - name: Test the nextest override-filter guard (parsing)
+        working-directory: .
+        run: python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
