@@ -112,3 +112,14 @@ test('close all / several / a working one / "stop <name>" ask first', async () =
   assert.equal(out.kind, 'confirm-close');
   assert.deepEqual(archived, [], 'nothing archived without the confirm');
 });
+
+test('a "working" plain shell is not mid-turn: close <name> archives at once', async () => {
+  // `working` only means recent output — a shell's prompt redraw is not an
+  // agent turn, so it must not force the confirm a working agent gets.
+  const { mod } = engine();
+  const archived: string[] = [];
+  const shell = { ...sess('z', 'Zlatan', undefined, 'working'), provider: 'shell' };
+  const out = await mod.runEnglish('please close zlatan', ctx([shell], archived));
+  assert.equal(out.kind, 'closed');
+  assert.deepEqual(archived, ['z']);
+});

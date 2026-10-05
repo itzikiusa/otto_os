@@ -12,7 +12,8 @@ import { expectFullyInViewport } from './helpers';
 // A remembered Archive or Delete applies without asking for ONE tab (the
 // user opted out of the question — confirming anyway made "Always delete" a
 // lie), and a bulk close that ends more than one session always confirms
-// once, naming the count.
+// once, naming the count. An AGENT working mid-turn still asks; these plain
+// shells read as "working" whenever they print, but are never mid-turn.
 // ─────────────────────────────────────────────────────────────────────────────
 
 let ctx: APIRequestContext;

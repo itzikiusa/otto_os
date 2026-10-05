@@ -1314,6 +1314,17 @@ class WorkspaceStore {
     return !!s && !s.archived;
   }
 
+  /** Whether ending `id` now would stop an AGENT mid-turn — the one case a
+   *  remembered "Always archive/delete" still asks about. `working` only means
+   *  "printed in the last few seconds", so a plain shell (whose prompt redraw
+   *  or `ls` output reads as working) is not mid-turn: its close/delete
+   *  honours the remembered choice like an idle session's. */
+  isAgentMidTurn(id: Id): boolean {
+    if (this.statusMap[id] !== 'working') return false;
+    const s = this.sessions.find((x) => x.id === id);
+    return !s || (s.kind === 'agent' && s.provider !== 'shell');
+  }
+
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
    *  null for cancel. Applies (and records) the remembered preference: a
@@ -1328,7 +1339,7 @@ class WorkspaceStore {
     if (ending.length === 0) return 'close';
     const n = ending.length;
     const many = n > 1;
-    const busy = ending.filter((id) => this.statusMap[id] === 'working').length;
+    const busy = ending.filter((id) => this.isAgentMidTurn(id)).length;
     const pref = ui.closeTabPref;
     if ((pref === 'archive' || pref === 'delete') && !many && busy === 0) return pref;
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
@@ -1546,7 +1557,7 @@ class WorkspaceStore {
    *  Failures surface as a toast. */
   async requestDeleteSession(id: Id): Promise<void> {
     // "Always delete" skips this — but never for an agent working mid-turn.
-    const working = this.statusMap[id] === 'working';
+    const working = this.isAgentMidTurn(id);
     if (ui.closeTabPref !== 'delete' || working) {
       const name = this.sessions.find((s) => s.id === id)?.title?.trim();
       const ok = await confirmer.ask(
