@@ -3749,6 +3749,9 @@ impl SessionManager {
                 live.push((id, pid));
             }
         }
+        // A shell idling at its prompt has no child process, so it cannot be
+        // hosting an agent: skip it without the whole-box `ps` (S9-10).
+        live.retain(|(_, pid)| pid.is_some_and(crate::nested::has_children));
         if live.is_empty() {
             return 0;
         }
@@ -4569,7 +4572,11 @@ impl SessionManager {
             // Transcript not on disk yet (id just captured, first turn pending).
             return Ok(false);
         };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // Async stat: this runs every ~20 s per candidate on a runtime worker.
+        let mtime = tokio::fs::metadata(&path)
+            .await
+            .and_then(|m| m.modified())
+            .ok();
         // Nothing new since the last look — skip the re-parse.
         if let Some(prev) = self.title_probe.get(&s.id) {
             if mtime.is_some() && prev.mtime == mtime {
