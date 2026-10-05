@@ -7785,6 +7785,13 @@ export interface SnipCopyResp {
 // ── Browser (reader/annotate tabs + on-demand page fetch) ───────────────────
 
 /** A workspace-scoped browser tab. Mirrors `otto_state::browser::BrowserTab`. */
+/** `POST /browser/proxy-ticket` — single-use ticket for the root-level
+ *  `GET /browser/proxy?url=&ticket=` take-over frame (bound to `url`). */
+export interface BrowserProxyTicket {
+  ticket: string;
+  expires_in_secs: number;
+}
+
 export interface BrowserTab {
   id: Id;
   workspace_id: Id;

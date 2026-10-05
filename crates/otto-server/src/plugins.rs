@@ -652,9 +652,16 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
     match tokio::fs::read(&c_target).await {
         Ok(bytes) => {
             let ct = mime_for(&c_target);
+            // nosniff: a plugin file is served with an extension-derived type;
+            // never let the browser re-interpret it as script/HTML. (A CSP
+            // `sandbox` without `allow-same-origin` isn't possible here: the
+            // plugin page calls `/api/v1/plugins/{slug}` with the bearer from
+            // `otto:init`, which an opaque origin can't do under our CORS.)
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", ct)
+                .header("x-content-type-options", "nosniff")
+                .header("referrer-policy", "no-referrer")
                 .body(Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }

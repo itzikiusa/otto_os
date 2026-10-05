@@ -17,6 +17,8 @@
   }
 </script>
 
+<svelte:window onmessage={onFrameMessage} />
+
 <script lang="ts">
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -38,6 +40,7 @@
   // markdown shows as-is.
   import type { InsightReport } from '../../lib/api/types';
   import { insightsApi } from '../../lib/api/insights';
+  import { openExternal } from '../../lib/external';
   import { renderMarkdownGfm } from '../../lib/md';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -75,6 +78,26 @@
   const effectiveMode = $derived<ViewMode>(mode === 'html' && !hasHtml ? 'preview' : mode);
 
   // ---- HTML (lazy, per report) -------------------------------------------
+  // The report runs sandboxed WITHOUT popups: a link click is posted to us
+  // (`otto-insights-open`) and opened in the system browser, so the report can
+  // never spawn an unsandboxed window of its own.
+  const LINK_BRIDGE =
+    "<script>document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href]');" +
+    "if(!a)return;var h=a.href;if(!/^https?:/i.test(h))return;e.preventDefault();" +
+    "parent.postMessage({type:'otto-insights-open',url:h},'*');},true);<\/script>";
+  function withLinkBridge(doc: string): string {
+    const i = doc.toLowerCase().lastIndexOf('</body>');
+    return i >= 0 ? doc.slice(0, i) + LINK_BRIDGE + doc.slice(i) : doc + LINK_BRIDGE;
+  }
+  let frameEl = $state<HTMLIFrameElement | null>(null);
+  function onFrameMessage(ev: MessageEvent): void {
+    if (!frameEl || ev.source == null || ev.source !== frameEl.contentWindow) return;
+    const m = ev.data as { type?: unknown; url?: unknown } | null;
+    if (!m || m.type !== 'otto-insights-open' || typeof m.url !== 'string') return;
+    if (!/^https?:\/\//i.test(m.url)) return;
+    void openExternal(m.url);
+  }
+
   let html = $state<string | null>(null);
   let htmlFor = $state<string | null>(null);
   let htmlError = $state<string | null>(null);
@@ -221,11 +244,13 @@
       {:else if html == null || htmlLoading}
         <div class="r-loading"><Skeleton rows={6} height={28} label="the HTML report" /></div>
       {:else}
-        <!-- Sandboxed: scripts run (charts), but never same-origin. -->
+        <!-- Sandboxed: scripts run (charts), but never same-origin and never
+             a popup — links go through the bridge to the system browser. -->
         <iframe
+          bind:this={frameEl}
           class="r-frame"
-          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-          srcdoc={html}
+          sandbox="allow-scripts"
+          srcdoc={withLinkBridge(html)}
           title="Insight report {periodText}"
         ></iframe>
       {/if}

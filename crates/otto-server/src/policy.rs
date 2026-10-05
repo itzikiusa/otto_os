@@ -56,7 +56,8 @@ use PolicyDecision::{Deny, Exempt, Require};
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
 /// including the `/api/v1` nest prefix the daemon mounts the API under — e.g.
 /// `/api/v1/connections/{id}/db/query`. Root-mounted WebSocket / proxy routers
-/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` and never reach
+/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` / a single-use
+/// `?ticket=` and never reach
 /// the central guard, so they are not represented here.
 pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Strip the `/api/v1` nest prefix so the rules read against the
@@ -215,10 +216,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/whoami" {
         return Exempt;
     }
-    // Host filesystem access: authenticated; OS permissions enforced by I/O.
-    // Share/MCP endpoint scopes are still checked before this exemption.
+    // Host filesystem access (browse + read anywhere the daemon's OS account
+    // can). There is no separate "Files" feature: reading the host disk is the
+    // same power as running an agent/shell session (which can `cat` anything),
+    // so it requires Agents/Edit — a Viewer can no longer read the host disk.
+    // Root bypasses; non-root callers additionally hit the secret deny list in
+    // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
     if matches!(p, "/fs/browse" | "/fs/read") {
-        return Exempt;
+        return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
     // and not feature-gated HERE because it spans many features — every lookup
@@ -1237,6 +1242,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/browser/tabs/{id}" || p == "/browser/annotations/{id}" {
         return Require(Browser, Edit);
     }
+    // Take-over proxy ticket: lets the root-level `/browser/proxy` fetch a
+    // caller-supplied URL once, so it's gated like `/page` (Edit).
+    if p == "/browser/proxy-ticket" {
+        return Require(Browser, Edit);
+    }
     if p == "/workspaces/{wid}/browser/page" || p == "/workspaces/{wid}/browser/query" {
         return Require(Browser, Edit);
     }
@@ -2084,6 +2094,12 @@ mod tests {
     // ---- Self-owned / cross-cutting exemptions -------------------------------
 
     #[test]
+    fn host_filesystem_requires_agents_edit_not_any_signed_in_user() {
+        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Require(Agents, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Require(Agents, Edit));
+    }
+
+    #[test]
     fn self_owned_routes_exempt() {
         assert_eq!(pol(Method::GET, "/api/v1/auth/me"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/auth/logout"), Exempt);
@@ -2094,8 +2110,6 @@ mod tests {
         assert_eq!(pol(Method::GET, "/api/v1/auth/capabilities"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/notifications"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
         // Agent discovery: every lookup is a self-call re-authorized by the
         // listed kind's own route, so the discovery route itself is exempt.
         assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);
@@ -2848,6 +2862,14 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_proxy_ticket_mint_is_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/proxy-ticket"),
             Require(Browser, Edit)
         );
     }
