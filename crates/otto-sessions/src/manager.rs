@@ -279,6 +279,20 @@ fn parse_ps_time_ms(s: &str) -> Option<u64> {
     Some((days * 86_400_000) + (h * 3_600_000) + (m * 60_000) + (sec * 1000.0) as u64)
 }
 
+/// Row-level auto-archive eligibility (`session_auto_archive_days`): an
+/// unarchived, unpinned agent session last active before `cutoff`. Liveness
+/// and attachment are checked separately (in-memory state).
+fn is_auto_archive_candidate(s: &Session, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    !s.archived
+        && s.kind == SessionKind::Agent
+        && s.last_active_at < cutoff
+        && !s
+            .meta
+            .get("keep_alive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
 /// The descendant-CPU guard's verdict for one session in one sweep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CpuVerdict {
@@ -5076,20 +5090,18 @@ impl SessionManager {
         };
         let mut archived = 0;
         for s in all {
-            if s.archived
-                || s.kind != SessionKind::Agent
-                || s.last_active_at >= cutoff
+            // Cheap pre-filter on the snapshot; re-decided under the lock.
+            if !is_auto_archive_candidate(&s, cutoff)
                 || self.is_live(&s.id)
                 || self.is_attached(&s.id)
-                || s.meta
-                    .get("keep_alive")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
             {
                 continue;
             }
-            match self.archive(&s.id).await {
-                Ok(_) => {
+            match self.archive_if_stale(&s.id, cutoff).await {
+                Ok(false) => {
+                    tracing::debug!(session = %s.id, "auto-archive: session became active mid-sweep; skipped");
+                }
+                Ok(true) => {
                     archived += 1;
                     tracing::info!(
                         session = %s.id, title = %s.title,
@@ -5253,6 +5265,29 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.archive_locked(id, session).await
+    }
+
+    /// [`Self::archive`] for the auto-archive sweep: archive only if the
+    /// session is STILL stale under its resume lock (review S1-17). The
+    /// sweep's checks run on a `list_all` snapshot outside the lock, so a
+    /// session the user opened as the sweep reached it was resumed and then
+    /// immediately killed and archived. `Ok(false)` = no longer stale.
+    async fn archive_if_stale(&self, id: &Id, cutoff: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
+        let session = self.repo.get(id).await?;
+        if !is_auto_archive_candidate(&session, cutoff)
+            || self.is_live(id)
+            || self.is_attached(id)
+        {
+            return Ok(false);
+        }
+        self.archive_locked(id, session).await.map(|_| true)
+    }
+
+    /// The archive body; the caller holds `id`'s resume lock.
+    async fn archive_locked(&self, id: &Id, session: Session) -> Result<Session> {
         self.networks.clear(id);
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
@@ -6813,6 +6848,53 @@ mod tests {
             .expect_err("shutting down");
         assert!(matches!(err, Error::Conflict(_)), "{err:?}");
         assert_eq!(manager.live_count(), 0);
+    }
+
+    /// Review S1-17: auto-archive re-decides under the resume lock against
+    /// the CURRENT row, so a session that became active after the sweep's
+    /// snapshot is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_archive_rechecks_staleness_under_the_lock() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let s = manager
+            .create(
+                &workspace,
+                &user,
+                CreateSessionReq {
+                    kind: SessionKind::Agent,
+                    provider: Some("shell".into()),
+                    title: Some("Stale".into()),
+                    cwd: Some("/tmp".into()),
+                    connection_id: None,
+                    model: None,
+                    meta: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        manager.kill_session(&s.id).await.unwrap();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(3);
+        let set_active = |at: chrono::DateTime<chrono::Utc>| {
+            let pool = repo.pool();
+            let id = s.id.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET last_active_at = ? WHERE id = ?")
+                    .bind(at.to_rfc3339())
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        // The snapshot said stale, but the row is fresh now (the user opened it).
+        set_active(chrono::Utc::now()).await;
+        assert!(!manager.archive_if_stale(&s.id, cutoff).await.unwrap());
+        assert!(!repo.get(&s.id).await.unwrap().archived);
+        // Still stale under the lock → archived.
+        set_active(chrono::Utc::now() - chrono::Duration::days(10)).await;
+        assert!(manager.archive_if_stale(&s.id, cutoff).await.unwrap());
+        assert!(repo.get(&s.id).await.unwrap().archived);
     }
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
