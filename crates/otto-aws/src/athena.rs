@@ -111,6 +111,42 @@ pub struct QueryReq {
     pub database: Option<String>,
     pub workgroup: Option<String>,
     pub output_location: Option<String>,
+    /// Required (`true`) to run a statement that is not a plain read
+    /// ([`sql_is_read`]) on a production account — the UI sets it only after
+    /// the person confirms (S16-03).
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+/// True when an Athena statement only READS: its first keyword (after
+/// comments, whitespace and opening parentheses) is `SELECT` / `WITH` /
+/// `SHOW` / `DESCRIBE` / `DESC` / `VALUES` / `TABLE`, or a non-executing
+/// `EXPLAIN`. Everything else — `DROP`, `INSERT`, CTAS, `ALTER`, `MSCK`,
+/// `UNLOAD` (writes to S3), `EXPLAIN ANALYZE` (executes), `OPTIMIZE`,
+/// `VACUUM`, `MERGE`, … — counts as DDL/DML. Conservative: an unknown leading
+/// keyword is a write.
+pub fn sql_is_read(sql: &str) -> bool {
+    let mut s = sql.trim_start();
+    loop {
+        if let Some(rest) = s.strip_prefix("--") {
+            s = rest.split_once('\n').map_or("", |(_, r)| r).trim_start();
+        } else if let Some(rest) = s.strip_prefix("/*") {
+            s = rest.split_once("*/").map_or("", |(_, r)| r).trim_start();
+        } else if let Some(rest) = s.strip_prefix('(') {
+            s = rest.trim_start();
+        } else {
+            break;
+        }
+    }
+    let mut words = s
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_uppercase);
+    match words.next().as_deref() {
+        Some("SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE") => true,
+        Some("EXPLAIN") => !words.any(|w| w == "ANALYZE"),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,6 +523,24 @@ pub async fn history(svc: &AwsService, a: &AwsAccountRow, q: &HistoryQuery) -> R
     })
 }
 
+/// DDL/DML on a production account needs an explicit `confirm` (S16-03): the
+/// DB Explorer has a write gate, and `DROP TABLE` on prod must not run like a
+/// `SELECT`. Reads never need it.
+fn ensure_prod_confirmed(
+    env: otto_core::domain::Environment,
+    sql: &str,
+    confirm: bool,
+) -> Result<()> {
+    if env == otto_core::domain::Environment::Prod && !confirm && !sql_is_read(sql) {
+        return Err(Error::Invalid(
+            "confirm_required: this is a production account and the statement is not a \
+             read (DDL/DML) — confirm to run it"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn start_query(
     svc: &AwsService,
     a: &AwsAccountRow,
@@ -497,6 +551,7 @@ pub async fn start_query(
     if sql.is_empty() || sql.len() > 256 * 1024 {
         return Err(Error::Invalid("sql must be 1 byte .. 256 KiB".into()));
     }
+    ensure_prod_confirmed(a.environment, sql, req.confirm)?;
     let workgroup = req
         .workgroup
         .as_deref()
@@ -674,6 +729,42 @@ pub async fn cancel(
 mod tests {
     use super::*;
 
+    /// S16-03: DDL/DML on a prod account is refused without `confirm`;
+    /// reads never need it, and non-prod accounts are unchanged.
+    #[test]
+    fn prod_ddl_dml_needs_confirm() {
+        use otto_core::domain::Environment;
+        for sql in [
+            "DROP TABLE logs",
+            "INSERT INTO t SELECT * FROM s",
+            "CREATE TABLE t AS SELECT 1",
+            "ALTER TABLE t ADD COLUMNS (c int)",
+            "MSCK REPAIR TABLE t",
+            "UNLOAD (SELECT 1) TO 's3://b/p' WITH (format = 'PARQUET')",
+            "EXPLAIN ANALYZE SELECT 1",
+            "  -- note\n delete from t where x = 1",
+            "/* c */ MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
+        ] {
+            assert!(!sql_is_read(sql), "{sql}");
+            let e = ensure_prod_confirmed(Environment::Prod, sql, false).unwrap_err();
+            assert!(e.to_string().contains("confirm_required"), "{sql}: {e}");
+            assert!(ensure_prod_confirmed(Environment::Prod, sql, true).is_ok());
+            assert!(ensure_prod_confirmed(Environment::Dev, sql, false).is_ok());
+        }
+        for sql in [
+            "SELECT 1",
+            "with x as (select 1) select * from x",
+            "(SELECT 1) UNION (SELECT 2)",
+            "SHOW TABLES",
+            "DESCRIBE t",
+            "EXPLAIN SELECT * FROM t",
+            "-- hi\nSELECT 1",
+        ] {
+            assert!(sql_is_read(sql), "{sql}");
+            assert!(ensure_prod_confirmed(Environment::Prod, sql, false).is_ok());
+        }
+    }
+
     #[test]
     fn workgroups_and_output_location() {
         let v: Value = serde_json::from_str(
@@ -691,10 +782,10 @@ mod tests {
             workgroup_output_location(&d).as_deref(),
             Some("s3://athena-results/primary/")
         );
-        assert!(workgroup_output_location(
-            &serde_json::json!({"WorkGroup": {"Configuration": {}}})
-        )
-        .is_none());
+        assert!(
+            workgroup_output_location(&serde_json::json!({"WorkGroup": {"Configuration": {}}}))
+                .is_none()
+        );
     }
 
     #[test]

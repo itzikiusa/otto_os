@@ -8920,6 +8920,9 @@ export interface AthenaQueryReq {
   database?: string;
   workgroup?: string;
   output_location?: string;
+  /** Required on a prod account for any statement that is not a plain read
+   *  (DDL/DML) — set only after the person confirms; else 400 `confirm_required`. */
+  confirm?: boolean;
 }
 
 export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
