@@ -261,10 +261,18 @@ fn owner_only_changes(task: &ScheduledTask, req: &UpdateReq) -> Vec<&'static str
     if diff(req.cwd.as_deref(), &task.cwd) {
         out.push("cwd");
     }
-    if req.destination.as_ref().is_some_and(|d| d != &task.destination) {
+    if req
+        .destination
+        .as_ref()
+        .is_some_and(|d| d != &task.destination)
+    {
         out.push("destination");
     }
-    if req.workflow_id.as_ref().is_some_and(|w| w != &task.workflow_id) {
+    if req
+        .workflow_id
+        .as_ref()
+        .is_some_and(|w| w != &task.workflow_id)
+    {
         out.push("workflow");
     }
     if diff(req.sandbox.as_deref(), &task.sandbox) {
@@ -785,8 +793,14 @@ mod tests {
         for (id, role) in [("owner", "editor"), ("bob", "editor"), ("adm", "admin")] {
             sqlx::query("INSERT INTO users (id, username, password_hash, display_name, is_root, created_at) VALUES (?, ?, 'x', ?, 0, ?)")
                 .bind(id).bind(id).bind(id).bind(now.to_rfc3339()).execute(&pool).await.unwrap();
-            sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', ?, ?)")
-                .bind(id).bind(role).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws', ?, ?)",
+            )
+            .bind(id)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
         let mut new = otto_state::NewScheduledTask::defaults("ws".into(), "t".into());
@@ -809,7 +823,10 @@ mod tests {
         };
         let evil = json!({"destination":{"type":"email","to":"bob@evil.test"}});
         assert_eq!(patch("bob", evil.clone()).await, StatusCode::FORBIDDEN);
-        assert_eq!(patch("bob", json!({"prompt":"leak secrets"})).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            patch("bob", json!({"prompt":"leak secrets"})).await,
+            StatusCode::FORBIDDEN
+        );
         assert_eq!(
             ctx.scheduled_tasks.get(&task.id).await.unwrap().prompt,
             "daily digest"
@@ -819,7 +836,10 @@ mod tests {
             patch("bob", json!({"enabled":false,"prompt":"daily digest"})).await,
             StatusCode::OK
         );
-        assert_eq!(patch("owner", json!({"prompt":"weekly digest"})).await, StatusCode::OK);
+        assert_eq!(
+            patch("owner", json!({"prompt":"weekly digest"})).await,
+            StatusCode::OK
+        );
         assert_eq!(patch("adm", evil).await, StatusCode::OK);
     }
 

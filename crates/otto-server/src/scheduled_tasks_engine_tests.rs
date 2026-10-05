@@ -372,7 +372,12 @@ async fn workflow_task_overlap_is_recorded_skipped_not_error() {
     assert_eq!(run.status, "skipped", "{run:?}");
     assert!(run.error.unwrap_or_default().contains("still in progress"));
     assert_eq!(
-        ctx.scheduled_tasks.get(&task.id).await.unwrap().last_status.as_deref(),
+        ctx.scheduled_tasks
+            .get(&task.id)
+            .await
+            .unwrap()
+            .last_status
+            .as_deref(),
         Some("skipped")
     );
 }

@@ -256,7 +256,10 @@ mod tests {
     #[test]
     fn report_hash_is_stable_and_whitespace_insensitive() {
         assert_eq!(report_hash("hello world"), "b94d27b9934d3e08");
-        assert_eq!(report_hash("  hello\n\n world \t"), report_hash("hello world"));
+        assert_eq!(
+            report_hash("  hello\n\n world \t"),
+            report_hash("hello world")
+        );
         assert_ne!(report_hash("hello world"), report_hash("hello  worlds"));
     }
 }

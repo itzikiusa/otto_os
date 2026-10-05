@@ -48,7 +48,13 @@ const DELIVERY_KEYS: [&str; 5] = [
     "callback_url",
 ];
 /// Where agents run / which worktrees a run provisions.
-const LOCATION_KEYS: [&str; 5] = ["working_directory", "repos", "worktree", "worktree_path", "cwd"];
+const LOCATION_KEYS: [&str; 5] = [
+    "working_directory",
+    "repos",
+    "worktree",
+    "worktree_path",
+    "cwd",
+];
 
 /// Who supplied a run input, which decides the reserved keys it may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,10 +397,23 @@ mod tests {
         let mut m = body.clone();
         strip_reserved_input(&mut m, InputSource::Manual);
         let m = m.as_object().unwrap();
-        for k in ["origin_workspace_id", "origin_user", "channel", "chat", "thread"] {
+        for k in [
+            "origin_workspace_id",
+            "origin_user",
+            "channel",
+            "chat",
+            "thread",
+        ] {
             assert!(!m.contains_key(k), "manual must drop {k}");
         }
-        for k in ["prompt", "result_chat", "result_webhook", "callback_url", "working_directory", "repos"] {
+        for k in [
+            "prompt",
+            "result_chat",
+            "result_webhook",
+            "callback_url",
+            "working_directory",
+            "repos",
+        ] {
             assert!(m.contains_key(k), "manual keeps {k}");
         }
         // Non-object input is untouched.

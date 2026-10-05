@@ -1552,7 +1552,17 @@ pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> 
         {
             let total = ORPHANED_RUNS_SWEPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             tracing::warn!(run = %id, orphaned_total = total, "workflow orphan sweep: errored a driverless run");
-            emit_run_updated(ctx, &run.workspace_id, &id, "error", None, rev, None, &nodes, false);
+            emit_run_updated(
+                ctx,
+                &run.workspace_id,
+                &id,
+                "error",
+                None,
+                rev,
+                None,
+                &nodes,
+                false,
+            );
         }
     }
     suspects
@@ -8675,7 +8685,14 @@ mod tests {
         let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
         let repo = WorkflowsRepo::new(ctx.pool.clone());
         let wf = repo
-            .create(&"orphan-ws".into(), "WF", "", "", &WorkflowGraph::default(), &"u".into())
+            .create(
+                &"orphan-ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
             .await
             .unwrap();
         let orphan = repo
@@ -8690,18 +8707,29 @@ mod tests {
         let first = sweep_orphaned_runs(&ctx, &HashSet::new()).await;
         assert!(first.contains(&orphan.id) && !first.contains(&driven.id));
         assert!(!repo.is_canceled(&orphan.id).await);
-        assert_eq!(repo.get_run(&orphan.id).await.unwrap().status, RunStatus::Pending);
+        assert_eq!(
+            repo.get_run(&orphan.id).await.unwrap().status,
+            RunStatus::Pending
+        );
         sweep_orphaned_runs(&ctx, &first).await;
         let swept = repo.get_run(&orphan.id).await.unwrap();
         assert_eq!(swept.status, RunStatus::Error);
-        assert!(swept.error.unwrap_or_default().contains("lost its engine driver"));
-        assert_eq!(repo.get_run(&driven.id).await.unwrap().status, RunStatus::Pending);
+        assert!(swept
+            .error
+            .unwrap_or_default()
+            .contains("lost its engine driver"));
+        assert_eq!(
+            repo.get_run(&driven.id).await.unwrap().status,
+            RunStatus::Pending
+        );
         // The workflow is admissible again.
-        assert!(repo
-            .admit_run_if_idle(&wf.id, &"orphan-ws".into(), &json!({}), None)
-            .await
-            .unwrap()
-            .is_none(), "the driven run still holds the slot");
+        assert!(
+            repo.admit_run_if_idle(&wf.id, &"orphan-ws".into(), &json!({}), None)
+                .await
+                .unwrap()
+                .is_none(),
+            "the driven run still holds the slot"
+        );
     }
 
     #[test]

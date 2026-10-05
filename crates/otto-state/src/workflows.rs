@@ -2604,7 +2604,14 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool.clone());
         let wf = repo
-            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
             .await
             .unwrap();
         let run = repo
@@ -2635,12 +2642,17 @@ mod tests {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool.clone());
         let wf = repo
-            .create(&"ws1".into(), "WF", "", "", &WorkflowGraph::default(), &"u1".into())
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
             .await
             .unwrap();
-        let mk = |thread: Option<&str>, chat: &str| {
-            serde_json::json!({"channel":"slack","chat":chat,"thread":thread,"origin_workspace_id":"ws1"})
-        };
+        let mk = |thread: Option<&str>, chat: &str| serde_json::json!({"channel":"slack","chat":chat,"thread":thread,"origin_workspace_id":"ws1"});
         let threaded = repo
             .create_run(&wf.id, &"ws1".into(), &mk(Some("t1"), "C1"), None)
             .await
@@ -2656,13 +2668,23 @@ mod tests {
             .unwrap();
         let find = |t: Option<&'static str>| {
             let repo = repo.clone();
-            async move { repo.find_active_run_for_chat("ws1", "slack", "C1", t).await.unwrap() }
+            async move {
+                repo.find_active_run_for_chat("ws1", "slack", "C1", t)
+                    .await
+                    .unwrap()
+            }
         };
         assert_eq!(find(Some("t1")).await, Some(threaded.id.clone()));
         assert_eq!(find(None).await, Some(newer.id.clone()));
-        assert_eq!(find(Some("t9")).await, Some(newer.id.clone()), "newest fallback");
         assert_eq!(
-            repo.find_active_run_for_chat("wsX", "slack", "C1", None).await.unwrap(),
+            find(Some("t9")).await,
+            Some(newer.id.clone()),
+            "newest fallback"
+        );
+        assert_eq!(
+            repo.find_active_run_for_chat("wsX", "slack", "C1", None)
+                .await
+                .unwrap(),
             None,
             "another workspace's message never controls the run"
         );

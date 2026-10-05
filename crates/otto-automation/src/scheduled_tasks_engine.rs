@@ -951,7 +951,9 @@ type ShellArgv = (String, Vec<String>);
 
 /// The environment a SANDBOXED shell task keeps — enough for a POSIX
 /// toolchain, nothing of the daemon's own.
-const SHELL_ENV_KEEP: [&str; 8] = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM"];
+const SHELL_ENV_KEEP: [&str; 8] = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM",
+];
 
 /// The sandbox argv for a shell task, when the `process_sandbox` setting
 /// confines `shell` (see `otto_sessions::manager::sandboxed_shell_argv`).
@@ -1864,10 +1866,14 @@ mod tests {
         let off = serde_json::json!({ "enabled": false });
         let not_shell = serde_json::json!({ "enabled": true, "providers": ["claude"] });
         let on = serde_json::json!({ "enabled": true });
-        assert!(sandboxed_shell_argv(&off, cwd.path(), data.path(), "true").await.is_none());
-        assert!(sandboxed_shell_argv(&not_shell, cwd.path(), data.path(), "true")
+        assert!(sandboxed_shell_argv(&off, cwd.path(), data.path(), "true")
             .await
             .is_none());
+        assert!(
+            sandboxed_shell_argv(&not_shell, cwd.path(), data.path(), "true")
+                .await
+                .is_none()
+        );
         let wrapped = sandboxed_shell_argv(&on, cwd.path(), data.path(), "echo hi").await;
         if otto_sandbox_supported() {
             let (program, args) = wrapped.expect("shell is in the default provider set");

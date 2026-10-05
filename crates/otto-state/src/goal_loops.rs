@@ -995,7 +995,11 @@ mod tests {
         repo.mark_running(&r.id, Utc::now()).await.unwrap();
         assert_eq!(repo.fail_running("interrupted").await.unwrap().len(), 1);
         let first = repo.get(&r.id).await.unwrap();
-        assert!(repo.fail_running("interrupted again").await.unwrap().is_empty());
+        assert!(repo
+            .fail_running("interrupted again")
+            .await
+            .unwrap()
+            .is_empty());
         let second = repo.get(&r.id).await.unwrap();
         assert_eq!(second.error.as_deref(), Some("interrupted"));
         assert_eq!(second.finished_at, first.finished_at);
