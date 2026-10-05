@@ -4486,6 +4486,8 @@ export interface SkillFileContentResp {
 export interface WriteSkillFileReq {
   path: string;
   content: string;
+  /** "New file": 409 instead of overwriting an existing `path`. */
+  create_only?: boolean;
 }
 
 export interface CreateLibrarySkillReq {

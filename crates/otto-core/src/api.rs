@@ -2528,6 +2528,10 @@ pub struct WriteSkillFileReq {
     /// Path relative to the skill dir (validated: no absolute, no `..`).
     pub path: String,
     pub content: String,
+    /// "New file": refuse (409) instead of overwriting when `path` already
+    /// exists — a typed existing path used to truncate it (even `SKILL.md`).
+    #[serde(default)]
+    pub create_only: bool,
 }
 
 /// `POST /library/skills` — create a new (empty-ish) library skill. When `body`
