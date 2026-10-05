@@ -79,24 +79,33 @@
     if (q) select(q);
   }
 
+  // Region-scoped, latest-wins: a slow region-A reply (or error) that lands
+  // after a switch to B must not overwrite B's error, end B's spinner, select
+  // an A queue, or fan A's queue URLs out against B's region.
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const rg = rq;
     loading = true;
     try {
-      const list = await aws.loadSqsQueues(account.id, '', rq);
+      const list = await aws.loadSqsQueues(account.id, '', rg);
+      if (seq !== loadSeq) return;
       error = '';
       // Approximate counts: capped so a 500-queue account doesn't fire 500 CLI
       // calls on open (the rest load when selected), and at most 2 in flight —
       // each is an `aws` process, and 40 at once took every webview socket to
-      // the daemon for seconds. The list is usable while they fill in.
+      // the daemon for seconds. The list is usable while they fill in. Each
+      // call carries the region captured above and stops once superseded.
       loading = false;
       autoSelect(list);
       void mapLimit(list.slice(0, 40), 2, (q) =>
-        aws.loadSqsAttrs(account.id, q.url, rq).catch(() => undefined),
+        seq === loadSeq ? aws.loadSqsAttrs(account.id, q.url, rg).catch(() => undefined) : Promise.resolve(undefined),
       );
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -345,7 +354,7 @@
   {loading}
   bind:auto
   {region}
-  onrefresh={() => void load()}
+  onrefresh={load}
 >
   <RegionPicker {account} service="sqs" bind:region />
 </ViewToolbar>
