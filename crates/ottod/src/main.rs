@@ -9,12 +9,14 @@
 #![recursion_limit = "512"]
 
 mod config;
+mod housekeeping;
 mod mcp_server;
 mod mcp_tools;
 #[cfg(feature = "embed-ui")]
 mod ui_assets;
 mod usage_tailer;
 
+use std::future::IntoFuture;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -39,6 +41,7 @@ use otto_state::{
 use tokio::sync::{broadcast, watch};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use crate::config::Config;
 
@@ -127,20 +130,52 @@ fn main() -> ExitCode {
         eprintln!("ottod: cannot create log dir {}: {e}", log_dir.display());
         return ExitCode::FAILURE;
     }
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "ottod.log");
+    // Daily files, the newest MAX_LOG_FILES kept (the appender prunes older
+    // `ottod.log.*` on rotation — they used to accumulate forever).
+    let file_appender = match tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("ottod.log")
+        .max_log_files(MAX_LOG_FILES)
+        .build(&log_dir)
+    {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("ottod: cannot open log file in {}: {e}", log_dir.display());
+            return ExitCode::FAILURE;
+        }
+    };
     let (file_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    // Under launchd, stderr is an append-only file (StandardErrorPath) that
+    // nothing rotates: mirror only warnings and errors there — the full log
+    // is in the rotating file. A terminal / test harness still gets it all.
+    let stderr_level = if std::env::var("XPC_SERVICE_NAME").as_deref() == Ok("com.otto.daemon") {
+        tracing_subscriber::filter::LevelFilter::WARN
+    } else {
+        tracing_subscriber::filter::LevelFilter::TRACE
+    };
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,sqlx=warn".into()),
         )
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(stderr_level),
+        )
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
                 .with_writer(file_writer),
         )
         .init();
+    install_panic_hook();
+    if let Some(was) = housekeeping::cap_stderr_log(
+        &log_dir.join("ottod.stderr.log"),
+        housekeeping::STDERR_LOG_MAX_BYTES,
+    ) {
+        tracing::info!("truncated ottod.stderr.log ({was} bytes)");
+    }
 
     raise_nofile_limit();
 
@@ -158,6 +193,35 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Daily `ottod.log.*` files kept (≈ a month).
+const MAX_LOG_FILES: usize = 30;
+
+/// How long the HTTP servers may drain in-flight requests after the shutdown
+/// signal. launchd SIGKILLs at `ExitTimeOut` (30 s in the plist); the drain
+/// plus the bounded teardown steps below must fit well inside it.
+const HTTP_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Route panics through tracing (file log, with a backtrace) and straight to
+/// stderr (unbuffered — launchd's StandardErrorPath), then chain the default
+/// hook. Before this a panicking worker left no trace in ottod.log: tokio
+/// caught it and the default hook wrote one line to a stderr nobody kept.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed>")
+            .to_string();
+        tracing::error!(target: "panic", %thread, "PANIC: {info}\nbacktrace:\n{backtrace}");
+        // The file writer is non-blocking (a background thread): if this panic
+        // is about to abort the process that line may never land — stderr is
+        // written synchronously, so the backtrace survives either way.
+        eprintln!("ottod PANIC on thread {thread}: {info}\nbacktrace:\n{backtrace}");
+        default_hook(info);
+    }));
 }
 
 /// Raise the soft `RLIMIT_NOFILE` as far as the hard limit allows (capped at
@@ -245,6 +309,17 @@ async fn run(cfg: Config) -> Result<(), String> {
     // Per-phase boot timing (perf2/03 N4/N7): one `boot: ready` line with the
     // breakdown, read by scripts/perf/daemon-budget.mjs.
     let mut boot = BootPhases::start();
+
+    // Unclean-shutdown detection: the marker is removed only at the end of a
+    // clean stop, so finding one means the last run crashed, was SIGKILLed
+    // (launchd ExitTimeOut, OOM) or the machine lost power.
+    if let Some(prev) = housekeeping::mark_running(
+        &cfg.data_dir,
+        std::process::id(),
+        std::time::SystemTime::now(),
+    ) {
+        tracing::warn!("previous run did not shut down cleanly ({prev})");
+    }
 
     // Offline compaction (perf2/03 N1): a large, fragmented otto.db is
     // rewritten HERE, before the pool opens — nothing can be writing, so no
@@ -837,6 +912,18 @@ async fn run(cfg: Config) -> Result<(), String> {
             // `com.otto.deploy.okfv3`). Removing them here caps any such loop
             // at the first restart it causes.
             let _ = tokio::task::spawn_blocking(sweep_stray_deploy_jobs).await;
+            // Dead files earlier versions left in the data dir (exact
+            // patterns only — see housekeeping::sweep_data_dir).
+            let data_dir = ctx.data_dir.clone();
+            if let Ok(removed) = tokio::task::spawn_blocking(move || {
+                housekeeping::sweep_data_dir(&data_dir, std::time::SystemTime::now())
+            })
+            .await
+            {
+                for path in removed {
+                    tracing::info!("boot sweep: removed dead file {}", path.display());
+                }
+            }
             // And leftover workflow run worktrees (+ safe otto-wf/<id> branch
             // cleanup) — finalize-time reaping can't run for a crashed daemon,
             // and pre-reap versions left one worktree per run in the user's
@@ -1444,10 +1531,21 @@ async fn run(cfg: Config) -> Result<(), String> {
     spawn_usage_recorder(ctx.clone());
     spawn_metrics_sampler(ctx.clone());
     spawn_budget_sampler(ctx.clone());
-    if usage.available() {
-        tracing::info!("usage tracking started (embedded clickhouse)");
-    } else {
-        tracing::info!("usage tracking idle (clickhouse not installed)");
+    // ClickHouse comes up in the background (UsageEngine::start returns at
+    // once), so `available()` here is almost always still false — report the
+    // outcome once the bring-up has actually resolved.
+    {
+        let usage = Arc::clone(&usage);
+        tokio::spawn(async move {
+            if usage.wait_ready(std::time::Duration::from_secs(120)).await {
+                tracing::info!("usage tracking started (embedded clickhouse)");
+            } else {
+                tracing::info!(
+                    "usage tracking idle (embedded clickhouse not available after 120 s — \
+                     not installed, disabled, or still starting)"
+                );
+            }
+        });
     }
 
     // --- Usage tailer: real token usage from Claude + Codex CLI transcripts ---
@@ -1517,6 +1615,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     tokio::spawn(async move {
         wait_for_signal().await;
         tracing::info!("shutdown signal received");
+        // Wake the long-poll handlers first so the drain below has nothing
+        // left that would otherwise hold it for 25–30 s.
+        otto_server::shutdown::begin();
         let _ = shutdown_tx.send(true);
     });
 
@@ -1556,7 +1657,7 @@ async fn run(cfg: Config) -> Result<(), String> {
                     let shutdown_handle = handle.clone();
                     tokio::spawn(async move {
                         let _ = rx.changed().await;
-                        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+                        shutdown_handle.graceful_shutdown(Some(HTTP_DRAIN_CAP));
                     });
                     network_task = Some(tokio::spawn(async move {
                         // `into_make_service_with_connect_info::<SocketAddr>` makes
@@ -1617,26 +1718,57 @@ async fn run(cfg: Config) -> Result<(), String> {
     // `into_make_service_with_connect_info::<SocketAddr>` exposes the real socket
     // peer to handlers via `ConnectInfo<SocketAddr>` — the login throttle keys on
     // it instead of a spoofable `X-Forwarded-For` header (audit S5).
-    axum::serve(
+    let serve = axum::serve(
         loopback,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown)
-    .await
-    .map_err(|e| format!("serve: {e}"))?;
-
-    if let Some(task) = network_task {
-        let _ = task.await;
+    .into_future();
+    // The graceful drain waits for EVERY in-flight request, unbounded. Cap it
+    // once the signal fires: long-polls already return early (shutdown::begin),
+    // and anything still running after HTTP_DRAIN_CAP is abandoned so the
+    // teardown below finishes inside launchd's ExitTimeOut.
+    let mut drain_rx = shutdown_rx.clone();
+    let drain_deadline = async move {
+        let _ = drain_rx.wait_for(|stop| *stop).await;
+        tokio::time::sleep(HTTP_DRAIN_CAP).await;
+    };
+    tokio::select! {
+        res = serve => res.map_err(|e| format!("serve: {e}"))?,
+        _ = drain_deadline => tracing::warn!(
+            "http drain exceeded {} s — abandoning in-flight requests",
+            HTTP_DRAIN_CAP.as_secs()
+        ),
     }
-    if let Some(task) = alt_task {
-        let _ = task.await;
+
+    // The other listeners got the same signal; they get no extra time.
+    for task in [network_task, alt_task].into_iter().flatten() {
+        if tokio::time::timeout(std::time::Duration::from_millis(500), task)
+            .await
+            .is_err()
+        {
+            tracing::warn!("secondary listener did not drain in time — abandoned");
+        }
     }
 
     // Terminate every live PTY so a daemon stop / system shutdown never leaves
     // orphaned agent processes behind — except the sessions running in PTY
     // holders (setting `session_persistence`, default on): those are detached
     // and re-adopted, still running, by the next daemon start.
-    let (killed, kept) = manager.shutdown_for_restart().await;
+    // Every teardown step is bounded: ExitTimeOut (30 s) minus the drain cap
+    // leaves ~27 s, and a hung step must not cost the ClickHouse flush after it.
+    let (killed, kept) = match tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        manager.shutdown_for_restart(),
+    )
+    .await
+    {
+        Ok(counts) => counts,
+        Err(_) => {
+            tracing::warn!("session shutdown exceeded 12 s — continuing teardown");
+            (0, 0)
+        }
+    };
     if kept > 0 {
         tracing::info!(
             "left {kept} session(s) running in their pty holders for the next daemon start"
@@ -1644,14 +1776,33 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
     // Close remote live sessions and stop their Chromium processes (no-op when
     // the remote live view was never used this run).
-    browser_handle.shutdown_live().await;
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        browser_handle.shutdown_live(),
+    )
+    .await
+    .is_err()
+    {
+        tracing::warn!("live browser shutdown exceeded 3 s");
+    }
     if killed > 0 {
         tracing::info!("terminated {killed} live session(s) on shutdown");
     }
     // Stop the embedded ClickHouse server cleanly (SIGTERM → flush) so its data
     // dir lock is released and the next daemon start doesn't have to reclaim it.
-    telemetry.shutdown().await;
-    usage.shutdown().await;
+    if tokio::time::timeout(std::time::Duration::from_secs(3), telemetry.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("telemetry shutdown exceeded 3 s");
+    }
+    if tokio::time::timeout(std::time::Duration::from_secs(6), usage.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("usage (clickhouse) shutdown exceeded 6 s");
+    }
+    housekeeping::clear_running(&cfg.data_dir);
     tracing::info!("ottod stopped");
     Ok(())
 }
@@ -1687,8 +1838,9 @@ fn pty_holder_config(
 /// usual tool directories — plus the *discovered* npm-global and GOPATH bins —
 /// so detection and PTY spawns see the same commands the user's shell does.
 /// Remove any `com.otto.deploy.*` launchd jobs left by a previous run. Otto's
-/// own deploy path (deploy.sh) detaches with nohup and never registers with
-/// launchd, so a job under this prefix can only be a coding agent's ad-hoc
+/// own deploy path (packaging/deploy.sh) only registers `com.otto.deploy-finish`
+/// (a hyphen, not matched here; packaging/deploy.sh also boots out exited
+/// `com.otto.deploy-once.*` leftovers), so a job under this prefix can only be a coding agent's ad-hoc
 /// `launchctl submit` — and launchd relaunches a submitted job on every exit,
 /// turning one deploy into an endless build → swap → restart loop that
 /// outlives the session that started it. Best-effort and macOS-only by

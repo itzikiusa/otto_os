@@ -2086,7 +2086,12 @@ async fn wait_for_decision(
     wait_seconds: Option<u64>,
 ) -> Option<bool> {
     let budget = Duration::from_secs(wait_seconds.unwrap_or(0).min(MAX_WAIT_SECS));
-    wait_for_decision_within(ctx, approval_id, budget, APPROVAL_FALLBACK_TICK).await
+    // Undecided on daemon shutdown: the caller gets its normal "still
+    // pending" answer instead of pinning the HTTP drain for up to 30 s.
+    tokio::select! {
+        decided = wait_for_decision_within(ctx, approval_id, budget, APPROVAL_FALLBACK_TICK) => decided,
+        _ = crate::shutdown::cancelled() => None,
+    }
 }
 
 /// Fallback re-read period for [`wait_for_decision`] when no event arrives.

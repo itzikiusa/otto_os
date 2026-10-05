@@ -92,6 +92,7 @@ pub mod run_workspace;
 pub mod scheduled_tasks_engine;
 pub mod scheduled_tasks_scheduler;
 mod self_call;
+pub mod shutdown;
 pub mod skill_eval;
 pub mod skill_review;
 pub mod spa;
