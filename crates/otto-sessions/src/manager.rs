@@ -209,10 +209,7 @@ const PS_ARGS: [&str; 3] = ["-ax", "-o", "pid=,ppid=,time="];
 /// (the sweep then behaves exactly as before the guard existed).
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 fn process_table() -> Vec<ProcRow> {
-    let out = match std::process::Command::new("ps")
-        .args(PS_ARGS)
-        .output()
-    {
+    let out = match std::process::Command::new("ps").args(PS_ARGS).output() {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
     };
@@ -277,6 +274,19 @@ fn parse_ps_time_ms(s: &str) -> Option<u64> {
         _ => return None,
     };
     Some((days * 86_400_000) + (h * 3_600_000) + (m * 60_000) + (sec * 1000.0) as u64)
+}
+
+/// Pause between provider-id capture scans, by time since the first input:
+/// quick while the CLI is most likely to flush its rollout, then backing off
+/// (review S1-28 — a 500 ms rescan for up to 180 s was pure overhead).
+fn capture_scan_pause(since_input: Duration) -> Duration {
+    if since_input < Duration::from_secs(10) {
+        Duration::from_secs(1)
+    } else if since_input < Duration::from_secs(60) {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(5)
+    }
 }
 
 /// Row-level auto-archive eligibility (`session_auto_archive_days`): an
@@ -3174,8 +3184,12 @@ impl SessionManager {
             let started = std::time::Instant::now();
             let mut captured: Option<String> = None;
             let mut logged_ambiguous = false;
+            // Waiting for the first input costs one map lookup per tick; the
+            // scans after it back off (review S1-28): each one walks the
+            // rollout dir and reads files, and loads every claimed id.
+            let mut pause = Duration::from_millis(500);
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(pause).await;
                 // Snapshot the probe (guard must not be held across awaits).
                 let Some((first_at, probe_text)) = probes
                     .get(&id)
@@ -3195,6 +3209,7 @@ impl SessionManager {
                 if since_input > WINDOW_AFTER_INPUT {
                     break;
                 }
+                pause = capture_scan_pause(since_input);
                 let floor = first_at
                     .checked_sub(Duration::from_secs(2))
                     .unwrap_or(std::time::UNIX_EPOCH);
@@ -3203,16 +3218,35 @@ impl SessionManager {
                 // tolerant of probe-garbling edits (arrow keys etc.).
                 let contended = in_flight.get(&cwd).map(|v| *v).unwrap_or(1) > 1;
                 let probe = contended.then_some(probe_text.as_str());
+                if !matches!(provider.as_str(), "codex" | "agy") {
+                    break;
+                }
                 let _guard = lock.lock().await;
                 let claimed_rows = repo.provider_session_ids().await.unwrap_or_default();
-                let claimed: std::collections::HashSet<&str> =
-                    claimed_rows.iter().map(String::as_str).collect();
-                let pick = match provider.as_str() {
-                    "codex" => pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe),
-                    "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
-                        .map(RolloutPick::Claim)
-                        .unwrap_or(RolloutPick::Nothing),
-                    _ => break,
+                // Directory walks + file reads: off the async workers.
+                let pick = {
+                    let provider = provider.clone();
+                    let codex_root = codex_root.clone();
+                    let cwd = cwd.clone();
+                    let probe = probe.map(str::to_owned);
+                    tokio::task::spawn_blocking(move || {
+                        let claimed: std::collections::HashSet<&str> =
+                            claimed_rows.iter().map(String::as_str).collect();
+                        match provider.as_str() {
+                            "codex" => pick_codex_rollout(
+                                &codex_root,
+                                &cwd,
+                                floor,
+                                &claimed,
+                                probe.as_deref(),
+                            ),
+                            _ => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
+                                .map(RolloutPick::Claim)
+                                .unwrap_or(RolloutPick::Nothing),
+                        }
+                    })
+                    .await
+                    .unwrap_or(RolloutPick::Nothing)
                 };
                 match pick {
                     RolloutPick::Claim(psid) => {
@@ -5273,13 +5307,15 @@ impl SessionManager {
     /// sweep's checks run on a `list_all` snapshot outside the lock, so a
     /// session the user opened as the sweep reached it was resumed and then
     /// immediately killed and archived. `Ok(false)` = no longer stale.
-    async fn archive_if_stale(&self, id: &Id, cutoff: chrono::DateTime<chrono::Utc>) -> Result<bool> {
+    async fn archive_if_stale(
+        &self,
+        id: &Id,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
-        if !is_auto_archive_candidate(&session, cutoff)
-            || self.is_live(id)
-            || self.is_attached(id)
+        if !is_auto_archive_candidate(&session, cutoff) || self.is_live(id) || self.is_attached(id)
         {
             return Ok(false);
         }
@@ -6402,6 +6438,22 @@ mod tests {
     }
 
     #[test]
+    fn capture_scan_backs_off_after_the_first_input() {
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(30)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(120)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
     fn cpu_verdict_is_the_pure_descendant_cpu_rule() {
         assert_eq!(
             cpu_verdict(Some(1_000), 1_500),
@@ -6446,10 +6498,7 @@ mod tests {
             table: LazyProcTable(Some(vec![(root, 1, 10), (root + 1, root, 5_050)])),
             ..Default::default()
         };
-        assert_eq!(
-            next.verdict(&baselines, &id, root).await,
-            CpuVerdict::Idle
-        );
+        assert_eq!(next.verdict(&baselines, &id, root).await, CpuVerdict::Idle);
     }
 
     #[test]
