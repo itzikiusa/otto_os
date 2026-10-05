@@ -532,7 +532,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 8px 14px;
     position: sticky;
     top: 0;

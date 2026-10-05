@@ -263,7 +263,7 @@
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
     if (ok) toasts.success('Copied', 'Mermaid source copied to clipboard.');
-    else toasts.error('Copy failed', 'Could not copy to the clipboard.');
+    else toasts.error('Couldn’t copy', 'Could not copy to the clipboard.');
   }
 
   /** Ask the agent to edit this scene's .mermaid source. */

@@ -95,7 +95,7 @@
   {#if aws.accountsLoading && !aws.accountsLoaded}
     <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={3} height={90} /></div>
   {:else if aws.accountsError && aws.accounts.length === 0}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
+    <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
   {:else if aws.accounts.length === 0}
     <EmptyState
       variant="page"

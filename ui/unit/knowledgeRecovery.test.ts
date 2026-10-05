@@ -33,7 +33,7 @@ function snip(overrides: Record<string, unknown>) {
     img: {}, annos: [], savedHash: '[]', copyTimer: null, copyInFlight: null,
     copyAgain: false, copyState: 'idle', snipId: 'snip', leavePending: null, allowClose: false,
     annosHash: JSON.stringify, uploadNeeded: (a: unknown, saved: string) => JSON.stringify(a) === saved ? null : JSON.stringify(a),
-    flatten: async () => new Blob(), toasts: { error() {} }, commitText() {},
+    flatten: async () => new Blob(), toasts: { error() {} }, toastError() {}, commitText() {},
     confirmer: { choose: async () => ({value: null}) },
     ...overrides,
   });

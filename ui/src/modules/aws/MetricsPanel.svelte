@@ -150,7 +150,7 @@
     {:else}
       <EmptyState
         icon="chart"
-        title="Couldn't load metrics"
+        title="Couldn’t load metrics"
         body={awsErrorText(error)}
         actionLabel={loginNeeded && onsignin ? 'Sign in' : 'Retry'}
         onaction={loginNeeded && onsignin ? onsignin : () => void load()}
@@ -288,7 +288,7 @@
     color: var(--text-dim);
     padding: 2px 4px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     font-size: var(--fs-xs);
   }
   .stats th:first-child {

@@ -444,7 +444,7 @@
     cursor: grab;
     user-select: none;
     overflow: hidden;
-    transition: border-color 120ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .head {
     display: flex;
@@ -496,7 +496,7 @@
   }
   .sk {
     font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     flex-shrink: 0;
@@ -568,7 +568,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

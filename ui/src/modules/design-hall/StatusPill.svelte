@@ -76,7 +76,7 @@
   .as-btn {
     cursor: pointer;
     font-family: inherit;
-    transition: filter 130ms ease-out;
+    transition: filter var(--dur-fast) ease-out;
   }
   .as-btn:hover {
     filter: brightness(0.97);

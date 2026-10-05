@@ -550,7 +550,7 @@
         icon: 'copy',
         action: () => {
           void copyText(cwd).then((ok) =>
-            ok ? toasts.info('Folder path copied') : toasts.error('Copy failed', 'The clipboard is not available here.'),
+            ok ? toasts.info('Folder path copied') : toasts.error('Couldn’t copy', 'The clipboard is not available here.'),
           );
         },
       });
@@ -1086,7 +1086,7 @@
     border-radius: var(--radius-m);
     overflow: hidden;
     background: var(--term-bg);
-    transition: border-color 140ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
     /* The header adapts to the PANE's inline size (the `@container pane` rules
        at the end). The query container is the pane, not the header: a
        container can't query itself. Inline-size containment means the pane has
@@ -1131,7 +1131,7 @@
     text-overflow: ellipsis;
     border-radius: var(--radius-s);
     padding-inline: 2px;
-    transition: color 140ms ease-out;
+    transition: color var(--dur-fast) ease-out;
   }
   .pane-title[role='button'] {
     cursor: default;
@@ -1151,7 +1151,7 @@
   }
   .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 0.7;
-    transition: opacity 140ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 1;
@@ -1166,7 +1166,7 @@
     height: 20px;
     opacity: 0;
     cursor: grab;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .pane-head:hover > .pane-grip,
   .pane-head > .pane-grip:focus-visible {
@@ -1230,7 +1230,7 @@
   }
   .task-chip.active {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .task-chip.done {
     color: var(--success);
@@ -1307,7 +1307,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     overflow: hidden;
-    transition: border-color 130ms ease-out, color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .meta-chip:hover,
   .meta-chip:focus-visible {

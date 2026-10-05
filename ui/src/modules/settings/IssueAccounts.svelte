@@ -87,7 +87,7 @@
   function testLabel(r: Exclude<TestResult, 'busy'>): string {
     return r.ok
       ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
-      : `Couldn't connect: ${r.error}`;
+      : `Couldn’t connect: ${r.error}`;
   }
 
   async function load(): Promise<void> {
@@ -142,7 +142,7 @@
       closeModal();
       toasts.success('Jira account added', a.label);
     } catch (e) {
-      toasts.error("Couldn't add the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t add the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -167,7 +167,7 @@
       closeModal();
       toasts.success('Jira account updated', updated.label);
     } catch (e) {
-      toasts.error("Couldn't save the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t save the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -180,7 +180,7 @@
       accounts = accounts.filter((x) => x.id !== a.id);
       toasts.success('Jira account deleted', a.label);
     } catch (e) {
-      toasts.error("Couldn't delete the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t delete the Jira account", loadErrorText(e));
     }
   }
 </script>

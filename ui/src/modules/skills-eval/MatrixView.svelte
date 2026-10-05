@@ -419,7 +419,7 @@
           <StatusBadge status={runStatus(selected.status)} />
           {#if selected.status === 'running'}
             <button class="btn small" type="button" onclick={cancel}>
-              <Icon name="square" size={12} /> Stop
+              <Icon name="stop" size={12} /> Stop
             </button>
           {/if}
         </div>
@@ -519,7 +519,7 @@
   .mx-side-title {
     font-size: var(--fs-s);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     flex: 1;

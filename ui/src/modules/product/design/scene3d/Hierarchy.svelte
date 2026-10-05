@@ -437,7 +437,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .s3d-hier-filter {
@@ -465,7 +465,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .s3d-row {
@@ -486,7 +486,7 @@
     box-shadow: inset 0 0 0 1px var(--accent);
   }
   .s3d-row.selected {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
   }
   .s3d-row.dimmed .s3d-row-name,
   .s3d-row.dimmed .s3d-row-icon {

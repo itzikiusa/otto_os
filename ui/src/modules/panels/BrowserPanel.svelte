@@ -737,7 +737,7 @@
     font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .btab:hover {
     background: var(--surface-2);
@@ -776,7 +776,7 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out, background 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .btab:hover .btab-close,
   .btab:focus-within .btab-close,
@@ -895,7 +895,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -910,7 +910,7 @@
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
     color: var(--text);
     width: 100%;
   }

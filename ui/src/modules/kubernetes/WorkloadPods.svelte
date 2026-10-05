@@ -161,7 +161,7 @@
   .wp-head {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);

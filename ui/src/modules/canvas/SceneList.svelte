@@ -67,7 +67,7 @@
     try {
       await canvas.updateMeta(s.id, { title: t.trim() });
     } catch (err) {
-      toasts.error('Rename failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t rename', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -83,7 +83,7 @@
     try {
       await canvas.updateMeta(s.id, { section: sec.trim() || null });
     } catch (err) {
-      toasts.error('Move failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t move', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -109,7 +109,7 @@
       await canvas.loadScenes().catch(() => {});
       toasts.success('Scene duplicated', `${row.title} (copy)`);
     } catch (err) {
-      toasts.error('Duplicate failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t duplicate', err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -125,7 +125,7 @@
       await canvas.del(s.id);
       toasts.success('Scene deleted', s.title);
     } catch (err) {
-      toasts.error('Delete failed', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t delete', err instanceof Error ? err.message : String(err));
     }
   }
 </script>
@@ -245,7 +245,7 @@
   }
   /* The field itself is borderless; the box carries the focus ring. */
   .search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 1px var(--accent);
   }
   .search input {
@@ -295,7 +295,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-transform: uppercase;
   }

@@ -159,7 +159,7 @@
       await product.updateQuestion(editingId, req);
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save question', product.errMsg(e));
+      toasts.error('Couldn’t save question', product.errMsg(e));
     } finally {
       savingId = null;
     }
@@ -176,7 +176,7 @@
       await product.updateQuestion(answeringId, req);
       answeringId = null;
     } catch (e) {
-      toasts.error('Could not save answer', product.errMsg(e));
+      toasts.error('Couldn’t save answer', product.errMsg(e));
     } finally {
       savingId = null;
     }
@@ -187,7 +187,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'discarded' });
     } catch (e) {
-      toasts.error('Could not discard question', product.errMsg(e));
+      toasts.error('Couldn’t discard question', product.errMsg(e));
     } finally {
       savingId = null;
     }
@@ -199,7 +199,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'open' });
     } catch (e) {
-      toasts.error('Could not reopen question', product.errMsg(e));
+      toasts.error('Couldn’t reopen question', product.errMsg(e));
     } finally {
       savingId = null;
     }
@@ -225,7 +225,7 @@
       await product.deleteQuestion(q.id);
       selectedIds = new Set([...selectedIds].filter((id) => id !== q.id));
     } catch (e) {
-      toasts.error('Could not delete question', product.errMsg(e));
+      toasts.error('Couldn’t delete question', product.errMsg(e));
     } finally {
       deletingId = null;
     }
@@ -245,7 +245,7 @@
       addOpen = false;
       toasts.success('Question added');
     } catch (e) {
-      toasts.error('Could not add question', product.errMsg(e));
+      toasts.error('Couldn’t add question', product.errMsg(e));
     } finally {
       addWorking = false;
     }
@@ -278,7 +278,7 @@
       selectedIds = new Set();
       toasts.success(`Posted ${ids.length} question${ids.length !== 1 ? 's' : ''}`);
     } catch (e) {
-      toasts.error('Post failed', product.errMsg(e));
+      toasts.error('Couldn’t post', product.errMsg(e));
     } finally {
       postingIds = false;
     }
@@ -628,7 +628,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transition: border-color 100ms;
+    transition: border-color var(--dur-fast);
   }
   .q-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
@@ -806,7 +806,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .req {

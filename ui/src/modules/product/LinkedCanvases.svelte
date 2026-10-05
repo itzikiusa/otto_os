@@ -221,7 +221,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .lc-actions {
     display: flex;
@@ -331,7 +331,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 2px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

@@ -1230,7 +1230,7 @@
     background: color-mix(in srgb, var(--text-dim) 24%, transparent);
     border: 1px solid var(--border);
     cursor: pointer;
-    transition: background 0.15s ease;
+    transition: background var(--dur-enter) ease;
   }
   .switch span::after {
     content: '';
@@ -1241,7 +1241,7 @@
     inset-inline-start: 2px;
     top: 2px;
     background: var(--text-dim);
-    transition: inset-inline-start 0.15s ease, background 0.15s ease;
+    transition: inset-inline-start var(--dur-enter) ease, background var(--dur-enter) ease;
   }
   .switch input:focus-visible + span {
     outline: 2px solid var(--accent-text);
@@ -1501,7 +1501,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.08em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .review-outcome {
@@ -1667,7 +1667,7 @@
   .pill {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     padding: 2px 7px;
     border-radius: 5px;
@@ -1743,7 +1743,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .written-link {
     align-self: flex-start;
@@ -1774,7 +1774,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     margin-bottom: 2px;
   }
   .run-row-wrap {
@@ -1826,7 +1826,7 @@
   }
   .run-row.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-soft);
   }
   .run-row-text {
     flex: 1;

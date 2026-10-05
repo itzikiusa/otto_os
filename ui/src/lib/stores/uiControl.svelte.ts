@@ -186,7 +186,7 @@ class UiControlStore {
     } catch (e) {
       if (!opts.quiet) {
         toasts.error(
-          enabled ? "Couldn't allow UI control" : "Couldn't turn off UI control",
+          enabled ? "Couldn’t allow UI control" : "Couldn’t turn off UI control",
           e instanceof Error ? e.message : String(e),
         );
       }

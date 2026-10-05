@@ -39,7 +39,7 @@
     if (!next.remotes.includes(remote)) remote = next.remotes[0] ?? '';
     try { localStorage.setItem(preferenceKey, next.repo_path); } catch { /* Browsing still works without storage. */ }
   }
-  // `what` names the step for the inline error ("Couldn't check the
+  // `what` names the step for the inline error ("Couldn’t check the
   // repository. <daemon reason>") — a bare daemon message didn't say which
   // of the six buttons failed.
   async function perform(what: string, action: () => Promise<void>) {

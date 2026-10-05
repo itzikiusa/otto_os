@@ -210,7 +210,7 @@
             <div class="db-pane-loading" role="status" aria-label="Loading Database"><Skeleton rows={3} /></div>
           {:catch err}
             <div class="db-pane-loading" role="alert">
-              <span>Couldn't load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
+              <span>Couldn’t load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
             </div>
           {/await}
         {/if}
@@ -343,7 +343,7 @@
     margin: auto;
     background: var(--border);
     border-radius: 2px;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .gutter:hover::after,
   .gutter:focus-visible::after {

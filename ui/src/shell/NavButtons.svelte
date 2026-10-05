@@ -47,7 +47,7 @@
     color: var(--text-dim);
     border-radius: var(--radius-s);
     cursor: pointer;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .nav-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

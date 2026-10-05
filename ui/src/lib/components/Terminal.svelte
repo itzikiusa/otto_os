@@ -761,7 +761,7 @@
       const frame = targetTransform ? targetTransform(input) : input;
       if (frame !== null) targetSocket.send(JSON.stringify(frame));
     } catch (e) {
-      toasts.error('Could not paste image', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t paste image', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -3152,7 +3152,7 @@
     background: var(--hover);
   }
   .find-result-row.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
   }
   .find-result-line {
@@ -3274,7 +3274,7 @@
     cursor: pointer;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
-    transition: background 0.1s;
+    transition: background var(--dur-fast);
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
   }
@@ -3337,7 +3337,7 @@
     backdrop-filter: blur(4px);
     -webkit-backdrop-filter: blur(4px);
     opacity: 0.7;
-    transition: opacity 150ms ease-out;
+    transition: opacity var(--dur-enter) ease-out;
   }
   .desk-toolbar:hover {
     opacity: 1;
@@ -3355,7 +3355,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .tb-btn:hover {
     background: var(--surface-2);

@@ -340,7 +340,7 @@
           watchOnly = true;
           releaseKeys();
         } else if (msg.code === 'nav_failed') {
-          toasts.error("Couldn't open the page", msg.message);
+          toasts.error("Couldn’t open the page", msg.message);
         } else if (msg.code === 'engine_unavailable') {
           errorNote = msg.message;
         }
@@ -1038,7 +1038,7 @@
     width: 100%;
     height: 100%;
     display: block;
-    transition: opacity 140ms ease-out, filter 140ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, filter var(--dur-fast) ease-out;
   }
   .surface.stale canvas {
     opacity: 0.55;

@@ -87,7 +87,7 @@
   }
   .tw {
     display: inline-block;
-    transition: transform 120ms ease;
+    transition: transform var(--dur-fast) ease;
     color: var(--text-dim);
     font-size: var(--fs-xs);
   }

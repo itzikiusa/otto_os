@@ -120,7 +120,7 @@
       await api.put('/settings', { [key]: checked });
     } catch (e) {
       flagValues[key] = !checked; // revert
-      toasts.error("Couldn't save the channel notification", loadErrorText(e));
+      toasts.error("Couldn’t save the channel notification", loadErrorText(e));
     }
   }
 </script>
@@ -178,7 +178,7 @@
     </p>
     {#if flagsError}
       <div class="flags-error" role="alert">
-        <span>Couldn't load these settings: {flagsError}</span>
+        <span>Couldn’t load these settings: {flagsError}</span>
         <button class="btn small" onclick={() => void loadChannelFlags()}>Retry</button>
       </div>
     {/if}
@@ -189,7 +189,7 @@
           hint={flag.sub}
           checked={flagValues[flag.key]}
           disabled={flagLoading[flag.key] || !!flagsError}
-          title={flagsError ? "Couldn't read the current value — Retry above" : undefined}
+          title={flagsError ? "Couldn’t read the current value — Retry above" : undefined}
           onchange={(v) => toggleFlag(flag.key, v)}
         />
       {/each}

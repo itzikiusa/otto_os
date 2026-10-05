@@ -164,6 +164,6 @@ export async function copyText(s: string, successToast?: [title: string, body?: 
     clipHistory.record(s, 'Results');
     if (successToast) toasts.success(successToast[0], successToast[1]);
   } catch {
-    toasts.error('Copy failed');
+    toasts.error('Couldn’t copy');
   }
 }

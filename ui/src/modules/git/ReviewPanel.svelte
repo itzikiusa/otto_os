@@ -588,7 +588,7 @@
       // network, 5xx — never retried, a 5xx may have created it): the comment
       // is approved in Otto but `posted` stays false. Never report that as sent.
       if (!updated.posted) {
-        if (!quiet) toasts.error("Couldn't post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        if (!quiet) toasts.error("Couldn’t post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
         return false;
       }
       if (!confirmed) toasts.success('Comment posted', prWhere);
@@ -1935,7 +1935,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .sev-info {

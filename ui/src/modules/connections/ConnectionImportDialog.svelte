@@ -221,7 +221,7 @@
         </div>
       {:else if sourcesError}
         <div class="imp-error" role="alert">
-          <span>Couldn't look for installed tools. {sourcesError}</span>
+          <span>Couldn’t look for installed tools. {sourcesError}</span>
           <button class="btn small" onclick={() => void loadSources()}>Retry</button>
         </div>
       {:else}
@@ -435,8 +435,8 @@
     cursor: pointer;
     text-align: start;
     transition:
-      border-color 120ms ease-out,
-      background 120ms ease-out;
+      border-color var(--dur-fast) ease-out,
+      background var(--dur-fast) ease-out;
   }
   .tool:disabled {
     opacity: 0.5;
@@ -642,7 +642,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: var(--radius-s);
     background: var(--surface-2);

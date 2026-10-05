@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // File → table import dialog (0002): the mirror of the export-to-path
   // ("Export all rows…") dialog. Picks a local file on the daemon host, a
   // format, a target table, and a batch size, then streams batched INSERTs
@@ -122,7 +123,7 @@
       }
 
       if (typeof res.error === 'string') {
-        toasts.error('Import failed', res.error);
+        toasts.error('Couldn’t import', res.error);
         return;
       }
       if (res.done) {
@@ -151,7 +152,7 @@
         progress = null;
         return;
       }
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = false;
       importAbort = null;

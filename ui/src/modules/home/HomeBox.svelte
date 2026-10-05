@@ -257,7 +257,7 @@
     border-radius: var(--radius-l);
     box-shadow: var(--shadow-card);
     overflow: hidden;
-    transition: box-shadow 130ms ease-out, border-color 130ms ease-out;
+    transition: box-shadow var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
   }
   .hbox.resizing {
     border-color: var(--accent);
@@ -296,7 +296,7 @@
     .hb-head .icon-btn,
     .grip {
       opacity: 0;
-      transition: opacity 130ms ease-out;
+      transition: opacity var(--dur-fast) ease-out;
     }
     .hbox:hover .hb-head .icon-btn,
     .hbox:hover .grip,
@@ -361,7 +361,7 @@
     /* Revealed on hover/focus only: a permanent corner mark on every box was
        visual noise. */
     opacity: 0;
-    transition: opacity 130ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .hbox:hover .resize::after,
   .resize:focus-visible::after {

@@ -315,7 +315,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .grow {
@@ -382,7 +382,7 @@
     color: var(--text);
     cursor: pointer;
     font-size: var(--fs-s);
-    transition: background 100ms;
+    transition: background var(--dur-fast);
     user-select: none;
   }
   .run-header:hover {
@@ -441,7 +441,7 @@
     cursor: pointer;
     white-space: nowrap;
     flex-shrink: 0;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .view-swarm-btn:hover {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -460,7 +460,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }

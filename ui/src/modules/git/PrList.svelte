@@ -238,7 +238,7 @@
         <button class="btn small" disabled={loadingMore} onclick={loadMore}>
           {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
         </button>
-        {#if moreError}<span class="pr-more-err" role="status">Couldn't load more: {moreError}</span>{/if}
+        {#if moreError}<span class="pr-more-err" role="status">Couldn’t load more: {moreError}</span>{/if}
       </div>
     {/if}
   {/if}
@@ -327,7 +327,7 @@
     text-align: start;
     padding: 10px 14px;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .pr-row:hover {
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));

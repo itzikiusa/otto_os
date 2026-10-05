@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Snip annotation editor — chrome-less full-screen view at `#/snip/{id}`.
   //
   // Single canvas at the image's natural pixel size, CSS-scaled to fit; all
@@ -278,7 +279,7 @@
         return true;
       } catch (e) {
         copyState = 'failed';
-        toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t copy', e);
         return hash === null;
       }
     })();
@@ -684,7 +685,7 @@
       toasts.info('Snip deleted');
       await close();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -917,7 +918,7 @@
   .tb.active {
     color: var(--text);
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   /* The icon set has no redo glyph: redo is undo, mirrored. (Not an RTL
      override: in RTL the Icon flips undo and this mirrors it back, so redo

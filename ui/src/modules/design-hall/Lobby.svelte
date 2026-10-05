@@ -752,7 +752,7 @@
     color: var(--text);
     font: inherit;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .studio:hover {
     border-color: var(--border-strong);

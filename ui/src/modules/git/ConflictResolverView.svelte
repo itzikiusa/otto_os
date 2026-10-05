@@ -403,14 +403,14 @@
     font-size: var(--fs-s);
     cursor: pointer;
     text-align: start;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .file-row:hover {
     background: var(--surface-2);
     color: var(--text);
   }
   .file-row.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }

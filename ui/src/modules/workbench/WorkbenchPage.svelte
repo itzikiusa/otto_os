@@ -158,7 +158,7 @@
       mobilePane = 'editor';
       focusEditorSoon();
     } catch (e) {
-      toasts.error("Couldn't create a file", loadErrorText(e));
+      toasts.error("Couldn’t create a file", loadErrorText(e));
     }
   }
 
@@ -227,7 +227,7 @@
     try {
       await workbench.patchMeta(id, { name });
     } catch (e) {
-      toasts.error("Couldn't rename", loadErrorText(e));
+      toasts.error("Couldn’t rename", loadErrorText(e));
     }
   }
 
@@ -236,7 +236,7 @@
     try {
       await workbench.patchMeta(doc.id, { language: value });
     } catch (e) {
-      toasts.error("Couldn't change the language", loadErrorText(e));
+      toasts.error("Couldn’t change the language", loadErrorText(e));
     }
   }
 
@@ -259,7 +259,7 @@
       await workbench.moveToTrash(doc.id);
       toasts.success('Moved to trash', `“${name}” and its history can be restored from the trash.`);
     } catch (e) {
-      toasts.error("Couldn't move to trash", loadErrorText(e));
+      toasts.error("Couldn’t move to trash", loadErrorText(e));
     }
   }
 
@@ -286,7 +286,7 @@
         label: 'Duplicate',
         icon: 'copy',
         disabled: !has,
-        action: () => doc && void workbench.duplicate(doc.id).catch((err) => toasts.error("Couldn't duplicate", loadErrorText(err))),
+        action: () => doc && void workbench.duplicate(doc.id).catch((err) => toasts.error("Couldn’t duplicate", loadErrorText(err))),
       },
       { label: 'Download', icon: 'download', disabled: !has || isImage, action: download },
       { separator: true },
@@ -329,7 +329,7 @@
           await workbench.create({ name, language: 'image', content: asset.id });
         }
       } catch (e) {
-        toasts.error(`Couldn't add ${f.name || 'the image'}`, loadErrorText(e));
+        toasts.error(`Couldn’t add ${f.name || 'the image'}`, loadErrorText(e));
       }
     }
   }
@@ -446,7 +446,7 @@
             {:else if active.loadError && !doc}
               <div class="wb-inline-err" role="alert">
                 <Icon name="warning" size={13} />
-                <span>Couldn't load this file: {active.loadError}</span>
+                <span>Couldn’t load this file: {active.loadError}</span>
                 <button class="btn small" onclick={() => void workbench.retryLoad(active.id)}>Retry</button>
               </div>
             {:else if !doc}
@@ -535,7 +535,7 @@
               {#if active.saveError}
                 <div class="wb-inline-err" role="alert">
                   <Icon name="warning" size={13} />
-                  <span>Couldn't save: {active.saveError}. Your text is kept on this device until it saves.</span>
+                  <span>Couldn’t save: {active.saveError}. Your text is kept on this device until it saves.</span>
                   <button class="btn small" onclick={() => void workbench.save(active.id, false)}>Retry</button>
                 </div>
               {/if}

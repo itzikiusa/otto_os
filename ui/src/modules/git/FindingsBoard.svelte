@@ -33,7 +33,7 @@
   let loadError = $state<string | null>(null);
   /** Failed silent refetch (WS bus) — the findings stay, with a stale bar + Retry. */
   let reloadError = $state<string | null>(null);
-  /** Per-finding failed detail/timeline load → "Couldn't load the timeline · Retry". */
+  /** Per-finding failed detail/timeline load → "Couldn’t load the timeline · Retry". */
   let detailError: Record<string, boolean> = $state({});
   let expanded: Record<string, boolean> = $state({});
   let details: Record<string, FindingDetail> = $state({});
@@ -448,7 +448,7 @@
   .fb-field-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
   }

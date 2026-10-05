@@ -77,7 +77,7 @@
       await copyTextOrThrow(detail.ddl);
       toasts.success('Copied DDL');
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
 
@@ -156,7 +156,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
 
@@ -666,7 +666,7 @@
          into the neutral "no object" empty state. -->
     <EmptyState
       icon="x"
-      title="Couldn't load object"
+      title="Couldn’t load object"
       body={database.objectError}
       actionLabel="Retry"
       onaction={retryOpen}
@@ -1190,7 +1190,7 @@
   .kind-chip {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
     padding: 1px 7px;
@@ -1210,7 +1210,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }
@@ -1258,7 +1258,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .ib-count {
@@ -1559,7 +1559,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }

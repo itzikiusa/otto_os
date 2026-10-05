@@ -190,7 +190,7 @@ registerUiCommands('connections', {
       key_filter: args.key_filter,
       value_filter: args.value_filter,
     });
-    if (!r) throw new UiCommandError('failed', `Couldn't read messages from “${args.topic}” (the page shows why).`);
+    if (!r) throw new UiCommandError('failed', `Couldn’t read messages from “${args.topic}” (the page shows why).`);
     return { cluster: c.name, topic: args.topic, ...summarizeMessages(r) };
   },
 

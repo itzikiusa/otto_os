@@ -445,7 +445,7 @@
     } catch (e) {
       if (owner !== consumeUrl()) return;
       tailError = loadErrorText(e);
-      if (!autoPoll) toasts.error("Couldn't read messages", tailError);
+      if (!autoPoll) toasts.error("Couldn’t read messages", tailError);
     } finally {
       consuming = false;
     }
@@ -553,7 +553,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error("Couldn't update the config", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t update the config", e instanceof Error ? e.message : String(e));
     } finally {
       cfgSaving = false;
     }
@@ -577,7 +577,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error("Couldn't delete the topic", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t delete the topic", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -595,7 +595,7 @@
         const full: ConsumeReq = { ...lastReq, preview: false };
         messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
       } catch (e) {
-        toasts.error("Couldn't export the messages", e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn’t export the messages", e instanceof Error ? e.message : String(e));
         return;
       } finally {
         exporting = false;
@@ -630,7 +630,7 @@
       });
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
+      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write.');
     }
   }
 </script>
@@ -655,7 +655,7 @@
   {#if detailErr}
     <div class="err" role="alert">
       <Icon name="warning" size={13} />
-      <span class="err-text">Couldn't load topic details. <span class="muted">{detailErr}</span></span>
+      <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
       <button class="btn small" onclick={() => loadDetail(detail !== null)}>
         <Icon name="refresh" size={12} /> Retry
       </button>
@@ -1130,7 +1130,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 6px 10px;
     position: sticky;
     top: 0;
@@ -1161,7 +1161,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .msg-list tbody tr.sel {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .key {
     max-width: 180px;
@@ -1223,7 +1223,7 @@
   .badge {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 2px 6px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -1233,7 +1233,7 @@
     margin: 12px 0 4px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .payload {

@@ -97,7 +97,7 @@
     color: var(--text);
     text-align: start;
     cursor: pointer;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out, transform 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out, transform var(--dur-fast) ease-out;
   }
   .tpl:hover:not(:disabled) {
     border-color: var(--accent);

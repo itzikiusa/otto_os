@@ -14,6 +14,7 @@
 </script>
 
 <script lang="ts">
+  import { toastError } from '../../../lib/toastError';
   // The agent session as a Claude/Codex-app-style conversation, rebuilt from
   // the provider's transcript on disk (docs/design/conversation-view.md §5.2).
   // Newest page first + "Load earlier" (scroll-anchored), auto-follow at the
@@ -643,7 +644,7 @@
     try {
       await ws.restartSession(sessionId);
     } catch (e) {
-      toasts.error('Resume failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resume', e);
     }
   }
 
@@ -791,7 +792,7 @@
   >
     <div class="conv-col" bind:this={colEl}>
     {#if conv.error && !t}
-      <EmptyState icon="warning" title="Couldn't load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
+      <EmptyState icon="warning" title="Couldn’t load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
     {:else if conv.loading && !t}
       <div class="skeleton" aria-busy="true" aria-label="Loading the conversation">
         <div class="sk sk-user"></div>

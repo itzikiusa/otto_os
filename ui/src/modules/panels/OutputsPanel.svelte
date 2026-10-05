@@ -224,7 +224,7 @@
       await navigator.clipboard.writeText(v);
       toasts.info('Copied', v);
     } catch {
-      toasts.error('Could not copy', v);
+      toasts.error('Couldn’t copy', v);
     }
   }
 
@@ -286,7 +286,7 @@
       <p class="empty-line dim" role="status">Loading outputs…</p>
     {:else if listError}
       <div class="pbody err" role="alert">
-        <div class="err-head"><Icon name="warning" size={13} /> Couldn't load outputs</div>
+        <div class="err-head"><Icon name="warning" size={13} /> Couldn’t load outputs</div>
         <div class="err-detail">{listError}</div>
         <button class="btn small" onclick={() => sid && void activity.loadArtifacts(sid, true)}>
           <Icon name="refresh" size={12} /> Retry
@@ -346,7 +346,7 @@
           <div class="pbody dim">Loading preview…</div>
         {:else if error}
           <div class="pbody err" role="alert">
-            <div class="err-head"><Icon name="warning" size={13} /> Couldn't load the preview</div>
+            <div class="err-head"><Icon name="warning" size={13} /> Couldn’t load the preview</div>
             <div class="err-detail">{error}</div>
             <button class="btn small" onclick={() => void select(selected!)}>
               <Icon name="refresh" size={12} /> Retry
@@ -406,7 +406,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .count {

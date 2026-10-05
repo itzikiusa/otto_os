@@ -242,7 +242,7 @@
     color: var(--text-dim);
     cursor: pointer;
     flex-shrink: 0;
-    transition: background 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rail-btn:hover {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

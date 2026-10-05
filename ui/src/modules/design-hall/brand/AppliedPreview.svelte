@@ -141,7 +141,7 @@
     border-radius: var(--radius-m);
     background: var(--pv-surface-alt);
     border: 1px solid var(--border);
-    transition: background 160ms ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .hero .copy {
     position: absolute;

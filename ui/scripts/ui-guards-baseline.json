@@ -274,10 +274,17 @@
     "src/modules/panels/BrowserPanel.svelte": 1
   },
   "status-as-text": {},
+  "straight-couldnt": {},
+  "toast-failed-title": {
+    "src/modules/aws/InstallPanel.svelte": 1,
+    "src/modules/aws/S3Browser.svelte": 2,
+    "src/modules/product/AnalysisTab.svelte": 1
+  },
   "token-fallback": {
     "src/lib/components/Terminal.svelte": 4,
     "src/modules/product/design/DeviceFrame.svelte": 1
   },
+  "transition-literal": {},
   "z-index-literal": {
     "src/modules/agents/SplitNode.svelte": 2,
     "src/modules/agents/TiledView.svelte": 2

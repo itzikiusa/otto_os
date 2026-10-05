@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EKS: clusters table (region switcher) + detail sheet with nodegroups and the
   // raw describe-cluster JSON. "Open in Kubernetes" [aws_eks Edit + kubernetes
@@ -97,7 +98,7 @@
       toasts.success('Cluster imported', k.name);
       router.go(`kubernetes/${k.id}`);
     } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = null;
     }
@@ -108,7 +109,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -142,7 +143,7 @@
   {#if loading && !clusters}
     <div class="pad" role="status"><p class="load-note">Loading EKS clusters…</p><Skeleton rows={5} /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="helm" title={filter ? 'No matching clusters' : allRegions ? 'No EKS clusters in any enabled region' : `No EKS clusters in ${region}`} />
   {:else}
@@ -246,7 +247,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -332,7 +333,7 @@
     margin: 6px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .raw {

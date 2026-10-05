@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // The approval queue — dangerous tool calls and `otto.ask_human_approval`
   // requests waiting on a human. Shows the redacted args (never the full/secret
   // values; the server binds the hash of the FULL args). Approve/Deny with the
@@ -77,7 +78,7 @@
       const list = await mcpCpExtraApi.autoApproveRules();
       allowFor = { approval: a, catalog: list.categories };
     } catch (e) {
-      toasts.error('Could not load the auto-approve catalog', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t load the auto-approve catalog', e instanceof Error ? e.message : String(e));
     } finally {
       allowLoading = null;
     }
@@ -129,7 +130,7 @@
       ondecided?.();
       await load();
     } catch (e) {
-      toasts.error('Decision failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t decision', e);
     } finally {
       const n = { ...busy };
       delete n[a.id];

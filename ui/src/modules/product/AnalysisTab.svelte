@@ -264,7 +264,7 @@
       activeDetail = await product.getAnalysis(a.id);
       if (!isTerminal(activeDetail.analysis.status)) startPolling(a.id);
     } catch (e) {
-      toasts.error('Could not load analysis', product.errMsg(e));
+      toasts.error('Couldn’t load analysis', product.errMsg(e));
     }
   }
 
@@ -295,7 +295,7 @@
       // Resume polling so results refresh automatically.
       if (analysisId) startPolling(analysisId);
     } catch (e) {
-      toasts.error('Retry failed', product.errMsg(e));
+      toasts.error('Couldn’t retry', product.errMsg(e));
     } finally {
       const done = new Set(retryingAgents);
       done.delete(agentId);
@@ -317,7 +317,7 @@
       // Refresh so the stopped (errored) state shows immediately.
       void pollOnce();
     } catch (e) {
-      toasts.error('Stop failed', product.errMsg(e));
+      toasts.error('Couldn’t stop', product.errMsg(e));
     } finally {
       const done = new Set(stoppingAgents);
       done.delete(agentId);
@@ -887,7 +887,7 @@
     font-size: var(--fs-xs);
     font-weight: 500;
     cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
     white-space: nowrap;
   }
   .chip:hover:not(:disabled) {
@@ -929,12 +929,12 @@
     padding: 6px 8px;
     line-height: 1.5;
     font-family: inherit;
-    transition: border-color 100ms;
+    transition: border-color var(--dur-fast);
     min-height: 48px;
   }
   .focus-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .focus-input:disabled {
     opacity: 0.5;
@@ -965,7 +965,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -1162,10 +1162,10 @@
     font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     cursor: pointer;
     padding: 2px 0;
-    transition: color 100ms;
+    transition: color var(--dur-fast);
   }
   .coll-trigger:hover {
     color: var(--text);
@@ -1243,7 +1243,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -1301,7 +1301,7 @@
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: background 100ms, border-color 100ms;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
     flex-shrink: 0;
   }
   .sl-hint-btn:hover {

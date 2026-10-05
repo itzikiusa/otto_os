@@ -303,7 +303,7 @@
     <Panel {...props} />
   {:else if failedPanels.has(key)}
     <div class="rp-fail" role="alert">
-      <span>Couldn't load this panel.</span>
+      <span>Couldn’t load this panel.</span>
       <button class="btn small" onclick={() => void loadPanel(key)}>Retry</button>
     </div>
   {:else}
@@ -555,7 +555,7 @@
     font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rtab:hover {
     background: var(--surface-2);
@@ -603,7 +603,7 @@
     cursor: pointer;
   }
   .ver.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
   }

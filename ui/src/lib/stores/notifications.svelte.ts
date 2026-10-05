@@ -444,7 +444,7 @@ class NotificationStore {
     } catch (e) {
       // Revert AND say so — a silent revert looks like the toggle "didn't take".
       this.settings = prev;
-      toasts.error('Could not save notification settings', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save notification settings', e instanceof Error ? e.message : String(e));
     }
   }
 

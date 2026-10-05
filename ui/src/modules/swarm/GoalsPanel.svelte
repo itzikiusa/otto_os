@@ -54,7 +54,7 @@
       if (res.started) toasts.success('Verification started', 'Watch goal statuses update live.');
       else toasts.info("Verification didn't start", res.reason ?? 'Verification could not start.');
     } catch (e) {
-      toasts.error("Couldn't start verification", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t start verification", e instanceof Error ? e.message : String(e));
     } finally {
       verifying = false;
     }
@@ -65,7 +65,7 @@
       await swarm.stopVerify(task.id);
       toasts.info('Verification stopped');
     } catch (e) {
-      toasts.error("Couldn't stop verification", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t stop verification", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -88,7 +88,7 @@
       try {
         await swarm.deleteGoal(g.id);
       } catch (e) {
-        toasts.error("Couldn't delete the goal", e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn’t delete the goal", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -200,7 +200,7 @@
   .kind {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -263,7 +263,7 @@
     padding: 1px 8px;
     border-radius: 999px;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     background: color-mix(in srgb, var(--text-dim) 18%, transparent);
     color: var(--text-dim);
   }

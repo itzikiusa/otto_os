@@ -216,7 +216,7 @@
     margin: 14px 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .vtable {
@@ -250,7 +250,7 @@
     gap: 4px;
   }
   .btn.active {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
   }

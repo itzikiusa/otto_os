@@ -38,7 +38,7 @@
     border: none;
     background: color-mix(in srgb, var(--text-dim) 30%, transparent);
     cursor: pointer;
-    transition: background 120ms ease;
+    transition: background var(--dur-fast) ease;
   }
   .sw::after {
     content: '';
@@ -49,7 +49,7 @@
     height: 13px;
     border-radius: 50%;
     background: var(--accent-contrast);
-    transition: inset-inline-start 120ms ease;
+    transition: inset-inline-start var(--dur-fast) ease;
   }
   .sw.on {
     background: var(--accent-solid);

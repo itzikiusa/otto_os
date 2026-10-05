@@ -181,10 +181,10 @@
     }
   }
   async function bulkMove(status: TaskStatus) {
-    if (await attempt("Couldn't move the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { status }))) clearSelection();
+    if (await attempt("Couldn’t move the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { status }))) clearSelection();
   }
   async function bulkAssign(agentId: string | null) {
-    if (await attempt("Couldn't reassign the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId })))
+    if (await attempt("Couldn’t reassign the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId })))
       clearSelection();
   }
   async function bulkDelete() {
@@ -197,7 +197,7 @@
         danger: true,
       })
     ) {
-      if (await attempt(`Couldn't delete the task${n === 1 ? '' : 's'}`, () => swarm.bulkDeleteTasks(selectedTasks))) clearSelection();
+      if (await attempt(`Couldn’t delete the task${n === 1 ? '' : 's'}`, () => swarm.bulkDeleteTasks(selectedTasks))) clearSelection();
     }
   }
   async function clearBoard() {
@@ -209,7 +209,7 @@
         { title: 'Clear board', confirmLabel: 'Clear board', danger: true },
       )
     ) {
-      if (await attempt("Couldn't clear the board", () => swarm.clearProject(board))) clearSelection();
+      if (await attempt("Couldn’t clear the board", () => swarm.clearProject(board))) clearSelection();
     }
   }
 
@@ -222,7 +222,7 @@
     const submitted = newTitle;
     addingTask = true;
     try {
-      if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: submitted.trim(), priority: 'medium' }))) {
+      if (await attempt("Couldn’t add the task", () => swarm.createTask(project, { title: submitted.trim(), priority: 'medium' }))) {
         if (pid === project && newTitle === submitted) {
           newTitle = '';
           adding = false;
@@ -301,11 +301,11 @@
   function cardMenu(e: MouseEvent, t: SwarmTask) {
     const moves = TASK_COLUMNS.filter((s) => s !== t.status).map((s) => ({
       label: `Move to ${COLUMN_LABEL[s]}`,
-      action: () => void attempt("Couldn't move the task", () => swarm.updateTask(t, { status: s })),
+      action: () => void attempt("Couldn’t move the task", () => swarm.updateTask(t, { status: s })),
     }));
     const assigns = agents.map((a) => ({
       label: `Assign to ${a.name}`,
-      action: () => void attempt("Couldn't reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
+      action: () => void attempt("Couldn’t reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
     }));
     ctxMenu.show(e, [
       { label: 'Run now', icon: 'play', action: () => runNow(t) },
@@ -327,7 +327,7 @@
               danger: true,
             })
           )
-            await attempt("Couldn't delete the task", () => swarm.deleteTask(t));
+            await attempt("Couldn’t delete the task", () => swarm.deleteTask(t));
         },
       },
     ]);
@@ -438,7 +438,7 @@
       {#if planning}
         <span class="planning" role="status"><span class="spinner-xs" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
         <button class="btn small" onclick={stopPlan} title="Stop the planner agents">
-          <Icon name="square" size={12} /> Stop
+          <Icon name="stop" size={12} /> Stop
         </button>
       {:else}
         <button class="btn small" onclick={planFromGoal} title="Break the project goal into tasks with several planner agents and a summarizer">

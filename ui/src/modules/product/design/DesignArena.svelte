@@ -775,7 +775,7 @@
         toasts.success('Blender render finished', `${renderJob.outputs.length} file(s) attached`);
         await loadAll(true);
       } else {
-        toasts.error('Blender render failed', renderJob.error ?? 'unknown error');
+        toasts.error('Couldn’t blender render', renderJob.error ?? 'unknown error');
       }
     } catch (e) {
       toastError('Couldn’t render with Blender', e);
@@ -1142,7 +1142,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .pane-switch {
@@ -1215,7 +1215,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-align: start;
   }
@@ -1248,7 +1248,7 @@
     background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .mockup-row.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .refine-btn,
@@ -1282,14 +1282,14 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 16%, transparent);
     color: var(--text-dim);
   }
   .mockup-row.active .mockup-type {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .mockup-name {
@@ -1306,7 +1306,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     max-width: 80px;
@@ -1353,7 +1353,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .st-grow {
@@ -1530,7 +1530,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
   }

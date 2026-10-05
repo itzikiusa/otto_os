@@ -357,7 +357,7 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .settings-nav-filter:focus-within {
     border-color: var(--accent-text);
@@ -413,7 +413,7 @@
     font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .settings-nav-label {
     flex: 1;

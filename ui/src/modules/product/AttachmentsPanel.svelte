@@ -250,7 +250,7 @@
       localAttUrls = rest;
       toasts.info('Attachment deleted');
     } catch (e) {
-      toasts.error('Delete failed', loadErrorText(e));
+      toasts.error('Couldn’t delete', loadErrorText(e));
     }
   }
 </script>
@@ -406,7 +406,7 @@
     padding: 10px 12px;
     margin-top: 12px;
     background: var(--surface);
-    transition: border-color 120ms, background 120ms;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .att-panel.drag-over {
     border-color: var(--accent);
@@ -576,7 +576,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    transition: border-color 100ms, color 100ms;
+    transition: border-color var(--dur-fast), color var(--dur-fast);
   }
   .att-action-btn:hover {
     border-color: var(--accent);

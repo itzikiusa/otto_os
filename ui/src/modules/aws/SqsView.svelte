@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { mapLimit } from '../../lib/poll';
   // SQS: queue list with approximate counts → queue detail tabs: Messages
@@ -151,7 +152,7 @@
       if (r.messages.length === 0) toasts.info('No messages visible right now');
     } catch (e) {
       if (version !== peekVersion) return;
-      toasts.error('Peek failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t peek', e);
     } finally {
       if (version === peekVersion) peeking = false;
     }
@@ -175,7 +176,7 @@
       toasts.success('Message deleted');
       void aws.loadSqsAttrs(account.id, selected.url, rq);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -214,7 +215,7 @@
       toasts.success('Message sent', r.message_id);
       void aws.loadSqsAttrs(account.id, queue.url, rq);
     } catch (e) {
-      toasts.error('Send failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send', e);
     } finally {
       sending = false;
     }
@@ -238,7 +239,7 @@
       toasts.success('Purge started', 'SQS empties the queue over the next ~60 s');
       void aws.loadSqsAttrs(account.id, q.url, rq);
     } catch (e) {
-      toasts.error('Purge failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t purge', e);
     }
   }
 
@@ -259,7 +260,7 @@
       const r = await awsApi.sqsRedrive(account.id, { source_arn: src, destination_arn: redriveDest.trim() || undefined }, rq || undefined);
       toasts.success('Redrive started', r.task_handle);
     } catch (e) {
-      toasts.error('Redrive failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t redrive', e);
     } finally {
       redriving = false;
     }
@@ -270,7 +271,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -317,7 +318,7 @@
       {#if loading && !queues}
         <div class="pad" role="status"><p class="load-note">Loading queues…</p><Skeleton rows={8} /></div>
       {:else if error}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list queues" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list queues" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
       {:else if shown.length === 0}
         <EmptyState icon="send" title={filter ? 'No matching queues' : 'No queues'} />
       {:else}
@@ -523,7 +524,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -565,7 +566,7 @@
     box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   .trow.sel {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .name :global(svg) {
     vertical-align: -2px;

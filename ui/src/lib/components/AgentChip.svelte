@@ -16,7 +16,7 @@
     height: 16px;
     padding: 0 6px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     font-weight: 600;
   }
 </style>

@@ -499,7 +499,7 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms;
+    transition: opacity var(--dur-fast);
   }
   .turn:hover .act-btn,
   .turn:focus-within .act-btn {

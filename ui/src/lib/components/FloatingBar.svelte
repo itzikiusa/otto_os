@@ -1005,10 +1005,10 @@
     background: color-mix(in srgb, var(--bg-sidebar) 78%, transparent);
     border-radius: 999px;
     transition:
-      width 180ms ease,
-      border-radius 180ms ease,
-      box-shadow 140ms ease,
-      border-color 140ms ease;
+      width var(--dur-enter) ease,
+      border-radius var(--dur-enter) ease,
+      box-shadow var(--dur-fast) ease,
+      border-color var(--dur-fast) ease;
   }
   .surface[hidden] {
     display: none;
@@ -1283,7 +1283,7 @@
     padding: 6px 10px 3px;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
   }

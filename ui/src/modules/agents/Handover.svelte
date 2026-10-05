@@ -341,7 +341,7 @@
     color: var(--accent-text);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     vertical-align: middle;
   }
 
@@ -393,15 +393,15 @@
     cursor: pointer;
     text-align: start;
     transition:
-      border-color 130ms ease-out,
-      background 130ms ease-out;
+      border-color var(--dur-fast) ease-out,
+      background var(--dur-fast) ease-out;
   }
   .provider-card:hover:not(:disabled) {
     background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
   }
   .provider-card.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .provider-card.unavailable {
     opacity: 0.5;
@@ -422,7 +422,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
   }
@@ -459,7 +459,7 @@
   }
   .agent-row.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .agent-title {
     flex: 1;

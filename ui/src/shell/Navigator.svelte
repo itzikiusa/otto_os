@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
@@ -361,7 +362,7 @@
     try {
       await ws.updateWorkspace(w.id, { name });
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -378,7 +379,7 @@
       await ws.updateWorkspace(w.id, { root_path: root });
       toasts.success('Folder changed', `${w.name} → ${root}`);
     } catch (e) {
-      toasts.error('Change failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change it', e);
     }
   }
 
@@ -1665,7 +1666,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 8px 4px;
   }
@@ -1712,7 +1713,7 @@
     font-size: var(--fs-m);
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -1769,7 +1770,7 @@
   /* A focused session row is the quieter variant: a lighter tint, no bar —
      the Agents row above it already carries the strong marker. */
   .nav-item.nested-item.active {
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    background: var(--accent-soft);
     font-weight: 500;
   }
   .nav-item.nested-item.active::before {
@@ -1870,7 +1871,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1889,7 +1890,7 @@
     display: grid;
     place-items: center;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .group-head:hover .group-chev,
   .group-head:focus-visible .group-chev,
@@ -2084,7 +2085,7 @@
      since they change what the list below shows. The fold chevron stays. */
   .agents-row > .twisty:not(.on):not([aria-expanded]) {
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .agents-row:hover > .twisty:not(.on):not([aria-expanded]),
   .agents-row:focus-within > .twisty:not(.on):not([aria-expanded]) {
@@ -2151,7 +2152,7 @@
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
   .sel-toggle.on { color: var(--accent-text); }
-  .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .nested-row.selected .nested-item { background: var(--accent-soft); }
   .row-action {
     display: grid;
     place-items: center;
@@ -2163,7 +2164,7 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .nested-row:hover .row-action {
     opacity: 1;
@@ -2326,7 +2327,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .needs-you-filter:hover {
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);

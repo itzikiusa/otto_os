@@ -628,7 +628,7 @@
     margin: auto;
     background: var(--border);
     border-radius: 2px;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .tgut.col::after {
     width: 2px;
@@ -721,7 +721,7 @@
     background: var(--term-bg);
     color: var(--text);
     cursor: pointer;
-    transition: border-color 140ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .tile-placeholder:hover {
     border-color: color-mix(in srgb, var(--accent) 55%, transparent);
@@ -748,7 +748,7 @@
     height: 16px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
   }
   .ph-body {
     flex: 1;

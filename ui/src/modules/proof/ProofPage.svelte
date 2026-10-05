@@ -179,7 +179,7 @@
       fullContent[id] = c.content ?? '(no content)';
       expanded[id] = true;
     } catch (e) {
-      toasts.error("Couldn't load the artifact", loadErrorText(e));
+      toasts.error("Couldn’t load the artifact", loadErrorText(e));
     }
   }
 
@@ -301,7 +301,7 @@
       addOpen = false;
       resetAdd();
     } catch (e) {
-      toasts.error("Couldn't add the artifact", loadErrorText(e));
+      toasts.error("Couldn’t add the artifact", loadErrorText(e));
     }
   }
 
@@ -313,7 +313,7 @@
       await deleteArtifact(id);
       await proof.refreshDetail();
     } catch (e) {
-      toasts.error("Couldn't delete the artifact", loadErrorText(e));
+      toasts.error("Couldn’t delete the artifact", loadErrorText(e));
     }
   }
 
@@ -358,7 +358,7 @@
       await proof.refreshDetail();
       toasts.success('Proof assembled', 'Re-assembled from the working directory.');
     } catch (e) {
-      toasts.error("Couldn't assemble proof", loadErrorText(e));
+      toasts.error("Couldn’t assemble proof", loadErrorText(e));
     }
   }
 
@@ -375,7 +375,7 @@
       waiveReason = '';
       toasts.success('Proof gate waived', 'Recorded with you as the approver.');
     } catch (e) {
-      toasts.error("Couldn't waive the proof gate", loadErrorText(e));
+      toasts.error("Couldn’t waive the proof gate", loadErrorText(e));
     }
   }
 
@@ -410,7 +410,7 @@
       mediaOpen = false;
       resetMedia();
     } catch (e) {
-      toasts.error("Couldn't attach the media", loadErrorText(e));
+      toasts.error("Couldn’t attach the media", loadErrorText(e));
     }
   }
 
@@ -492,7 +492,7 @@
       evidenceOpen = false;
       resetEvidence();
     } catch (e) {
-      toasts.error("Couldn't add the evidence", loadErrorText(e));
+      toasts.error("Couldn’t add the evidence", loadErrorText(e));
     }
   }
 
@@ -504,7 +504,7 @@
       await proof.refreshDetail();
       toasts.success('CI refreshed', 'Live CI status pulled into a CI artifact.');
     } catch (e) {
-      toasts.error("Couldn't refresh CI", loadErrorText(e));
+      toasts.error("Couldn’t refresh CI", loadErrorText(e));
     }
   }
 
@@ -535,7 +535,7 @@
       prOpen = false;
       resetPr();
     } catch (e) {
-      toasts.error("Couldn't run the PR check", loadErrorText(e));
+      toasts.error("Couldn’t run the PR check", loadErrorText(e));
     }
   }
 
@@ -550,7 +550,7 @@
         format === 'md' ? 'text/markdown' : 'text/html',
       );
     } catch (e) {
-      toasts.error("Couldn't export the report", loadErrorText(e));
+      toasts.error("Couldn’t export the report", loadErrorText(e));
     }
   }
 
@@ -587,7 +587,7 @@
         require_review: !!c.require_review,
       };
     } catch (e) {
-      toasts.error("Couldn't load the proof requirements", loadErrorText(e));
+      toasts.error("Couldn’t load the proof requirements", loadErrorText(e));
       cfgOpen = false;
     } finally {
       cfgLoading = false;
@@ -609,7 +609,7 @@
       cfgOpen = false;
       toasts.success('Requirements saved', 'Proof requirements updated for this repo.');
     } catch (e) {
-      toasts.error("Couldn't save the requirements", loadErrorText(e));
+      toasts.error("Couldn’t save the requirements", loadErrorText(e));
     }
   }
 
@@ -628,7 +628,7 @@
       // Land on the next pack instead of an empty "pick one" pane.
       if (!viewport.isPhone && proof.packs.length > 0) void open(proof.packs[0].id);
     } catch (e) {
-      toasts.error("Couldn't delete the proof pack", loadErrorText(e));
+      toasts.error("Couldn’t delete the proof pack", loadErrorText(e));
     }
   }
 
@@ -652,7 +652,7 @@
       toasts.success('Session packs archived', `${r.archived} hidden (nothing deleted).`);
       await loadList(wsId, filter);
     } catch (e) {
-      toasts.error("Couldn't archive session packs", loadErrorText(e));
+      toasts.error("Couldn’t archive session packs", loadErrorText(e));
     }
   }
 
@@ -677,7 +677,7 @@
       await loadList(ws.currentId, filter);
       await open(created.id);
     } catch (e) {
-      toasts.error("Couldn't create the proof pack", loadErrorText(e));
+      toasts.error("Couldn’t create the proof pack", loadErrorText(e));
     }
   }
 

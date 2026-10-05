@@ -139,7 +139,7 @@
   // Keyed on the workspace ONLY: the loaders read store state synchronously
   // (`loadPresets` checks `presets.length`), which would otherwise subscribe
   // this effect — the presets landing then re-ran it and fired a second list
-  // load that silently replaced a failed load's "Couldn't load" + Retry.
+  // load that silently replaced a failed load's "Couldn’t load" + Retry.
   $effect(() => {
     const id = ws.currentId;
     if (!id) return;
@@ -432,7 +432,7 @@
       creating = false;
       editId = null;
     } catch (e) {
-      error = `Couldn't save the task. ${errText(e)}`;
+      error = `Couldn’t save the task. ${errText(e)}`;
     } finally {
       busy = false;
     }
@@ -446,7 +446,7 @@
     try {
       await scheduledTasks.setEnabled(t.id, !t.enabled);
     } catch (e) {
-      toasts.error(t.enabled ? `Couldn't pause “${t.name}”` : `Couldn't resume “${t.name}”`, errText(e));
+      toasts.error(t.enabled ? `Couldn’t pause “${t.name}”` : `Couldn’t resume “${t.name}”`, errText(e));
     }
   }
 
@@ -503,7 +503,7 @@
       await scheduledTasks.runNow(t.id);
       expandedId = t.id;
     } catch (e) {
-      toasts.error(`Couldn't start “${t.name}”`, errText(e));
+      toasts.error(`Couldn’t start “${t.name}”`, errText(e));
     } finally {
       const { [t.id]: _done, ...rest } = runningIds;
       runningIds = rest;
@@ -540,7 +540,7 @@
         disableTask ? `Created a workflow from “${t.name}” and paused the task.` : `Created a workflow from “${t.name}”.`,
       );
     } catch (e) {
-      toasts.error(`Couldn't convert “${t.name}” to a workflow`, errText(e));
+      toasts.error(`Couldn’t convert “${t.name}” to a workflow`, errText(e));
     } finally {
       busy = false;
     }
@@ -556,7 +556,7 @@
       if (expandedId === t.id) expandedId = null;
       toasts.success('Scheduled task deleted', t.name);
     } catch (e) {
-      toasts.error(`Couldn't delete “${t.name}”`, errText(e));
+      toasts.error(`Couldn’t delete “${t.name}”`, errText(e));
     }
   }
 
@@ -738,7 +738,7 @@
               {/if}
             </select>
             {#if wfError}
-              <small class="fld-hint bad">Couldn't load workflows. {wfError}
+              <small class="fld-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
             {/if}
           </label>
@@ -1038,7 +1038,7 @@
         <div class="muted" role="status">Loading the report…</div>
       {:else if reportError}
         <div class="err" role="alert">
-          <Icon name="warning" size={12} /> Couldn't load the report. {reportError}
+          <Icon name="warning" size={12} /> Couldn’t load the report. {reportError}
           <button class="btn small" onclick={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}>Retry</button>
         </div>
       {:else if !reportText.trim()}
@@ -1055,7 +1055,7 @@
             <button type="button" class:active={!reportRaw} aria-pressed={!reportRaw} onclick={() => (reportRaw = false)}>Formatted</button>
             <button type="button" class:active={reportRaw} aria-pressed={reportRaw} onclick={() => (reportRaw = true)}>Plain text</button>
           </div>
-          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn't copy the report")}>
+          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn’t copy the report")}>
             <Icon name="copy" size={12} /> Copy
           </button>
           <span class="grow"></span>

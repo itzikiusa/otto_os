@@ -111,7 +111,7 @@
       </section>
     {:else if browserLive.loadError && !st}
       <section class="card bs-card err-card" role="alert">
-        <p class="error">Couldn't load the browser engine settings: {browserLive.loadError}</p>
+        <p class="error">Couldn’t load the browser engine settings: {browserLive.loadError}</p>
         <button class="btn small" onclick={() => void browserLive.load()}><Icon name="refresh" size={12} /> Retry</button>
       </section>
     {:else if !st}
@@ -182,7 +182,7 @@
           {:else if job?.state === 'failed'}
             <p class="error" role="alert">The last download failed: {job.error || 'unknown error'}</p>
           {/if}
-          {#if installError}<p class="error" role="alert">Couldn't start the download: {installError}</p>{/if}
+          {#if installError}<p class="error" role="alert">Couldn’t start the download: {installError}</p>{/if}
         {/if}
       </section>
 
@@ -227,7 +227,7 @@
       {#if !isAdmin}
         <p class="row-desc note">Only a Browser admin can change the engine settings.</p>
       {/if}
-      {#if saveError}<p class="error" role="alert">Couldn't save: {saveError}</p>{/if}
+      {#if saveError}<p class="error" role="alert">Couldn’t save: {saveError}</p>{/if}
     {/if}
   </PageBody>
 </div>

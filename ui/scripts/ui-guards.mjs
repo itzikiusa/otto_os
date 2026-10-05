@@ -207,6 +207,9 @@ const RULES = {
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
   'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
   'private-keyframes': 'private @keyframes — spinners use .spinner / otto-spin, live-dot pulses otto-pulse, entrances otto-fade-in / otto-pop-in (app.css); keep a local one only when the motion is genuinely different',
+  'transition-literal': 'transition with a literal 80–220 ms duration — use var(--dur-fast) / var(--dur-enter)',
+  'straight-couldnt': "straight apostrophe in “Couldn't” — write Couldn’t (content.md §3)",
+  'toast-failed-title': 'toasts.error titled “… failed” / “Could not …” — use toastError(\'Couldn’t <verb> …\', e)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -318,6 +321,7 @@ for (const f of files) {
       if (PHYSICAL.test(prop)) hit('physical-prop', f, at, `${prop}:${value.trimEnd()}`);
       if (prop === 'text-align' && /^\s*(left|right)\b/.test(value)) hit('physical-prop', f, at, `text-align:${value.trimEnd()}`);
       if (prop === 'color' && /^\s*var\(\s*--accent\s*\)/.test(value)) hit('accent-text', f, at, 'color: var(--accent)');
+      if (prop === 'transition' && /\b(?:(?:8|9)\d|1\d\d|2[01]\d|220)ms\b|\b0?\.(?:1|2)\d?s\b/.test(value)) hit('transition-literal', f, at, `transition:${value.trimEnd()}`);
       if (prop === 'color' && /var\(\s*--status-/.test(value)) hit('status-as-text', f, at, `color:${value.trimEnd()}`);
       for (const m of value.matchAll(/var\(\s*(--[\w-]+)\s*,/g)) if (TOKEN_NAMES.has(m[1])) hit('token-fallback', f, vAt + m.index, m[0]);
       if (prop === 'border-radius' && /^\s*([3-9]|1[0-9]|2[0-9])px\s*$/.test(value)) hit('radius-literal', f, at, `border-radius:${value.trimEnd()}`);
@@ -376,6 +380,13 @@ for (const f of files) {
       hit('outline-removed', f, ol.at, `"${s.sel}" — outline: ${ol.value} with no focus replacement`);
     }
   }
+}
+
+// ---------- copy ratchets (script + markup text) ----------
+for (const f of files) {
+  if (!/\.(svelte|ts)$/.test(f.path)) continue;
+  for (const m of f.text.matchAll(/Couldn't/g)) hit('straight-couldnt', f, m.index, "Couldn't");
+  for (const m of f.text.matchAll(/toasts\.error\((['"`])(?:[A-Z][A-Za-z ]*? failed|Could not )/g)) hit('toast-failed-title', f, m.index, m[0]);
 }
 
 // ---------- rule 3 (HARD): icon-only buttons — scan markup (script/style/comments blanked) ----------

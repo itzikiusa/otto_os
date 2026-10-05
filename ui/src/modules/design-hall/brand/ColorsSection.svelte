@@ -204,7 +204,7 @@
     position: relative;
     height: 76px;
     border-block-end: 1px solid var(--border);
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .swc-c.invalid {
     background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 6px, var(--surface-3) 6px, var(--surface-3) 12px) !important;
@@ -275,9 +275,9 @@
     background: var(--surface-2);
   }
   .hex:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     background: var(--surface-2);
-    outline: none;
+    outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .hex.bad {
     color: var(--danger);

@@ -652,7 +652,7 @@
     font-size: var(--fs-xs);
     color: var(--text);
     text-align: start;
-    transition: background 80ms;
+    transition: background var(--dur-fast);
   }
   .df-head:hover {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));

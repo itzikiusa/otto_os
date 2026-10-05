@@ -208,10 +208,10 @@
   ];
 
   const LIFECYCLE_FAILED: Record<'start' | 'pause' | 'abort' | 'resume', string> = {
-    start: "Couldn't start the swarm",
-    pause: "Couldn't pause the swarm",
-    abort: "Couldn't abort the swarm",
-    resume: "Couldn't resume the swarm",
+    start: "Couldn’t start the swarm",
+    pause: "Couldn’t pause the swarm",
+    abort: "Couldn’t abort the swarm",
+    resume: "Couldn’t resume the swarm",
   };
 
   async function lifecycle(action: 'start' | 'pause' | 'abort' | 'resume') {
@@ -248,7 +248,7 @@
       await swarm.setParallelCap(detail.id, v);
     } catch (e) {
       input.value = String(cap);
-      toasts.error("Couldn't change parallel sessions", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t change parallel sessions", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -273,7 +273,7 @@
     try {
       await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
     } catch (e) {
-      toasts.error("Couldn't change the run budget", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t change the run budget", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -324,7 +324,7 @@
       }
       projModal = false;
     } catch (e) {
-      toasts.error("Couldn't save the project", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t save the project", e instanceof Error ? e.message : String(e));
     } finally {
       projSaving = false;
     }
@@ -344,7 +344,7 @@
         projModal = false;
         toasts.success('Project deleted');
       } catch (e) {
-        toasts.error("Couldn't delete the project", e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn’t delete the project", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -365,7 +365,7 @@
         const next = swarm.swarms[0];
         if (next && !viewport.isPhone) void openSwarm(next.id);
       } catch (e) {
-        toasts.error("Couldn't delete the swarm", e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn’t delete the swarm", e instanceof Error ? e.message : String(e));
       }
     }
   }
@@ -383,7 +383,7 @@
       await swarm.runTask(created);
       view = 'kanban';
     } catch (e) {
-      toasts.error("Couldn't run the task", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t run the task", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -439,7 +439,7 @@
     try {
       await swarm.updateSwarm(detail.id, patch);
     } catch (e) {
-      toasts.error("Couldn't raise the budget", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t raise the budget", e instanceof Error ? e.message : String(e));
       return;
     }
     await lifecycle('resume');
@@ -1028,7 +1028,7 @@
     width: 5px;
     cursor: col-resize;
     background: var(--border);
-    transition: background 0.12s;
+    transition: background var(--dur-fast);
   }
   .resizer:hover {
     background: color-mix(in srgb, var(--accent) 60%, var(--border));

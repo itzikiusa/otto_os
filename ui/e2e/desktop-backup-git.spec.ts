@@ -28,7 +28,7 @@ test('Git backup preview commits only snapshot files and supports reviewed impor
     const panel = card.getByLabel('Git snapshot preview');
     const previewButton = card.getByRole('button', { name: 'Preview snapshot', exact: true });
     // A preview is bound to the daemon state it showed: Write refuses a stale
-    // one ("Couldn't write the snapshot…") — the product working. The snapshot
+    // one ("Couldn’t write the snapshot…") — the product working. The snapshot
     // is daemon-wide, and on this shared e2e daemon other workers seed and
     // rename workspaces at any moment (config/workspaces.json), so a
     // Preview → Write they disturbed is simply redone.

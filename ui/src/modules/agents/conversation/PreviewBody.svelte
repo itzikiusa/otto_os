@@ -173,7 +173,7 @@
     {/if}
   {:else if error}
     <div class="pb-err" role="alert">
-      <EmptyState icon="warning" title="Couldn't open the file" body={error} />
+      <EmptyState icon="warning" title="Couldn’t open the file" body={error} />
     </div>
   {:else if loading || (content == null && !imageUrl)}
     <div class="pb-loading" aria-busy="true" aria-label="Loading the file">

@@ -132,7 +132,7 @@
       body = full.body_md ?? '';
     } catch (e) {
       // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
-      if (planVersion) toasts.error('Could not load plan', product.errMsg(e));
+      if (planVersion) toasts.error('Couldn’t load plan', product.errMsg(e));
       else loadError = loadErrorText(e);
     } finally {
       loading = false;
@@ -256,7 +256,7 @@
       );
       startPolling();
     } catch (e) {
-      toasts.error('Plan generation failed', product.errMsg(e));
+      toasts.error('Couldn’t plan generation', product.errMsg(e));
     } finally {
       generating = false;
     }
@@ -278,7 +278,7 @@
       if (plan) await loadPlanBody(plan);
       toasts.info('Refreshed', 'Loaded the latest plan version.');
     } catch (e) {
-      toasts.error('Refresh failed', product.errMsg(e));
+      toasts.error('Couldn’t refresh', product.errMsg(e));
     }
   }
 
@@ -304,7 +304,7 @@
         savedTick = true;
         setTimeout(() => { savedTick = false; }, 1500);
       }).catch((e) => {
-        toasts.error('Could not save progress', product.errMsg(e));
+        toasts.error('Couldn’t save progress', product.errMsg(e));
         // Best-effort reload to resync with the server.
         const plan = latestPlan();
         if (plan) void loadPlanBody(plan);
@@ -392,7 +392,7 @@
       await swarm.openProject(ws.currentId, resp.swarm.id, resp.project.id);
       router.go('swarm');
     } catch (e) {
-      toasts.error('Send to Swarm failed', product.errMsg(e));
+      toasts.error('Couldn’t send to Swarm', product.errMsg(e));
     } finally {
       sendingToSwarm = false;
     }
@@ -649,7 +649,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -729,7 +729,7 @@
   .prog-fill {
     height: 100%;
     background: var(--accent);
-    transition: width 160ms;
+    transition: width var(--dur-enter);
   }
   .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-inline-start: auto; }
   .saving { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
@@ -762,7 +762,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
     white-space: nowrap;
@@ -790,7 +790,7 @@
     justify-content: center;
     cursor: pointer;
     padding: 0;
-    transition: background 110ms, border-color 110ms;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
   }
   .checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
   .checkbox.status-done { background: var(--success); border-color: var(--success); }

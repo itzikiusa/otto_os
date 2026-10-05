@@ -618,7 +618,7 @@
             <div class="banner warn" role="alert">
               <Icon name="warning" size={14} />
               <div class="banner-body">
-                <strong>Couldn't start the insights run.</strong>
+                <strong>Couldn’t start the insights run.</strong>
                 <span>{runFailReason}</span>
               </div>
               <button class="btn small" onclick={() => router.go('settings/skills')}>Open skills settings</button>

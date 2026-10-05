@@ -66,7 +66,7 @@
       );
     } catch (e) {
       // SettingToggle re-syncs the box to ottoEnabled (unchanged) after this.
-      toasts.error("Couldn't change the Connections MCP setting", errMsg(e));
+      toasts.error("Couldn’t change the Connections MCP setting", errMsg(e));
     } finally {
       ottoSaving = false;
     }
@@ -223,7 +223,7 @@
       closeForm();
       await load(wsId);
     } catch (e) {
-      toasts.error(editing ? "Couldn't save the MCP server" : "Couldn't add the MCP server", errMsg(e));
+      toasts.error(editing ? "Couldn’t save the MCP server" : "Couldn’t add the MCP server", errMsg(e));
     } finally {
       saving = false;
     }
@@ -236,7 +236,7 @@
       await mcpApi.update(s.id, { enabled: !s.enabled });
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn't ${s.enabled ? 'disable' : 'enable'} ${s.name}`, errMsg(e));
+      toasts.error(`Couldn’t ${s.enabled ? 'disable' : 'enable'} ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -257,7 +257,7 @@
       toasts.success('MCP server removed', s.name);
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn't remove ${s.name}`, errMsg(e));
+      toasts.error(`Couldn’t remove ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -286,7 +286,7 @@
       label="Attach the Connections MCP to agent sessions"
       checked={ottoEnabled}
       disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
-      title={!wsId ? 'Select a workspace first' : ottoError ? "Couldn't read the current value — Retry below" : undefined}
+      title={!wsId ? 'Select a workspace first' : ottoError ? "Couldn’t read the current value — Retry below" : undefined}
       onchange={toggleOtto}
     >
       Otto's own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
@@ -296,7 +296,7 @@
     </SettingToggle>
     {#if ottoError}
       <div class="otto-error" role="alert">
-        <span>Couldn't read this workspace's setting: {ottoError}</span>
+        <span>Couldn’t read this workspace's setting: {ottoError}</span>
         <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
       </div>
     {/if}

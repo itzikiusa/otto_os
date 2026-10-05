@@ -407,7 +407,7 @@
     background: var(--hover);
   }
   .row.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
   }
   /* Reserved OKF files (index.md…): dim + italic, never faded below the
      readable text contrast. */
@@ -423,7 +423,7 @@
     display: inline-flex;
     flex-shrink: 0;
     color: var(--text-dim);
-    transition: transform 0.12s;
+    transition: transform var(--dur-fast);
     width: 12px;
   }
   .chev.open {

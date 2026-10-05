@@ -289,7 +289,7 @@
       {#if previewOnly}
         {#if fullState === 'error'}
           <div class="trunc-note load-err" role="alert">
-            Couldn't load the full output.
+            Couldn’t load the full output.
             <button class="link-btn" onclick={loadFull}>Retry</button>
           </div>
         {:else if fullState === 'loading' || !ctx.sessionId}

@@ -496,7 +496,7 @@
     color: var(--text-dim);
     font: 600 var(--fs-xs) var(--font-ui);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-align: start;
   }
@@ -505,7 +505,7 @@
   }
   .s3d-ph-chev {
     display: inline-flex;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
     width: 12px;
   }
   .s3d-ph-chev.closed {

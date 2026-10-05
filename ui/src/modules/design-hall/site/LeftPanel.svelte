@@ -506,7 +506,7 @@
     color: var(--text);
     text-align: start;
     cursor: grab;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .tile:hover {
     border-color: var(--accent);

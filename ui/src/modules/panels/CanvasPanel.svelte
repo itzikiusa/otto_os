@@ -259,7 +259,7 @@
         <p class="empty-line dim">Loading canvases…</p>
       {:else if loadError}
         <div class="load-error" role="alert">
-          <div class="error-head"><Icon name="warning" size={13} /> Couldn't load this session's canvases</div>
+          <div class="error-head"><Icon name="warning" size={13} /> Couldn’t load this session's canvases</div>
           <div class="error-detail">{loadError}</div>
           <button class="btn small" onclick={() => void load()}>
             <Icon name="refresh" size={12} /> Retry
@@ -350,7 +350,7 @@
             <p class="empty-line dim">Loading scenes…</p>
           {:else if attachError}
             <p class="empty-line attach-error" role="alert">
-              Couldn't load scenes.
+              Couldn’t load scenes.
               <button class="btn ghost small" onclick={() => void loadAllScenes()}>Retry</button>
             </p>
           {:else if attachCandidates.length === 0}
@@ -453,7 +453,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);

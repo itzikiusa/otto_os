@@ -213,7 +213,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .env-list {
@@ -245,7 +245,7 @@
     background: var(--hover);
   }
   .env-pick.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .radio {
     display: grid;

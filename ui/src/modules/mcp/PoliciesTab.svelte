@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Policy-as-code rules (global + this workspace). List / create / edit /
   // delete, export the whole ruleset to JSON, import a ruleset (append or
   // replace), and an Evaluate preview that shows the decision a (server, tool)
@@ -65,7 +66,7 @@
       toasts.success('Policy deleted', p.name);
       await load();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -80,7 +81,7 @@
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export', e);
     }
   }
 
@@ -132,7 +133,7 @@
       importText = '';
       await load();
     } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = false;
     }
@@ -162,7 +163,7 @@
         workspace_id: wsId,
       });
     } catch (e) {
-      toasts.error('Evaluate failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t evaluate', e);
     } finally {
       evaluating = false;
     }
@@ -347,7 +348,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .prow {

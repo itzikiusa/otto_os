@@ -79,7 +79,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Could not create the epic', product.errMsg(e));
+      toasts.error('Couldn’t create the epic', product.errMsg(e));
     } finally {
       draftCreating = false;
     }
@@ -117,7 +117,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Could not add the child', product.errMsg(e));
+      toasts.error('Couldn’t add the child', product.errMsg(e));
     }
   }
 
@@ -179,7 +179,7 @@
       await product.moveStory(s.id, epic.id, s.folder || '');
       collapsedEpics = { ...collapsedEpics, [epic.id]: false };
     } catch (e) {
-      toasts.error('Move failed', product.errMsg(e));
+      toasts.error('Couldn’t move', product.errMsg(e));
     }
   }
   async function setFolder(s: ProductStory): Promise<void> {
@@ -192,21 +192,21 @@
     try {
       await product.patchStory(s.id, { folder: folder ?? '' });
     } catch (e) {
-      toasts.error('Could not set the folder', product.errMsg(e));
+      toasts.error('Couldn’t set the folder', product.errMsg(e));
     }
   }
   async function detach(s: ProductStory): Promise<void> {
     try {
       await product.moveStory(s.id, null, '');
     } catch (e) {
-      toasts.error('Detach failed', product.errMsg(e));
+      toasts.error('Couldn’t detach', product.errMsg(e));
     }
   }
   async function mark(s: ProductStory, kind: TreeKind): Promise<void> {
     try {
       await product.setTreeKind(s.id, kind);
     } catch (e) {
-      toasts.error('Could not change the tree role', product.errMsg(e));
+      toasts.error('Couldn’t change the tree role', product.errMsg(e));
     }
   }
   function toggleEpic(id: string): void {
@@ -235,7 +235,7 @@
       // On mobile, reveal the new draft's content panel right away.
       mobileSection = 'content';
     } catch (e) {
-      toasts.error("Couldn't create the draft", product.errMsg(e));
+      toasts.error("Couldn’t create the draft", product.errMsg(e));
     } finally {
       draftCreating = false;
     }
@@ -470,7 +470,7 @@
     try {
       await product.deleteStory(s.id);
     } catch (e) {
-      toasts.error(`Couldn't delete "${s.title}"`, product.errMsg(e));
+      toasts.error(`Couldn’t delete "${s.title}"`, product.errMsg(e));
       return;
     }
     if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
@@ -941,7 +941,7 @@
     display: flex;
     align-items: center;
     border-radius: var(--radius-s);
-    transition: background 100ms ease-out;
+    transition: background var(--dur-fast) ease-out;
     position: relative;
   }
   .story-row-wrap:hover {
@@ -982,7 +982,7 @@
     cursor: pointer;
     margin-inline-end: 6px;
     padding: 0;
-    transition: color 100ms, background 100ms;
+    transition: color var(--dur-fast), background var(--dur-fast);
   }
   .story-row-wrap:hover .row-menu-btn,
   .story-row-wrap:focus-within .row-menu-btn,
@@ -1060,7 +1060,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
@@ -1118,7 +1118,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
     white-space: nowrap;
   }
   .tag-filter-btn:hover {
@@ -1126,7 +1126,7 @@
     color: var(--accent-text);
   }
   .tag-filter-btn.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
     font-weight: 600;

@@ -145,7 +145,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .dim {
@@ -207,7 +207,7 @@
   .tag {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     border-radius: 999px;
     padding: 0 6px;
     line-height: 14px;

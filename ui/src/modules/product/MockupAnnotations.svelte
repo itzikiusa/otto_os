@@ -579,7 +579,7 @@
     color: var(--text);
   }
   .mt.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .note-list {

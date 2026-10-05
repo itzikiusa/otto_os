@@ -379,7 +379,7 @@
             {#if notifications.error && notifications.notices.length === 0}
               <div class="panel-empty nb-error" role="alert">
                 <Icon name="warning" size={20} />
-                <p>Couldn't load notifications</p>
+                <p>Couldn’t load notifications</p>
                 <button class="btn small" onclick={() => notifications.load()} disabled={notifications.loading}>
                   <Icon name="refresh" size={12} /> Retry
                 </button>
@@ -818,7 +818,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .nb-dismiss {
-      transition: opacity 120ms ease-out, background 120ms ease-out;
+      transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
     }
   }
   .nb-item:hover .nb-dismiss,

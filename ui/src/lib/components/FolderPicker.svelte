@@ -459,7 +459,7 @@
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .pad {
     padding: 14px;

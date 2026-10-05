@@ -99,7 +99,7 @@ test('rooms: failed messages never claim an empty conversation and Retry recover
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Messages temporarily unavailable' } })
     : r.continue());
   await page.goto('/#/personal-agents/rooms');
-  await expect(page.getByText("Couldn't load room messages")).toBeVisible();
+  await expect(page.getByText("Couldn’t load room messages")).toBeVisible();
   await expect(page.getByText(/No messages yet/)).toHaveCount(0);
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();

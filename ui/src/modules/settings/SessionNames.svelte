@@ -58,7 +58,7 @@
       resp = await api.put<NameThemesResp>('/name-themes/active', { theme_id: id });
     } catch (e) {
       if (resp && prev) resp.active = prev; // revert
-      toasts.error("Couldn't switch the name theme", loadErrorText(e));
+      toasts.error("Couldn’t switch the name theme", loadErrorText(e));
     } finally {
       saving = false;
     }
@@ -79,7 +79,7 @@
       await load();
       toasts.success('Custom theme created', `${label} · ${names.length} names`);
     } catch (e) {
-      toasts.error("Couldn't create the theme", loadErrorText(e));
+      toasts.error("Couldn’t create the theme", loadErrorText(e));
     } finally {
       creating = false;
     }
@@ -99,7 +99,7 @@
       await load();
       toasts.success('Theme deleted', t.label);
     } catch (e) {
-      toasts.error("Couldn't delete the theme", loadErrorText(e));
+      toasts.error("Couldn’t delete the theme", loadErrorText(e));
     }
   }
 
@@ -233,7 +233,7 @@
     gap: 4px;
     min-width: 0;
     color: var(--text);
-    transition: border-color 120ms ease-out, background 120ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .theme-card:hover:not(:disabled) {
     background: var(--hover);

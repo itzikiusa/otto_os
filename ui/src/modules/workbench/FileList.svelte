@@ -53,7 +53,7 @@
     try {
       await fn();
     } catch (e) {
-      toasts.error(`Couldn't ${label}`, loadErrorText(e));
+      toasts.error(`Couldn’t ${label}`, loadErrorText(e));
     }
   }
 
@@ -257,7 +257,7 @@
     outline: none;
   }
   .wb-search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .wb-files-body {
     flex: 1;
@@ -276,7 +276,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .wb-row {
     display: flex;

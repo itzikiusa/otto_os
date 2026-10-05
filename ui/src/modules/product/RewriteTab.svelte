@@ -147,7 +147,7 @@
         sourceVersion = fullSource;
       }
     } catch (e) {
-      if (suggestedVersion) toasts.error('Could not load version bodies', product.errMsg(e));
+      if (suggestedVersion) toasts.error('Couldn’t load version bodies', product.errMsg(e));
       else loadError = loadErrorText(e);
     } finally {
       loadingBodies = false;
@@ -164,7 +164,7 @@
       toasts.info('Rewrite triggered', 'Waiting for suggested version to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Rewrite failed', product.errMsg(e));
+      toasts.error('Couldn’t rewrite', product.errMsg(e));
     } finally {
       generating = false;
     }
@@ -195,7 +195,7 @@
       await product.publishVersion(suggestedVersion.id);
       toasts.success('Published', 'Suggested version published back to source.');
     } catch (e) {
-      toasts.error('Publish failed', product.errMsg(e));
+      toasts.error('Couldn’t publish', product.errMsg(e));
     } finally {
       publishing = false;
     }
@@ -391,7 +391,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -434,7 +434,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .cn-body {
@@ -494,7 +494,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
   }

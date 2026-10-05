@@ -72,7 +72,7 @@ export async function runPush(
       if (choice === 'force') return runPush(repoId, status, onstatus, { forceWithLease: true });
       return false;
     }
-    toasts.error('Push failed', msg);
+    toasts.error('Couldn’t push', msg);
     return false;
   }
 }

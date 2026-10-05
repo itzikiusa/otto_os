@@ -116,7 +116,7 @@
     try {
       await copyAsJson(r);
     } catch {
-      toasts.error("Couldn't copy the row", 'Clipboard access was blocked.');
+      toasts.error("Couldn’t copy the row", 'Clipboard access was blocked.');
       return;
     }
     copiedRow = r.key;
@@ -334,7 +334,7 @@
     height: 100%;
     background: var(--accent-solid);
     border-radius: var(--radius-s);
-    transition: width 0.2s;
+    transition: width var(--dur-enter);
   }
   @media (prefers-reduced-motion: reduce) {
     .bar-fill {

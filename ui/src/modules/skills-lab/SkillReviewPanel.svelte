@@ -414,7 +414,7 @@
           </div>
           <div class="grow"></div>
           {#if selected.status === 'running'}
-            <button class="btn small" onclick={cancelReview}><Icon name="square" size={12} /> Stop review</button>
+            <button class="btn small" onclick={cancelReview}><Icon name="stop" size={12} /> Stop review</button>
           {/if}
           <button class="icon-btn" onclick={() => selected && deleteReview(selected)} aria-label="Delete this review" title="Delete this review"><Icon name="trash" size={14} /></button>
         </div>

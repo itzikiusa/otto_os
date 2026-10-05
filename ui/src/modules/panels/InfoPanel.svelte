@@ -264,7 +264,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -306,7 +306,7 @@
   }
   .ws-select:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .hint {
     margin: 4px 0 0;

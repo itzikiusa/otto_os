@@ -728,7 +728,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .bucket-icon {
@@ -763,7 +763,7 @@
   .item {
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
+    transition: background var(--dur-fast);
   }
   .item:last-child {
     border-bottom: none;
@@ -849,7 +849,7 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .strip-now {
     flex: 1;

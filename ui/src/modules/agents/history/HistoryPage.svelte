@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../../lib/toastError';
   // History (`#/history[/<sessionId>]`) — every past Claude/Codex conversation,
   // grouped by repo/cwd like the Codex/Claude app sidebars, with a read-only
   // conversation on the right (docs/design/conversation-view.md §5.3).
@@ -125,7 +126,7 @@
       await history.rescan(wsId);
     } catch (e) {
       rescanning = false;
-      toasts.error('Rescan failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rescan', e);
     }
   }
 
@@ -148,7 +149,7 @@
       }
       openInChat(sid);
     } catch (err) {
-      toasts.error('Could not resume', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t resume', err instanceof Error ? err.message : String(err));
     } finally {
       busy = false;
     }
@@ -170,7 +171,7 @@
       await navigator.clipboard.writeText(v);
       toasts.info(what, v);
     } catch {
-      toasts.error('Could not copy', v);
+      toasts.error('Couldn’t copy', v);
     }
   }
 
@@ -196,7 +197,7 @@
       await ws.archiveSession(e.session_id);
       history.patchSession(e.session_id, { status: 'exited' });
     } catch (err) {
-      toasts.error('Could not archive', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t archive', err instanceof Error ? err.message : String(err));
     } finally {
       busy = false;
     }
@@ -717,7 +718,7 @@
     color: var(--text-dim);
   }
   .search-wrap:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .search {
@@ -787,7 +788,7 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   @media (prefers-reduced-motion: reduce) {
     .pfill {

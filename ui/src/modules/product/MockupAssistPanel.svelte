@@ -388,7 +388,7 @@
     outline: none;
   }
   .ma-composer textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .ma-send {
     display: inline-flex;

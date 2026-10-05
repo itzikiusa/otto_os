@@ -574,7 +574,7 @@
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
     <div class="tree-error" role="status" aria-live="polite">
-      <div class="tree-error-head"><Icon name="warning" size={12} />Couldn't connect</div>
+      <div class="tree-error-head"><Icon name="warning" size={12} />Couldn’t connect</div>
       <div class="tree-error-msg">{database.activeConnStatus.error}</div>
       <button class="btn small tree-error-retry" onclick={() => database.retryConnection()}>
         <Icon name="refresh" size={12} />Retry
@@ -945,7 +945,7 @@
     color: var(--text);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     cursor: pointer;
   }
   .back-btn:hover {
@@ -958,7 +958,7 @@
     padding: 4px 8px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .hit-scan {

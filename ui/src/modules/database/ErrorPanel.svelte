@@ -80,7 +80,7 @@
 
   async function copyRaw() {
     if (await copyText(error)) toasts.success('Error copied');
-    else toasts.error('Copy failed');
+    else toasts.error('Couldn’t copy');
   }
 </script>
 
@@ -183,7 +183,7 @@
   .err-engine {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
     padding: 1px 7px;
@@ -270,7 +270,7 @@
   .err-excerpt-label {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 2px;
   }

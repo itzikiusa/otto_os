@@ -208,7 +208,7 @@
         <div class="r-error" role="alert">
           <Icon name="warning" size={14} />
           <div>
-            <strong>Couldn't load the HTML report.</strong>
+            <strong>Couldn’t load the HTML report.</strong>
             <span class="dim">The file may still be being written. Retry, or use Preview.</span>
             <span class="dim mono err-detail">{htmlError}</span>
           </div>

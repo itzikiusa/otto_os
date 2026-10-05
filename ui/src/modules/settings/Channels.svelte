@@ -101,7 +101,7 @@
       await copyTextOrThrow(text);
       toasts.success('Copied to the clipboard');
     } catch {
-      toasts.error("Couldn't copy", 'Select the text and copy it manually.');
+      toasts.error("Couldn’t copy", 'Select the text and copy it manually.');
     }
   }
 
@@ -205,7 +205,7 @@
         updated.enabled ? 'Enabled' : 'Saved as disabled',
       );
     } catch (e) {
-      toasts.error(`Couldn't save the ${channelLabel(editChannel)} integration`, loadErrorText(e));
+      toasts.error(`Couldn’t save the ${channelLabel(editChannel)} integration`, loadErrorText(e));
     } finally {
       editBusy = false;
     }
@@ -235,7 +235,7 @@
       integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
       refreshStatusSoon();
     } catch (e) {
-      toasts.error(`Couldn't ${intg.enabled ? 'disable' : 'enable'} ${channelLabel(intg.channel)}`, loadErrorText(e));
+      toasts.error(`Couldn’t ${intg.enabled ? 'disable' : 'enable'} ${channelLabel(intg.channel)}`, loadErrorText(e));
     }
   }
 
@@ -253,7 +253,7 @@
       integrations = integrations.filter((i) => i.channel !== channel);
       toasts.success(`${label} integration removed`);
     } catch (e) {
-      toasts.error(`Couldn't remove the ${label} integration`, loadErrorText(e));
+      toasts.error(`Couldn’t remove the ${label} integration`, loadErrorText(e));
     }
   }
 
@@ -286,10 +286,10 @@
       if (resp.ok) {
         toasts.success('Test message sent', `Posted to the default ${channel === 'webhook' ? 'callback URL' : 'chat'}.`);
       } else {
-        toasts.error("Couldn't send the test message", resp.error ?? 'The provider gave no reason.');
+        toasts.error("Couldn’t send the test message", resp.error ?? 'The provider gave no reason.');
       }
     } catch (e) {
-      toasts.error("Couldn't send the test message", loadErrorText(e));
+      toasts.error("Couldn’t send the test message", loadErrorText(e));
     } finally {
       testBusy = null;
     }

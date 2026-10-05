@@ -112,9 +112,9 @@ a:hover {
   font-weight: 500;
   cursor: pointer;
   transition:
-    background 130ms ease-out,
-    border-color 130ms ease-out,
-    opacity 130ms ease-out;
+    background var(--dur-fast) ease-out,
+    border-color var(--dur-fast) ease-out,
+    opacity var(--dur-fast) ease-out;
   white-space: nowrap;
 }
 /* Icons never shrink: a scoped `.btn { width: 30px }` icon button used to
@@ -183,7 +183,7 @@ a:hover {
   color: var(--text-dim);
   cursor: pointer;
   font-size: var(--fs-s);
-  transition: background 130ms ease-out, color 130ms ease-out;
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   flex-shrink: 0;
 }
 .icon-btn:hover {
@@ -225,7 +225,7 @@ textarea.input {
   background: var(--surface-2);
   color: var(--text);
   font-size: var(--fs-m);
-  transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+  transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
 }
 textarea.input {
   height: auto;
@@ -261,7 +261,7 @@ textarea.input {
   border: 1px solid var(--border);
   background: var(--surface-2);
   color: var(--text-dim);
-  transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+  transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
 }
 .input-group:focus-within {
   border-color: var(--accent-text);
@@ -371,7 +371,7 @@ textarea.input {
   font-size: var(--fs-s);
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 130ms ease-out, color 130ms ease-out;
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .segmented > button:hover:not(:disabled) {
   color: var(--text);
@@ -404,7 +404,7 @@ textarea.input {
   font-size: var(--fs-s);
   font-weight: 500;
   cursor: pointer;
-  transition: background 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .pill-toggle:disabled {
   opacity: 0.45;

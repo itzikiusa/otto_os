@@ -168,7 +168,7 @@
       await copyTextOrThrow(mintedUrl);
       toasts.success('Link copied', 'The share link is in your clipboard.');
     } catch {
-      toasts.error('Copy failed', 'Could not access clipboard.');
+      toasts.error('Couldn’t copy', 'Could not access clipboard.');
     }
   }
 
@@ -446,7 +446,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sm-optional {
@@ -501,7 +501,7 @@
   .sm-select:focus,
   .sm-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .sm-generate {
     align-self: flex-start;
@@ -578,7 +578,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sm-spacer {
@@ -658,7 +658,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);

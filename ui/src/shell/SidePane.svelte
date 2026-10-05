@@ -123,7 +123,7 @@
       {:else}
         <div class="sp-error" role="alert">
           <span class="sp-error-icon"><Icon name="warning" size={22} /></span>
-          <h3>Couldn't load {label}</h3>
+          <h3>Couldn’t load {label}</h3>
           <p>The side pane didn't start. Everything in the main pane is unaffected.</p>
           <div class="sp-error-actions">
             <button class="btn" onclick={() => sidePane.retry()}>
@@ -158,7 +158,7 @@
     display: block;
     background: var(--bg);
     opacity: 0;
-    transition: opacity 160ms ease-out;
+    transition: opacity var(--dur-enter) ease-out;
   }
   iframe.ready {
     opacity: 1;

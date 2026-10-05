@@ -147,7 +147,7 @@
   .node circle {
     stroke: var(--bg);
     stroke-width: 2;
-    transition: r 0.1s;
+    transition: r var(--dur-fast);
   }
   .node:hover circle {
     stroke: var(--text);

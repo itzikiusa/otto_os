@@ -73,7 +73,7 @@ test('replacement import fetches global scope, confirms empty visible workspace,
     ${methods('modules/mcp/PoliciesTab.svelte', ['doImport'])} return {doImport};`, {
     mcpCpApi: { cpPolicies: async (...args: unknown[]) => { assert.equal(args.length, 0); if (reject) throw Error('offline'); return [{workspace_id:'B'}, {workspace_id:null}]; },
       cpImportPolicies: async (req: unknown) => { imports.push(req); return { imported: 0 }; } },
-    confirmer: { ask: async (text: string) => { prompts.push(text); return approve; } }, toasts: toast, load: async () => {},
+    confirmer: { ask: async (text: string) => { prompts.push(text); return approve; } }, toasts: toast, toastError: (title: string) => toast.error(title), load: async () => {},
   });
   await state.doImport(); assert.match(prompts[0], /2 existing rules across every workspace/); assert.equal(imports.length, 0);
   reject = true; approve = true; await state.doImport(); assert.equal(imports.length, 0);

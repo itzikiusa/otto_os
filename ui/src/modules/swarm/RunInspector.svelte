@@ -103,7 +103,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error("Couldn't copy to the clipboard");
+      toasts.error("Couldn’t copy to the clipboard");
     }
   }
 
@@ -330,7 +330,7 @@
   .stat .k {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .stat .v {
@@ -350,7 +350,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sec-h {

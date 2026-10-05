@@ -15,7 +15,7 @@ function isStatusError(e: unknown): e is StatusError {
   return typeof e === 'object' && e !== null && typeof (e as { status?: unknown }).status === 'number';
 }
 
-/** Secondary detail line for "Couldn't load X" — the cause, in the user's terms. */
+/** Secondary detail line for "Couldn’t load X" — the cause, in the user's terms. */
 export function loadErrorText(e: unknown): string {
   if (isStatusError(e)) {
     if (e.status === 401) return 'Your session expired. Sign in again, then retry.';

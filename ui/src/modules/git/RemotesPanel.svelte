@@ -107,7 +107,7 @@
     {:else if loadFailed}
       <div class="rp-err" role="alert">
         <Icon name="warning" size={12} />
-        <span>Couldn't load remotes: {error}</span>
+        <span>Couldn’t load remotes: {error}</span>
         <button class="btn small" onclick={() => loadRev++}>Retry</button>
       </div>
     {:else if remotes.length === 0}

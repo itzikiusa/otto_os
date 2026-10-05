@@ -497,7 +497,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
-    transition: border-color 120ms;
+    transition: border-color var(--dur-fast);
   }
   .otp-input:focus {
     outline: none;

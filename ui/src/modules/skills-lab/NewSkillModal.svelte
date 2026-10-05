@@ -193,7 +193,7 @@
       <span class="hint">Agents read this to decide when to use the skill — say what it does and when.</span>
     </div>
   {/if}
-  {#if error}<p class="err" role="alert">Couldn't create the skill. {error}</p>{/if}
+  {#if error}<p class="err" role="alert">Couldn’t create the skill. {error}</p>{/if}
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

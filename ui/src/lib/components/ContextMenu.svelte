@@ -363,7 +363,7 @@
     cursor: pointer;
     text-align: start;
     outline: none;
-    transition: background 80ms ease-out;
+    transition: background var(--dur-fast) ease-out;
     flex-shrink: 0;
   }
 

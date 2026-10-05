@@ -296,7 +296,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .sev-info {
@@ -321,7 +321,7 @@
     padding: 1px 5px;
     text-transform: uppercase;
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     flex-shrink: 0;
   }
   .rp-state-fixing    { background: var(--warning-soft); color: var(--warning); }

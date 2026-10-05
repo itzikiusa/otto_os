@@ -199,7 +199,7 @@
       runs = [...runs, ...page.items.filter((r) => !have.has(r.id))];
       nextCursor = page.next_cursor;
     } catch (e) {
-      toasts.error("Couldn't load more evaluations", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t load more evaluations", e instanceof Error ? e.message : String(e));
     } finally {
       loadingMore = false;
     }
@@ -229,7 +229,7 @@
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
-      toasts.error("Couldn't start the evaluation", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t start the evaluation", e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
     }
@@ -308,7 +308,7 @@
         <div aria-busy="true" aria-label="Loading evaluations"><Skeleton rows={4} height={56} /></div>
       {:else if loadError && runs.length === 0}
         <div class="se-muted se-err" role="alert">
-          <span><Icon name="warning" size={12} /> <strong>Couldn't load evaluations.</strong></span>
+          <span><Icon name="warning" size={12} /> <strong>Couldn’t load evaluations.</strong></span>
           <span class="se-err-detail">{loadError}</span>
           <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
         </div>

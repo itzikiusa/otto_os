@@ -144,7 +144,7 @@
       addRefs = '';
       addKind = 'pattern';
     } catch (e) {
-      toasts.error('Could not add learning', product.errMsg(e));
+      toasts.error('Couldn’t add learning', product.errMsg(e));
     } finally {
       adding = false;
     }
@@ -188,7 +188,7 @@
       toasts.success('Learning updated');
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save learning', product.errMsg(e));
+      toasts.error('Couldn’t save learning', product.errMsg(e));
     } finally {
       editSaving = false;
     }
@@ -200,7 +200,7 @@
     try {
       await product.updateLearning(l.id, { active: !l.active });
     } catch (e) {
-      toasts.error('Could not toggle active', product.errMsg(e));
+      toasts.error('Couldn’t toggle active', product.errMsg(e));
     } finally {
       togglingId = null;
     }
@@ -213,7 +213,7 @@
       await product.acceptLearning(id);
       toasts.success('Learning accepted — now active');
     } catch (e) {
-      toasts.error('Could not accept learning', product.errMsg(e));
+      toasts.error('Couldn’t accept learning', product.errMsg(e));
     } finally {
       acceptingId = null;
     }
@@ -234,7 +234,7 @@
       await product.deleteLearning(deletingId);
       toasts.info('Learning deleted');
     } catch (e) {
-      toasts.error('Could not delete learning', product.errMsg(e));
+      toasts.error('Couldn’t delete learning', product.errMsg(e));
     } finally {
       deletingId = null;
     }
@@ -622,7 +622,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .form-row {
@@ -638,7 +638,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -725,7 +725,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
   }
   .col-count {
     font-size: var(--fs-xs);
@@ -753,7 +753,7 @@
     display: flex;
     flex-direction: column;
     gap: 7px;
-    transition: opacity 150ms;
+    transition: opacity var(--dur-enter);
   }
   .learning-card.inactive {
     opacity: 0.72;
@@ -777,7 +777,7 @@
     border-radius: var(--radius-s);
     padding: 3px 8px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
 
   /* Card header */
@@ -829,7 +829,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
   .icon-act.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
@@ -875,7 +875,7 @@
     font-weight: 500;
     text-decoration: none;
     border: 1px solid transparent;
-    transition: opacity 100ms;
+    transition: opacity var(--dur-fast);
   }
   .ref-badge:hover { opacity: 0.8; }
   /* Sources are kinds, not states: neutral chips (components.md §4 — no

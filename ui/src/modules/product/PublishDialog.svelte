@@ -124,7 +124,7 @@
         await onAccountChange();
       }
     } catch (e) {
-      setError("Couldn't load your Jira / Confluence accounts", e);
+      setError("Couldn’t load your Jira / Confluence accounts", e);
     } finally {
       accountsLoading = false;
     }
@@ -151,7 +151,7 @@
         await loadIssueTypes();
       }
     } catch (e) {
-      setError("Couldn't load Jira projects", e);
+      setError("Couldn’t load Jira projects", e);
     } finally {
       projectsLoading = false;
     }
@@ -183,7 +183,7 @@
       );
       if (spaces.length > 0) spaceKey = spaces[0].key;
     } catch (e) {
-      setError("Couldn't load Confluence spaces", e);
+      setError("Couldn’t load Confluence spaces", e);
     } finally {
       spacesLoading = false;
     }
@@ -221,7 +221,7 @@
       }
       onclose();
     } catch (e) {
-      setError(mode === 'story' ? "Couldn't publish to Jira" : "Couldn't publish to Confluence", e);
+      setError(mode === 'story' ? "Couldn’t publish to Jira" : "Couldn’t publish to Confluence", e);
     } finally {
       submitting = false;
     }

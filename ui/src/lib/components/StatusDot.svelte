@@ -37,7 +37,7 @@
     border-radius: 50%;
     flex-shrink: 0;
     background: var(--status-idle);
-    transition: background 150ms ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .dot.working {
     background: var(--status-working);

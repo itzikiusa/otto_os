@@ -170,7 +170,7 @@
     background: var(--hover);
   }
   .srow.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .sn {

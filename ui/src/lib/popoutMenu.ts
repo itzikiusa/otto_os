@@ -15,7 +15,7 @@ export function popoutItems(route: string, title?: string): MenuItem[] {
       icon: 'external',
       action: () =>
         void openPopout(route, title).catch((e: unknown) =>
-          toasts.error('Could not open window', e instanceof Error ? e.message : String(e)),
+          toasts.error('Couldn’t open window', e instanceof Error ? e.message : String(e)),
         ),
     },
   ];

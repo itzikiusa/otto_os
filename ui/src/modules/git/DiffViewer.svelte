@@ -952,7 +952,7 @@
           'The hunk no longer applies — the file changed since the diff was shown; refresh and retry.',
         );
       } else {
-        toasts.error('Stage failed', msg);
+        toasts.error('Couldn’t stage', msg);
       }
     } finally {
       applying = false;
@@ -1437,7 +1437,7 @@
       </div>
     {:else if r.kind === 'error'}
       <div class="drow inf dfile-error" role="alert" data-rk={r.key} use:measure={[r.key, i]}>
-        <span>Couldn't load this file's diff: {r.message}</span>
+        <span>Couldn’t load this file's diff: {r.message}</span>
         <button class="btn small" onclick={() => retryLoad(r.file)}>Retry</button>
       </div>
     {:else if r.kind === 'end'}
@@ -1696,7 +1696,7 @@
     font-size: var(--fs-xs);
     color: var(--text);
     border-radius: 0;
-    transition: background 80ms;
+    transition: background var(--dur-fast);
     min-width: 0;
   }
   .nav-file:hover {
@@ -2041,7 +2041,7 @@
   /* Line selection wins over the add/del row tints below it. */
   .vrow.dline.selected,
   .vrow.dline.selected .gut {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
   }
   .sign {
     width: 16px;

@@ -108,7 +108,7 @@
   function copy(text: string, what: string): void {
     void navigator.clipboard?.writeText(text).then(
       () => toasts.info('Copied', what),
-      () => toasts.error('Copy failed', what),
+      () => toasts.error('Couldn’t copy', what),
     );
   }
 

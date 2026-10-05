@@ -210,7 +210,7 @@
     background: var(--border-strong);
     box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
     cursor: pointer;
-    transition: transform 140ms ease-out;
+    transition: transform var(--dur-fast) ease-out;
   }
   .frame:hover {
     transform: translateY(-2px);

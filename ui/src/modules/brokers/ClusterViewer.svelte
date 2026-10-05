@@ -62,7 +62,7 @@
     try {
       const r = await api.post<TestClusterResp>(`/brokers/clusters/${cluster.id}/test`, {});
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
-      else toasts.error('Connection failed', r.message);
+      else toasts.error('Couldn’t connect', r.message);
     } catch (e) {
       toastError('Couldn’t test the connection', e);
     } finally {

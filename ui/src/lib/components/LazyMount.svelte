@@ -17,7 +17,7 @@
   interface Props {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     lazy: LazyComponent<Component<any>>;
-    /** Noun for the error headline: "Couldn't load {what}". */
+    /** Noun for the error headline: "Couldn’t load {what}". */
     what: string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     props?: Record<string, any>;

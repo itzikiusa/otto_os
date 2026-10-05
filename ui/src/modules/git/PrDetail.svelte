@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
   // Three tabs: Summary | Files | Review (AI agents).
@@ -224,7 +225,7 @@
       requestChangesBody = '';
       await load(repoId, number);
     } catch (e) {
-      toasts.error('Request changes failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t request changes', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -265,7 +266,7 @@
       await load(repoId, number);
       toasts.success('Pull request updated');
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -381,7 +382,7 @@
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
-      toasts.error(approve ? "Couldn't approve the PR" : "Couldn't decline the PR", e instanceof Error ? e.message : String(e));
+      toasts.error(approve ? "Couldn’t approve the PR" : "Couldn’t decline the PR", e instanceof Error ? e.message : String(e));
     } finally {
       if (!disposed) busy = '';
     }
@@ -412,7 +413,7 @@
       });
       // createSession → addSession → navigateToSession handles routing.
     } catch (e) {
-      toasts.error('Could not open session', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t open session', e instanceof Error ? e.message : String(e));
     } finally {
       if (!disposed) busy = '';
     }
@@ -810,7 +811,7 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
-    transition: color 120ms, border-color 120ms;
+    transition: color var(--dur-fast), border-color var(--dur-fast);
     margin-bottom: -1px;
   }
   .tab-btn:hover {
@@ -836,7 +837,7 @@
     top: 8px;
     inset-inline-end: 8px;
     opacity: 0;
-    transition: opacity 130ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .prd-desc:hover .edit-btn {
     opacity: 1;
@@ -849,7 +850,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }

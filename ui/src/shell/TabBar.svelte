@@ -378,7 +378,7 @@
       title="Tabbed view"
       aria-label="Tabbed view"
     >
-      <Icon name="square" size={12} />
+      <Icon name="stop" size={12} />
     </button>
     <button
       class:active={ws.viewMode === 'tiled'}
@@ -469,7 +469,7 @@
     font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
     max-width: 200px;
     /* Tabs keep their width and the strip scrolls (never squeezed). */
     flex-shrink: 0;
@@ -539,7 +539,7 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out, background 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
     flex-shrink: 0;
   }
   .tab:hover .tab-close,

@@ -44,7 +44,7 @@ class ActivityStore {
    *  `{…, done:false}` when a rescan is requested so the button can show it. */
   historyIndex: HistoryIndexProgress | null = $state(null);
   /** session id -> why its trail/tasks load failed (cleared on success), so
-   *  the Activity panel shows "Couldn't load" + Retry, not an empty board. */
+   *  the Activity panel shows "Couldn’t load" + Retry, not an empty board. */
   loadErrorBySession: Record<string, string> = $state({});
   /** session ids we've already fetched once (avoid refetch churn) */
   private loaded = new Set<string>();

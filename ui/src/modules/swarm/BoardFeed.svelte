@@ -91,7 +91,7 @@
       if (draft === submitted) draft = '';
     } catch (e) {
       // Keep the draft so nothing typed is lost; say why it didn't post.
-      toasts.error("Couldn't post to the board", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t post to the board", e instanceof Error ? e.message : String(e));
     } finally {
       posting = false;
     }

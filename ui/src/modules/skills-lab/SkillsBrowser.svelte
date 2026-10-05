@@ -83,7 +83,7 @@
       bun.status === 'rejected' ? 'the bundled catalog' : '',
       prov.status === 'rejected' ? 'the Claude / Codex / Antigravity skill folders' : '',
     ].filter(Boolean);
-    partialError = !loadError && failed.length > 0 ? `Couldn't read ${failed.join(' or ')} — those copies are missing from the list.` : null;
+    partialError = !loadError && failed.length > 0 ? `Couldn’t read ${failed.join(' or ')} — those copies are missing from the list.` : null;
     library = lib.status === 'fulfilled' ? lib.value : [];
     bundled = bun.status === 'fulfilled' ? bun.value : [];
     providerSkills = prov.status === 'fulfilled' ? prov.value : [];
@@ -531,7 +531,7 @@
     color: var(--text-dim);
   }
   .search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* The focus ring is drawn on the .search wrapper (:focus-within above). */

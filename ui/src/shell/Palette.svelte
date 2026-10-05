@@ -401,7 +401,7 @@
         return done();
       case 'unparsed':
         toasts.warn(
-          "Couldn't parse that",
+          "Couldn’t parse that",
           'Try e.g. "open 2 claude sessions", or enable AI fallback for free-form requests.',
         );
         return;
@@ -712,7 +712,7 @@
     text-align: start;
   }
   .pal-item.selected {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   /* One line per row (30px): a long "Focus session: …" title ellipsizes
      instead of wrapping out of the row and shoving the group / shortcut. */
@@ -785,7 +785,7 @@
   }
   .pal-english textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .pal-english-row {
     display: flex;
@@ -811,7 +811,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .pal-plan-item {
@@ -860,7 +860,7 @@
     background: var(--hover);
   }
   .pal-hit.selected {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .pal-hit-main {
     display: flex;

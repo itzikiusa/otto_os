@@ -236,7 +236,7 @@
       );
       if (current()) dryRunResult = preview;
     } catch (e) {
-      if (current()) toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toasts.error("Couldn’t preview the reset", e instanceof Error ? e.message : String(e));
     } finally {
       if (request === detailRequest) dryRunLoading = false;
     }
@@ -276,7 +276,7 @@
       if (current()) detail = updated;
       toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
-      toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t reset offsets", e instanceof Error ? e.message : String(e));
     } finally {
       resetting = false;
     }
@@ -562,7 +562,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .grow-row.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   /* Windowed rows must be uniform: one-line ids (full id in the title). */
@@ -603,7 +603,7 @@
   .state {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: var(--radius-s);
   }
@@ -701,7 +701,7 @@
     margin: 16px 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   table {

@@ -139,7 +139,7 @@
         </div>
       </div>
       {#if saveError}
-        <div class="error" role="alert">Couldn't set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
+        <div class="error" role="alert">Couldn’t set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
       {/if}
     </div>
   {:else}

@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
-// "Design every state": a FAILED list load must render inline ("Couldn't load
+// "Design every state": a FAILED list load must render inline ("Couldn’t load
 // X" + Retry, via the shared LoadState), never masquerade as the empty state
 // ("No scheduled tasks yet", "No external servers yet"), and Retry must
 // recover once the endpoint answers again. The endpoint is forced to 500 with

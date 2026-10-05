@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
@@ -56,7 +57,7 @@
             : 'Remote branches and tags refreshed',
       );
     } catch (e) {
-      toasts.error('Fetch failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t fetch', e);
     } finally {
       busy = '';
     }
@@ -137,7 +138,7 @@
       onrefresh?.();
       toasts.success('Branch created', name);
     } catch (e) {
-      toasts.error('Branch failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the branch', e);
     } finally {
       busy = '';
     }
@@ -173,7 +174,7 @@
       onrefresh?.();
       toasts.success('Stashed');
     } catch (e) {
-      toasts.error('Stash failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stash', e);
     } finally {
       busy = '';
     }
@@ -197,7 +198,7 @@
         toasts.success('Stash popped');
       }
     } catch (e) {
-      toasts.error('Pop failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t pop', e);
     } finally {
       busy = '';
     }

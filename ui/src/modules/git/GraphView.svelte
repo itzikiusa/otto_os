@@ -1662,7 +1662,7 @@
     const parent = git.allRepos.find((r) => r.id === repoId);
     const wsId = workspaceId || parent?.workspace_id || ws.currentId;
     if (!wsId) {
-      toasts.error('Open worktree failed', 'No workspace available to register the worktree');
+      toasts.error('Couldn’t open worktree', 'No workspace available to register the worktree');
       return;
     }
     openWtBusy = w.path;
@@ -4102,7 +4102,7 @@
     cursor: pointer;
     text-transform: uppercase;
     text-align: start;
-    transition: color 110ms ease-out;
+    transition: color var(--dur-fast) ease-out;
   }
   .ref-header:hover {
     color: var(--text);
@@ -4135,7 +4135,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     text-align: start;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-folder:hover {
     background: var(--surface-2);
@@ -4195,7 +4195,7 @@
     cursor: pointer;
     text-align: start;
     overflow: hidden;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-more-leaves {
     display: flex;
@@ -4236,7 +4236,7 @@
     color: var(--text-dim);
     opacity: 0;
     cursor: pointer;
-    transition: opacity 100ms ease-out, color 100ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-row:hover .ref-more,
   .ref-row:focus-within .ref-more,
@@ -4262,11 +4262,11 @@
   .ref-row.current {
     color: var(--accent-text);
     font-weight: 600;
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    background: var(--accent-soft);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   .ref-row.current:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   :global([dir='rtl']) .ref-row.current {
@@ -4377,7 +4377,7 @@
     min-width: 0;
     overflow-y: auto;
     overflow-x: auto;
-    transition: flex 180ms ease-out;
+    transition: flex var(--dur-enter) ease-out;
   }
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
@@ -4478,7 +4478,7 @@
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 100ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .graph-row:hover {
     background: var(--surface-2);
@@ -4746,7 +4746,7 @@
     gap: 4px;
     overflow: hidden;
     padding-inline: 6px;
-    transition: width 180ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .chip-label {
     overflow: hidden;
@@ -4823,7 +4823,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 5px 8px 2px;
   }
@@ -4859,7 +4859,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -4965,7 +4965,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width 180ms ease-out;
+    transition: width var(--dur-enter) ease-out;
     border-inline-start: 1px solid var(--border);
     background: var(--surface);
   }
@@ -4988,7 +4988,7 @@
   .detail-empty-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.1em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     text-transform: uppercase;
   }

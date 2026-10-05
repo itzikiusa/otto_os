@@ -74,7 +74,7 @@
   summary { cursor: pointer; padding: 5px 9px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary:hover { color: var(--text); }
-  .chev { display: inline-flex; flex-shrink: 0; transition: transform 120ms ease-out; }
+  .chev { display: inline-flex; flex-shrink: 0; transition: transform var(--dur-fast) ease-out; }
   .chev.open { transform: rotate(90deg); }
   /* Icon already mirrors chevronRight in RTL (points start-ward when closed);
      open must turn the mirrored glyph the other way to point down. */

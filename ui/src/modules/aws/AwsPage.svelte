@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // AWS console module. Routes: `#/aws` (accounts overview) ·
   // `#/aws/<accountId>/<service>` (service ∈ s3|sqs|ec2|athena|eks|rds) ·
@@ -94,7 +95,7 @@
       toasts.success('Account deleted', a.name);
       if (routeAccountId === a.id) router.go('aws');
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 

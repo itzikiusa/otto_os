@@ -146,7 +146,7 @@
       const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
-      toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t create canvas', e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -468,8 +468,8 @@
     cursor: pointer;
     text-align: center;
     transition:
-      border-color 0.12s,
-      transform 0.12s;
+      border-color var(--dur-fast),
+      transform var(--dur-fast);
   }
   .mode:hover {
     border-color: var(--accent);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -106,9 +107,9 @@
     try {
       const r = await api.post<TestClusterResp>(`/brokers/clusters/${c.id}/test`, {});
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
-      else toasts.error('Connection failed', r.message);
+      else toasts.error('Couldn’t connect', r.message);
     } catch (e) {
-      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the test', e);
     } finally {
       testing = false;
     }
@@ -124,7 +125,7 @@
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove', e);
     }
   }
 
@@ -217,7 +218,7 @@
     try {
       await brokers.createSection(parentId, name);
     } catch (e) {
-      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the section', e);
     }
   }
 
@@ -231,7 +232,7 @@
     try {
       await brokers.renameSection(sec.id, name);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -246,7 +247,7 @@
     try {
       await brokers.deleteSection(sec.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -263,7 +264,7 @@
     try {
       await brokers.moveCluster(id, sectionId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -277,7 +278,7 @@
     try {
       await brokers.reparentSection(id, parentId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -622,7 +623,7 @@
   .aside-head .title {
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .head-btns {
@@ -657,7 +658,7 @@
     cursor: default;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     opacity: 0.8;
     margin-top: 4px;
   }

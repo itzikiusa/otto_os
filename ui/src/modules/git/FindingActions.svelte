@@ -86,7 +86,7 @@
       toasts.success(ok);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error(`Could not ${label}`, msg);
+      toasts.error(`Couldn’t ${label}`, msg);
     } finally {
       busy = '';
     }
@@ -106,7 +106,7 @@
       toasts.success(ok, resp.session_id ? 'Agent session started — watch it in Agents.' : undefined);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error(`Could not ${label}`, msg);
+      toasts.error(`Couldn’t ${label}`, msg);
     } finally {
       busy = '';
     }
@@ -131,7 +131,7 @@
       })
       .catch((e: unknown) => {
         const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        toasts.error('Could not verify', msg);
+        toasts.error('Couldn’t verify', msg);
       })
       .finally(() => {
         busy = '';
@@ -163,7 +163,7 @@
       })
       .catch((e: unknown) => {
         const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        toasts.error('Could not add to repo rule', msg);
+        toasts.error('Couldn’t add to repo rule', msg);
       })
       .finally(() => {
         busy = '';
@@ -204,7 +204,7 @@
     } catch (e) {
       // 400 {code:'invalid'} when no Jira account is configured — show its message.
       const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error('Could not convert to Jira', msg);
+      toasts.error('Couldn’t convert to Jira', msg);
     } finally {
       busy = '';
     }

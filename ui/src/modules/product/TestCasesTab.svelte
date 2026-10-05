@@ -141,7 +141,7 @@
     try {
       await product.reorderTestcases(activeRun.id, orderedIds);
     } catch (e) {
-      toasts.error('Could not save order', product.errMsg(e));
+      toasts.error('Couldn’t save order', product.errMsg(e));
     } finally {
       savingOrder = false;
     }
@@ -403,7 +403,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.success('Case approved');
     } catch (e) {
-      toasts.error('Could not approve', product.errMsg(e));
+      toasts.error('Couldn’t approve', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -419,7 +419,7 @@
         `${result.approved} case${result.approved !== 1 ? 's' : ''} approved`,
       );
     } catch (e) {
-      toasts.error('Bulk approve failed', product.errMsg(e));
+      toasts.error('Couldn’t bulk approve', product.errMsg(e));
     } finally {
       bulkApproving = false;
     }
@@ -440,7 +440,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.info('Changes requested');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toasts.error('Couldn’t update', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -470,7 +470,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.success('Test case updated');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toasts.error('Couldn’t update', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -485,7 +485,7 @@
       toasts.info('Test generation triggered', 'Waiting for a new run to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Generate failed', product.errMsg(e));
+      toasts.error('Couldn’t generate', product.errMsg(e));
     } finally {
       generating = false;
     }
@@ -504,7 +504,7 @@
         `${approvedCount} case${approvedCount !== 1 ? 's' : ''} approved — skill learning kicked off.`,
       );
     } catch (e) {
-      toasts.error('Could not approve run', product.errMsg(e));
+      toasts.error('Couldn’t approve run', product.errMsg(e));
     } finally {
       approvingRun = false;
     }
@@ -531,7 +531,7 @@
         toasts.success('Published to Confluence');
       }
     } catch (e) {
-      toasts.error('Publish failed', product.errMsg(e));
+      toasts.error('Couldn’t publish', product.errMsg(e));
     } finally {
       publishingRun = false;
     }
@@ -1091,7 +1091,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -1159,7 +1159,7 @@
     font-weight: 600;
     text-decoration: none;
     cursor: pointer;
-    transition: background 110ms;
+    transition: background var(--dur-fast);
   }
   .confluence-link:hover {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -1311,7 +1311,7 @@
     cursor: grab;
     padding-inline-end: 2px;
     user-select: none;
-    transition: opacity 90ms;
+    transition: opacity var(--dur-fast);
   }
   .case-card:hover .drag-handle {
     opacity: 0.8;
@@ -1374,7 +1374,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
   }
@@ -1481,7 +1481,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .if-actions {

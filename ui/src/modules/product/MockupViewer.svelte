@@ -148,7 +148,7 @@
       renderError = e instanceof Error ? e.message : String(e);
       // A source override means the user is TYPING (code view) — a transient
       // Mermaid parse error is expected mid-edit; show it inline, don't toast.
-      if (src === null) toasts.error('Could not render mockup', renderError);
+      if (src === null) toasts.error('Couldn’t render mockup', renderError);
     } finally {
       rendering = false;
     }

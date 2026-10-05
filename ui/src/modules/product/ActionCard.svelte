@@ -66,7 +66,7 @@
       appliedLabel = 'Draft replaced';
       toasts.success('Draft replaced');
     } catch (e) {
-      toasts.error('Could not replace draft', product.errMsg(e));
+      toasts.error('Couldn’t replace draft', product.errMsg(e));
     } finally {
       applying = false;
     }
@@ -84,7 +84,7 @@
       applied = false;
       toasts.success('Draft restored');
     } catch (e) {
-      toasts.error('Could not undo', product.errMsg(e));
+      toasts.error('Couldn’t undo', product.errMsg(e));
     } finally {
       undoing = false;
     }
@@ -130,7 +130,7 @@
       appliedLabel = `Added ${picked.length} question${picked.length === 1 ? '' : 's'}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Could not add questions', product.errMsg(e));
+      toasts.error('Couldn’t add questions', product.errMsg(e));
     } finally {
       applying = false;
     }
@@ -152,7 +152,7 @@
       appliedLabel = `Added ${picked.length} note${picked.length === 1 ? '' : 's'}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Could not add notes', product.errMsg(e));
+      toasts.error('Couldn’t add notes', product.errMsg(e));
     } finally {
       applying = false;
     }
@@ -175,7 +175,7 @@
       applied = false;
       toasts.success('Undone');
     } catch (e) {
-      toasts.error('Could not undo', product.errMsg(e));
+      toasts.error('Couldn’t undo', product.errMsg(e));
     } finally {
       undoing = false;
     }
@@ -218,7 +218,7 @@
         toasts.success('Canvas created');
       }
     } catch (e) {
-      toasts.error('Could not create canvas', product.errMsg(e));
+      toasts.error('Couldn’t create canvas', product.errMsg(e));
     } finally {
       applying = false;
     }
@@ -391,7 +391,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -492,7 +492,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

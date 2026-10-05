@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
   // tabs (one per open repo) above the active repo's RepoView. With no tab open
   // it shows a full-width landing — the repo browser/list + "Add Repository"
@@ -216,7 +217,7 @@
       addOpen = false;
       await git.loadAllRepos(true);
     } catch (e) {
-      toasts.error('Clone failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t clone', e);
     } finally {
       busy = false;
     }
@@ -253,7 +254,7 @@
         r.name,
       );
     } catch (e) {
-      toasts.error('Could not link account', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t link account', e instanceof Error ? e.message : String(e));
       // Snap the <select> back to the stored binding — the change never landed.
       await git.loadAllRepos(true);
     }
@@ -281,7 +282,7 @@
       // Newly registered (not async-cloning) repos open straight into a tab.
       if (addMode === 'register') openRepo(repo.id);
     } catch (e) {
-      toasts.error('Add failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add it', e);
     } finally {
       busy = false;
     }
@@ -752,7 +753,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text-dim);
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .repo-search:focus-within {
     border-color: var(--accent-text);
@@ -786,7 +787,7 @@
   .repo-card {
     display: flex;
     flex-direction: column;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .repo-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));

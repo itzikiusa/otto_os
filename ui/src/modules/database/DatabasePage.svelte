@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
   // SchemaTree + a Saved/History switch; main = a tab strip (Query / Builder /
   // Structure / Dashboards) over the active view.
@@ -260,7 +261,7 @@
       await database.loadConnections();
       editConnection(copy);
       toasts.info('Configuration duplicated', 'Set a password for the new connection. Access grants were not copied.');
-    } catch (error) { toasts.error('Could not duplicate connection', error instanceof Error ? error.message : String(error)); }
+    } catch (error) { toasts.error('Couldn’t duplicate connection', error instanceof Error ? error.message : String(error)); }
   }
 
   // --- Section hierarchy (THE unified tree: every kind + broker clusters) ----
@@ -428,7 +429,7 @@
       );
       sections = [...sections, sec];
     } catch (e) {
-      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the section', e);
     }
   }
 
@@ -443,7 +444,7 @@
       const updated = await api.patch<ConnectionSection>(`/connection-sections/${sec.id}`, { name });
       sections = sections.map((s) => (s.id === sec.id ? updated : s));
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -475,7 +476,7 @@
         cl.section_id && removed.has(cl.section_id) ? { ...cl, section_id: null } : cl,
       );
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -499,7 +500,7 @@
         x.id === c.id ? saved : x,
       );
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -525,7 +526,7 @@
       });
       sections = sections.map((s) => (s.id === id ? updated : s));
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -640,7 +641,7 @@
     try {
       await brokers.remove(cl.id);
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove', e);
     }
   }
 
@@ -669,7 +670,7 @@
       // session is killed when the tab closes (see `closeSshTerminal`).
       database.addSshTab({ connId: c.id, sessionId: session.id, name: c.name, kind: c.kind });
     } catch (e) {
-      toasts.error('Open failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open', e);
     } finally {
       opening[c.id] = false;
     }
@@ -700,7 +701,7 @@
       if (database.openConnIds.includes(c.id)) database.closeConnection(c.id);
       await database.loadConnections();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -1843,7 +1844,7 @@
   }
   .list-search-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .rename-input {
     flex: 1;
@@ -1917,7 +1918,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .head-btns {
@@ -1954,7 +1955,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .caret {
@@ -2105,7 +2106,7 @@
     background: var(--surface-2);
   }
   .ss.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .side-body {
@@ -2296,7 +2297,7 @@
   .conn-tab-path {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--accent-text);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     border-radius: 999px;
@@ -2316,7 +2317,7 @@
     white-space: nowrap;
     max-width: 320px;
     flex-shrink: 0;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .conn-tab:hover {
     background: var(--surface-2);
@@ -2367,7 +2368,7 @@
     cursor: pointer;
     opacity: 0;
     flex-shrink: 0;
-    transition: opacity 120ms ease-out, background 120ms ease-out, color 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .conn-tab:hover .conn-tab-close,
   .conn-tab.active .conn-tab-close {
@@ -2447,7 +2448,7 @@
   .cap-chip {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
     padding: 1px 7px;

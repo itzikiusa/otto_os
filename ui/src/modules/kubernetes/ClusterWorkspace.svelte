@@ -696,7 +696,7 @@
     color: var(--text);
   }
   .kind.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     font-weight: 500;
   }

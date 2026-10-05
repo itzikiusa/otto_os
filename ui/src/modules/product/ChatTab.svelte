@@ -205,14 +205,14 @@
     display: flex;
     align-items: center;
     border-radius: 0;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
     position: relative;
   }
   .chat-item:hover {
     background: var(--hover);
   }
   .chat-item.active {
-    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    background: var(--accent-soft);
   }
   .chat-item.archived {
     opacity: 0.65;
@@ -253,7 +253,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -279,7 +279,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast);
     white-space: nowrap;
   }
   .chat-item:hover .archive-btn,

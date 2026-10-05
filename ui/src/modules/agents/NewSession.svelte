@@ -715,7 +715,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    transition: border-color 130ms ease-out, background 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   /* The card body is the (exclusive) provider choice; the stepper below it is
      the batch count, so they are separate controls inside one card. */
@@ -739,7 +739,7 @@
   }
   .provider-card.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   /* The one the model picker / context preview / browser toggle apply to. */
   .provider-card.primary {
@@ -811,7 +811,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -913,7 +913,7 @@
   .preview-toggle .chevron {
     display: inline-flex;
     color: var(--text-dim);
-    transition: transform 120ms ease-out;
+    transition: transform var(--dur-fast) ease-out;
   }
   .preview-toggle .chevron.open {
     transform: rotate(90deg);

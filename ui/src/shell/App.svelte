@@ -1474,7 +1474,7 @@
   }
   .mtop-btn.active {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .mtop-title {
     font-size: var(--fs-m);

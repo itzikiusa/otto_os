@@ -184,7 +184,7 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     height: 16px;
   }
   .dim {

@@ -285,7 +285,7 @@
       await copyTextOrThrow(gatewayNames.join('\n'));
       toasts.success('Tool names copied');
     } catch {
-      toasts.error('Copy failed', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', 'Select and copy manually.');
     }
   }
 
@@ -587,7 +587,7 @@
     margin: 4px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .tools-head {
@@ -758,7 +758,7 @@
   }
   .disclose span {
     display: inline-flex;
-    transition: transform 120ms ease;
+    transition: transform var(--dur-fast) ease;
   }
   .disclose span.open {
     transform: rotate(90deg);

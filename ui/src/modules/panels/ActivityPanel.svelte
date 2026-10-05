@@ -189,7 +189,7 @@
            "the agent has done nothing"), with Retry. -->
       <div class="load-error" role="alert">
         <Icon name="warning" size={14} />
-        <span class="grow">Couldn't load this session's activity. {loadError}</span>
+        <span class="grow">Couldn’t load this session's activity. {loadError}</span>
         <button class="btn small" onclick={() => session && wsId && void activity.load(wsId, session.id, true)}>
           <Icon name="refresh" size={12} /> Retry
         </button>
@@ -397,7 +397,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .count {
@@ -501,7 +501,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     border-radius: 999px;
     padding: 0 5px;
     line-height: 14px;
@@ -532,7 +532,7 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .tasks {
     list-style: none;
@@ -748,7 +748,7 @@
   .row-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .src-user .row-src {

@@ -589,7 +589,7 @@
     min-width: 0;
   }
   .cmd-row.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .cmd-name {
     color: var(--accent-text);
@@ -605,7 +605,7 @@
   .cmd-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .cmd-hint {
     font-size: var(--fs-xs);

@@ -155,7 +155,7 @@
 {#if error}
   <div class="inline-error" role="alert">
     <Icon name="warning" size={14} />
-    <div><strong>Couldn't load activity for this skill.</strong> <span class="dim">{error}</span></div>
+    <div><strong>Couldn’t load activity for this skill.</strong> <span class="dim">{error}</span></div>
     <button class="btn small" onclick={() => { void load(wsId); void loadEvals(wsId, group.name); }}>Retry</button>
   </div>
 {:else if !wsId}

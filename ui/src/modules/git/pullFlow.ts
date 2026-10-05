@@ -60,6 +60,6 @@ export async function runPull(
       if (ok) await runPull(repoId, onstatus, { ...opts, autoStash: true });
       return;
     }
-    toasts.error('Pull failed', msg);
+    toasts.error('Couldn’t pull', msg);
   }
 }

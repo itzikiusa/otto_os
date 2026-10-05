@@ -48,7 +48,7 @@ import {
 
 type Payload<T> = T extends unknown ? Omit<T, 'ns'> : never;
 
-/** How long a fresh pane may take to boot before it shows "Couldn't load". */
+/** How long a fresh pane may take to boot before it shows "Couldn’t load". */
 const READY_TIMEOUT_MS = 20_000;
 
 /** What the host window does for its pane (App.svelte supplies these). */

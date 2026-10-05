@@ -726,7 +726,7 @@
       await navigator.clipboard.writeText(sql);
       toasts.success('Copied', 'Generated SQL copied');
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
 
@@ -1347,7 +1347,7 @@
     color: var(--text-dim);
   }
   .pal-search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .pal-search-input {
     flex: 1;
@@ -1551,8 +1551,8 @@
     border-color: var(--border);
   }
   .alias-input:focus {
-    border-color: var(--accent);
-    background: var(--surface);
+    border-color: var(--accent-text);
+    background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .node-src {
     flex: 1;

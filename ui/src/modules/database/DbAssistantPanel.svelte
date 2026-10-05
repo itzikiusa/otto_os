@@ -370,7 +370,7 @@
     outline: none;
   }
   .da-ask textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .da-send {
     align-self: center;

@@ -357,7 +357,7 @@
     <!-- Stale data + a failed refresh: keep the list, say so, offer Retry. -->
     <div class="banner-err" role="alert">
       <Icon name="warning" size={14} />
-      <span class="be-text">Couldn't refresh Mission Control. {err}</span>
+      <span class="be-text">Couldn’t refresh Mission Control. {err}</span>
       <button class="btn small" onclick={() => ws.currentId && void reload(ws.currentId)}>Retry</button>
     </div>
   {/if}
@@ -372,7 +372,7 @@
         <div class="card">
           <EmptyState
             icon="radar"
-            title="Couldn't load Mission Control"
+            title="Couldn’t load Mission Control"
             body={err}
             actionLabel="Retry"
             actionIcon="refresh"

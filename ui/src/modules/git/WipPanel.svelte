@@ -1141,7 +1141,7 @@
     padding-inline-end: 6px;
   }
   .wp-file.selected {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .wp-name {
     display: flex;
@@ -1172,7 +1172,7 @@
     border-radius: var(--radius-s);
     line-height: 1;
     opacity: 0;
-    transition: opacity 100ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .wp-file:hover .wp-discard,
   .wp-file:focus-within .wp-discard,

@@ -117,7 +117,7 @@
   const selectedNode = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
   const selectedSummary = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
   let inspectorBody = $state<NodeRunState | null>(null);
-  /** The step-output fetch failed → "Couldn't load the step output · Retry". */
+  /** The step-output fetch failed → "Couldn’t load the step output · Retry". */
   let inspectorError = $state(false);
   let inspectorRetry = $state(0);
   const selectedRun = $derived(inspectorBody ?? selectedSummary);
@@ -1736,7 +1736,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Cancel takes the primary's place (same word as
              the inspector's "Cancel run" and the run's final "Cancelled"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Stop run…</button>
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={11} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -2148,7 +2148,7 @@
                   onclick={stop}
                   title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="square" size={11} /> Stop run…
+                  <Icon name="stop" size={11} /> Stop run…
                 </button>
               {/if}
               <button
@@ -3431,7 +3431,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   textarea {
     width: 100%;
@@ -3459,7 +3459,7 @@
   }
   textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
@@ -3557,7 +3557,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 4px 6px;
   }
   /* Was `.row` — the global app.css class (whose gap it relied on), so it's
@@ -4054,7 +4054,7 @@
   .inspector input[type='url']:focus,
   .inspector input[type='number']:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .inspector select {
@@ -4070,7 +4070,7 @@
   }
   .inspector select:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .insp-load-err {
@@ -4272,7 +4272,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 3px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
@@ -4356,7 +4356,7 @@
     outline: none;
   }
   .json-zoom:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
 
@@ -4383,7 +4383,7 @@
   }
   .run-item:hover,
   .run-item.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .run-status {
     flex: 1;
@@ -4465,7 +4465,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 6px;
   }
@@ -4721,7 +4721,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .retry-row {
@@ -4751,7 +4751,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }

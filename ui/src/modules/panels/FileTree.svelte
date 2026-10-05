@@ -334,7 +334,7 @@
       <div class="load-error" role="alert">
         <div class="error-head">
           <Icon name="warning" size={13} />
-          <span>Couldn't list {basename(effectiveRoot)}</span>
+          <span>Couldn’t list {basename(effectiveRoot)}</span>
         </div>
         <div class="error-detail">{rootError}</div>
         <button class="btn small" onclick={() => void loadRoot(effectiveRoot)}>
@@ -520,7 +520,7 @@
     white-space: nowrap;
     overflow: hidden;
     padding-inline-end: 6px;
-    transition: background 80ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .tree-row:hover {
     background: var(--surface-2);
@@ -640,7 +640,7 @@
     border-radius: var(--radius-s);
   }
   .pv.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .preview-frame {
