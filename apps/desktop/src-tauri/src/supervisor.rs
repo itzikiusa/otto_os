@@ -137,6 +137,107 @@ fn keep_previous_daemon(dst: &std::path::Path) {
     }
 }
 
+/// Put the bundled `src` daemon at `dst` (temp sibling + rename) — but only
+/// when the bytes differ. Returns whether `dst` changed. An identical binary
+/// is left alone, and so is `ottod.prev`: a reinstall triggered by a slow or
+/// failed health probe must never overwrite the real rollback copy with the
+/// binary that is already running.
+fn install_binary(src: &PathBuf, dst: &PathBuf) -> Result<bool, String> {
+    if dst.exists() && !files_differ(src, dst).map_err(|e| format!("compare ottod: {e}"))? {
+        return Ok(false);
+    }
+    // Copy to a temp sibling and rename() into place. NEVER copy over dst
+    // in place: the kernel caches the code signature per inode, so rewriting
+    // a previously-executed (or currently-running) binary's inode leaves a
+    // stale signature seal → every subsequent exec dies with SIGKILL
+    // (Code Signature Invalid) and launchd KeepAlive turns that into a
+    // respawn/throttle loop. rename() gives new execs a fresh inode with an
+    // intact seal, and is atomic on the same volume.
+    let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::copy(src, &tmp).map_err(|e| format!("copy ottod: {e}"))?;
+    // Keep the binary being replaced as `bin/ottod.prev` so a bad update can
+    // be rolled back by hand (or by deploy.sh) without a rebuild.
+    keep_previous_daemon(dst);
+    std::fs::rename(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("swap ottod into place: {e}")
+    })?;
+    Ok(true)
+}
+
+/// What [`ensure_daemon`] does about the daemon it found.
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    /// Healthy and current — nothing to do.
+    Healthy,
+    /// Same binary, launchd job loaded, but not answering yet: it is most
+    /// likely still booting (offline compaction, a pre-migration snapshot —
+    /// 5–7 s observed on a 373 MB DB, past the 2 s probe). Wait for it;
+    /// booting it out would kill it mid-boot and restart the boot from zero.
+    WaitForBoot,
+    /// Bundled binary differs/missing, or the job isn't registered.
+    Install,
+}
+
+fn recovery_plan(needs_install: &Result<bool, String>, healthy: bool, loaded: bool) -> Recovery {
+    match (needs_install, healthy) {
+        // A failed comparison can't justify replacing a daemon that answers.
+        (Ok(false) | Err(_), true) => Recovery::Healthy,
+        (Ok(false) | Err(_), false) if loaded => Recovery::WaitForBoot,
+        _ => Recovery::Install,
+    }
+}
+
+/// How long a loaded-but-silent daemon gets to finish booting before the
+/// supervisor kickstarts it.
+const BOOT_WAIT: Duration = Duration::from_secs(30);
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn identical_binary_and_unhealthy_daemon_waits_instead_of_reinstalling() {
+        assert_eq!(
+            recovery_plan(&Ok(false), false, true),
+            Recovery::WaitForBoot
+        );
+        assert_eq!(recovery_plan(&Ok(false), true, true), Recovery::Healthy);
+        // Not registered with launchd at all: only a (re)bootstrap fixes it.
+        assert_eq!(recovery_plan(&Ok(false), false, false), Recovery::Install);
+        assert_eq!(recovery_plan(&Ok(true), true, true), Recovery::Install);
+        assert_eq!(
+            recovery_plan(&Err("x".into()), true, true),
+            Recovery::Healthy
+        );
+        assert_eq!(
+            recovery_plan(&Err("x".into()), false, true),
+            Recovery::WaitForBoot
+        );
+    }
+
+    #[test]
+    fn identical_reinstall_never_touches_the_rollback_copy() {
+        let dir = std::env::temp_dir().join(format!("otto-sup-inst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("bundled");
+        let dst = dir.join("ottod");
+        let prev = dir.join("ottod.prev");
+        std::fs::write(&src, "v2").unwrap();
+        std::fs::write(&dst, "v2").unwrap();
+        std::fs::write(&prev, "v1").unwrap();
+        assert!(!install_binary(&src, &dst).unwrap());
+        assert_eq!(std::fs::read_to_string(&prev).unwrap(), "v1");
+        // A real update keeps the replaced binary.
+        std::fs::write(&src, "v3").unwrap();
+        assert!(install_binary(&src, &dst).unwrap());
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&prev).unwrap(), "v2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod keep_previous_tests {
     use super::keep_previous_daemon;
@@ -201,22 +302,7 @@ fn install_daemon() -> Result<String, String> {
     let src = bundled_ottod().ok_or("bundled ottod not found next to app binary")?;
     let dst = installed_bin();
     std::fs::create_dir_all(dst.parent().unwrap()).map_err(|e| e.to_string())?;
-    // Copy to a temp sibling and rename() into place. NEVER copy over dst
-    // in place: the kernel caches the code signature per inode, so rewriting
-    // a previously-executed (or currently-running) binary's inode leaves a
-    // stale signature seal → every subsequent exec dies with SIGKILL
-    // (Code Signature Invalid) and launchd KeepAlive turns that into a
-    // respawn/throttle loop. rename() gives new execs a fresh inode with an
-    // intact seal, and is atomic on the same volume.
-    let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
-    std::fs::copy(&src, &tmp).map_err(|e| format!("copy ottod: {e}"))?;
-    // Keep the binary being replaced as `bin/ottod.prev` so a bad update can
-    // be rolled back by hand (or by deploy.sh) without a rebuild.
-    keep_previous_daemon(&dst);
-    std::fs::rename(&tmp, &dst).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("swap ottod into place: {e}")
-    })?;
+    install_binary(&src, &dst)?;
 
     let logs = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -242,9 +328,10 @@ fn install_daemon() -> Result<String, String> {
          under contention. Interactive = app-level QoS, like a foreground
          app. The re-bootstrap below applies it on the next app update. -->
     <key>ProcessType</key><string>Interactive</string>
-    <!-- launchd SIGKILLs a job this long after SIGTERM (default 20 s; the
-         daemon caps its own HTTP drain at ~3 s and bounds every teardown
-         step, so 30 s is headroom, never the expected path). -->
+    <!-- launchd SIGKILLs a job this long after SIGTERM (default 20 s). The
+         daemon's worst-case stop is ~24 s: a 3 s HTTP drain, an 18 s
+         teardown deadline shared by every step (ClickHouse's flush slot
+         reserved), and a 2 s runtime shutdown. -->
     <key>ExitTimeOut</key><integer>30</integer>
     <!-- A panic or abort writes to stderr before the tracing file sees it. -->
     <key>StandardOutPath</key><string>{}/ottod.stdout.log</string>
@@ -376,31 +463,74 @@ fn libc_getuid() -> u32 {
     .unwrap_or(501)
 }
 
+/// Poll [`health`] every 500 ms for up to `budget`.
+async fn wait_healthy(budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if health().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Health-check; install + start when the daemon is down. Called at app start.
 pub async fn ensure_daemon() -> DaemonReport {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let needs_install = daemon_needs_install();
+    let target = format!("gui/{}/{LAUNCHD_LABEL}", libc_getuid());
+    let healthy = health().await;
+    let loaded = !healthy && service_loaded(&target);
 
-    if matches!(needs_install, Ok(false)) && health().await {
-        return DaemonReport {
-            healthy: true,
-            installed: installed_bin().exists(),
-            daemon_version: daemon_version().await,
-            app_version,
-            detail: "daemon healthy".into(),
-        };
-    }
-
-    if let Err(e) = needs_install {
-        if health().await {
+    match recovery_plan(&needs_install, healthy, loaded) {
+        Recovery::Healthy => {
             return DaemonReport {
                 healthy: true,
                 installed: installed_bin().exists(),
                 daemon_version: daemon_version().await,
                 app_version,
-                detail: format!("daemon healthy; update check failed: {e}"),
+                detail: match needs_install {
+                    Err(e) => format!("daemon healthy; update check failed: {e}"),
+                    Ok(_) => "daemon healthy".into(),
+                },
             };
         }
+        Recovery::WaitForBoot => {
+            let healthy = wait_healthy(BOOT_WAIT).await || {
+                // Still silent: start it if launchd isn't running it (no -k —
+                // never kill a live instance), then give it one more window.
+                let t = target.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("launchctl")
+                        .args(["kickstart", &t])
+                        .output()
+                })
+                .await;
+                wait_healthy(Duration::from_secs(10)).await
+            };
+            return DaemonReport {
+                healthy,
+                installed: installed_bin().exists(),
+                daemon_version: if healthy {
+                    daemon_version().await
+                } else {
+                    None
+                },
+                app_version,
+                detail: if healthy {
+                    "daemon healthy (waited for boot)".into()
+                } else {
+                    format!(
+                        "daemon loaded but not answering after {} s — see ~/Library/Logs/Otto/ottod.log",
+                        BOOT_WAIT.as_secs() + 10
+                    )
+                },
+            };
+        }
+        Recovery::Install => {}
     }
 
     // spawn_blocking: install_daemon() waits out the old daemon's shutdown and

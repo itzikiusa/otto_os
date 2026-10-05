@@ -184,13 +184,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cfg)) {
+    let code = match runtime.block_on(run(cfg)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("ottod failed: {e}");
             ExitCode::FAILURE
         }
-    }
+    };
+    // Dropping a Runtime waits, unbounded, for in-flight `spawn_blocking`
+    // work (a usage-tailer transcript rebuild, a long `git` call): a stop
+    // during one would hang past "ottod stopped" until launchd's SIGKILL.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_CAP);
+    code
 }
 
 /// Daily `ottod.log.*` files kept (≈ a month).
@@ -200,6 +205,19 @@ const MAX_LOG_FILES: usize = 30;
 /// signal. launchd SIGKILLs at `ExitTimeOut` (30 s in the plist); the drain
 /// plus the bounded teardown steps below must fit well inside it.
 const HTTP_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The whole post-drain teardown (sessions, live browser, telemetry,
+/// ClickHouse) shares this one deadline. Worst case from SIGTERM: the 3 s
+/// drain, 1 s of secondary listeners, this 18 s and the 2 s runtime shutdown
+/// make 24 s, leaving ≥6 s of launchd's 30 s `ExitTimeOut` for the log flush.
+const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(18);
+
+/// Reserved out of [`TEARDOWN_BUDGET`] for the ClickHouse stop (SIGTERM →
+/// flush → release the data-dir lock): the earlier steps can never eat it.
+const CLICKHOUSE_RESERVE: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How long the tokio runtime may wait for blocking tasks after `run`.
+const RUNTIME_SHUTDOWN_CAP: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Route panics through tracing (file log, with a backtrace) and straight to
 /// stderr (unbuffered — launchd's StandardErrorPath), then chain the default
@@ -272,6 +290,23 @@ async fn run(cfg: Config) -> Result<(), String> {
         cfg.data_dir.display()
     );
 
+    // Graceful shutdown signal (ctrl_c or SIGTERM) fanned out via watch —
+    // installed FIRST, before any boot step: with the default action a
+    // SIGTERM mid-boot (a deploy kickstart, the supervisor, a user quit)
+    // killed the process inside the pre-migration snapshot or a compaction.
+    // A signal during boot is remembered; boot runs to its end and the
+    // listener below then drains at once and tears down normally.
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let signals = ShutdownSignals::install();
+    tokio::spawn(async move {
+        signals.recv().await;
+        tracing::info!("shutdown signal received");
+        // Wake the long-poll handlers first so the drain below has nothing
+        // left that would otherwise hold it for 25–30 s.
+        otto_server::shutdown::begin();
+        let _ = shutdown_tx.send(true);
+    });
+
     // Single-instance lock FIRST: holding the loopback port is what proves no
     // other ottod owns this data dir. Everything below mutates shared state —
     // the usage engine's reclaim_dir kills whatever ClickHouse server holds the
@@ -333,17 +368,9 @@ async fn run(cfg: Config) -> Result<(), String> {
     #[cfg(not(feature = "embed-ui"))]
     let assets = None;
     let router = build_router_with_assets(ctx, api_extras, root_extras, assets);
-
-    // Graceful shutdown signal (ctrl_c or SIGTERM) fanned out via watch.
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        wait_for_signal().await;
-        tracing::info!("shutdown signal received");
-        // Wake the long-poll handlers first so the drain below has nothing
-        // left that would otherwise hold it for 25–30 s.
-        otto_server::shutdown::begin();
-        let _ = shutdown_tx.send(true);
-    });
+    if *shutdown_rx.borrow() {
+        tracing::info!("shutdown requested during boot — boot finished, stopping now");
+    }
 
     // (Bound at the very top of `run` — the single-instance lock.)
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
@@ -394,13 +421,13 @@ async fn bind_alt_loopback(port: u16) -> Option<tokio::net::TcpListener> {
 /// The binary's own post-listen sweeps, run on the blocking pool by
 /// `boot::spawn_post_listen_work` once plugins are up.
 fn post_listen_housekeeping(data_dir: std::path::PathBuf) {
-    // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh detaches
-    // with nohup — never launchd — so any job under that prefix is an
-    // agent's improvisation, and launchd re-runs a submitted job every
-    // time it exits: build → app swap → daemon restart → script exits
-    // → launchd runs it again, forever (seen 2026-07-16 as
-    // `com.otto.deploy.okfv3`). Removing them here caps any such loop
-    // at the first restart it causes.
+    // Sweep stray `com.otto.deploy.*` launchd jobs. deploy.sh's own
+    // finish job is `com.otto.deploy-finish` (a hyphen — not matched), so
+    // any job under the dotted prefix is an agent's improvisation, and
+    // launchd re-runs a submitted job every time it exits: build → app
+    // swap → daemon restart → script exits → launchd runs it again,
+    // forever (seen 2026-07-16 as `com.otto.deploy.okfv3`). Removing them
+    // here caps any such loop at the first restart it causes.
     sweep_stray_deploy_jobs();
     // Dead files earlier versions left in the data dir (exact
     // patterns only — see housekeeping::sweep_data_dir).
@@ -573,26 +600,36 @@ async fn serve_loopback(
 /// holders (setting `session_persistence`, default on): those are detached
 /// and re-adopted, still running, by the next daemon start. Then stop the
 /// live browser, telemetry and the embedded ClickHouse.
-/// Every teardown step is bounded: ExitTimeOut (30 s) minus the drain cap
-/// leaves ~27 s, and a hung step must not cost the ClickHouse flush after it.
+/// Every step shares one deadline ([`TEARDOWN_BUDGET`]) with the ClickHouse
+/// flush's slot reserved ([`CLICKHOUSE_RESERVE`]): a hung step can neither
+/// push the stop past launchd's SIGKILL nor cost the flush after it.
 async fn teardown(
     manager: &otto_sessions::SessionManager,
     browser: &otto_server::routes::browser::BrowserEngineHandle,
     telemetry: Option<&otto_telemetry::TelemetryService>,
     usage: &otto_usage::UsageEngine,
 ) {
-    let (killed, kept) = match tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        manager.shutdown_for_restart(),
-    )
-    .await
-    {
-        Ok(counts) => counts,
-        Err(_) => {
-            tracing::warn!("session shutdown exceeded 12 s — continuing teardown");
-            (0, 0)
-        }
+    use std::time::Duration;
+    let deadline = std::time::Instant::now() + TEARDOWN_BUDGET;
+    let slot = |cap: Duration, reserve: Duration| {
+        step_budget(
+            deadline.saturating_duration_since(std::time::Instant::now()),
+            cap,
+            reserve,
+        )
     };
+    let sessions_slot = slot(Duration::from_secs(12), CLICKHOUSE_RESERVE);
+    let (killed, kept) =
+        match tokio::time::timeout(sessions_slot, manager.shutdown_for_restart()).await {
+            Ok(counts) => counts,
+            Err(_) => {
+                tracing::warn!(
+                    "session shutdown exceeded {} ms — continuing teardown",
+                    sessions_slot.as_millis()
+                );
+                (0, 0)
+            }
+        };
     if kept > 0 {
         tracing::info!(
             "left {kept} session(s) running in their pty holders for the next daemon start"
@@ -600,31 +637,54 @@ async fn teardown(
     }
     // Close remote live sessions and stop their Chromium processes (no-op when
     // the remote live view was never used this run).
-    if tokio::time::timeout(std::time::Duration::from_secs(3), browser.shutdown_live())
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        slot(Duration::from_secs(3), CLICKHOUSE_RESERVE),
+        browser.shutdown_live(),
+    )
+    .await
+    .is_err()
     {
-        tracing::warn!("live browser shutdown exceeded 3 s");
+        tracing::warn!("live browser shutdown exceeded its slot");
     }
     if killed > 0 {
         tracing::info!("terminated {killed} live session(s) on shutdown");
     }
     if let Some(telemetry) = telemetry {
-        if tokio::time::timeout(std::time::Duration::from_secs(3), telemetry.shutdown())
-            .await
-            .is_err()
+        if tokio::time::timeout(
+            slot(Duration::from_secs(3), CLICKHOUSE_RESERVE),
+            telemetry.shutdown(),
+        )
+        .await
+        .is_err()
         {
-            tracing::warn!("telemetry shutdown exceeded 3 s");
+            tracing::warn!("telemetry shutdown exceeded its slot");
         }
     }
     // Stop the embedded ClickHouse server cleanly (SIGTERM → flush) so its data
     // dir lock is released and the next daemon start doesn't have to reclaim it.
-    if tokio::time::timeout(std::time::Duration::from_secs(6), usage.shutdown())
+    // Whatever is left of the budget (never less than its reserve, which
+    // the steps above could not touch).
+    let ch_slot = slot(TEARDOWN_BUDGET, Duration::ZERO);
+    if tokio::time::timeout(ch_slot, usage.shutdown())
         .await
         .is_err()
     {
-        tracing::warn!("usage (clickhouse) shutdown exceeded 6 s");
+        tracing::warn!(
+            "usage (clickhouse) shutdown exceeded {} ms",
+            ch_slot.as_millis()
+        );
     }
+}
+
+/// One teardown step's timeout: its own `cap`, but never more than what is
+/// left of the shared deadline (`remaining`) after keeping `reserve` back for
+/// the steps behind it.
+fn step_budget(
+    remaining: std::time::Duration,
+    cap: std::time::Duration,
+    reserve: std::time::Duration,
+) -> std::time::Duration {
+    cap.min(remaining.saturating_sub(reserve))
 }
 
 /// Where this daemon's PTY holders live (`<data_dir>/pty-holders`, or a
@@ -832,19 +892,79 @@ fn pem_cert_fingerprint(pem_bytes: &[u8]) -> Option<String> {
     certs.first().map(|c| cert_fingerprint(c.as_ref()))
 }
 
-async fn wait_for_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
+/// SIGTERM/SIGINT listeners, registered synchronously by [`install`] — the
+/// default (terminate) action is replaced the moment this returns, not when a
+/// spawned task first gets polled.
+///
+/// [`install`]: ShutdownSignals::install
+struct ShutdownSignals {
     #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {}
-            _ = sigterm.recv() => {}
+    sigterm: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    sigint: tokio::signal::unix::Signal,
+}
+
+impl ShutdownSignals {
+    fn install() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Self {
+                sigterm: signal(SignalKind::terminate()).expect("install SIGTERM handler"),
+                sigint: signal(SignalKind::interrupt()).expect("install SIGINT handler"),
+            }
+        }
+        #[cfg(not(unix))]
+        Self {}
+    }
+
+    async fn recv(self) {
+        #[cfg(unix)]
+        {
+            let Self {
+                mut sigterm,
+                mut sigint,
+            } = self;
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = ctrl_c.await;
+}
+
+#[cfg(test)]
+mod shutdown_budget_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn steps_never_eat_the_clickhouse_reserve() {
+        let s = Duration::from_secs;
+        // Plenty left: the step's own cap.
+        assert_eq!(step_budget(s(18), s(12), CLICKHOUSE_RESERVE), s(12));
+        // A slow first step left 8 s: the next gets 2 s, keeping 6 back.
+        assert_eq!(step_budget(s(8), s(3), CLICKHOUSE_RESERVE), s(2));
+        // Nothing beyond the reserve: zero, never negative.
+        assert_eq!(step_budget(s(5), s(3), CLICKHOUSE_RESERVE), Duration::ZERO);
+        // The last step takes what is left.
+        assert_eq!(step_budget(s(7), TEARDOWN_BUDGET, Duration::ZERO), s(7));
+    }
+
+    #[test]
+    fn worst_case_stop_fits_inside_launchd_exit_timeout() {
+        // drain + two secondary listeners at 500 ms + teardown + runtime.
+        let worst =
+            HTTP_DRAIN_CAP + Duration::from_millis(1000) + TEARDOWN_BUDGET + RUNTIME_SHUTDOWN_CAP;
+        let exit_timeout = Duration::from_secs(30);
+        assert!(
+            worst + Duration::from_secs(5) <= exit_timeout,
+            "worst-case stop {worst:?} leaves <5 s of ExitTimeOut"
+        );
+        assert!(CLICKHOUSE_RESERVE < TEARDOWN_BUDGET);
     }
 }

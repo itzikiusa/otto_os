@@ -81,11 +81,18 @@ done
 
 if [[ "$WANT_STATUS" == 1 ]]; then
     latest="$LOG_DIR_DEFAULT/deploy-finish-latest.log"
-    if [[ -d "$LOCK_DIR" ]] && holder="$(cat "$LOCK_DIR/pid" 2>/dev/null)" && kill -0 "$holder" 2>/dev/null; then
+    if [[ -d "$LOCK_DIR" ]] && read -r holder _ 2>/dev/null < "$LOCK_DIR/pid" && kill -0 "$holder" 2>/dev/null; then
         echo "== deploy lock held by pid $holder"
     fi
     app_rc=0
-    [[ -d "$INSTALLED_APP" ]] || { echo "== $INSTALLED_APP is MISSING — restore /Applications/.Otto.app.previous or redeploy"; app_rc=5; }
+    if [[ ! -d "$INSTALLED_APP" ]]; then
+        # A deploy killed between the two swap renames leaves the previous app
+        # at .Otto.app.old.<pid> — THAT is the copy to restore (the next deploy
+        # does it automatically); .previous is the one before it.
+        aside="$(ls -1dt "$(dirname "$INSTALLED_APP")"/.Otto.app.old.* 2>/dev/null | head -1 || true)"
+        echo "== $INSTALLED_APP is MISSING — restore ${aside:-$(dirname "$INSTALLED_APP")/.Otto.app.previous} (mv it back) or redeploy"
+        app_rc=5
+    fi
     [[ -f "$latest" ]] || { echo "no detached deploy phase has run yet"; exit $(( app_rc ? app_rc : 2 )); }
     echo "== $(readlink "$latest" || echo "$latest")"
     grep -v "^DEPLOY-FINISH EXIT=" "$latest" || true
@@ -258,8 +265,15 @@ heal_codesign_inode() {
     [[ -f "$dep" && -f "$side" ]] || return 1
     echo "    self-heal: ottod is in an OS_REASON_CODESIGNING crash-loop"
     echo "    → replacing the deployed binary with a fresh inode (clears the poisoned per-inode CS cache)…"
+    # Re-copy from the RECEIPTED sidecar only. Never re-sign here: signing
+    # $APP after the receipt changes the build verify_install compares
+    # against (diff -qr), turning a heal into a rollback.
     cp -f "$side" "$dep.fresh"
-    codesign --verify "$dep.fresh" 2>/dev/null || bash "$HERE/sign.sh" "$APP" >/dev/null 2>&1 || true
+    if ! codesign --verify "$dep.fresh" 2>/dev/null; then
+        command rm -f "$dep.fresh"
+        echo "    self-heal: the bundled sidecar fails codesign --verify — not installing it" >&2
+        return 1
+    fi
     mv -f "$dep.fresh" "$dep"          # atomic replace → NEW inode
     launchctl kickstart -k "gui/$(id -u)/com.otto.daemon" 2>/dev/null || true
 }
@@ -304,15 +318,18 @@ swap_app() {
 # Under launchd, osascript may lack Automation rights for Otto (TCC) and quit
 # silently does nothing — fall back to a plain TERM on the shell process; the
 # daemon is a separate launchd job, so nothing user-facing is lost.
+# Only the app AT $INSTALLED_APP is waited on or signalled (app_pid matches the
+# executable path): a `tauri dev` build or another copy is never touched.
 quit_app() {
+    local pid
     osascript -e 'quit app "Otto"' 2>/dev/null || true
-    for _ in $(seq 1 12); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
-    if pgrep -x otto-desktop >/dev/null; then
-        echo "    app did not quit via AppleScript — terminating it"
-        pkill -TERM -x otto-desktop || true
-        for _ in $(seq 1 10); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
+    for _ in $(seq 1 12); do app_pid >/dev/null || break; sleep 0.5; done
+    if pid="$(app_pid)"; then
+        echo "    app did not quit via AppleScript — terminating pid $pid"
+        kill -TERM "$pid" 2>/dev/null || true
+        for _ in $(seq 1 10); do app_pid >/dev/null || break; sleep 0.5; done
     fi
-    if pgrep -x otto-desktop >/dev/null; then fail_verify "app did not exit"; return 1; fi
+    if app_pid >/dev/null; then fail_verify "app did not exit"; return 1; fi
 }
 
 # Put the previous app back after a failed verify (or a phase that died after
@@ -325,6 +342,9 @@ rollback_install() {
         return 1
     fi
     echo "==> ROLLBACK  restoring the previous Otto.app"
+    # The FAILED build's daemon: success means a different process.
+    local failed_pid
+    failed_pid="$(daemon_pid)" || failed_pid=""
     quit_app || true
     local failed
     failed="$(apps_dir)/.Otto.app.failed.$$"
@@ -339,12 +359,33 @@ rollback_install() {
     SWAP_DONE=0
     rm -rf "$failed"
     open "$INSTALLED_APP" || true
-    if poll_health 20; then
-        echo "    ROLLED BACK: previous app relaunched, daemon healthy"
+    if verify_rollback "$failed_pid"; then
+        echo "    ROLLED BACK: previous app relaunched; previous daemon verified (pid $ROLLBACK_PID, healthy)"
     else
-        echo "    ROLLED BACK: previous app restored, but the daemon is not healthy yet — check ~/Library/Logs/Otto/" >&2
+        echo "    ROLLED BACK: previous app restored, but the previous daemon was NOT verified" \
+             "(still the failed build's pid, a different binary, or unhealthy) — check ~/Library/Logs/Otto/ and packaging/README.md#recovery-rolling-back-a-bad-deploy" >&2
     fi
-    echo "    note: migrations the new daemon applied stay applied; pre-migration DB snapshots are in ~/Library/Application Support/Otto/backups/"
+    echo "    note: migrations the new daemon applied stay applied (older builds boot on the newer additive schema);" \
+         "pre-migration DB snapshots are in ~/Library/Application Support/Otto/backups/"
+}
+
+# The restored app's supervisor must have put ITS sidecar in place and that
+# daemon must be the one answering: a pid other than the failed build's, at
+# the deployed path, with the restored bundle's bytes, and healthy. Health
+# alone used to pass against the failed daemon before the supervisor booted it out.
+ROLLBACK_PID=""
+verify_rollback() {
+    local failed_pid="$1" pid restored_side="$INSTALLED_APP/Contents/MacOS/ottod"
+    for _ in $(seq 1 30); do
+        pid="$(daemon_pid)" || pid=""
+        if [[ -n "$pid" && "$pid" != "$failed_pid" && -f "$dep" ]] &&
+            [[ "$(process_path "$pid")" == "$dep" ]] &&
+            cmp -s "$restored_side" "$dep" && health_ok; then
+            ROLLBACK_PID="$pid"; return 0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 # Last-resort cleanup on ANY exit of the install phase (set -e, a signal).
@@ -356,6 +397,29 @@ finish_cleanup() {
         mv "$PREVIOUS_APP" "$INSTALLED_APP" && echo "    restored the previous $INSTALLED_APP" >&2
     fi
     [[ -z "$STAGED_APP" ]] || rm -rf "$STAGED_APP"
+}
+
+# A finish job SIGKILLed between swap_app's two renames (no EXIT trap) leaves
+# no $INSTALLED_APP and the previous app at .Otto.app.old.<pid>. Put a lone
+# such copy back before anything else, so this run has a real rollback target
+# — and prune .old copies orphaned next to a present app.
+recover_interrupted_swap() {
+    local olds=() o
+    for o in "$(apps_dir)"/.Otto.app.old.*; do [[ -d "$o" ]] && olds+=("$o"); done
+    [[ ${#olds[@]} -gt 0 ]] || return 0
+    if [[ ! -d "$INSTALLED_APP" ]]; then
+        if [[ ${#olds[@]} -eq 1 ]]; then
+            mv "${olds[0]}" "$INSTALLED_APP" ||
+                { fail_verify "could not restore ${olds[0]} to $INSTALLED_APP"; return 1; }
+            echo "    restored $INSTALLED_APP from ${olds[0]} (an earlier deploy was killed mid-swap)"
+            return 0
+        fi
+        fail_verify "$INSTALLED_APP is missing and several .Otto.app.old.* copies exist — mv the right one back by hand"
+        return 1
+    fi
+    for o in "${olds[@]}"; do
+        rm -rf "$o" && echo "    pruned orphaned $o"
+    done
 }
 
 # A verified deploy keeps ONE previous app for a manual rollback.
@@ -379,6 +443,7 @@ old_hash=""
 echo "==> 6/7  Stage, install & relaunch"
 # Sweep stale siblings a killed earlier run may have left (never .previous).
 rm -rf "$(apps_dir)"/.Otto.app.staging.* "$(apps_dir)"/.Otto.app.failed.* 2>/dev/null || true
+recover_interrupted_swap || return 1
 stage_app || return 1
 quit_app || return 1
 swap_app || return 1
@@ -394,7 +459,7 @@ else
     daemon_loaded || reason="${reason:-service not registered with launchd}"
     echo "    daemon not healthy yet — ${reason:-no launchd reason}"
     if echo "$reason" | grep -qi 'CODESIGNING'; then
-        heal_codesign_inode
+        heal_codesign_inode || echo "    WARN: self-heal skipped"
         poll_health 15 && echo "    daemon healthy after self-heal: $(curl -s localhost:7700/api/v1/health)" \
                         || echo "    WARN: still not healthy after self-heal — check the app/logs."
     else
@@ -418,59 +483,121 @@ echo "done."
 }
 
 # ---- single-deploy lock ---------------------------------------------------
-# mkdir is atomic. A lock whose pid is dead is stale and swept. The build
-# foreground hands the lock to the detached finish job by passing its own pid
-# as OTTO_DEPLOY_LOCK_HANDOFF; that job then takes the lock over.
+# mkdir is atomic. `$LOCK_DIR/pid` holds "<pid> <process start time>": a lock
+# whose pid is dead — or alive but started at another time (a reused pid) — is
+# stale. A stale lock is renamed aside (atomic) and the rename re-checked, so
+# two deploys that both saw it stale can't both take it. The build foreground
+# hands the lock to the detached finish job by passing its own pid as
+# OTTO_DEPLOY_LOCK_HANDOFF; that job then takes the lock over.
 LOCK_HELD=0
+proc_start() { ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+lock_holder_alive() {
+    [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null || return 1
+    [[ -z "$2" ]] && return 0          # a lock written before start times were recorded
+    [[ "$(proc_start "$1")" == "$2" ]]
+}
+lock_dir_age() {
+    local m
+    m="$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null)" || { echo 0; return; }
+    echo $(( $(date +%s) - m ))
+}
 lock_acquire() {
-    local holder
+    local holder start moved stale tries=0
     mkdir -p "$(dirname "$LOCK_DIR")"
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-        if [[ -n "$holder" && "$holder" != "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]] && kill -0 "$holder" 2>/dev/null; then
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        holder=""; start=""
+        read -r holder start 2>/dev/null < "$LOCK_DIR/pid" || true
+        if [[ -n "$holder" && "$holder" == "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]]; then
+            break   # handed to us by the build foreground
+        fi
+        if [[ -z "$holder" && "$(lock_dir_age)" -lt 10 ]]; then
+            fail_verify "another deploy is taking the lock right now — see packaging/deploy.sh --status"
+            return 1
+        fi
+        if lock_holder_alive "$holder" "$start"; then
             fail_verify "another deploy is running (pid $holder) — see packaging/deploy.sh --status"
             return 1
         fi
-        [[ "$holder" == "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]] || echo "    sweeping stale deploy lock (pid ${holder:-?} is gone)"
-    fi
-    echo "$$" > "$LOCK_DIR/pid"
+        tries=$((tries + 1))
+        if [[ $tries -gt 3 ]]; then
+            fail_verify "could not take over the stale deploy lock $LOCK_DIR"; return 1
+        fi
+        echo "    sweeping stale deploy lock (pid ${holder:-?} is gone)"
+        stale="$LOCK_DIR.stale.$$"
+        command rm -rf "$stale"
+        mv "$LOCK_DIR" "$stale" 2>/dev/null || continue
+        moved=""
+        read -r moved _ 2>/dev/null < "$stale/pid" || true
+        if [[ "$moved" != "$holder" ]]; then
+            # Another deploy swept it and re-locked in between: that's theirs.
+            mv "$stale" "$LOCK_DIR" 2>/dev/null || true
+            fail_verify "another deploy took the lock (pid ${moved:-?}) — see packaging/deploy.sh --status"
+            return 1
+        fi
+        command rm -rf "$stale"
+    done
+    printf '%s %s\n' "$$" "$(proc_start $$)" > "$LOCK_DIR/pid"
     LOCK_HELD=1
 }
 lock_release() {
+    local holder=""
     [[ "$LOCK_HELD" == 1 ]] || return 0
-    [[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" == "$$" ]] && rm -rf "$LOCK_DIR"
+    read -r holder _ 2>/dev/null < "$LOCK_DIR/pid" || true
+    [[ "$holder" == "$$" ]] && rm -rf "$LOCK_DIR"
     LOCK_HELD=0
 }
 
 # ---- live sessions a deploy will end (read-only) --------------------------
-# The relaunch restarts ottod: shell terminals and workflow / swarm / scheduled
-# agents die with it (only manual foreground agents run in PTY holders). Count
-# what is live so the person deploying can decide. Read-only GET; needs a
-# token (OTTO_API_TOKEN, else the session's OTTO_MCP_TOKEN) — without one the
-# count is simply unknown. Prints "<total> <shells> <agents>" or nothing.
+# The relaunch restarts ottod. User-started agent sessions — shell terminals
+# included (kind=agent, provider=shell) — run in PTY holders and SURVIVE
+# (session persistence, on by default). What dies: connection terminals
+# (kind=connection: ssh / db / k8s exec) and background or non-manual agents
+# (meta.source in the background list, or meta.work.origin other than
+# "manual"). This mirrors otto-sessions `is_user_started` +
+# `Session::is_foreground_agent`; BACKGROUND_SOURCES must match
+# otto-core BACKGROUND_SESSION_SOURCES (a test pins it). Read-only GET; needs
+# a token (OTTO_API_TOKEN, else the session's OTTO_MCP_TOKEN) — without one
+# the count is unknown. Prints "<total> <held> <connections> <background>".
+BACKGROUND_SOURCES="channel review review_summarizer skilleval skillreview product-analysis product_refine swarm canvas_assist canvas_assist_preview mockup_assist db_assist workflow vault-docs vault-docs-review pr-draft commit-draft insights run_with_otto goal_loop discovery_chat scheduled_task finding assistant design_assist browser_summarize"
+classify_live_sessions() {
+    BACKGROUND_SOURCES="$BACKGROUND_SOURCES" /usr/bin/python3 -c '
+import json, os, sys
+background = set(os.environ["BACKGROUND_SOURCES"].split())
+rows = json.load(sys.stdin)
+live = [r for r in rows if r.get("status") in ("running", "working", "idle")]
+held = conn = bg = 0
+for r in live:
+    meta = r.get("meta") or {}
+    if r.get("kind") == "connection":
+        conn += 1
+    elif meta.get("source") in background:
+        bg += 1
+    elif ((meta.get("work") or {}).get("origin") or "manual") != "manual":
+        bg += 1
+    else:
+        held += 1
+print(len(live), held, conn, bg)
+'
+}
 live_session_counts() {
     local token="${OTTO_API_TOKEN:-${OTTO_MCP_TOKEN:-}}" body
     [[ -n "$token" ]] || return 1
     body="$(curl -fsS --max-time 4 -H "Authorization: Bearer $token" \
         http://127.0.0.1:7700/api/v1/sessions 2>/dev/null)" || return 1
-    printf '%s' "$body" | /usr/bin/python3 -c '
-import json, sys
-rows = json.load(sys.stdin)
-live = [r for r in rows if r.get("status") in ("running", "working", "idle")]
-shells = sum(1 for r in live if r.get("kind") == "shell")
-print(len(live), shells, len(live) - shells)
-' 2>/dev/null
+    printf '%s' "$body" | classify_live_sessions 2>/dev/null
 }
 confirm_session_loss() {
-    local counts total shells agents answer
+    local counts total held conn bg answer
     if counts="$(live_session_counts)" && [[ -n "$counts" ]]; then
-        read -r total shells agents <<< "$counts"
-        echo "==> This deploy restarts the daemon: $total live session(s) visible to this token ($shells shell, $agents agent)."
-        echo "    Shell terminals and workflow/swarm/scheduled agents are terminated; manual agents in PTY holders survive."
-        [[ "$total" -gt 0 ]] || return 0
+        read -r total held conn bg <<< "$counts"
+        echo "==> This deploy restarts the daemon: $total live session(s) visible to this token."
+        echo "    $held user agent/shell session(s) survive in PTY holders;" \
+             "$conn connection terminal(s) (ssh/db/k8s exec) and $bg background/workflow agent(s) are terminated."
+        [[ $((conn + bg)) -gt 0 ]] || return 0
     else
         echo "==> This deploy restarts the daemon (live session count unavailable — no token or daemon down)."
-        echo "    Shell terminals and workflow/swarm/scheduled agents are terminated; manual agents in PTY holders survive."
+        echo "    User agent and shell sessions survive in PTY holders; connection terminals (ssh/db/k8s exec)" \
+             "and background/workflow agents are terminated."
     fi
     [[ "$ASSUME_YES" != 1 && -t 0 ]] || return 0
     read -r -p "    Continue? [y/N] " answer
@@ -492,7 +619,7 @@ sweep_deploy_once_jobs() {
 # Keep the newest KEEP_DEPLOY_LOGS deploy logs of each kind.
 prune_deploy_logs() {
     local keep="${KEEP_DEPLOY_LOGS:-20}" pattern old
-    for pattern in 'deploy-finish-[0-9]*.log' 'deploy-[0-9]*.log'; do
+    for pattern in 'deploy-finish-[0-9]*.log' 'deploy-foreground-[0-9]*.log' 'deploy-[0-9]*.log'; do
         while IFS= read -r old; do
             [[ -n "$old" ]] && rm -f "$old"
         done < <(cd "$1" 2>/dev/null && ls -1t $pattern 2>/dev/null | tail -n +$((keep + 1)) | sed "s|^|$1/|")
