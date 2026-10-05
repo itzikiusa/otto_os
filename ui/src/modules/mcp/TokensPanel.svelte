@@ -77,6 +77,7 @@
   }
 
   async function createToken(): Promise<void> {
+    if (fRestrictTools && fTools.size === 0) return;
     creating = true;
     try {
       const scope: McpScope = {
@@ -277,7 +278,8 @@
         <button
           class="btn primary"
           data-testid="mcp-create-token"
-          disabled={creating}
+          disabled={creating || (fRestrictTools && fTools.size === 0)}
+          title={fRestrictTools && fTools.size === 0 ? 'Pick at least one tool — a token restricted to none can call nothing' : undefined}
           onclick={() => void createToken()}
         >
           {creating ? 'Creating…' : 'Create token'}
