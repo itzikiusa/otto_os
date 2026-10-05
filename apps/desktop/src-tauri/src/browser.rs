@@ -41,8 +41,24 @@ fn label(id: &str) -> String {
     format!("{PREFIX}{id}")
 }
 
+/// Browser tabs are for web pages only: `http(s)` plus `about:blank`. Anything
+/// else (`file:`, `tauri:`, `asset:`, custom app schemes, `javascript:`…) is
+/// refused — a tab must never become a way to read local files or reach an
+/// app-internal / OS URL handler.
+fn allowed_tab_url(u: &tauri::Url) -> bool {
+    match u.scheme() {
+        "http" | "https" => true,
+        "about" => u.as_str() == "about:blank",
+        _ => false,
+    }
+}
+
 fn parse_url(url: &str) -> Result<tauri::Url, String> {
-    url.parse().map_err(|e| format!("bad url '{url}': {e}"))
+    let u: tauri::Url = url.parse().map_err(|e| format!("bad url '{url}': {e}"))?;
+    if !allowed_tab_url(&u) {
+        return Err(format!("unsupported url scheme '{}:' (http/https only)", u.scheme()));
+    }
+    Ok(u)
 }
 
 /// Open (or re-navigate + reposition + show) the webview for tab `id` at the
@@ -87,12 +103,18 @@ pub fn browser_open(
         .transparent(false)
         // Track in-page navigation for the address bar (never calls url()).
         .on_navigation(move |u: &tauri::Url| {
+            // A page can't navigate the tab off the web (file:, app schemes…).
+            if !allowed_tab_url(u) {
+                return false;
+            }
             let _ = app_nav.emit_to(lbl_nav.as_str(), URL_EVENT, (id_nav.clone(), u.to_string()));
             true
         })
         // Deny OS popups; ask the SPA to open a real in-app tab instead.
         .on_new_window(move |u: tauri::Url, _features: NewWindowFeatures| {
-            let _ = app_new.emit_to(win_label.as_str(), NEW_TAB_EVENT, u.to_string());
+            if allowed_tab_url(&u) {
+                let _ = app_new.emit_to(win_label.as_str(), NEW_TAB_EVENT, u.to_string());
+            }
             NewWindowResponse::Deny
         });
     window
@@ -282,6 +304,25 @@ pub fn browser_close_all(app: tauri::AppHandle, window: tauri::Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tabs_accept_only_web_urls() {
+        for ok in ["https://example.com/", "http://127.0.0.1:3000/x", "about:blank"] {
+            assert!(parse_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "file:///etc/passwd",
+            "tauri://localhost/",
+            "asset://localhost/x",
+            "javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "about:srcdoc",
+            "otto://browser-new-tab",
+            "vscode://file/x",
+        ] {
+            assert!(parse_url(bad).is_err(), "{bad}");
+        }
+    }
 
     #[tokio::test]
     async fn eval_resolves_with_the_page_result() {
