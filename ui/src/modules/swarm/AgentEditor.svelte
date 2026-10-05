@@ -71,9 +71,23 @@
     newSkill = '';
   }
 
+  // `at` is wall-clock time in this zone (the scheduler is timezone-aware).
+  // An existing agent keeps its stored zone — pre-timezone schedules have
+  // none and stay UTC; new schedules use the Mac's zone.
+  const browserTz = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
+  })();
+  const schedTz = untrack(() => (initSched ? (initSched.timezone ?? 'UTC') : browserTz));
+
+  // Unchecking "Scheduled runs" sends `schedule: null`, which clears it
+  // server-side; the server also carries the stored run cursor across edits.
   function buildSchedule(): AgentSchedule | null {
     if (!scheduled) return null;
-    const base: AgentSchedule = { cadence, directive, enabled: true };
+    const base: AgentSchedule = { cadence, directive, enabled: true, timezone: schedTz };
     if (cadence === 'interval') base.every_min = everyMin;
     if (cadence === 'daily') base.at = at;
     if (cadence === 'weekly') {
@@ -210,13 +224,13 @@
           <option value="weekly">weekly</option>
         </select>
         {#if cadence === 'interval'}
-          <input class="input small" type="number" min="1" bind:value={everyMin} /> min
+          <input class="input small" type="number" min="5" bind:value={everyMin} aria-label="Every N minutes (minimum 5)" /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
-          <!-- The swarm scheduler matches `at` against UTC (swarm_scheduler.rs),
-               not the Mac's local clock — say so, or 09:00 fires at 09:00 UTC. -->
-          <input class="input small" type="time" bind:value={at} aria-label="Run time (UTC)" title="Time of day in UTC" />
-          <span class="dim" title="The swarm scheduler runs on UTC time">UTC</span>
+          <!-- `at` is matched in the schedule's timezone (swarm_scheduler.rs →
+               cadence): name the zone so 09:00 means what it says. -->
+          <input class="input small" type="time" bind:value={at} aria-label={`Run time (${schedTz})`} title={`Time of day in ${schedTz}`} />
+          <span class="dim" title="The time is interpreted in this timezone">{schedTz}</span>
         {/if}
         {#if cadence === 'weekly'}
           <select class="input small" bind:value={weekday}>

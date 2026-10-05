@@ -454,6 +454,10 @@ impl GoalLoopsRepo {
     /// Move a loop to a terminal/blocked state with a final summary/error.
     /// Clears the wall-clock anchor and sets `finished_at`. The controller adds
     /// the final active window via [`add_elapsed`] before calling this.
+    /// Mark the loop terminal (or Blocked), banking the open active window in
+    /// the same statement: `elapsed_secs += now - run_started_at` only while an
+    /// anchor is still set. A Pause that landed first already banked the window
+    /// and cleared the anchor, so the time is never counted twice.
     pub async fn finalize(
         &self,
         id: &Id,
@@ -464,6 +468,8 @@ impl GoalLoopsRepo {
         let now = self.touch();
         sqlx::query(
             "UPDATE goal_loops SET status = ?, phase = 'done', summary = ?, error = ?,
+             elapsed_secs = elapsed_secs + COALESCE(MAX(0, CAST(ROUND(
+                 (julianday(?) - julianday(run_started_at)) * 86400) AS INTEGER)), 0),
              run_started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?",
         )
         .bind(status.as_str())
@@ -471,11 +477,34 @@ impl GoalLoopsRepo {
         .bind(error)
         .bind(&now)
         .bind(&now)
+        .bind(&now)
         .bind(id)
         .execute(&self.pool)
         .await
         .map_err(dberr("finalize goal loop"))?;
         Ok(())
+    }
+
+    /// Pause a RUNNING loop in one conditional statement: flip the status, bank
+    /// the open window, clear the anchor. A controller that finalized (or
+    /// blocked) the loop first wins — the old read-then-write pause overwrote
+    /// `succeeded`/`blocked` with `paused` and banked the window a second time
+    /// on top of finalize's. Returns whether the pause applied.
+    pub async fn pause_running(&self, id: &Id) -> Result<bool> {
+        let now = self.touch();
+        let res = sqlx::query(
+            "UPDATE goal_loops SET status = 'paused',
+             elapsed_secs = elapsed_secs + COALESCE(MAX(0, CAST(ROUND(
+                 (julianday(?) - julianday(run_started_at)) * 86400) AS INTEGER)), 0),
+             run_started_at = NULL, updated_at = ? WHERE id = ? AND status = 'running'",
+        )
+        .bind(&now)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("pause goal loop"))?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// Move a loop into the Running state (start/resume): re-anchor the
@@ -976,5 +1005,46 @@ mod tests {
         let after = repo.get(&l.id).await.unwrap();
         assert_eq!(after.status, GoalLoopStatus::Paused);
         assert_eq!(after.phase, GoalLoopPhase::Evaluating);
+    }
+
+    /// Finding 5: Pause after the controller finalized must not overwrite the
+    /// terminal status nor bank the window a second time; Pause then finalize
+    /// banks it exactly once.
+    #[tokio::test]
+    async fn pause_never_overwrites_finalize_or_double_banks() {
+        let repo = GoalLoopsRepo::new(mem_pool().await);
+        let started = Utc::now() - chrono::Duration::seconds(100);
+
+        let a = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&a.id, started).await.unwrap();
+        repo.finalize(&a.id, GoalLoopStatus::Succeeded, Some("ok"), None)
+            .await
+            .unwrap();
+        assert!(
+            !repo.pause_running(&a.id).await.unwrap(),
+            "late pause is a no-op"
+        );
+        let a = repo.get(&a.id).await.unwrap();
+        assert_eq!(a.status, GoalLoopStatus::Succeeded);
+        assert!(
+            (99..=102).contains(&a.elapsed_secs),
+            "banked once: {}",
+            a.elapsed_secs
+        );
+        assert!(a.run_started_at.is_none());
+
+        let b = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&b.id, started).await.unwrap();
+        assert!(repo.pause_running(&b.id).await.unwrap());
+        repo.finalize(&b.id, GoalLoopStatus::Blocked, Some("q"), None)
+            .await
+            .unwrap();
+        let b = repo.get(&b.id).await.unwrap();
+        assert_eq!(b.status, GoalLoopStatus::Blocked);
+        assert!(
+            (99..=102).contains(&b.elapsed_secs),
+            "banked once: {}",
+            b.elapsed_secs
+        );
     }
 }

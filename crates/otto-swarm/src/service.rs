@@ -183,7 +183,7 @@ impl SwarmService {
                     specialization: req.specialization,
                     scope_md: req.scope_md,
                     skills: req.skills,
-                    schedule: req.schedule.map(Some),
+                    schedule: req.schedule,
                     cwd_mode: req.cwd_mode.map(Some),
                     avatar: None,
                     status: req.status,

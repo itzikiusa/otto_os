@@ -114,8 +114,10 @@ pub struct CreateAgentReq {
     pub order_idx: Option<i64>,
 }
 
-/// PATCH agent. Present fields are applied; nullable fields are set (not cleared)
-/// — to clear a schedule, send `{"schedule": {...,"enabled": false}}`.
+/// PATCH agent. Present fields are applied; nullable fields are set (not cleared),
+/// except `schedule`: `null` clears it, an absent key leaves it untouched. The
+/// server owns the schedule's `last_run` / `armed_at` cursor keys — an edit
+/// carries the stored ones forward whatever the client sends.
 #[derive(Debug, Deserialize)]
 pub struct UpdateAgentReq {
     #[serde(default)]
@@ -138,8 +140,10 @@ pub struct UpdateAgentReq {
     pub scope_md: Option<String>,
     #[serde(default)]
     pub skills: Option<Value>,
-    #[serde(default)]
-    pub schedule: Option<Value>,
+    /// Tri-state: absent = keep, `null` = clear ("Scheduled runs" unchecked),
+    /// an object = replace (cursor keys carried server-side).
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub schedule: Option<Option<Value>>,
     #[serde(default)]
     pub cwd_mode: Option<String>,
     #[serde(default)]

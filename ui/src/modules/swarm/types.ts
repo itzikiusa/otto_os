@@ -84,7 +84,13 @@ export interface AgentSchedule {
   weekday?: number;
   directive: string;
   enabled: boolean;
+  /** IANA zone `at` is read in (absent = UTC, the pre-timezone behaviour). */
+  timezone?: string;
+  /** Server-owned cursor: when the agent last fired (carried across edits). */
   last_run?: string;
+  /** Server-owned: when the schedule was last (re)armed — created, resumed or
+   *  re-timed. The next fire is computed from max(last_run, armed_at). */
+  armed_at?: string;
 }
 
 export interface SwarmAgent {

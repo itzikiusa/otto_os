@@ -1493,8 +1493,12 @@ async fn run(cfg: Config) -> Result<(), String> {
     tracing::info!("workgraph projector started");
 
     // --- Scheduled Tasks ---
-    // Fires due recurring agent jobs (interval/daily/weekly), reaps interrupted
-    // runs on startup, and bounds concurrency. The engine writes + delivers reports.
+    // Reap runs a previous daemon life left `running` BEFORE the router serves:
+    // reaping inside the spawned supervisor raced the first "Run now" and
+    // marked that fresh run "interrupted by daemon restart" (like the
+    // workflow/swarm recovery above, this is awaited). Then fire due recurring
+    // jobs (interval/daily/weekly/cron) with bounded concurrency.
+    otto_server::scheduled_tasks_scheduler::reap_interrupted(&ctx).await;
     let _scheduled_tasks_handle = otto_server::scheduled_tasks_scheduler::start(ctx.clone());
     tracing::info!("scheduled tasks scheduler started");
 

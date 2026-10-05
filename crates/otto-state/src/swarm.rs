@@ -279,6 +279,56 @@ pub struct AgentPatch {
     pub order_idx: Option<i64>,
 }
 
+/// Keys of an agent schedule that define WHEN it fires. A change to any of
+/// them (or a resume) re-arms the schedule; a directive-only edit does not.
+const AGENT_SCHEDULE_KEYS: [&str; 6] =
+    ["cadence", "every_min", "at", "weekday", "expr", "timezone"];
+
+/// Merge an incoming agent schedule with the stored one. The server owns the
+/// two cursor keys inside `schedule_json`:
+///   * `last_run` — the scheduler's fired cursor. The editor rebuilds the
+///     schedule from its form fields, so a save used to drop it and the agent
+///     fired again on the next tick (duplicate run). Always carried forward.
+///   * `armed_at` — the instant the schedule was (re)armed: created, resumed,
+///     or given a new cadence/timezone. The scheduler uses
+///     `max(last_run, armed_at)` as its cursor, so a new `daily 09:00` saved at
+///     15:00 waits for tomorrow instead of firing at once.
+///
+/// A client-supplied `last_run` / `armed_at` is ignored.
+pub fn merge_agent_schedule(cur: Option<&Value>, incoming: Value, now: &str) -> Value {
+    let mut next = incoming;
+    let Some(obj) = next.as_object_mut() else {
+        return next;
+    };
+    obj.remove("last_run");
+    obj.remove("armed_at");
+    let enabled = |v: &Value| v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let new_enabled = obj.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let rearm = match cur.filter(|c| c.is_object()) {
+        None => true,
+        Some(c) => {
+            (!enabled(c) && new_enabled)
+                || AGENT_SCHEDULE_KEYS.iter().any(|k| c.get(k) != obj.get(*k))
+        }
+    };
+    if let Some(c) = cur {
+        if let Some(l) = c.get("last_run").filter(|v| !v.is_null()) {
+            obj.insert("last_run".into(), l.clone());
+        }
+    }
+    let armed = if rearm {
+        Some(Value::String(now.to_string()))
+    } else {
+        cur.and_then(|c| c.get("armed_at"))
+            .filter(|v| !v.is_null())
+            .cloned()
+    };
+    if let Some(a) = armed {
+        obj.insert("armed_at".into(), a);
+    }
+    next
+}
+
 pub struct NewProject {
     pub swarm_id: Id,
     pub workspace_id: Id,
@@ -900,7 +950,11 @@ impl SwarmRepo {
         .bind(&a.specialization)
         .bind(&a.scope_md)
         .bind(a.skills.to_string())
-        .bind(a.schedule.as_ref().map(|v| v.to_string()))
+        .bind(
+            a.schedule
+                .clone()
+                .map(|v| merge_agent_schedule(None, v, &Utc::now().to_rfc3339()).to_string()),
+        )
         .bind(&a.cwd_mode)
         .bind(&a.avatar)
         .bind(a.order_idx)
@@ -914,7 +968,19 @@ impl SwarmRepo {
     }
 
     pub async fn update_agent(&self, id: &Id, p: AgentPatch) -> Result<SwarmAgent> {
-        let cur = self.get_agent(id).await?;
+        // Read-modify-write under the write lock: the scheduler advances the
+        // schedule cursor concurrently, and the merge must see the stored one.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin agent edit"))?;
+        let row = sqlx::query("SELECT * FROM swarm_agents WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("get agent for edit"))?;
+        let cur = row_to_agent(&row)?;
         let name = p.name.unwrap_or(cur.name);
         let title = p.title.unwrap_or(cur.title);
         let reports_to = p.reports_to.unwrap_or(cur.reports_to);
@@ -925,7 +991,16 @@ impl SwarmRepo {
         let specialization = p.specialization.unwrap_or(cur.specialization);
         let scope_md = p.scope_md.unwrap_or(cur.scope_md);
         let skills = p.skills.unwrap_or(cur.skills).to_string();
-        let schedule = p.schedule.unwrap_or(cur.schedule).map(|v| v.to_string());
+        let schedule = match p.schedule {
+            None => cur.schedule,
+            Some(None) => None,
+            Some(Some(v)) => Some(merge_agent_schedule(
+                cur.schedule.as_ref(),
+                v,
+                &Utc::now().to_rfc3339(),
+            )),
+        }
+        .map(|v| v.to_string());
         let cwd_mode = p.cwd_mode.unwrap_or(cur.cwd_mode);
         let avatar = p.avatar.unwrap_or(cur.avatar);
         let status = p.status.unwrap_or(cur.status);
@@ -954,9 +1029,10 @@ impl SwarmRepo {
         .bind(order_idx)
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("update agent"))?;
+        tx.commit().await.map_err(dberr("commit agent edit"))?;
         self.get_agent(id).await
     }
 
@@ -1435,29 +1511,68 @@ impl SwarmRepo {
     /// behavior; budget-paused and aborted swarms cannot admit new work.
     pub async fn reserve_run(&self, r: NewRun, allow_paused: bool) -> Result<SwarmRun> {
         let id = new_id();
-        let inserted = sqlx::query(
-            "INSERT INTO swarm_runs (id, swarm_id, workspace_id, project_id, task_id, agent_id,
-                kind, trigger, status, attempt, enqueued_at)
-             SELECT ?, s.id, ?, ?, ?, ?, ?, ?, 'queued',
-                (SELECT COUNT(*) FROM swarm_runs WHERE task_id = ?), ?
-             FROM swarms s WHERE s.id = ? AND s.workspace_id = ?
-               AND (s.status = 'active' OR (? AND s.status = 'paused' AND COALESCE(s.pause_reason, '') = ''))
-               AND NOT EXISTS (SELECT 1 FROM swarm_runs WHERE agent_id = ? AND status IN ('queued','running','waiting'))
-               AND (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id AND status IN ('queued','running','waiting'))
-                   < MAX(1, COALESCE(json_extract(s.config_json, '$.max_parallel_sessions'), 4))
-               AND (s.max_total_runs IS NULL OR (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id) < s.max_total_runs)",
-        )
-        .bind(&id).bind(&r.workspace_id).bind(&r.project_id).bind(&r.task_id)
-        .bind(&r.agent_id).bind(&r.kind).bind(&r.trigger).bind(&r.task_id)
-        .bind(fmt(Utc::now())).bind(&r.swarm_id).bind(&r.workspace_id)
-        .bind(allow_paused).bind(&r.agent_id)
-        .execute(&self.pool).await.map_err(dberr("reserve run"))?;
-        if inserted.rows_affected() == 0 {
+        let mut conn = self.pool.acquire().await.map_err(dberr("reserve run"))?;
+        if reserve_run_on(&mut conn, &id, &r, allow_paused).await? == 0 {
             return Err(otto_core::Error::Conflict(
                 "swarm stopped, agent busy, or run capacity exhausted".into(),
             ));
         }
+        drop(conn);
         self.get_run(&id).await
+    }
+
+    /// Admit one scheduled-agent tick: the run reservation and the cursor
+    /// advance commit together, and only while the stored schedule is still
+    /// the one the scheduler judged due (`seen`). Only `$.last_run` is written
+    /// (`json_set`), so a concurrent edit is never reverted to the scheduler's
+    /// stale copy — the old full-row `update_agent` write did exactly that.
+    /// `Ok(None)` = the schedule changed under the tick (it is re-judged next
+    /// scan); `Err(Conflict)` = swarm stopped, agent busy, or no capacity.
+    pub async fn reserve_scheduled_run(
+        &self,
+        r: NewRun,
+        seen: &Value,
+        fired_at: &str,
+    ) -> Result<Option<SwarmRun>> {
+        let id = new_id();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled swarm run"))?;
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT schedule_json FROM swarm_agents WHERE id = ?")
+                .bind(&r.agent_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(dberr("read agent schedule"))?
+                .flatten();
+        let Some(raw) = raw else { return Ok(None) };
+        if serde_json::from_str::<Value>(&raw).ok().as_ref() != Some(seen) {
+            return Ok(None);
+        }
+        if reserve_run_on(&mut tx, &id, &r, false).await? == 0 {
+            return Err(otto_core::Error::Conflict(
+                "swarm stopped, agent busy, or run capacity exhausted".into(),
+            ));
+        }
+        let advanced = sqlx::query(
+            "UPDATE swarm_agents SET schedule_json = json_set(schedule_json, '$.last_run', ?)
+             WHERE id = ? AND schedule_json = ?",
+        )
+        .bind(fired_at)
+        .bind(&r.agent_id)
+        .bind(&raw)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("advance agent schedule"))?;
+        if advanced.rows_affected() == 0 {
+            return Ok(None);
+        }
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled swarm run"))?;
+        self.get_run(&id).await.map(Some)
     }
 
     pub async fn create_run(&self, r: NewRun) -> Result<SwarmRun> {
@@ -1805,15 +1920,35 @@ impl SwarmRepo {
     /// stays.
     pub async fn fail_running(&self, error: &str) -> Result<u64> {
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin swarm recovery"))?;
+        // A turn the restart cut short is not the task's fault: give back the
+        // attempt it was charged at dispatch (floor 0, like a pause refund) in
+        // the same transaction that stops the run, or every daemon restart
+        // walked a task toward its `max_attempts` ceiling.
+        sqlx::query(
+            "UPDATE swarm_tasks SET attempts = MAX(attempts - 1, 0), updated_at = ?
+             WHERE id IN (SELECT task_id FROM swarm_runs
+                          WHERE task_id IS NOT NULL
+                            AND status IN ('queued','running','waiting'))",
+        )
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("refund interrupted swarm attempts"))?;
         let res = sqlx::query(
             "UPDATE swarm_runs SET status = 'stopped', error = ?, finished_at = ?
              WHERE status IN ('queued','running','waiting')",
         )
         .bind(error)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("fail running swarm runs"))?;
+        tx.commit().await.map_err(dberr("commit swarm recovery"))?;
         let reset = sqlx::query(
             "UPDATE swarm_tasks SET status = 'todo', updated_at = ?
              WHERE status = 'in_progress'
@@ -2217,6 +2352,34 @@ impl SwarmRepo {
             .map_err(dberr("delete trigger"))?;
         Ok(())
     }
+}
+
+/// The atomic gated INSERT behind [`SwarmRepo::reserve_run`] (rows affected:
+/// 0 = refused). Shared so a caller can run it inside its own transaction.
+async fn reserve_run_on(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    r: &NewRun,
+    allow_paused: bool,
+) -> Result<u64> {
+    let inserted = sqlx::query(
+            "INSERT INTO swarm_runs (id, swarm_id, workspace_id, project_id, task_id, agent_id,
+                kind, trigger, status, attempt, enqueued_at)
+             SELECT ?, s.id, ?, ?, ?, ?, ?, ?, 'queued',
+                (SELECT COUNT(*) FROM swarm_runs WHERE task_id = ?), ?
+             FROM swarms s WHERE s.id = ? AND s.workspace_id = ?
+               AND (s.status = 'active' OR (? AND s.status = 'paused' AND COALESCE(s.pause_reason, '') = ''))
+               AND NOT EXISTS (SELECT 1 FROM swarm_runs WHERE agent_id = ? AND status IN ('queued','running','waiting'))
+               AND (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id AND status IN ('queued','running','waiting'))
+                   < MAX(1, COALESCE(json_extract(s.config_json, '$.max_parallel_sessions'), 4))
+               AND (s.max_total_runs IS NULL OR (SELECT COUNT(*) FROM swarm_runs WHERE swarm_id = s.id) < s.max_total_runs)",
+        )
+        .bind(id).bind(&r.workspace_id).bind(&r.project_id).bind(&r.task_id)
+        .bind(&r.agent_id).bind(&r.kind).bind(&r.trigger).bind(&r.task_id)
+        .bind(fmt(Utc::now())).bind(&r.swarm_id).bind(&r.workspace_id)
+        .bind(allow_paused).bind(&r.agent_id)
+        .execute(&mut *conn).await.map_err(dberr("reserve run"))?;
+    Ok(inserted.rows_affected())
 }
 
 #[cfg(test)]
@@ -2967,5 +3130,223 @@ mod tests {
                 assert!(!plan.contains("TEMP B-TREE"), "{sql}: {plan}");
             }
         }
+    }
+    fn new_agent(swarm: &Swarm, schedule: Option<Value>) -> NewAgent {
+        NewAgent {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            name: "researcher".into(),
+            title: String::new(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills: json!([]),
+            schedule,
+            cwd_mode: None,
+            avatar: String::new(),
+            order_idx: 0,
+            created_by: new_id(),
+        }
+    }
+
+    async fn active_swarm(pool: &DbPool, repo: &SwarmRepo) -> Swarm {
+        let swarm = repo.create_swarm(new_swarm(&new_id())).await.unwrap();
+        sqlx::query("UPDATE swarms SET status = 'active' WHERE id = ?")
+            .bind(&swarm.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        swarm
+    }
+
+    fn sched_run(swarm: &Swarm, agent: &Id) -> NewRun {
+        NewRun {
+            swarm_id: swarm.id.clone(),
+            workspace_id: swarm.workspace_id.clone(),
+            project_id: None,
+            task_id: None,
+            agent_id: agent.clone(),
+            kind: "scheduled".into(),
+            trigger: "scheduled".into(),
+        }
+    }
+
+    /// Finding 1: `schedule: Some(None)` (the editor's unchecked "Scheduled
+    /// runs" → JSON `null`) clears the schedule; an absent key keeps it.
+    #[tokio::test]
+    async fn agent_schedule_null_clears_absent_keeps() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool.clone());
+        let swarm = active_swarm(&pool, &repo).await;
+        let sched = json!({"cadence":"daily","at":"09:00","enabled":true,"directive":"d"});
+        let agent = repo
+            .create_agent(new_agent(&swarm, Some(sched)))
+            .await
+            .unwrap();
+        assert!(
+            agent.schedule.as_ref().unwrap().get("armed_at").is_some(),
+            "create arms"
+        );
+
+        let kept = repo
+            .update_agent(
+                &agent.id,
+                AgentPatch {
+                    name: Some("x".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept.schedule, agent.schedule);
+
+        let cleared = repo
+            .update_agent(
+                &agent.id,
+                AgentPatch {
+                    schedule: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            cleared.schedule.is_none(),
+            "null must clear the stored schedule"
+        );
+    }
+
+    /// Finding 2: an edit that re-sends the schedule without its cursor (the
+    /// editor rebuilds it from form fields) must keep the stored `last_run`
+    /// (and not re-arm on a directive-only change); a cadence change re-arms.
+    #[tokio::test]
+    async fn agent_edit_carries_schedule_cursor() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool.clone());
+        let swarm = active_swarm(&pool, &repo).await;
+        let sched = json!({"cadence":"interval","every_min":60,"enabled":true,"directive":"a"});
+        let agent = repo
+            .create_agent(new_agent(&swarm, Some(sched)))
+            .await
+            .unwrap();
+        let seen = agent.schedule.clone().unwrap();
+        let fired = "2026-10-05T09:00:00+00:00";
+        let run = repo
+            .reserve_scheduled_run(sched_run(&swarm, &agent.id), &seen, fired)
+            .await
+            .unwrap();
+        assert!(run.is_some());
+        let after_fire = repo.get_agent(&agent.id).await.unwrap().schedule.unwrap();
+        assert_eq!(after_fire["last_run"], json!(fired));
+
+        let edited = json!({"cadence":"interval","every_min":60,"enabled":true,"directive":"b",
+                            "last_run": null});
+        let a2 = repo
+            .update_agent(
+                &agent.id,
+                AgentPatch {
+                    schedule: Some(Some(edited)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let s2 = a2.schedule.unwrap();
+        assert_eq!(
+            s2["last_run"],
+            json!(fired),
+            "edit must not erase the cursor"
+        );
+        assert_eq!(
+            s2["armed_at"], seen["armed_at"],
+            "directive edit must not re-arm"
+        );
+        assert_eq!(s2["directive"], json!("b"));
+
+        let recadenced =
+            json!({"cadence":"interval","every_min":30,"enabled":true,"directive":"b"});
+        let a3 = repo
+            .update_agent(
+                &agent.id,
+                AgentPatch {
+                    schedule: Some(Some(recadenced)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let s3 = a3.schedule.unwrap();
+        assert_eq!(s3["last_run"], json!(fired));
+        assert_ne!(s3["armed_at"], seen["armed_at"], "cadence change re-arms");
+    }
+
+    /// Finding 4: the scheduler's cursor write is a compare-and-set on the
+    /// schedule it judged due — a concurrent edit makes it stand down instead
+    /// of reverting the edit, and no run is reserved.
+    #[tokio::test]
+    async fn scheduled_reservation_never_reverts_a_concurrent_edit() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool.clone());
+        let swarm = active_swarm(&pool, &repo).await;
+        let sched = json!({"cadence":"interval","every_min":60,"enabled":true,"directive":"a"});
+        let agent = repo
+            .create_agent(new_agent(&swarm, Some(sched)))
+            .await
+            .unwrap();
+        let seen = agent.schedule.clone().unwrap();
+        // The user edits between the scheduler's read and its admission.
+        let edited = json!({"cadence":"interval","every_min":60,"enabled":true,"directive":"new"});
+        repo.update_agent(
+            &agent.id,
+            AgentPatch {
+                schedule: Some(Some(edited)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run = repo
+            .reserve_scheduled_run(
+                sched_run(&swarm, &agent.id),
+                &seen,
+                "2026-10-05T09:00:00+00:00",
+            )
+            .await
+            .unwrap();
+        assert!(run.is_none(), "stale tick must stand down");
+        let now = repo.get_agent(&agent.id).await.unwrap().schedule.unwrap();
+        assert_eq!(now["directive"], json!("new"));
+        assert!(now.get("last_run").is_none());
+        assert_eq!(repo.active_run_count(&swarm.id).await.unwrap(), 0);
+    }
+
+    /// Finding 9: a daemon restart refunds the attempt its interrupted run was
+    /// charged (floor 0) while stopping the run.
+    #[tokio::test]
+    async fn fail_running_refunds_interrupted_attempt() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool.clone());
+        let swarm = active_swarm(&pool, &repo).await;
+        let task = repo
+            .create_task(new_task(&swarm.id, "in_progress"))
+            .await
+            .unwrap();
+        let idle = repo.create_task(new_task(&swarm.id, "todo")).await.unwrap();
+        assert_eq!(repo.bump_task_attempt(&task.id).await.unwrap(), 1);
+        assert_eq!(repo.bump_task_attempt(&idle.id).await.unwrap(), 1);
+        let mut r = new_run(&swarm.id);
+        r.task_id = Some(task.id.clone());
+        repo.create_run(r).await.unwrap();
+        assert_eq!(repo.fail_running("restart").await.unwrap(), 1);
+        assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 0);
+        assert_eq!(
+            repo.get_task(&idle.id).await.unwrap().attempts,
+            1,
+            "no run, no refund"
+        );
     }
 }
