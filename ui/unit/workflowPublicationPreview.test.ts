@@ -47,7 +47,7 @@ function approvalFixture(productGate = true) {
     approvalPreviewLoading: false, approvalPreviewError: '', approvalPreviewVersion: 'displayed-body-v1',
     approvalPreview: productGate ? preview : null,
     api: { post: async (path: string, body: Record<string, unknown>) => { requests.push({path,body}); } },
-    toasts: { success() {}, error() {} }, refetchRun: async () => {},
+    toastError() {}, toasts: { success() {}, error() {} }, refetchRun: async () => {},
   });
   return { state, requests };
 }

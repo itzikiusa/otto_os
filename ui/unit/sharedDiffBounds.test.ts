@@ -1,3 +1,4 @@
+import { plural } from '../src/lib/plural.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -18,6 +19,7 @@ function diff(before: string, after: string, contextLines: number | undefined = 
     constructor(length: number) { allocations.push(length); super(length); }
   }
   const context: Record<string, any> = {
+    plural,
     $props: () => ({ before, after, mode: 'split', contextLines }),
     $state: (value: unknown) => value,
     $derived: Object.assign((value: unknown) => value, { by: (fn: () => unknown) => fn() }),
@@ -30,7 +32,8 @@ function diff(before: string, after: string, contextLines: number | undefined = 
   const downloads: Blob[] = [];
   Object.assign(context, { Blob, URL: { createObjectURL: (blob: Blob) => { downloads.push(blob); return 'blob:fixture'; }, revokeObjectURL() {} },
     document: { createElement: () => ({ href: '', download: '', click() {} }) }, setTimeout: (fn: () => void) => fn() });
-  const code = `${script}\nglobalThis.result = { ${names.join(',')}, ${functionNames.join(',')}, before, after,
+  const executable = file.statements.filter(node => !ts.isImportDeclaration(node)).map(node => node.getText(file)).join('\n');
+  const code = `${executable}\nglobalThis.result = { ${names.join(',')}, ${functionNames.join(',')}, before, after,
     renderAgain: () => [${renderExpressions.join(',')}], currentPage: () => pageIndex };`;
   runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context, { timeout: 5000 });
   return { ...context.result, allocations, downloads, rendered: renderedExpressions.map(name => context.result[name]) };

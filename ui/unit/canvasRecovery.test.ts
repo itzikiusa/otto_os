@@ -11,7 +11,7 @@ for (const name of ['Excalidraw', 'Mermaid', 'D2']) {
     const canvas = { currentId: 'scene-A', assist: async () => { throw new Error('Provider unavailable'); }, pushConvo() {} };
     const editor = componentFunctions(editorPath(name), ['generate'], {
       canvas, sceneId: 'scene-A', saveContext: undefined, generating: false, userAdjusted: false,
-      toastError() {}, toasts: { info() {}, success() {} },
+      toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
     });
     const panel = componentFunctions(panelPath, ['send'], {
       canvas, editor, busy: false, draft: '  Draw the login flow\nwith retries  ', toastError() {},
@@ -28,7 +28,7 @@ for (const name of ['Excalidraw', 'Mermaid', 'D2']) {
       pushConvo() {}, ingestDoc() { applied++; }, refreshSession: async () => {} };
     const editor = componentFunctions(editorPath(name), ['generate'], {
       canvas, sceneId: 'scene-A', saveContext: 'visit-A', generating: false, userAdjusted: false, sketch: false,
-      toastError() {}, toasts: { info() {}, success() {} },
+      toastAgentEdit() {}, toastError() {}, toasts: { info() {}, success() {} },
     });
     assert.equal(await editor.generate('Draw a flow'), false);
     assert.equal(applied, 0);

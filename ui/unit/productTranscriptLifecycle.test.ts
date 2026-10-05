@@ -1,3 +1,4 @@
+import * as labels from '../src/lib/labels.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -27,7 +28,7 @@ function fixture(count: number) {
     },
   };
   const { product } = loadSource(new URL('../src/lib/stores/product.svelte.ts', import.meta.url), {
-    '../api/client': { api }, '../loadError': { loadErrorText: String },
+    '../labels': labels, '../api/client': { api }, '../loadError': { loadErrorText: String },
     './workspace.svelte': { ws: { currentId: 'workspace' } }, '../lazyModule': { announceModule() {} },
   }, { Blob });
   product.selectedId = 'A';

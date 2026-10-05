@@ -1,3 +1,4 @@
+import { plural, pluralNoun } from '../src/lib/plural.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -20,7 +21,7 @@ function component(path: string, state: Record<string, any>) {
       d.initializer && [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NumericLiteral].includes(d.initializer.kind),
     );
   }).map(node => node.getText(file)).join('\n');
-  const context: Record<string, any> = { Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
+  const context: Record<string, any> = { plural, pluralNoun, toastError: (message: string, cause: unknown) => { state.toasts?.error(message, cause); }, Error, DOMException, AbortController, onDestroy: (callback: () => void) => lifecycle.push(callback), destroy: () => { for (const callback of lifecycle) callback(); }, ws: { currentId: 'workspace-A' }, $state: { snapshot: (v: unknown) => structuredClone(v) }, ...state };
   runInNewContext(ts.transpileModule(functions, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText, context);
   return context;
 }

@@ -1,3 +1,4 @@
+import * as labels from '../src/lib/labels.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
@@ -28,7 +29,7 @@ function fixture(bodySize = 256 * 1024, count = 100) {
     return response;
   } };
   const { product } = loadSource(new URL('../src/lib/stores/product.svelte.ts', import.meta.url), {
-    '../api/client': { api }, '../loadError': { loadErrorText: String },
+    '../labels': labels, '../api/client': { api }, '../loadError': { loadErrorText: String },
     './workspace.svelte': { ws: { currentId: 'workspace' } }, '../lazyModule': { announceModule() {} },
   });
   product.selectedId = 'A'; product.detail = { story: { id: 'A', source_kind: 'draft' } };
