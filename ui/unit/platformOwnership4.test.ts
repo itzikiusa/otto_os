@@ -242,3 +242,29 @@ test('AccountPicker provider change and unmount reject obsolete lookup publicati
   requests[2].reject(new Error('after unmount')); await tick();
   assert.equal(c.error, ''); assert.equal(c.listError, ''); assert.equal(c.label, 'Keep this label');
 });
+
+
+for (const staleFails of [false, true]) test(`personal agent list A-B-A keeps newer rows after stale ${staleFails ? 'failure' : 'success'}`, async () => {
+  const replies = [deferred<any[]>(), deferred<any[]>(), deferred<any[]>()]; let call = 0;
+  const schedules: string[] = [];
+  const store = personal({list: () => replies[call++].promise, schedules: async (id: string) => { schedules.push(id); return []; }});
+  const first = store.loadAgents('A'), middle = store.loadAgents('B'), latest = store.loadAgents('A');
+  replies[2].resolve([{id: 'new-A'}]); await latest;
+  if (staleFails) replies[0].reject(new Error('obsolete list')); else replies[0].resolve([{id: 'old-A'}]);
+  replies[1].resolve([{id: 'B'}]); await Promise.all([first, middle]);
+  assert.deepEqual(plain(store.agents), [{id: 'new-A'}]);
+  assert.equal(store.agentsError, null);
+  assert.equal(store.loadingAgents, false);
+  assert.deepEqual(schedules, ['new-A'], 'obsolete list completions must not trigger duplicate schedule fanout');
+});
+
+test('personal agent old completion does not clear a newer loading state', async () => {
+  const old = deferred<any[]>(), next = deferred<any[]>(); let call = 0;
+  const store = personal({list: () => ++call === 1 ? old.promise : next.promise, schedules: async () => []});
+  const first = store.loadAgents('A'), second = store.loadAgents('B');
+  old.resolve([]); await first;
+  assert.equal(store.loadingAgents, true);
+  next.resolve([{id: 'new-B'}]); await second;
+  assert.equal(store.loadingAgents, false);
+  assert.deepEqual(plain(store.agents), [{id: 'new-B'}]);
+});

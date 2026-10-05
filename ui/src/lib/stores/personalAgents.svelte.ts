@@ -55,6 +55,7 @@ class PersonalAgentsStore {
   private wsId = '';
   /** Workspace each list was last loaded for (a late reply for another is dropped). */
   private agentsWs = '';
+  private agentsRequest = 0;
   private roomsWs = '';
 
   agent(id: string): PersonalAgent | undefined {
@@ -71,6 +72,8 @@ class PersonalAgentsStore {
   }
 
   async loadAgents(workspaceId: string): Promise<void> {
+    const request = ++this.agentsRequest;
+    const current = () => request === this.agentsRequest && this.agentsWs === workspaceId;
     if (this.agentsWs !== workspaceId) this.agents = [];
     this.wsId = workspaceId;
     this.agentsWs = workspaceId;
@@ -78,12 +81,15 @@ class PersonalAgentsStore {
     this.agentsError = null;
     try {
       const list = await personalAgentsApi.list(workspaceId);
-      if (this.agentsWs === workspaceId) this.agents = list;
+      if (!current()) return;
+      this.agents = list;
     } catch (e) {
-      if (this.agentsWs === workspaceId) this.agentsError = loadErrorText(e);
+      if (!current()) return;
+      this.agentsError = loadErrorText(e);
     } finally {
-      this.loadingAgents = false;
+      if (current()) this.loadingAgents = false;
     }
+    if (!current()) return;
     // Schedules feed the cards' next-run + the Schedules tab; best-effort.
     await Promise.all(this.agents.map((a) => this.loadSchedules(a.id)));
   }
