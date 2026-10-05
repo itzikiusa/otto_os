@@ -130,7 +130,7 @@ a:hover {
   opacity: 0.8;
 }
 .btn:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .btn.primary {
@@ -193,7 +193,7 @@ a:hover {
   color: var(--text);
 }
 .icon-btn:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
   background: transparent;
   color: var(--text-dim);
@@ -357,7 +357,7 @@ button.chip[aria-selected='true'] {
   background: var(--accent-soft);
 }
 button.chip:disabled {
-  opacity: 0.5;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 button.chip:focus-visible {
@@ -456,7 +456,7 @@ button.chip:focus-visible {
   box-shadow: var(--shadow-card);
 }
 .segmented > button:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 
@@ -478,7 +478,7 @@ button.chip:focus-visible {
   transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .pill-toggle:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .pill-toggle.on {

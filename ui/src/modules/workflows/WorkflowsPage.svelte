@@ -4144,7 +4144,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
@@ -4675,7 +4675,7 @@
     gap: 8px;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .resumed-banner {
     display: flex;

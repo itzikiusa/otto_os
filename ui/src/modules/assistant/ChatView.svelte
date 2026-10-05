@@ -228,7 +228,7 @@
     overscroll-behavior: contain;
   }
   .col {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 18px 20px 12px;
     display: flex;
     flex-direction: column;

@@ -348,7 +348,7 @@
     line-height: 1.5;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .tools {
     display: flex;

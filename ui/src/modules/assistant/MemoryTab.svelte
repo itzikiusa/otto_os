@@ -318,7 +318,7 @@
 
 <style>
   .memory {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 18px 20px 32px;
     display: flex;
     flex-direction: column;
