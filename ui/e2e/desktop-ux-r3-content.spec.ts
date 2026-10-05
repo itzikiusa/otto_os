@@ -59,7 +59,10 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
   await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}-entry.png`});
   await page.locator('.snip-textentry').fill('Readable annotation');await page.keyboard.press('Control+Enter');await expect(page.locator('.snip-editor')).toHaveAttribute('data-count','1');
   // The input may move inward, but the exported annotation must also be legible.
-  const ink = await drawing.evaluate((canvas: HTMLCanvasElement) => {
+  // `data-count` flips on commit; the canvas repaints on the next animation
+  // frame, so poll the pixels instead of reading them once (a cold first run
+  // read the pre-commit frame: no ink at all).
+  const measureInk = () => drawing.evaluate((canvas: HTMLCanvasElement) => {
     const pixels = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
     let left = canvas.width, right = 0, top = canvas.height, bottom = 0;
     for (let i = 0; i < pixels.length; i += 4) if (pixels[i] > 150 && pixels[i + 1] < 130 && pixels[i + 2] < 130 && pixels[i + 3] > 100) {
@@ -68,8 +71,8 @@ for(const [theme,scheme,width,rtl] of [['native','light',1440,false],['native','
     }
     return { width: right - left, height: bottom - top };
   });
-  expect(ink.width, 'Committed edge text must remain readable in the image').toBeGreaterThan(100);
-  expect(ink.height).toBeGreaterThan(10);
+  await expect.poll(async () => (await measureInk()).width, { message: 'Committed edge text must remain readable in the image' }).toBeGreaterThan(100);
+  expect((await measureInk()).height).toBeGreaterThan(10);
   await expect(page.locator('.snip-copied')).toHaveText('Copied');await page.screenshot({path:`/tmp/otto-ux-r3-content-snip-${theme}-${scheme}.png`});
  });
 }
