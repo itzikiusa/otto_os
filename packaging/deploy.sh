@@ -363,7 +363,7 @@ rollback_install() {
         echo "    ROLLED BACK: previous app relaunched; previous daemon verified (pid $ROLLBACK_PID, healthy)"
     else
         echo "    ROLLED BACK: previous app restored, but the previous daemon was NOT verified" \
-             "(still the failed build's pid, a different binary, or unhealthy) — check ~/Library/Logs/Otto/ and packaging/README.md#recovery" >&2
+             "(still the failed build's pid, a different binary, or unhealthy) — check ~/Library/Logs/Otto/ and packaging/README.md#recovery-rolling-back-a-bad-deploy" >&2
     fi
     echo "    note: migrations the new daemon applied stay applied (older builds boot on the newer additive schema);" \
          "pre-migration DB snapshots are in ~/Library/Application Support/Otto/backups/"

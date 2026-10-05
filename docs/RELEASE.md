@@ -147,6 +147,15 @@ open /Applications/Otto.app
 - [ ] Open a session (claude/codex/shell), a git repo, and a DB connection — no
       crashes; no permission prompts that should have been auto-trusted.
 
+### Rolling back
+
+A bad local deploy rolls back automatically when verification fails. To roll
+back by hand, follow
+[packaging/README.md — Recovery](../packaging/README.md#recovery-rolling-back-a-bad-deploy). Roll back
+the app and the daemon together: the app's supervisor reinstalls its bundled
+`ottod` at every launch, so restoring `bin/ottod.prev` alone does not stick
+while a newer app is installed.
+
 ## Walkthrough videos (separate from the DMG)
 
 The in-app Walkthroughs page streams its MP4s from the rolling GitHub release

@@ -167,6 +167,61 @@ curl -s localhost:7700/api/v1/health      # {"ok":true}
 ```
 
 
+## Recovery: rolling back a bad deploy
+
+A deploy leaves these recovery artifacts:
+
+| Artifact | What it is | Written by |
+|---|---|---|
+| `/Applications/.Otto.app.previous` | The app the last **verified** deploy replaced | `deploy.sh` (`keep_previous_app`) |
+| `/Applications/.Otto.app.old.<pid>` | The previous app, only while a deploy is mid-swap. A leftover means a finish job was killed between the two renames; the next deploy puts a lone copy back automatically, and `--status` names it | `deploy.sh` (`swap_app`) |
+| `~/Library/Application Support/Otto/bin/ottod.prev` | The daemon binary the app's supervisor last **replaced** (only on a real byte change, never on a slow-boot reinstall) | the app supervisor |
+| `~/Library/Application Support/Otto/backups/otto.db.pre-<version>-<UTC stamp>` | A `VACUUM INTO` copy of the state DB taken just before pending migrations ran (newest 3 kept, owner-only `0600`) | `ottod` at boot |
+
+`deploy.sh` rolls back automatically when verification fails: it restores the
+previous app, relaunches it, and reports success only once a **different**
+daemon process, running the restored bundle's sidecar, answers `/health`
+(`ROLLED BACK: … previous daemon verified`). Otherwise it prints
+`previous daemon was NOT verified` — follow the manual steps below.
+
+**The schema stays migrated.** Migrations are append-only and additive, and
+an older `ottod` boots on a newer schema (it logs a WARN listing the newer
+versions and leaves them in place). Restore a DB snapshot only when the new
+build damaged data, not as part of an ordinary rollback: it discards
+everything written since the snapshot.
+
+**The app and the daemon roll back together.** At every launch the app's
+supervisor installs its bundled sidecar whenever the bytes differ from
+`bin/ottod`, so restoring `ottod.prev` alone is silently undone the next time
+the (newer) app starts. Roll back the app, and the daemon follows.
+
+Manual rollback:
+
+```bash
+# 1. Quit the app, then stop the daemon (launchd would respawn it otherwise).
+osascript -e 'quit app "Otto"'
+launchctl bootout "gui/$(id -u)/com.otto.daemon"
+
+# 2. Restore the previous app (or the .Otto.app.old.<pid> copy --status names).
+mv /Applications/Otto.app "/Applications/.Otto.app.failed.$(date +%s)"
+mv /Applications/.Otto.app.previous /Applications/Otto.app
+
+# 3. ONLY if the new build damaged data: restore the newest snapshot, and
+#    remove the WAL/SHM files so SQLite can't replay the newer log onto it.
+D="$HOME/Library/Application Support/Otto"
+ls -1t "$D/backups"/otto.db.pre-*            # newest first
+cp "$D/otto.db" "$D/otto.db.broken.$(date +%s)"
+cp "$D/backups/otto.db.pre-<version>-<stamp>" "$D/otto.db"
+rm -f "$D/otto.db-wal" "$D/otto.db-shm"
+chmod 600 "$D/otto.db"
+
+# 4. Launch the restored app: its supervisor reinstalls ITS ottod and
+#    bootstraps the launchd job. Verify:
+open /Applications/Otto.app
+packaging/deploy.sh --status
+curl -s localhost:7700/api/v1/health      # {"ok":true}
+```
+
 ## Staged local deployment from an Otto session
 
 Deploy from a clean, committed checkout. To finish the build and signing before
