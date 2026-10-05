@@ -444,7 +444,12 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
 | POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
 
-`ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at}`.
+`ShareInfo` = `{id, session_id, role, token_prefix, label?, created_at, expires_at, dormant}`.
+`dormant: true` marks an email-OTP share whose window lapsed but which the link
+holder can still revive with `POST /share/extend` — both share lists include it
+(so it can be revoked) until its **7-day absolute lifetime** (`created_at + 7d`),
+past which extend answers 403 and the row drops out. Extend is also capped at
+3 per share per hour (429) and never clears the IP throttle.
 `role` is `"viewer"` (read-only) or `"editor"` (read + input); never `"admin"`.
 TTL is FIXED (never slid); `expires_at = created_at + ttl_secs`.
 

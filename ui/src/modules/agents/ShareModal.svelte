@@ -411,7 +411,12 @@
               </span>
             </div>
             <div class="sm-share-meta">
-              <span class="sm-share-expiry">{fmtExpiry(share.expires_at)}</span>
+              <span
+                class="sm-share-expiry"
+                title={share.dormant
+                  ? 'Window lapsed — the link holder can still request a new code until it is revoked'
+                  : undefined}>{share.dormant ? 'dormant (revivable)' : fmtExpiry(share.expires_at)}</span
+              >
               <button
                 class="btn sm-revoke-btn"
                 disabled={revoking[share.id]}
