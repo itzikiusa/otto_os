@@ -3680,11 +3680,20 @@ mod tests {
         let forged = "SELECT throwIf(1, 'Code: 164. Cannot modify ''readonly'' setting')";
         assert!(conn.post(forged.into()).await.is_err());
         assert!(!conn.readonly_refused.load(Ordering::Relaxed));
-        // The next request still asks for readonly=2.
+        // The next request still asks for readonly=2 (the fake refuses every
+        // readonly=2 request, so it is followed by another probe — the
+        // request itself is what must carry the barrier).
         let _ = conn.post("SELECT 1".into()).await;
         let seen = seen.lock().unwrap();
         assert!(
-            seen.last().is_some_and(|(t, _)| t.contains("readonly=2")),
+            seen.iter()
+                .any(|(t, b)| b == "SELECT 1" && t.contains("readonly=2")),
+            "{seen:?}"
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|(t, b)| b == "SELECT 1" && !t.contains("readonly=2")),
             "{seen:?}"
         );
         assert!(!seen
