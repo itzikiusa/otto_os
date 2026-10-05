@@ -31,7 +31,7 @@ test('Canvas preserves a failed pending draft across scene switches',async({page
 test('Reader new page clears old pending mark and nested links leave one tab stop',async({page})=>{
  const {ctx,base}=await apiCtx();const w=await seedWorkspace(ctx,base);await ctx.dispose();await page.addInitScript(id=>localStorage.setItem('otto_workspace',id),w);
  await page.context().route('**/browser/page?url=**',route=>{const second=route.request().url().includes('second');return route.fulfill({json:{url:`https://example.invalid/${second?'second':'first'}`,title:second?'Second reader':'First reader',markdown:'Paragraph with [nested link](https://example.invalid/nested).\n\n> Nested **quote** with [link](https://example.invalid/quote).',engine:'fixture',degraded:false}});});
- await openPage(page,'browser');const url=page.getByPlaceholder('Enter URL');await url.fill('https://example.invalid/first');await url.press('Enter');await expect(page.locator('.reader h1')).toHaveText('First reader');
+ await openPage(page,'browser');const url=page.getByPlaceholder('e.g. https://example.com');await url.fill('https://example.invalid/first');await url.press('Enter');await expect(page.locator('.reader h1')).toHaveText('First reader');
  await page.getByRole('button',{name:'Mark passage',exact:true}).click();
  await expect(page.locator('.reader article a').first()).toHaveAttribute('tabindex','-1');
  await page.locator('.reader article p').first().click();await page.getByRole('textbox',{name:'Note for this mark'}).fill('Old source draft');
