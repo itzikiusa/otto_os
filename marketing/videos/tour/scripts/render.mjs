@@ -1,11 +1,14 @@
-// Render the tour film and everything the app needs to play it.
+// Render the tour film and everything the app needs to play it — as review
+// candidates in out/. It never edits the app's active manifest; after the
+// assets are uploaded and verified, scripts/activate.mjs does that.
 //
-//   node scripts/render.mjs                 # full film → out/otto-tour.mp4 (+ poster, vtt, film.json)
-//   node scripts/render.mjs --stills 110,420 # preview frames → .cache/frames/f<N>.jpg
-//   node scripts/render.mjs --crf 24         # override the H.264 quality (default 23)
+//   node scripts/render.mjs                          # full film → out/otto-tour-<edition>.mp4 (+ poster, vtt, film.candidate.json)
+//   node scripts/render.mjs --stills 240,600,1800    # preview frames → .cache/frames/f<N>.jpg (half scale)
+//   node scripts/render.mjs --stills 240 --scale 1   # full-size preview
+//   node scripts/render.mjs --crf 24                 # override the H.264 quality (default 28)
 //
 // Steps: bundle once → renderMedia (concurrency ≤ 4) → ffmpeg two-pass loudnorm
-// to −16 LUFS (video stream copied) → poster still → captions + manifest.
+// to −16 LUFS / −1.5 dBTP (video stream copied) → poster still → captions + manifest.
 import { bundle } from '@remotion/bundler';
 import { renderMedia, renderStill, selectComposition } from '@remotion/renderer';
 import { execFileSync } from 'node:child_process';
@@ -14,7 +17,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const tour = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const repo = resolve(tour, '../../..');
 const FF = process.env.FFMPEG ?? 'ffmpeg';
 const argv = process.argv.slice(2);
 const opt = (f) => {
@@ -22,9 +24,13 @@ const opt = (f) => {
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const CONCURRENCY = Math.min(4, Number(opt('concurrency') ?? 4));
-const CRF = Number(opt('crf') ?? 30); // ≤ 30 MB for ~3 min of mostly-static UI
+const CRF = Number(opt('crf') ?? 28);
 const out = join(tour, 'out');
 mkdirSync(out, { recursive: true });
+const timing = JSON.parse(readFileSync(join(tour, 'src/generated/timing.json'), 'utf8'));
+const name = `otto-tour-${timing.edition}`;
+
+if (!existsSync(join(tour, 'public/audio/music.wav'))) throw new Error('public/audio/music.wav is missing: run node scripts/soundtrack.mjs first');
 
 console.log('[render] bundling…');
 const serveUrl = await bundle({ entryPoint: join(tour, 'src/index.ts'), publicDir: join(tour, 'public') });
@@ -34,15 +40,16 @@ const stills = opt('stills');
 if (stills) {
   const dir = join(tour, '.cache/frames');
   mkdirSync(dir, { recursive: true });
+  const scale = Number(opt('scale') ?? 0.5);
   for (const f of stills.split(',').map(Number)) {
-    await renderStill({ serveUrl, composition, frame: f, output: join(dir, `f${f}.jpg`), imageFormat: 'jpeg', jpegQuality: 88 });
+    await renderStill({ serveUrl, composition, frame: f, output: join(dir, `f${f}.jpg`), imageFormat: 'jpeg', jpegQuality: 85, scale });
     console.log(`[render] still ${f}`);
   }
   process.exit(0);
 }
 
-const raw = join(out, 'otto-tour.raw.mp4');
-const final = join(out, 'otto-tour-instrumental-20260925.mp4');
+const raw = join(out, `${name}.raw.mp4`);
+const final = join(out, `${name}.mp4`);
 let last = -1;
 await renderMedia({
   serveUrl,
@@ -64,7 +71,7 @@ await renderMedia({
   },
 });
 
-// Loudness: measure, then normalize to −16 LUFS / −1.5 dBTP (two-pass).
+// Loudness: measure, then normalize to −16 LUFS / −1.5 dBTP (two-pass, linear).
 console.log('[render] loudness pass…');
 let m = null;
 try {
@@ -82,20 +89,16 @@ rmSync(raw, { force: true });
 
 // Poster.
 const posterComp = await selectComposition({ serveUrl, id: 'Poster' });
-await renderStill({ serveUrl, composition: posterComp, output: join(out, 'otto-tour-poster.jpg'), imageFormat: 'jpeg', jpegQuality: 90 });
+await renderStill({ serveUrl, composition: posterComp, output: join(out, `${name}-poster.jpg`), imageFormat: 'jpeg', jpegQuality: 90 });
 
-// Captions + manifest for the Help page.
-const timing = JSON.parse(readFileSync(join(tour, 'src/generated/timing.json'), 'utf8'));
-const vtt = join(out, 'otto-tour.vtt');
-const walk = join(repo, 'ui/src/lib/walkthroughs');
-// The instrumental edition can reuse its versioned captions without invoking TTS.
-if (existsSync(vtt)) copyFileSync(vtt, join(walk, 'otto-tour.vtt'));
-else copyFileSync(join(walk, 'otto-tour.vtt'), vtt);
+// Captions + the candidate manifest for the Help page (same contract as film.json).
+copyFileSync(join(tour, `src/generated/${name}.vtt`), join(out, `${name}.vtt`));
+const duration = Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', final], { encoding: 'utf8' }));
 const film = {
-  file: 'otto-tour-instrumental-20260925.mp4',
-  poster: 'otto-tour-poster.jpg',
-  captions: 'otto-tour.vtt',
-  duration: Math.round(timing.totalSeconds * 100) / 100,
+  file: `${name}.mp4`,
+  poster: `${name}-poster.jpg`,
+  captions: `${name}.vtt`,
+  duration: Math.round(duration * 100) / 100,
   chapters: timing.chapters.map((c) => ({
     id: c.id,
     section: c.section,
@@ -104,7 +107,7 @@ const film = {
     duration: Math.round((c.frames / timing.fps) * 100) / 100,
   })),
 };
-writeFileSync(join(walk, 'film.json'), JSON.stringify(film, null, 2) + '\n');
+writeFileSync(join(out, 'film.candidate.json'), JSON.stringify(film, null, 2) + '\n');
 
 const mb = (statSync(final).size / 1048576).toFixed(1);
-console.log(`[render] ${final} — ${timing.totalSeconds.toFixed(1)}s, ${mb} MB; poster, vtt and ui/src/lib/walkthroughs/film.json written`);
+console.log(`[render] ${final} — ${duration.toFixed(2)}s, ${mb} MB; poster, captions and out/film.candidate.json written (active manifest unchanged)`);

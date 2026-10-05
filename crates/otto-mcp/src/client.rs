@@ -290,7 +290,7 @@ fn init_request() -> Value {
     json!({
         "jsonrpc":"2.0","id":1,"method":"initialize",
         "params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},
-                  "clientInfo":{"name":"otto-control-plane","version":"0.1.0"}}
+                  "clientInfo":{"name":"otto-control-plane","version":env!("CARGO_PKG_VERSION")}}
     })
 }
 

@@ -8,12 +8,13 @@ import { record } from './recorder.mjs';
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function open(c, route, { settle = 2500, ...ctxOpts } = {}) {
+async function open(c, route, { settle = 2500, ready = '.shell', ...ctxOpts } = {}) {
   const context = await c.newContext(ctxOpts);
   const page = await context.newPage();
   page.on('pageerror', (e) => console.log(`  [pageerror] ${e.message.slice(0, 160)}`));
   await page.goto(`${UI}/#/${route}`);
-  await page.locator('.shell').first().waitFor({ timeout: 60_000 }).catch(() => {});
+  // #/tray and #/bar render without the app shell; they pass their own `ready`.
+  await page.locator(ready).first().waitFor({ timeout: 60_000 }).catch(() => {});
   await wait(settle);
   return { context, page };
 }
@@ -111,12 +112,12 @@ export const SHOTS = {
   // The desktop-app surfaces rendered from their own routes.
   desktop: async (c) => {
     {
-      const { context, page } = await open(c, 'tray', { settle: 3500, viewport: { width: 540, height: 390 } });
+      const { context, page } = await open(c, 'tray', { settle: 3500, ready: 'body', viewport: { width: 540, height: 390 } });
       await still(page, c, 'desktop-tray');
       await context.close();
     }
     {
-      const { context, page } = await open(c, 'bar', { settle: 3500, viewport: { width: 1000, height: 420 } });
+      const { context, page } = await open(c, 'bar', { settle: 3500, ready: '[data-testid="floating-bar"]', viewport: { width: 1000, height: 420 } });
       await page.keyboard.press('Meta+k').catch(() => {});
       const input = page.locator('input').first();
       await input.click().catch(() => {});
@@ -175,7 +176,7 @@ export const SHOTS = {
   'mission-control': async (c) => {
     const { context, page } = await open(c, 'mission-control', { settle: 3500 });
     await still(page, c, 'mission-control');
-    if (await tryClick(page.getByRole('button', { name: /Graph/ }), 'graph toggle')) {
+    if (await tryClick(page.getByRole('tab', { name: 'Graph' }), 'graph toggle')) {
       await wait(2500);
       await still(page, c, 'mission-graph');
     }
@@ -349,8 +350,9 @@ export const SHOTS = {
   },
   browser: async (c) => {
     const { context, page } = await open(c, 'browser', { settle: 3000 });
-    const url = page.getByPlaceholder(/Enter URL/);
-    await url.click().catch(() => {});
+    // Browser v2 (the default): the address field is labelled "Address".
+    const url = page.getByRole('textbox', { name: 'Address' });
+    await url.click({ timeout: 15_000 });
     await page.keyboard.type('https://www.rust-lang.org/learn');
     await page.keyboard.press('Enter');
     await wait(7000);

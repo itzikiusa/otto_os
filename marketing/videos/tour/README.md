@@ -1,231 +1,221 @@
 # Otto product tour film
 
-One music-led film (~3 min, 1920×1080, 30 fps, H.264 + AAC) that walks through
+One music-led film (2:20, 1920×1080, 30 fps, H.264 + AAC) that walks through
 every main area of the app, chaptered by sidebar section. The Help →
 Walkthroughs page plays it from `ui/src/lib/walkthroughs/film.json`.
 
+The edit is cut to its own score. The score runs at 120 BPM, so a beat is
+exactly 15 frames and a bar is 60. Every chapter starts on a bar line, and every
+cut, camera move and callout lands on a beat. Chapter starts get a fill and a
+crash in the music. Section starts get a riser and an impact, and the visuals
+answer with a soft light ring and a kinetic title.
+
 Everything here is self-contained: its own `package.json`, footage captured from
-the **current** UI, an original instrumental soundtrack synthesized from code,
-and instructional captions. No sampled commercial music is used.
+the **current** UI, an original score synthesized from code, and short captions.
+No samples or commercial music are used.
 
 ```
-script/chapters.json     narration text + chapter → sidebar section map (edit this first)
-scripts/capture.mjs      isolated daemon + demo DBs + seed + Playwright → public/capture/
-scripts/lib/seed.mjs     the fictional "Acme Storefront" demo data (API calls only)
-scripts/lib/shots.mjs    the shot list (routes, clicks, stills, flow clips)
-scripts/voice.mjs        say → ffmpeg, per-sentence timing → src/generated/timing.json + out/otto-tour.vtt
-scripts/soundtrack.mjs   synthesized music bed + UI sound accents → public/audio/
-scripts/render.mjs       Remotion render → loudnorm → poster → film.json
-src/                     the Remotion compositions (Tour, Poster) and scene specs (src/scenes.ts)
+script/chapters.json      the edit plan: chapters → Help sections, length in bars, music sections, captions (edit this first)
+scripts/timing.mjs        chapters.json → src/generated/timing.json + otto-tour-<edition>.vtt (bar grid)
+scripts/soundtrack.mjs    the score + UI accents, arranged from timing.json → public/audio/
+scripts/capture.mjs       isolated daemon + demo DBs + seed + Playwright → public/capture/
+scripts/capture-rooms.mjs genuine two-person Rooms footage → public/capture/rooms/
+scripts/lib/shots.mjs     the shot list (routes, clicks, stills, flow clips)
+scripts/render.mjs        Remotion render → loudnorm → poster → out/film.candidate.json
+scripts/validate.mjs      checks the candidate (media, chapters, captions, loudness, Rooms provenance)
+scripts/activate.mjs      points the app at the candidate (only after the assets are published)
+src/                      the Remotion compositions (Tour, Poster) and the shot specs (src/scenes.ts)
 ```
+
+## The score
+
+`node scripts/soundtrack.mjs` writes `public/audio/music.wav`. The score is
+electronic pop in D major at 120 BPM. It uses an uplifting vi–IV–I–V loop (Bm G D A)
+and is arranged from the edit's music sections in `chapters.json`:
+
+| Section | Chapters | What plays |
+|---|---|---|
+| Intro build | Meet Otto | The filter opens on a supersaw pad, the pluck arp comes in, then the kick from bar 3, a snare roll, a riser and half a beat of silence |
+| Drop / chorus | Home → Run with Otto | Four-on-the-floor kick, clap with a short room, swung 16th hats with open off-beats, pumping 8th bass, side-chained pad, arp and the lead hook. The last 4 bars are a post-chorus. |
+| Verse | Swarm, Workflows | Lighter hats, a syncopated bass, a darker pad and a prominent arp, with the hook's figure answered on the pluck |
+| Chorus | Git → Design Hall | Riser and impact in, then the hook again |
+| Verse | Database, Connections | As the first verse |
+| Breakdown | Insights | Drums out, a resonant pad sweep, the hook on the pluck, then a 2-bar riser and snare roll |
+| Final chorus | Rooms | Full energy, with the hook harmonised a third below |
+| Outro | Everywhere | vi–IV–V resolves to I under the logo lockup, followed by a tonic hit and the hook's tag. The track then rings out. |
+
+Sound design (all in code):
+
+- polyBLEP saws, which suppress aliasing
+- a 7-voice supersaw pad through a resonant state-variable filter
+- a side-chain pump from the kick
+- a filtered-saw pluck arp with a dotted-8th ping-pong delay
+- a detuned saw lead whose 3+3+2 hook recurs in every chorus
+- a layered kick (pitched body, click and saturation, so it reads on laptop speakers) and 808-style metallic hats
+- a Freeverb hall on a high-passed send
+
+The master high-passes at 34 Hz. No fundamental sits below 43 Hz. The mix keeps
+its weight in the mids, where the hook, arp and bass harmonics sit. A two-pass
+**linear** loudnorm to −16 LUFS keeps the section contrast: the intro builds
+from about −25 to −20 dB RMS, the choruses sit near −17, the verses near −19 and
+the breakdown near −24. The UI accents (`sfx-tick` and the rest) are tuned to
+the key.
+
+To check the score objectively without listening:
+
+```bash
+ffmpeg -i public/audio/music.wav -lavfi showspectrumpic=s=1400x600:scale=log:fscale=log:legend=1 /tmp/spec.png
+ffmpeg -hide_banner -nostats -i public/audio/music.wav -af ebur128=peak=true -f null - 2>&1 | tail -12
+```
+
+## The picture
+
+- **Opening (4 bars).** "Your agents. Your repos. Your data. Your
+  infrastructure." lands one word every two beats, each with its screen. On
+  bar 3 the screens rush into a wall and "One home." appears. On bar 4 the logo
+  slams in. The camera then zooms through the logo onto the drop.
+- **Chapters.** On the downbeat, a kinetic title (the group plus the words
+  rising from masks) holds for about 1.5 beats. It then docks into a header
+  band above the window. Its second line follows the shot on screen. A
+  progress rail, top right, fills chapter by chapter in the sidebar group
+  colours.
+- **Shots** are 2–8 beats long. Cuts rotate through whip-pan (with motion
+  blur), push and diagonal wipe. Chapter changes zoom through to the next
+  window. The camera springs to each key: zoom to a callout, then a slow drift.
+  Callouts pulse with the beat. Highlight rings glow around a region.
+- **Backdrop.** Drifting light fields in the chapter's group colours, taken
+  from `tokens.css` (`--accent` and `--cat-*`). It has a soft ring on each
+  chapter downbeat and a gentle on-beat lift in the choruses. There is no
+  flashing.
+- **Montages.** Design Hall's studios and Connections are quick cuts, one
+  every two beats, each with a glass name card.
+- **Rooms** is the final chorus. It uses five genuine room clips: start and
+  invite, live screen share, annotation, terminal hand-over, and the recap
+  draft.
+- **Outro.** Snip, Slack & Telegram and the phone view land on successive beats.
+  The logo, the line and "Download Otto for macOS" arrive on the tonic hit.
 
 ## Prerequisites
 
-- ffmpeg on PATH (or set `FFMPEG`); macOS `say` only for optional timing regeneration.
+- ffmpeg on PATH (or set `FFMPEG`).
 - A daemon binary built from this tree: `cargo build -p ottod` (or point
   `OTTO_E2E_BIN` at an existing one).
 - The production UI build: `cd ui && npm run build` (→ `ui/dist`).
 - Docker (optional) for the demo databases. The capture uses local images
   `mariadb:11.8.4`, `mongo:8.2` and `redpandadata/redpanda:v24.2.7`. It skips
   any image that isn't present, and the chapters that need it look emptier.
-- `npm install` in this folder. This installs Remotion and Playwright 1.61,
-  which reuses the Chromium in `~/Library/Caches/ms-playwright`.
+- `npm install` in this folder. This installs Remotion, which downloads its own
+  headless Chrome on first render. It also installs Playwright 1.63, which reuses
+  the Chromium in `~/Library/Caches/ms-playwright`.
+- **Rooms only.** A local whisper.cpp binary and multilingual model, macOS `say`,
+  the UI's installed Playwright, and `CODEX_HOME` pointing to a signed-in Codex
+  subscription. Alternatively, reuse an existing genuine capture (see below).
 
-## 1. Capture footage
+## Producing the film: one heavy sequence
+
+Run these one at a time; each is CPU-bound. `nice` keeps the Mac responsive.
 
 ```bash
+cd marketing/videos/tour
+
+# 1. Footage from the current UI (isolated daemon on its own port; never touches :7700).
 OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7811 OTTO_E2E_PW_PORT=5211 \
   nice -n 10 node scripts/capture.mjs
+node scripts/contact.mjs public/capture            # optional: contact sheets in .cache/cs/ to eyeball
+
+# 2. Rooms footage: re-capture, OR reuse a previous genuine capture verbatim.
+OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
+OTTO_TOUR_WHISPER=/path/to/whisper-cli OTTO_TOUR_WHISPER_MODEL=/path/to/ggml-small.bin \
+  nice -n 10 node scripts/capture-rooms.mjs
+#   (or: cp -R <checkout>/marketing/videos/tour/public/capture/rooms public/capture/)
+
+# 3. Timeline and score (seconds, light).
+node scripts/timing.mjs
+nice -n 10 node scripts/soundtrack.mjs
+
+# 4. Check a few frames, then render (concurrency ≤ 4).
+nice -n 10 node scripts/render.mjs --stills 120,262,900,3500,4060
+nice -n 10 node scripts/render.mjs --concurrency 3
+
+# 5. Verify the candidate.
+node scripts/validate.mjs
 ```
 
-What the capture sets up:
+`render.mjs` writes these to `out/`:
 
-- **Isolated daemon.** It spawns its own `ottod` on a temp data dir with a
-  **fake `HOME`**. Agent CLIs (`claude`, `codex`, …) are replaced on `PATH` by a
-  scripted stand-in (`scripts/lib/agent-sim.sh`). Secrets are file-backed and
-  there is no Keychain access. It never touches the real daemon on `:7700`,
-  `~/Library/Application Support/Otto`, `~/.claude`, `~/.codex` or `~/.hermes`.
-- **Demo databases.** Throwaway MariaDB, MongoDB and Redpanda containers with
-  fictional data (`scripts/demo-db/`).
-- **Seed data.** Everything is seeded through the daemon API:
-  - workspace and git repos, agent sessions
-  - Assistant threads, memory and tasks
-  - DB connections and dashboards, SSH hosts, Kafka topics
-  - placeholder AWS and Kubernetes registrations
-  - API requests, an MCP server, a swarm, a goal loop, workflows, scheduled
-    tasks, personal agents, Run with Otto runs
-  - an AI review and findings, a proof pack, a product story, a Vault bundle,
-    Design Hall artifacts, a skill review, and channel settings (disabled)
-  - fake transcripts for History and Usage, and insights reports
-- **Driving the UI.** Playwright drives the production build at 1600×900 @2x
-  with one worker:
-  - stills are `public/capture/*.jpg`
-  - flow clips (⌘K, agents, git, query builder) are recorded through the
-    DevTools screencast as `*.mp4`
+- `otto-tour-<edition>.mp4`, with a two-pass loudnorm to −16 LUFS and −1.5 dBTP
+  and the video stream copied
+- `otto-tour-<edition>-poster.jpg`
+- `otto-tour-<edition>.vtt`
+- `film.candidate.json`
 
-When it finishes, the daemon, the static server, Chromium and the containers
-are all stopped.
+The active app manifest is **not** touched.
 
-To iterate on one shot without reseeding each time:
+To iterate on one capture without reseeding each time:
 
 ```bash
 node scripts/capture.mjs --serve          # bring up + seed, keep running
-node scripts/capture.mjs --attach --only db-builder,git
-node scripts/contact.mjs public/capture   # 4-up contact sheets in .cache/cs/ for review
+node scripts/capture.mjs --attach --only db-builder,browser
 ```
 
-## 2. Timing and captions
+`npx remotion studio src/index.ts` previews the edit interactively.
 
-The existing timeline and captions are retained in the instrumental edition.
-The optional script below regenerates sentence timing; its voice files are not
-included in the final composition.
+## Publish (after the owner approves)
+
+`out/`, `public/capture/` and `public/audio/` are git-ignored. The mp4, poster
+and captions are published as assets of the `walkthroughs` GitHub release:
 
 ```bash
-node scripts/voice.mjs            # VOICE=Samantha RATE=182 by default
+gh release upload walkthroughs out/otto-tour-<edition>.mp4 out/otto-tour-<edition>-poster.jpg out/otto-tour-<edition>.vtt
+node scripts/activate.mjs   # → ui/src/lib/walkthroughs/film.json + the bundled .vtt; commit both
 ```
 
-Each sentence of `script/chapters.json` is synthesized separately, trimmed, and
-joined with a short breath. Each chapter is then EQ'd, compressed and
-normalized to −16 LUFS.
-
-Outputs:
-
-- `public/audio/vo-<chapter>.wav`
-- `src/generated/timing.json`, the edit timeline (commit this)
-- `out/otto-tour.vtt`, WebVTT captions from the real sentence timings
-
-Chapter length is the narration plus a short lead-in and tail, so rewriting a
-line re-times the whole film automatically.
-
-## 3. Soundtrack
-
-```bash
-node scripts/soundtrack.mjs       # sized to timing.json
-```
-
-This produces an original 124 BPM instrumental with a punchy kick and clap,
-syncopated bass, bright chord stabs and a light arpeggio. Short phrase breaks
-and a final fade keep the score moving without vocals or commercial samples. It is normalized to −20 LUFS. It also writes the UI accents
-(`sfx-click|whoosh|tick|riser|impact.wav`).
-
-The instrumental composition keeps the score present throughout, with gentle
-opening and closing fades. Captions are enabled by default in the app.
-
-## 4. Render
-
-```bash
-nice -n 10 node scripts/render.mjs              # concurrency 4, CRF 23
-node scripts/render.mjs --stills 300,1200,2400  # preview frames → .cache/frames/
-npx remotion studio src/index.ts                # interactive preview
-```
-
-The render produces:
-
-- `out/otto-tour-instrumental-20260925.mp4`, with a two-pass loudnorm to −16 LUFS integrated and
-  −1.5 dBTP, and the video stream copied
-- `out/otto-tour-poster.jpg`
-- `ui/src/lib/walkthroughs/film.json`, the manifest the app reads (chapters
-  with `section` ids)
-- `ui/src/lib/walkthroughs/otto-tour.vtt`, a copy of the captions. It is
-  committed because release assets are served without CORS headers.
-
-## 5. Publish
-
-The mp4 and poster are **not** committed; `out/`, `public/capture/` and
-`public/audio/` are git-ignored. They are published as assets of the
-`walkthroughs` GitHub release, and only after the owner approves:
-
-```bash
-gh release upload walkthroughs out/otto-tour-instrumental-20260925.mp4 out/otto-tour-poster.jpg out/otto-tour.vtt --clobber
-```
+Captions are bundled next to `film.json` because release assets are served
+without CORS headers. `TourFilm` resolves the VTT by the manifest's `captions`
+basename.
 
 ## Editing the film
 
-- **Words.** Edit `script/chapters.json`, then run `voice.mjs`,
-  `soundtrack.mjs` and `render.mjs`.
-- **What's on screen.** Edit `src/scenes.ts`. Each chapter is a list of shots:
-  - a `screen` shot has camera keys (`{t, x, y, z}` in normalized footage
-    coordinates), callouts and chips
-  - a `montage` shot is a quick beat of several stills
-  - a `custom` shot is used for the desktop-app and phone beats
+- **Timing.** Change a chapter's `bars` in `script/chapters.json`, then run
+  `timing.mjs`. Next, make that chapter's shots in `src/scenes.ts` add up to
+  `bars × 4` beats; `layout()` refuses a mismatch. Finally re-run
+  `soundtrack.mjs`, which re-arranges itself to the new chapter starts.
+- **Music sections.** The `music` key on a chapter starts a section there:
+  `intro`, `chorus`, `verse`, `breakdown`, `final` or `outro`. Keep sections a
+  multiple of 4 bars so the chord loop lands.
+- **Captions.** These are the `captions` lines in `chapters.json`. They are
+  split evenly across the chapter, or by `captionBeats`.
+- **What's on screen.** Edit `src/scenes.ts`. Each shot has a length in
+  `beats` and may have any of these:
+  - camera keys `{b, x, y, z}`, in beats and normalized footage coordinates
+  - `callouts` and `highlights` from beat `b` to `until`
+  - a header `label`
+  - a montage `card`
+  - an optional `transition` (`whip`, `push` or `wipe`)
 - **After a UI change.** Re-run the capture, then render.
 
-## Instrumental update without re-rendering footage
+## Rooms footage: what is genuine
 
-`node scripts/instrumental.mjs /path/to/otto-tour.mp4` replaces only the audio
-stream of an existing tour with the current original score. It retains the
-video bytes, duration and chapter/caption timing. Run `soundtrack.mjs` first.
-The output has a new filename, so the previous narrated asset remains available.
+The Rooms capture drives two independent browser participants through the
+production UI and an isolated daemon. No room endpoints, WebSocket events,
+transcripts or summary responses are mocked.
 
-## Rooms edition: genuine collaboration footage
+- **Synthetic media inputs.** The fictional Acme screen content is live canvas
+  video, carried by the real WebRTC pipeline. Locally synthesized speech is the
+  microphone input, recognized by real local whisper.cpp.
+- **Real execution.** A real shell runs the demonstrated regression test.
+- **Real summary.** The recap draft comes from the actual signed-in Codex
+  subscription, after the UI confirmation, with the production read-only,
+  tool-disabled invocation.
+- **Credentials.** None are copied into artifacts or printed.
 
-The Rooms edition preserves the released film and inserts a new chapter before
-“Everywhere”. Its original manifest and captions are snapshotted under
-`script/baseline-20260925/`, so rerendering after publication never inserts Rooms
-a second time. It replaces the entire score with the new 124 BPM composition.
-The capture drives two independent browser participants through the production
-UI and an isolated daemon. No room endpoints, WebSocket events, transcripts or
-summary responses are mocked.
+`validate.mjs` requires the capture's `recap-evidence.json`, with a ready draft,
+and `provenance.json`, with no runtime errors. `script/rooms-validation.md`
+records the 2026-09-28 capture.
 
-The fictional Acme screen content is supplied as live canvas video; its tracks
-pass through the real WebRTC pipeline. Locally synthesized Samantha speech is
-supplied as microphone input; the production recorder sends it to real local
-whisper.cpp. A real shell executes the demonstrated regression test. The
-summary uses the actual signed-in Codex subscription, after the UI confirmation,
-with the production read-only, tool-disabled recap invocation. Only fictional
-demonstration evidence is sent. Existing credentials are neither copied into
-artifacts nor printed. The fake HOME keeps real agent history and projects out
-of the capture.
+**Limits shown honestly.**
 
-Prerequisites: the current `ui/dist`, a daemon containing Rooms, `ffmpeg`,
-macOS `say`, the UI's installed Playwright, an existing local whisper.cpp binary
-and multilingual model, and `CODEX_HOME` pointing to subscription sign-in.
-The script validates those prerequisites and fails instead of fabricating output.
-
-```bash
-# Download the existing published movie once (read-only).
-gh release download walkthroughs -R itzikiusa/otto_os \
-  -p otto-tour-instrumental-20260925.mp4 -D out
-
-# One capture at a time. Ports must be free. No real microphone/desktop is read.
-OTTO_E2E_BIN=/path/to/ottod OTTO_E2E_PORT=7831 OTTO_E2E_PW_PORT=5231 \
-OTTO_TOUR_WHISPER=/path/to/whisper-cli \
-OTTO_TOUR_WHISPER_MODEL=/path/to/ggml-small.bin \
-  node scripts/capture-rooms.mjs
-
-# Two encoder threads, one filter thread; creates a candidate, never publishes.
-node scripts/rooms-edition.mjs out/otto-tour-instrumental-20260925.mp4
-node scripts/validate-rooms.mjs
-```
-
-The eleven captured beats cover start/invite, admission and chat, recap consent,
-voice and live screen sharing, granted highlighting/drawing, multiple presenters
-and pinning, requested terminal control, host takeover, the actual transcript,
-saved screen samples, and the actual Codex draft with decisions and action items.
-The caption strip is added in the edit; app content is unaltered. Short shots
-hold their final real frame long enough to read the instructions.
-
-`public/capture/rooms/` contains the clips, inspection frames, real recap evidence,
-shot list and provenance. `out/` contains the review MP4, candidate manifest,
-updated WebVTT captions, poster and timeline. All are ignored generated outputs.
-`film.candidate.json` is deliberately separate from the active application
-manifest: the app must keep its working published movie until the new assets
-are uploaded and verified.
-
-Limits shown honestly: this is browser room footage, not a recording of native
-macOS window chrome; takeover controls the shared session terminal, not arbitrary
-OS apps; the product does not imply webcam video or multiple simultaneous sources
-from one presenter. Screen recap images are periodic samples, not continuous
-video. Recognition failures remain visible coverage gaps in the genuine archive
-and draft. Physical microphone/display acceptance is a separate product check.
-
-Publication is a separate reviewed step: upload the candidate MP4, poster and
-`otto-tour-rooms.vtt` to the existing `walkthroughs` release, verify the assets
-are downloadable, then copy `out/film.candidate.json` to
-`ui/src/lib/walkthroughs/film.json` and copy `out/otto-tour-rooms.vtt` to the
-bundled `ui/src/lib/walkthroughs/otto-tour-rooms.vtt`, matching the candidate
-manifest’s `captions` basename. `TourFilm` resolves the locally globbed caption
-file by that basename because release asset responses lack CORS headers.
-Verify playback, the Rooms chapter jump, and the shifted outro captions before
-shipping the UI. None of the capture/render scripts performs these publication
-or active-manifest changes automatically.
+- This is browser room footage, not native macOS window chrome.
+- Takeover controls the shared session terminal, not arbitrary OS apps.
+- The product does not imply webcam video.
+- Screen recap images are periodic samples, not continuous video.
