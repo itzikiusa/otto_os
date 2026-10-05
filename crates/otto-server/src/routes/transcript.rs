@@ -1584,7 +1584,10 @@ mod tests {
             archived: true,
             meta: serde_json::json!({}),
         };
-        assert!(history_resumable(&s), "exited + archived with a provider id");
+        assert!(
+            history_resumable(&s),
+            "exited + archived with a provider id"
+        );
         s.archived = false;
         assert!(history_resumable(&s), "exited with a provider id");
         s.provider_session_id = None;

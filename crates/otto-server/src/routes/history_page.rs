@@ -10,10 +10,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use otto_core::{
-    domain::WorkspaceRole,
-    Error, Id,
-};
+use otto_core::{domain::WorkspaceRole, Error, Id};
 use otto_state::history_page::{self, Candidate, PageRequest};
 use otto_transcript::{HistoryEntry, Provider};
 use serde::{Deserialize, Serialize};

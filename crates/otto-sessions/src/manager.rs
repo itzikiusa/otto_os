@@ -6201,7 +6201,10 @@ mod tests {
         assert!(msg.contains("no longer exists"), "{msg}");
         assert!(!gone.exists(), "the refusal must not recreate the folder");
         assert!(missing_cwd_refusal_in(&mk("ws", dir.path()), &data).is_none());
-        assert!(missing_cwd_refusal_in(&mk(otto_core::domain::SCRATCH_WORKSPACE_ID, &gone), &data).is_none());
+        assert!(
+            missing_cwd_refusal_in(&mk(otto_core::domain::SCRATCH_WORKSPACE_ID, &gone), &data)
+                .is_none()
+        );
         assert!(missing_cwd_refusal_in(&mk("ws", &data.join("db-assist/x")), &data).is_none());
     }
     use otto_state::NewSession;
