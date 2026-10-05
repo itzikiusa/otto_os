@@ -303,7 +303,7 @@ fn ssh_config_from_conn(conn: &Connection) -> Result<SshTunnelConfig, String> {
             return Err(format!(
                 "SSH connection '{}' has an invalid port",
                 conn.name
-            ))
+            ));
         }
     };
     let identity_file = p
@@ -1494,7 +1494,7 @@ pub async fn oauth2_token(
         other => {
             return Err(ApiError(Error::Invalid(format!(
                 "unsupported grant: {other}"
-            ))))
+            ))));
         }
     }
     if !req.scope.is_empty() {
@@ -2000,7 +2000,7 @@ pub async fn run_saved_request(
             body: exec.body.clone(),
         };
         let svars = string_vars(&vars);
-        let out = api_scripts::run_pre_request(pre_code, &script_req, &svars);
+        let out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
         if let Some(error) = out.error {
             let error =
                 api_secrets::scrub_str(&error, &env_blob.values().cloned().collect::<Vec<_>>());
@@ -2182,7 +2182,12 @@ pub async fn run_saved_request(
             headers: response_headers,
             body_text: response.body.clone(),
         };
-        let out = api_scripts::run_post_response(post_code, &script_response, &string_vars(&vars));
+        let out = api_scripts::run_post_response_isolated(
+            post_code,
+            &script_response,
+            &string_vars(&vars),
+        )
+        .await;
         merge_string_vars(&mut vars, &out.vars);
         tests.extend(
             out.tests
@@ -3600,7 +3605,7 @@ pub(crate) async fn run_step(
             body: exec.body.clone(),
         };
         let mut svars = string_vars(vars);
-        let out = api_scripts::run_pre_request(pre_code, &script_req, &svars);
+        let out = api_scripts::run_pre_request_isolated(pre_code, &script_req, &svars).await;
         if let Some(err) = out.error {
             return ApiRunStepResult {
                 request_id,
@@ -3761,7 +3766,8 @@ pub(crate) async fn run_step(
                     body_text: resp.body.clone(),
                 };
                 let svars = string_vars(vars);
-                let out = api_scripts::run_post_response(post_code, &script_resp, &svars);
+                let out =
+                    api_scripts::run_post_response_isolated(post_code, &script_resp, &svars).await;
                 merge_string_vars(vars, &out.vars);
                 for t in &out.tests {
                     if !t.passed {

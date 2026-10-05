@@ -3,14 +3,30 @@
 //! whose surface is ported verbatim from the interactive runner
 //! (`ui/src/lib/api/scripts.ts`), so a script behaves the same whether the
 //! user clicks Send or an automation replays the stored request. Like the UI
-//! runtime this is a convenience engine, not a security sandbox — but boa's
-//! loop/recursion limits keep a runaway script from hanging the daemon.
+//! runtime this is a convenience engine, not a security sandbox.
+//!
+//! boa's loop limit is PER LOOP (nested loops multiply it) and it has no
+//! wall-clock or heap bound, so a script from an imported collection could pin
+//! a thread forever or abort the process on allocation failure. The daemon
+//! therefore runs every script through [`run_pre_request_isolated`] /
+//! [`run_post_response_isolated`]: in a child `ottod apiclient-script`
+//! process (registered with [`set_script_host`]) that is killed after
+//! [`SCRIPT_TIMEOUT`], so a runaway or OOM script costs one child, never the
+//! daemon. At most [`MAX_CONCURRENT_SCRIPTS`] run at once. Without a
+//! registered host (unit tests, other binaries) the script runs in-process on
+//! the blocking pool — never on an async worker.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use boa_engine::{Context, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 
 /// Mutable request view a pre-request script works on. `headers` keeps the
 /// wire `[{key,value,enabled}]` shape so mutations round-trip losslessly.
@@ -34,7 +50,7 @@ pub struct ScriptResponse {
 }
 
 /// One `pm.test(...)` result.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScriptTest {
     pub name: String,
     pub passed: bool,
@@ -44,7 +60,8 @@ pub struct ScriptTest {
 
 /// Outcome of one script run. `error` is a script-level failure (syntax or
 /// uncaught throw); individual test failures land in `tests` instead.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScriptOutcome {
     pub logs: Vec<String>,
     pub error: Option<String>,
@@ -244,10 +261,219 @@ pub fn run_post_response(
     run("post", code, &ctx)
 }
 
+/// argv[1] that makes `ottod` run ONE script from stdin ([`child_main`]).
+pub const CHILD_ARG: &str = "apiclient-script";
+/// Wall clock a script may run before its child process is killed.
+pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Scripts running at once, daemon-wide (each may burn a core until killed).
+pub const MAX_CONCURRENT_SCRIPTS: usize = 4;
+/// Cap on a child's stdout (the serialized outcome).
+const CHILD_OUTPUT_CAP: u64 = 32 * 1024 * 1024;
+
+static SCRIPT_HOST: OnceLock<PathBuf> = OnceLock::new();
+static SCRIPT_SLOTS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_SCRIPTS);
+
+/// Register the executable that runs scripts out of process (`ottod` itself,
+/// dispatching [`CHILD_ARG`] to [`child_main`]). First call wins.
+pub fn set_script_host(exe: PathBuf) {
+    let _ = SCRIPT_HOST.set(exe);
+}
+
+/// One script job, as sent to the child on stdin.
+#[derive(Serialize, Deserialize)]
+struct ChildJob {
+    kind: String,
+    code: String,
+    ctx: Value,
+}
+
+/// Entry point of `ottod apiclient-script`: read one [`ChildJob`] from stdin,
+/// run it, write the [`ScriptOutcome`] JSON to stdout. Returns success.
+pub fn child_main() -> bool {
+    use std::io::{Read, Write};
+    let mut input = Vec::new();
+    if std::io::stdin().read_to_end(&mut input).is_err() {
+        return false;
+    }
+    let Ok(job) = serde_json::from_slice::<ChildJob>(&input) else {
+        return false;
+    };
+    let outcome = run(&job.kind, &job.code, &job.ctx);
+    let Ok(out) = serde_json::to_vec(&outcome) else {
+        return false;
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&out).is_ok() && stdout.flush().is_ok()
+}
+
+fn failed(error: String) -> ScriptOutcome {
+    ScriptOutcome {
+        error: Some(error),
+        ..Default::default()
+    }
+}
+
+/// Run `job` in `program args…`, killing it after `timeout`. Any failure
+/// (spawn, crash, OOM abort, timeout, garbage output) is a script error.
+async fn run_in_child(
+    program: &OsStr,
+    args: &[&str],
+    job: &ChildJob,
+    timeout: Duration,
+) -> ScriptOutcome {
+    let payload = match serde_json::to_vec(job) {
+        Ok(p) => p,
+        Err(e) => return failed(format!("script encode failed: {e}")),
+    };
+    let mut child = match tokio::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return failed(format!("script runner failed to start: {e}")),
+    };
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return failed("script runner has no stdio".into());
+    };
+    let exchange = async {
+        // A child that dies early closes stdin; its exit status says why.
+        let _ = stdin.write_all(&payload).await;
+        drop(stdin);
+        let mut out = Vec::new();
+        stdout.take(CHILD_OUTPUT_CAP).read_to_end(&mut out).await?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, out))
+    };
+    let result = tokio::time::timeout(timeout, exchange).await;
+    match result {
+        Ok(Ok((status, out))) if status.success() => serde_json::from_slice(&out)
+            .unwrap_or_else(|e| failed(format!("script outcome parse failed: {e}"))),
+        Ok(Ok((status, _))) => failed(format!(
+            "script runner failed ({status}) — the script may have exhausted memory"
+        )),
+        Ok(Err(e)) => failed(format!("script runner I/O failed: {e}")),
+        Err(_) => {
+            let _ = child.start_kill();
+            failed(format!(
+                "script timed out after {} s and was stopped",
+                timeout.as_secs()
+            ))
+        }
+    }
+}
+
+async fn run_isolated(kind: &str, code: &str, ctx: Value) -> ScriptOutcome {
+    let Ok(_slot) = SCRIPT_SLOTS.acquire().await else {
+        return failed("script runner unavailable".into());
+    };
+    let job = ChildJob {
+        kind: kind.to_string(),
+        code: code.to_string(),
+        ctx,
+    };
+    match SCRIPT_HOST.get() {
+        Some(exe) => run_in_child(exe.as_os_str(), &[CHILD_ARG], &job, SCRIPT_TIMEOUT).await,
+        None => tokio::task::spawn_blocking(move || run(&job.kind, &job.code, &job.ctx))
+            .await
+            .unwrap_or_else(|e| failed(format!("script task failed: {e}"))),
+    }
+}
+
+/// [`run_pre_request`], isolated (out of process when a host is registered,
+/// bounded by [`SCRIPT_TIMEOUT`]) — what the daemon calls.
+pub async fn run_pre_request_isolated(
+    code: &str,
+    request: &ScriptRequest,
+    vars: &BTreeMap<String, String>,
+) -> ScriptOutcome {
+    if code.trim().is_empty() {
+        return run_pre_request(code, request, vars);
+    }
+    let ctx = serde_json::json!({ "vars": vars, "req": request });
+    run_isolated("pre", code, ctx).await
+}
+
+/// [`run_post_response`], isolated like [`run_pre_request_isolated`].
+pub async fn run_post_response_isolated(
+    code: &str,
+    response: &ScriptResponse,
+    vars: &BTreeMap<String, String>,
+) -> ScriptOutcome {
+    if code.trim().is_empty() {
+        return run_post_response(code, response, vars);
+    }
+    let ctx = serde_json::json!({ "vars": vars, "resp": response });
+    run_isolated("post", code, ctx).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn job() -> ChildJob {
+        ChildJob {
+            kind: "pre".into(),
+            code: "for (;;) { for (;;) {} }".into(),
+            ctx: json!({}),
+        }
+    }
+
+    /// S6-04: a child that never finishes is killed at the timeout and the
+    /// caller gets a script error — the daemon is never pinned.
+    #[tokio::test]
+    async fn hung_script_child_is_killed_at_the_timeout() {
+        let started = std::time::Instant::now();
+        let out = run_in_child(
+            OsStr::new("/bin/sleep"),
+            &["30"],
+            &job(),
+            Duration::from_millis(300),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(out.error.unwrap().contains("timed out"));
+    }
+
+    /// S6-04: a child that dies (e.g. aborts on allocation failure) is a
+    /// script error, not a daemon crash.
+    #[tokio::test]
+    async fn crashed_script_child_is_a_script_error() {
+        let out = run_in_child(
+            OsStr::new("/usr/bin/false"),
+            &[],
+            &job(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(out.error.unwrap().contains("script runner failed"));
+    }
+
+    /// The child protocol round-trips: what `child_main` writes is what the
+    /// parent parses.
+    #[test]
+    fn outcome_round_trips_over_the_child_protocol() {
+        let out = run_pre_request("pm.environment.set('a', 'b');", &req(), &BTreeMap::new());
+        let wire = serde_json::to_vec(&out).unwrap();
+        let back: ScriptOutcome = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(back.vars.get("a").unwrap(), "b");
+        assert_eq!(back.request.unwrap().url, req().url);
+    }
+
+    /// Without a registered host the isolated runner still works (blocking
+    /// pool), so tests and non-daemon binaries keep running scripts.
+    #[tokio::test]
+    async fn isolated_runner_falls_back_in_process() {
+        let out =
+            run_pre_request_isolated("pm.environment.set('k', 'v');", &req(), &BTreeMap::new())
+                .await;
+        assert!(out.error.is_none(), "{:?}", out.error);
+        assert_eq!(out.vars.get("k").unwrap(), "v");
+    }
 
     fn req() -> ScriptRequest {
         ScriptRequest {
