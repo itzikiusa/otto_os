@@ -41,6 +41,7 @@
   } from '../../lib/api/proof';
   import { downloadText } from '../../lib/components/exporters';
   import { ws } from '../../lib/stores/workspace.svelte';
+  import { api } from '../../lib/api/client';
   import { ui } from '../../lib/stores/ui.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -366,7 +367,7 @@
       { label: 'Add artifact…', icon: 'plus', action: () => { resetAdd(); addOpen = true; } },
       { label: 'Add media…', icon: 'file', action: () => { resetMedia(); mediaOpen = true; } },
       { label: 'Add evidence…', icon: 'db', action: () => { resetEvidence(); evidenceOpen = true; } },
-      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; } },
+      { label: 'PR check…', icon: 'pr', action: () => { resetPr(); prOpen = true; void packRepoPath().then((p) => { if (prOpen && !prCwd) prCwd = p; }); } },
     ]);
   }
 
@@ -375,7 +376,7 @@
       ...(detail
         ? [
             { label: 'Waive…', icon: 'check', title: 'Record an approved exception for this pack', action: () => { waiveReason = ''; waiveOpen = true; } },
-            ...(detail.pack.repo_id ? [{ label: 'Refresh CI', icon: 'fetch', action: () => void refreshCi() }] : []),
+            ...(detail.pack.repo_id ? [{ label: ciRefreshing ? 'Refreshing CI…' : 'Refresh CI', icon: 'fetch', disabled: ciRefreshing, action: () => void refreshCi() }] : []),
             { separator: true },
           ]
         : []),
@@ -384,21 +385,45 @@
     ]);
   }
 
+  // Long actions (assemble, CI refresh, PR check, add evidence) each take
+  // seconds: their buttons show progress, carry aria-busy and refuse a second
+  // click while one is in flight.
+  let assembling = $state(false);
+  let ciRefreshing = $state(false);
+  let prRunning = $state(false);
+  let evidenceSaving = $state(false);
+
+  /** The pack's repository folder — the folder prompts default to it. */
+  async function packRepoPath(): Promise<string> {
+    const rid = detail?.pack.repo_id;
+    if (!rid) return '';
+    try {
+      return (await api.get<{ path: string }>(`/repos/${encodeURIComponent(rid)}`)).path ?? '';
+    } catch {
+      return '';
+    }
+  }
+
   async function assemble(): Promise<void> {
-    if (!detail) return;
+    if (!detail || assembling) return;
+    const initial = await packRepoPath();
     const cwd = await confirmer.promptText('Working folder to assemble proof from:', {
       title: 'Assemble proof',
       browseFolder: true,
       confirmLabel: 'Assemble',
       placeholder: 'e.g. ~/code/my-repo',
+      initial,
     });
-    if (cwd === null) return;
+    if (cwd === null || !detail) return;
+    assembling = true;
     try {
       await assembleProof(detail.pack.id, { cwd: cwd.trim() || undefined });
       await proof.refreshDetail();
       toasts.success('Proof assembled', 'Re-assembled from the working folder.');
     } catch (e) {
       toasts.error("Couldn’t assemble proof", loadErrorText(e));
+    } finally {
+      assembling = false;
     }
   }
 
@@ -501,7 +526,8 @@
   );
 
   async function submitEvidence(): Promise<void> {
-    if (!detail || !evidenceValid) return;
+    if (!detail || !evidenceValid || evidenceSaving) return;
+    evidenceSaving = true;
     try {
       const id = detail.pack.id;
       if (eType === 'api') {
@@ -533,18 +559,25 @@
       resetEvidence();
     } catch (e) {
       toasts.error("Couldn’t add the evidence", loadErrorText(e));
+    } finally {
+      evidenceSaving = false;
     }
   }
 
   // ---- CI refresh (R2) -----------------------------------------------------
   async function refreshCi(): Promise<void> {
-    if (!detail) return;
+    if (!detail || ciRefreshing) return;
+    ciRefreshing = true;
+    const pending = toasts.info('Refreshing CI…', 'Pulling live CI status for this pack.');
     try {
       await ciRefresh(detail.pack.id, {});
       await proof.refreshDetail();
       toasts.success('CI refreshed', 'Live CI status pulled into a CI artifact.');
     } catch (e) {
       toasts.error("Couldn’t refresh CI", loadErrorText(e));
+    } finally {
+      ciRefreshing = false;
+      toasts.dismiss(pending);
     }
   }
 
@@ -563,7 +596,8 @@
   }
 
   async function submitPr(): Promise<void> {
-    if (!detail || !prTitle.trim() || !prDesc.trim()) return;
+    if (!detail || !prTitle.trim() || !prDesc.trim() || prRunning) return;
+    prRunning = true;
     try {
       await runPrCheck(detail.pack.id, {
         title: prTitle.trim(),
@@ -576,6 +610,8 @@
       resetPr();
     } catch (e) {
       toasts.error("Couldn’t run the PR check", loadErrorText(e));
+    } finally {
+      prRunning = false;
     }
   }
 
@@ -764,7 +800,7 @@
         <!-- The four ways to attach evidence share one menu: four sibling
              "Add …" buttons made this the busiest header in the app. -->
         <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={11} /></button>
-        <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble…</button>
+        <button class="btn small primary" onclick={assemble} disabled={assembling} aria-busy={assembling}><Icon name="refresh" size={12} /> {assembling ? 'Assembling…' : 'Assemble…'}</button>
       {/if}
       <!-- Everything occasional (waive, CI refresh, housekeeping, delete) lives
            in one ⋯ so the header stays at Add + Assemble + ⋯. -->
@@ -1170,7 +1206,7 @@
     {/if}
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (evidenceOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={submitEvidence} disabled={!evidenceValid}>Add evidence</button>
+      <button class="btn primary" onclick={submitEvidence} disabled={!evidenceValid || evidenceSaving} aria-busy={evidenceSaving}>{evidenceSaving ? 'Adding…' : 'Add evidence'}</button>
     {/snippet}
   </Modal>
 {/if}
@@ -1201,7 +1237,7 @@
     </div>
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (prOpen = false)}>Cancel</button>
-      <button class="btn primary" onclick={submitPr} disabled={!prTitle.trim() || !prDesc.trim()}>Run check</button>
+      <button class="btn primary" onclick={submitPr} disabled={!prTitle.trim() || !prDesc.trim() || prRunning} aria-busy={prRunning}>{prRunning ? 'Running check…' : 'Run check'}</button>
     {/snippet}
   </Modal>
 {/if}
