@@ -731,29 +731,42 @@ impl GoalLoopsRepo {
     /// `running`/`paused`/`blocked` is orphaned. Pause active work, retain blocked
     /// questions, mark incomplete iterations interrupted, and return the rows
     /// so the caller can release sessions without removing working files.
+    ///
+    /// A loop the USER paused (`paused` with no open run window) had no live
+    /// controller to lose: it is left untouched, so a restart never re-stamps
+    /// it "interrupted"/finished (S3-13). Each loop's elapsed banking, row
+    /// flip and iteration sweep commit together in one transaction.
     pub async fn fail_running(&self, error: &str) -> Result<Vec<GoalLoop>> {
-        let loops = self.list_running().await?;
+        let loops: Vec<GoalLoop> = self
+            .list_running()
+            .await?
+            .into_iter()
+            .filter(|l| !(l.status == GoalLoopStatus::Paused && l.run_started_at.is_none()))
+            .collect();
         if loops.is_empty() {
             return Ok(loops);
         }
         let now = fmt(Utc::now());
         for l in &loops {
-            if let Some(started) = l.run_started_at {
-                self.add_elapsed(
-                    &l.id,
-                    interrupted_window_secs(started, l.updated_at, Utc::now()),
-                )
-                .await?;
-            }
+            let elapsed = l
+                .run_started_at
+                .map(|started| interrupted_window_secs(started, l.updated_at, Utc::now()))
+                .unwrap_or(0);
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(dberr("begin goal-loop boot sweep"))?;
             sqlx::query(
                 "UPDATE goal_loops SET status = CASE WHEN status = 'blocked' THEN 'blocked' ELSE 'paused' END, error = ?, phase = 'done',
-                 run_started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?",
+                 elapsed_secs = elapsed_secs + ?, run_started_at = NULL, finished_at = ?, updated_at = ? WHERE id = ?",
             )
             .bind(error)
+            .bind(elapsed as i64)
             .bind(&now)
             .bind(&now)
             .bind(&l.id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("fail running goal loop"))?;
             sqlx::query(
@@ -762,9 +775,12 @@ impl GoalLoopsRepo {
             )
             .bind(&now)
             .bind(&l.id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("fail running goal-loop iterations"))?;
+            tx.commit()
+                .await
+                .map_err(dberr("commit goal-loop boot sweep"))?;
         }
         Ok(loops)
     }
@@ -954,6 +970,39 @@ mod tests {
         let after = repo.get(&l.id).await.unwrap();
         assert_eq!(after.status, GoalLoopStatus::Paused);
         assert_eq!(after.error.as_deref(), Some("interrupted"));
+    }
+
+    /// S3-13: a loop the user paused deliberately survives a restart as-is —
+    /// no "interrupted" error, no finish stamp — and a second restart doesn't
+    /// re-stamp a loop the first sweep already paused.
+    #[tokio::test]
+    async fn fail_running_leaves_user_paused_loops_alone() {
+        let pool = mem_pool().await;
+        let repo = GoalLoopsRepo::new(pool.clone());
+        let l = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&l.id, Utc::now()).await.unwrap();
+        assert!(repo.pause_running(&l.id).await.unwrap());
+        let before = repo.get(&l.id).await.unwrap();
+        assert!(repo.fail_running("interrupted").await.unwrap().is_empty());
+        let after = repo.get(&l.id).await.unwrap();
+        assert_eq!(after.status, GoalLoopStatus::Paused);
+        assert_eq!(after.error, None);
+        assert_eq!(after.finished_at, None);
+        assert_eq!(after.elapsed_secs, before.elapsed_secs);
+
+        // A running loop is swept once; the next boot leaves it alone.
+        let r = repo.create(new_loop()).await.unwrap();
+        repo.mark_running(&r.id, Utc::now()).await.unwrap();
+        assert_eq!(repo.fail_running("interrupted").await.unwrap().len(), 1);
+        let first = repo.get(&r.id).await.unwrap();
+        assert!(repo
+            .fail_running("interrupted again")
+            .await
+            .unwrap()
+            .is_empty());
+        let second = repo.get(&r.id).await.unwrap();
+        assert_eq!(second.error.as_deref(), Some("interrupted"));
+        assert_eq!(second.finished_at, first.finished_at);
     }
 
     /// F4: a daemon death charges the active window only up to the controller's

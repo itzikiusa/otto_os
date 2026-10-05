@@ -6076,6 +6076,29 @@ fn evict_if_same(live: &DashMap<Id, Arc<PtyHandle>>, id: &Id, handle: &Arc<PtyHa
     live.remove_if(id, |_, h| Arc::ptr_eq(h, handle)).is_some()
 }
 
+/// The `sandbox-exec`-wrapped argv for a NON-PTY `/bin/sh -c cmd` — a
+/// scheduled shell task — under the same `process_sandbox` gating as a
+/// `shell` agent session (S3-04: it used to run unconfined even with the
+/// sandbox on). `None` = run it plain (setting off, `shell` not in the
+/// provider set, or no sandbox on this host). `cfg` is the setting's JSON.
+pub async fn sandboxed_shell_argv(
+    cfg: &serde_json::Value,
+    cwd: &std::path::Path,
+    data_dir: &std::path::Path,
+    cmd: &str,
+) -> Option<(String, Vec<String>)> {
+    if !otto_sandbox::is_supported() {
+        return None;
+    }
+    let network = sandbox_decision(cfg, SessionKind::Agent, "shell")?;
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let extra: Vec<std::path::PathBuf> = resolve_git_common_dir(cwd).await.into_iter().collect();
+    let policy = otto_sandbox::SandboxPolicy::for_agent(cwd, &home, data_dir, &extra, network);
+    Some(policy.wrap("/bin/sh", &["-c".to_string(), cmd.to_string()]))
+}
+
 /// Decide whether a session should be sandboxed and with what network posture,
 /// from the `process_sandbox` setting JSON. `None` means "do not sandbox". Pure
 /// (no I/O) so the gating is unit-testable: only `Agent` sessions whose provider

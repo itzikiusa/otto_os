@@ -3813,6 +3813,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "hex",
  "otto-agent-run",
  "otto-channels",
  "otto-core",
@@ -3823,6 +3824,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "tempfile",
  "tokio",

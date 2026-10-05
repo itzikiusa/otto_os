@@ -33,7 +33,7 @@ use otto_state::FinishRun;
 use otto_state::NewScheduledRun;
 use serde_json::json;
 use tokio::sync::Semaphore;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cadence;
 // Report + delivery mechanics are shared with the personal-agents engine; the
@@ -64,7 +64,6 @@ const RETRY_BACKOFF: [Duration; 3] = [
 const SHELL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Poll cadence + cap while waiting for a handed-off workflow run to finish.
 const WORKFLOW_POLL: Duration = Duration::from_secs(2);
-const WORKFLOW_WAIT: Duration = Duration::from_secs(600);
 
 /// Keep at most this many runs per task; older runs (+ their report files) are pruned.
 const KEEP_RUNS: i64 = 100;
@@ -100,6 +99,9 @@ struct ExecFailure {
     attempts: i64,
     /// Stopped by a user (`POST …/runs/{id}/cancel`), not failed.
     canceled: bool,
+    /// Not run at all: the workflow it hands off to was still busy with an
+    /// earlier run (S3-08). Recorded `skipped`, with no failure notice.
+    skipped: bool,
 }
 
 impl From<Error> for ExecFailure {
@@ -111,6 +113,7 @@ impl From<Error> for ExecFailure {
             workflow_run_id: None,
             attempts: 1,
             canceled: false,
+            skipped: false,
         }
     }
 }
@@ -210,7 +213,8 @@ pub async fn run_task(
     trigger: &str,
 ) -> Result<String> {
     let run = open_run(ctx, task, trigger).await?;
-    complete_run(ctx, task, &run.id, trigger).await
+    let cancel = run_cancels().register(&run.id);
+    complete_run(ctx, task, &run.id, trigger, cancel).await
 }
 
 /// Start a run in the BACKGROUND and return its freshly-opened (`running`)
@@ -244,6 +248,10 @@ pub async fn spawn_run(
         ));
     }
     let run = open_run(ctx, task, trigger).await?;
+    // Stoppable from the moment the `running` row is returned — registering
+    // inside the spawned task left a window where Stop got "not running"
+    // for a row that said running (S3-12).
+    let cancel = run_cancels().register(&run.id);
     let (ctx2, task2, run_id, trigger2) = (
         ctx.clone(),
         task.clone(),
@@ -253,7 +261,7 @@ pub async fn spawn_run(
     tokio::spawn(async move {
         // Held until the run settles, so the scheduler skips this task meanwhile.
         let _guard = guard;
-        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2).await;
+        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2, cancel).await;
     });
     Ok(run)
 }
@@ -280,12 +288,15 @@ async fn complete_run(
     task: &ScheduledTask,
     run_id: &str,
     trigger: &str,
+    // Registered by the caller as soon as the run row opened. Dropped once
+    // execution ends: delivery/proof can't be stopped midway, and the cancel
+    // route then answers "finishing" instead of a false "not running".
+    cancel: RunCancelGuard,
 ) -> Result<String> {
     let repo = ctx.scheduled_tasks();
     let run_id = run_id.to_string();
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
-    let cancel = run_cancels().register(&run_id);
     let result = tokio::select! {
         r = execute(ctx, task, &run_id) => r,
         _ = until_cancelled(&cancel.signal) => Err(stop_run(ctx, &run_id).await),
@@ -365,10 +376,16 @@ async fn complete_run(
         }
         Err(fail) => {
             let msg = fail.error.to_string();
-            let canceled = fail.canceled;
+            // Neither a user's Stop nor a skipped overlap is a failure to
+            // notify about.
+            let quiet = fail.canceled || fail.skipped;
             let msg_for_notice = msg.clone();
-            let status = if fail.canceled { "canceled" } else { "error" };
-            warn!(task = %task.id, "scheduled task run failed: {msg}");
+            let status = fail_status(&fail);
+            if fail.skipped {
+                info!(task = %task.id, "scheduled task run skipped: {msg}");
+            } else {
+                warn!(task = %task.id, "scheduled task run failed: {msg}");
+            }
             // Keep whatever the failed run still produced (shell output, a
             // workflow report) so the run's report view shows why it failed.
             let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
@@ -404,8 +421,7 @@ async fn complete_run(
             // always fails used to grow its run list without bound.
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, status);
-            // A user's Stop isn't a failure to tell them about.
-            if !canceled {
+            if !quiet {
                 task_notice(ctx, task, &run_id, Some(&msg_for_notice), None).await;
             }
             Ok(run_id)
@@ -523,6 +539,18 @@ async fn stop_run(ctx: &impl AutomationCtx, run_id: &str) -> ExecFailure {
         workflow_run_id,
         attempts: 1,
         canceled: true,
+        skipped: false,
+    }
+}
+
+/// The terminal run status of a non-ok execution.
+fn fail_status(fail: &ExecFailure) -> &'static str {
+    if fail.canceled {
+        "canceled"
+    } else if fail.skipped {
+        "skipped"
+    } else {
+        "error"
     }
 }
 
@@ -536,7 +564,7 @@ fn failure_finish(
     report_rel: Option<String>,
 ) -> FinishRun {
     FinishRun {
-        status: if fail.canceled { "canceled" } else { "error" }.into(),
+        status: fail_status(&fail).into(),
         error: Some(error),
         summary,
         report_path,
@@ -695,6 +723,7 @@ async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &
         workflow_run_id: None,
         attempts,
         canceled: false,
+        skipped: false,
     };
     if outcome.errored() {
         return Err(fail(Error::Internal(format!(
@@ -802,10 +831,20 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
         .await
         .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
     let cmd = task.prompt.clone();
+    // Confined like a `shell` agent session when the process sandbox applies
+    // to `shell` (S3-04) — any Editor can author a shell task.
+    let confine = shell_confinement(ctx, &cwd, &cmd).await;
     // The retry policy applies to shell tasks too: a failing command (spawn error,
     // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
-    let (res, attempts) =
-        run_shell_with_retry(&cmd, &cwd, task.max_retries, SHELL_TIMEOUT, &RETRY_BACKOFF).await;
+    let (res, attempts) = run_shell_with_retry(
+        &cmd,
+        &cwd,
+        task.max_retries,
+        SHELL_TIMEOUT,
+        &RETRY_BACKOFF,
+        confine.as_ref(),
+    )
+    .await;
     // A spawn error / timeout on the final attempt → no report.
     let run = res.map_err(|error| ExecFailure {
         attempts,
@@ -830,6 +869,7 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
             workflow_run_id: None,
             attempts,
             canceled: false,
+            skipped: false,
         });
     }
     Ok(ExecOutcome {
@@ -851,13 +891,14 @@ async fn run_shell_with_retry(
     max_retries: i64,
     timeout: Duration,
     backoff: &[Duration],
+    confine: Option<&ShellArgv>,
 ) -> (Result<std::process::Output>, i64) {
     let max_attempts = (1 + max_retries).clamp(1, 6);
     let mut attempts = 0i64;
     let mut last: Option<Result<std::process::Output>> = None;
     for i in 0..max_attempts {
         attempts += 1;
-        let res = run_shell_once(cmd, cwd, timeout).await;
+        let res = run_shell_once(cmd, cwd, timeout, confine).await;
         let success = matches!(&res, Ok(out) if out.status.success());
         last = Some(res);
         if success {
@@ -905,17 +946,66 @@ async fn drain_shell_stream(
     Ok(kept)
 }
 
+/// A confined shell argv: `(program, args)` from `sandboxed_shell_argv`.
+type ShellArgv = (String, Vec<String>);
+
+/// The environment a SANDBOXED shell task keeps — enough for a POSIX
+/// toolchain, nothing of the daemon's own.
+const SHELL_ENV_KEEP: [&str; 8] = [
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM",
+];
+
+/// The sandbox argv for a shell task, when the `process_sandbox` setting
+/// confines `shell` (see `otto_sessions::manager::sandboxed_shell_argv`).
+async fn shell_confinement(ctx: &impl AutomationCtx, cwd: &str, cmd: &str) -> Option<ShellArgv> {
+    let cfg = otto_state::SettingsRepo::new(ctx.pool().clone())
+        .get("process_sandbox")
+        .await
+        .ok()
+        .flatten()?;
+    otto_sessions::manager::sandboxed_shell_argv(
+        &cfg,
+        std::path::Path::new(cwd),
+        ctx.data_dir(),
+        cmd,
+    )
+    .await
+}
+
 /// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
 /// On timeout the whole group is killed: the old `timeout(…, output())` only
 /// dropped the future, and tokio does not kill a child on drop by default —
 /// every timed-out attempt left its shell (and whatever it started: `ssh`, a
 /// test run stuck on a prompt) running, each retry added another copy, and the
 /// released permit let the next scheduled occurrence stack more on top.
-async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::process::Output> {
-    let mut spec = tokio::process::Command::new("/bin/sh");
-    spec.arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
+///
+/// `confine` (a sandbox-exec argv that already embeds `/bin/sh -c cmd`) runs
+/// it confined, with a scrubbed environment: the daemon's own variables
+/// (tokens, Otto internals) never reach a sandboxed command.
+async fn run_shell_once(
+    cmd: &str,
+    cwd: &str,
+    timeout: Duration,
+    confine: Option<&ShellArgv>,
+) -> Result<std::process::Output> {
+    let mut spec = match confine {
+        Some((program, args)) => {
+            let mut c = tokio::process::Command::new(program);
+            c.args(args).env_clear();
+            for key in SHELL_ENV_KEEP {
+                if let Some(v) = std::env::var_os(key) {
+                    c.env(key, v);
+                }
+            }
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.arg("-c").arg(cmd);
+            c
+        }
+    };
+    spec.current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1002,10 +1092,9 @@ async fn execute_workflow(
         return Err(Error::Invalid("workflow belongs to a different workspace".into()).into());
     }
     // Overlap guard (the workflow schedule-trigger scheduler has the same one):
-    // this path stops waiting after WORKFLOW_WAIT and releases the task's
-    // in-flight guard, so a 40-minute workflow on a 15-minute cadence used to
-    // get a second — then third — concurrent run, each with its own worktrees
-    // and agents.
+    // a workflow still busy with an earlier run (started by a trigger, a
+    // manual run, or another task) is not stacked — this occurrence is
+    // recorded `skipped`, quietly.
     // The check and the insert are one write transaction (`admit_run_if_idle`):
     // a separate has_active_run → create_run let a trigger admit between them.
     let ws = ctx.workspaces().get(&task.workspace_id).await?;
@@ -1014,11 +1103,13 @@ async fn execute_workflow(
         .admit_run_if_idle(&workflow.id, &workflow.workspace_id, &input, None)
         .await?
     else {
-        return Err(Error::Conflict(format!(
-            "skipped: a run of workflow \"{}\" is still in progress",
-            workflow.name
-        ))
-        .into());
+        return Err(ExecFailure {
+            skipped: true,
+            ..ExecFailure::from(Error::Conflict(format!(
+                "skipped: a run of workflow \"{}\" is still in progress",
+                workflow.name
+            )))
+        });
     };
     let run_id = run.id.clone();
     // Linked at once: the run row can open it while it runs, and a Stop
@@ -1036,70 +1127,62 @@ async fn execute_workflow(
         None,
     );
 
-    // Wait (bounded) for the workflow to finish so the report reflects its outcome.
-    let deadline = std::time::Instant::now() + WORKFLOW_WAIT;
+    // Wait for the workflow to settle so the task run records its REAL
+    // outcome (S3-08: after a fixed 600 s the run used to be recorded `ok`
+    // with a "handed off" report, whatever the workflow later did, and the
+    // next tick's overlap was stored as a failure). Nothing is held but this
+    // task's own in-flight claim — its next tick would only skip anyway while
+    // the workflow runs — and a Stop still cancels both (see `stop_run`).
     loop {
         tokio::time::sleep(WORKFLOW_POLL).await;
         // Perf W2: poll the status only; the full row (50–200 KB of
         // `nodes_json`) is read ONCE, when the run has settled.
-        let settled = matches!(
-            repo.run_status(&run_id).await,
-            Ok(Some((
-                otto_core::workflows::RunStatus::Success
-                    | otto_core::workflows::RunStatus::Error
-                    | otto_core::workflows::RunStatus::Canceled,
-                _
-            )))
-        );
-        let full = if settled {
-            repo.get_run(&run_id).await.ok()
-        } else {
-            None
-        };
-        if let Some(r) = full {
-            let status = format!("{:?}", r.status).to_lowercase();
-            if matches!(status.as_str(), "success" | "error" | "canceled") {
-                let report = workflow_report(&workflow.name, &r);
-                let summary = extract_summary(&report);
-                // A canceled workflow did not do the task's job — reporting it
-                // `ok` (as this used to) hid a stopped run behind a green badge.
-                if let Some(error) = workflow_failure(&status, &run_id) {
-                    return Err(ExecFailure {
-                        error,
-                        report: Some(report),
-                        session_id: None,
-                        workflow_run_id: Some(run_id),
-                        attempts: 1,
-                        canceled: false,
-                    });
-                }
-                return Ok(ExecOutcome {
-                    report,
-                    summary,
-                    session_id: None,
+        let status = match repo.run_status(&run_id).await {
+            Ok(Some((s, _))) => s,
+            Ok(None) => {
+                return Err(ExecFailure {
                     workflow_run_id: Some(run_id),
-                    attempts: 1,
+                    ..ExecFailure::from(Error::Internal(
+                        "the workflow run disappeared before it finished".into(),
+                    ))
                 });
             }
+            // A transient read error: keep waiting.
+            Err(_) => continue,
+        };
+        use otto_core::workflows::RunStatus;
+        if !matches!(
+            status,
+            RunStatus::Success | RunStatus::Error | RunStatus::Canceled
+        ) {
+            continue;
         }
-        if std::time::Instant::now() >= deadline {
-            let report = format!(
-                "# Workflow handed off: {}\n\nLaunched workflow run `{}`; still running after \
-                 {}s — see the Workflows page for live status.\n\n---\n\nThe scheduled task \
-                 handed control to the workflow engine.",
-                workflow.name,
-                run_id,
-                WORKFLOW_WAIT.as_secs()
-            );
-            let summary = extract_summary(&report);
-            return Ok(ExecOutcome {
-                report,
-                summary,
+        let Ok(r) = repo.get_run(&run_id).await else {
+            continue;
+        };
+        let status = status.as_str();
+        let report = workflow_report(&workflow.name, &r);
+        let summary = extract_summary(&report);
+        // A canceled workflow did not do the task's job — reporting it `ok`
+        // (as this used to) hid a stopped run behind a green badge.
+        if let Some(error) = workflow_failure(status, &run_id) {
+            return Err(ExecFailure {
+                error,
+                report: Some(report),
                 session_id: None,
                 workflow_run_id: Some(run_id),
                 attempts: 1,
+                canceled: false,
+                skipped: false,
             });
         }
+        return Ok(ExecOutcome {
+            report,
+            summary,
+            session_id: None,
+            workflow_run_id: Some(run_id),
+            attempts: 1,
+        });
     }
 }
 
@@ -1728,6 +1811,7 @@ mod tests {
             workflow_run_id: Some("w1".into()),
             attempts: 3,
             canceled: false,
+            skipped: false,
         };
         let f = failure_finish(
             fail,
@@ -1761,6 +1845,7 @@ mod tests {
             "head -c 700000 /dev/zero; head -c 700000 /dev/zero >&2; exit 7",
             "/tmp",
             Duration::from_secs(10),
+            None,
         )
         .await
         .unwrap();
@@ -1771,6 +1856,56 @@ mod tests {
         }
     }
 
+    /// S3-04: the process-sandbox setting gates scheduled shell tasks like a
+    /// `shell` agent session, and a confined command gets a scrubbed env.
+    #[tokio::test]
+    async fn sandboxed_shell_tasks_follow_the_setting_and_scrub_the_env() {
+        use otto_sessions::manager::sandboxed_shell_argv;
+        let cwd = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let off = serde_json::json!({ "enabled": false });
+        let not_shell = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        let on = serde_json::json!({ "enabled": true });
+        assert!(sandboxed_shell_argv(&off, cwd.path(), data.path(), "true")
+            .await
+            .is_none());
+        assert!(
+            sandboxed_shell_argv(&not_shell, cwd.path(), data.path(), "true")
+                .await
+                .is_none()
+        );
+        let wrapped = sandboxed_shell_argv(&on, cwd.path(), data.path(), "echo hi").await;
+        if otto_sandbox_supported() {
+            let (program, args) = wrapped.expect("shell is in the default provider set");
+            assert_eq!(program, "/usr/bin/sandbox-exec");
+            assert_eq!(&args[args.len() - 3..], ["/bin/sh", "-c", "echo hi"]);
+        }
+        // The confined path never forwards the daemon's own env.
+        std::env::set_var("OTTO_S304_PROBE", "leaked");
+        let argv: ShellArgv = (
+            "/bin/sh".into(),
+            vec!["-c".into(), "printf %s \"$OTTO_S304_PROBE\"".into()],
+        );
+        let cwd_s = cwd.path().to_string_lossy();
+        let out = run_shell_once("", &cwd_s, Duration::from_secs(10), Some(&argv))
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        let out = run_shell_once(
+            "printf %s \"$OTTO_S304_PROBE\"",
+            &cwd_s,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "leaked");
+    }
+
+    fn otto_sandbox_supported() -> bool {
+        cfg!(target_os = "macos") && std::path::Path::new("/usr/bin/sandbox-exec").exists()
+    }
+
     #[tokio::test]
     async fn shell_retry_counts_attempts_and_stops_on_success() {
         let cwd = std::env::temp_dir();
@@ -1779,18 +1914,18 @@ mod tests {
         // An always-failing command runs 1 + max_retries times, and still returns
         // its (failed) output so a report can be built.
         let (res, attempts) =
-            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 3);
         let out = res.expect("output captured even when the command fails");
         assert!(!out.status.success());
         // A succeeding command runs exactly once.
         let (res, attempts) =
-            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 1);
         assert!(res.unwrap().status.success());
         // max_retries = 0 ⇒ a single attempt even on failure.
         let (_res, attempts) =
-            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 1);
     }
 
@@ -1806,6 +1941,7 @@ mod tests {
             "(sleep 1; touch orphan-ran) & sleep 30",
             &cwd,
             Duration::from_millis(300),
+            None,
         )
         .await;
         assert!(res.is_err(), "timed out");

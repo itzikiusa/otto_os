@@ -7651,8 +7651,9 @@ export interface ScheduledTaskRun {
   id: Id;
   task_id: Id;
   workspace_id: Id;
-  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
-  status: 'running' | 'ok' | 'error' | 'canceled';
+  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`).
+   *  `skipped`: a workflow task whose workflow was still busy with an earlier run. */
+  status: 'running' | 'ok' | 'error' | 'canceled' | 'skipped';
   trigger: 'schedule' | 'manual';
   started_at: string;
   finished_at?: string | null;

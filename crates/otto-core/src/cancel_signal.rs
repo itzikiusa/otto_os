@@ -8,9 +8,8 @@
 //!
 //! Also the run bookkeeping the background engines share ([`InFlightSet`],
 //! [`RunCancels`], [`until_cancelled`]). Lives in `otto-core` so leaf engine
-//! crates (`otto-assistant`) can use it without depending on `otto-server`;
-//! the daemon's own `crate::cancel_signal` / `scheduled_tasks_engine` copies are
-//! to be folded onto this module once the parallel crate splits land.
+//! crates (`otto-assistant`, `otto-automation`) can use it without depending
+//! on `otto-server`; the daemon's `crate::cancel_signal` is a re-export of it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
