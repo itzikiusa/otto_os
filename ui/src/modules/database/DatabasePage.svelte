@@ -223,6 +223,14 @@
   let accessFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
   $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
+  // The "Open a connection" pane offers the most recently opened ones as a
+  // one-click reopen instead of only pointing at the list.
+  const recentConns = $derived(
+    database.connections
+      .filter((c) => c.last_opened_at)
+      .sort((a, b) => Date.parse(b.last_opened_at!) - Date.parse(a.last_opened_at!))
+      .slice(0, 5),
+  );
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
     ctxMenu.show(e, [
@@ -1104,7 +1112,18 @@
           body={`${hubSummary} Choose one ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
           actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
           onaction={showConnections}
-        />
+        >
+          {#if recentConns.length > 0}
+            <div class="recent-conns" data-testid="db-recent-conns">
+              <p class="empty-note">Recently opened</p>
+              {#each recentConns as c (c.id)}
+                <button class="btn ghost small" onclick={() => void database.openConnection(c.id)} title="Open {c.name}">
+                  <Icon name={engineGlyph(c.kind)} size={12} /> {c.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </EmptyState>
       {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -1734,6 +1753,15 @@
 {/if}
 
 <style>
+  .recent-conns {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 12px;
+  }
+  .recent-conns .empty-note { flex-basis: 100%; margin: 0; text-align: center; }
   .db-root {
     height: 100%;
     display: flex;
