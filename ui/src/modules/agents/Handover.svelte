@@ -4,6 +4,7 @@
   // the source agent's recent work (+ git state), summarizes it, and types a
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -146,7 +147,7 @@
         'Handover started',
         briefText
           ? `Delivering your brief to ${where}.`
-          : `Preparing the brief for ${where} — it'll arrive shortly.`,
+          : `Preparing the brief for ${where} — it’ll arrive shortly.`,
       );
     } catch (e) {
       toastError('Couldn’t hand over the session', e);
@@ -170,7 +171,7 @@
   {#if phase === 'compose'}
     <p class="lead">
       Pass <strong>{source?.title ?? 'this agent'}</strong>’s context to another agent. Otto
-      summarizes what <span class="chip">{source?.provider ?? 'the agent'}</span> has been doing
+      summarizes what <Badge tone="accent" label={source?.provider ?? 'the agent'} /> has been doing
       (plus the repo’s git state) and hands the brief over.
     </p>
 
@@ -205,8 +206,8 @@
             >
               <span class="provider-name">
                 {p}
-                {#if p === source?.provider}<span class="badge muted">same</span>{/if}
-                {#if !avail}<span class="badge muted">not found</span>{/if}
+                {#if p === source?.provider}<Badge label="Same" />{/if}
+                {#if !avail}<Badge label="Not found" />{/if}
               </span>
               <span class="provider-desc">{providerDesc(p)}</span>
             </button>
@@ -225,7 +226,7 @@
               >
                 <StatusDot state={sessionState(a, ws.statusMap[a.id], ws.needsYou[a.id] === true, { stale: events.state !== 'connected' })} />
                 <span class="agent-title">{a.title}</span>
-                <span class="chip">{a.provider}</span>
+                <Badge tone="accent" label={a.provider} />
               </button>
             </li>
           {/each}
@@ -240,7 +241,7 @@
         class="input"
         bind:value={focus}
         rows="3"
-        placeholder="e.g. The auth refactor is done — focus on wiring the new endpoint into the UI; don't touch the DB layer."
+        placeholder="e.g. The auth refactor is done — focus on wiring the new endpoint into the UI; don’t touch the DB layer."
       ></textarea>
     </div>
 
@@ -329,27 +330,16 @@
     font-size: var(--fs-xs);
     line-height: 1.45;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     border-radius: var(--radius-s);
-    padding: 7px 9px;
-  }
-  .chip {
-    display: inline-block;
-    padding: 0 5px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    vertical-align: middle;
+    padding: 6px 8px;
   }
 
   /* Segmented control: new vs existing target */
   .seg {
     display: flex;
     gap: 4px;
-    padding: 3px;
+    padding: 2px;
     margin-bottom: 12px;
     background: var(--surface-2);
     border: 1px solid var(--border);
@@ -369,7 +359,7 @@
   .seg-btn.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .seg-btn:disabled {
     opacity: 0.45;
@@ -393,15 +383,15 @@
     cursor: pointer;
     text-align: start;
     transition:
-      border-color 130ms ease-out,
-      background 130ms ease-out;
+      border-color var(--dur-fast) ease-out,
+      background var(--dur-fast) ease-out;
   }
   .provider-card:hover:not(:disabled) {
     background: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
   }
   .provider-card.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .provider-card.unavailable {
     opacity: 0.5;
@@ -418,19 +408,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 6px;
-    border-radius: 999px;
-  }
-  .badge.muted {
-    background: color-mix(in srgb, var(--text-dim) 20%, transparent);
-    color: var(--text-dim);
-  }
-
   /* Existing-agent list */
   .agent-list {
     list-style: none;
@@ -459,7 +436,7 @@
   }
   .agent-row.selected {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .agent-title {
     flex: 1;
@@ -490,7 +467,7 @@
   .toggle-row {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 2px 0;
     cursor: pointer;
   }

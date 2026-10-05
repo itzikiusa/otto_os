@@ -4,6 +4,7 @@
   // is set from the Inspector. Highlight runs line-by-line so a fallback (escaped
   // plain text) shows instantly before hljs arrives.
   import { Handle, Position } from '@xyflow/svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
@@ -62,10 +63,9 @@
     <span class="lang">{lang ?? 'text'}</span>
   </div>
   {#if editing}
-    <!-- svelte-ignore a11y_autofocus -->
     <textarea
       bind:value={draft}
-      autofocus
+      use:focusOnMount
       spellcheck="false"
       onblur={commit}
       onkeydown={(e) => {
@@ -106,7 +106,7 @@
   .lang {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .src {

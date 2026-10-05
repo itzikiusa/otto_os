@@ -2,7 +2,7 @@
   // A one-shot reminder: when it fires and where it is delivered (back to the
   // origin that asked, plus a notification). Cancel while it's still pending.
   import ActionCard from './ActionCard.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { taskStateLabel, taskTone } from '../model';
@@ -27,8 +27,8 @@
   }
 </script>
 
-<ActionCard icon="clock" kind="Reminder" summary={task.title} testid="card-reminder">
-  {#snippet pill()}<StatePill tone={taskTone(task)} label={taskStateLabel(task)} />{/snippet}
+<ActionCard icon="clock" heading="Reminder" summary={task.title} testid="card-reminder">
+  {#snippet pill()}<Badge tone={taskTone(task)} label={taskStateLabel(task)} />{/snippet}
   <p class="line">
     {#if task.run_at}
       <time datetime={task.run_at} title={new Date(task.run_at).toLocaleString()}>{whenLabel(task.run_at)}</time>
@@ -41,7 +41,7 @@
   {#if task.detail}<p class="detail">{task.detail}</p>{/if}
   {#snippet footer()}
     {#if task.state === 'queued'}
-      <button class="btn small ghost" onclick={() => void cancel()} disabled={busy}>{busy ? 'Cancelling…' : 'Cancel reminder'}</button>
+      <button class="btn small ghost" onclick={() => void cancel()} disabled={busy}>{busy ? 'Canceling…' : 'Cancel reminder'}</button>
     {/if}
   {/snippet}
 </ActionCard>

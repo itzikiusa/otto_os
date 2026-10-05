@@ -1,4 +1,5 @@
 <script lang="ts" module>
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // Builder state survives unmount (tab switch, "Open in editor") and
   // connection flips: each connection gets its own snapshot here, restored
   // when the builder remounts or the user switches back. Module-level on
@@ -35,6 +36,7 @@
   import { paneResizer } from '../../lib/paneResizer';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Modal from '../../lib/components/Modal.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
@@ -673,16 +675,64 @@
       ...s.pairs.map(([a, b]): CanvasEdge => ({ id: nid('edge'), fromUid: s.fromUid, fromCol: a, toUid: s.toUid, toCol: b, type: 'INNER' })),
     ];
   }
+  // ── "Add join…": the keyboard path to the column-to-column drag ────────────
+  // A small form (left table.column, right table.column, join type) that adds
+  // the same edge a drag would — no pointer needed.
+  let joinOpen = $state(false);
+  let jLeft = $state('');
+  let jLeftCol = $state('');
+  let jRight = $state('');
+  let jRightCol = $state('');
+  let jType = $state<JoinType>('INNER');
+  let joinError = $state<string | null>(null);
+  const jLeftT = $derived(tables.find((t) => t.uid === jLeft));
+  const jRightT = $derived(tables.find((t) => t.uid === jRight));
+  function firstCol(t: CardTable | undefined, prefer?: string): string {
+    const cols = t?.columns ?? [];
+    return (prefer && cols.find((c) => c.name === prefer)?.name) || cols[0]?.name || '';
+  }
+  function openJoinForm(): void {
+    const left = tables[0];
+    // Default the right side to a table that is not joined yet, if any.
+    const right = unreached[0] ?? tables.find((t) => t.uid !== left?.uid);
+    jLeft = left?.uid ?? '';
+    jRight = right?.uid ?? '';
+    jLeftCol = firstCol(left, left?.pk[0]);
+    jRightCol = firstCol(right, jLeftCol);
+    jType = 'INNER';
+    joinError = null;
+    joinOpen = true;
+  }
+  function addJoin(): void {
+    if (!jLeft || !jRight || !jLeftCol || !jRightCol) return;
+    if (jLeft === jRight) {
+      joinError = 'Pick two different tables.';
+      return;
+    }
+    const dup = edges.some(
+      (e) =>
+        (e.fromUid === jLeft && e.fromCol === jLeftCol && e.toUid === jRight && e.toCol === jRightCol) ||
+        (e.fromUid === jRight && e.fromCol === jRightCol && e.toUid === jLeft && e.toCol === jLeftCol),
+    );
+    if (dup) {
+      joinError = 'These columns are already joined.';
+      return;
+    }
+    edges = [...edges, { id: nid('edge'), fromUid: jLeft, fromCol: jLeftCol, toUid: jRight, toCol: jRightCol, type: jType }];
+    joinOpen = false;
+  }
+
   function edgeMenu(e: MouseEvent, id: string): void {
     const edge = edges.find((x) => x.id === id);
     if (!edge) return;
     ctxMenu.show(e, [
       ...JOIN_TYPES.map((t) => ({
-        label: `${t === 'FULL' ? 'FULL OUTER' : t} JOIN${edge.type === t ? '  ✓' : ''}`,
+        label: `${t === 'FULL' ? 'FULL OUTER' : t} JOIN`,
+        checked: edge.type === t,
         action: () => (edges = edges.map((x) => (x.id === id ? { ...x, type: t } : x))),
       })),
       { separator: true },
-      { label: 'Remove join', icon: 'trash', danger: true, action: () => (edges = edges.filter((x) => x.id !== id)) },
+      { label: 'Remove join', icon: 'trash', action: () => (edges = edges.filter((x) => x.id !== id)) },
     ]);
   }
 
@@ -726,7 +776,7 @@
       await navigator.clipboard.writeText(sql);
       toasts.success('Copied', 'Generated SQL copied');
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
 
@@ -742,7 +792,7 @@
     if (!dialect) return;
     const r = parseSelect(text, dialect);
     if (!r.ok) {
-      importError = `This statement can't be edited in the builder: ${r.error}.`;
+      importError = `This statement can’t be edited in the builder: ${r.error}.`;
       return;
     }
     importing = true;
@@ -806,7 +856,7 @@
   <EmptyState
     icon="layers"
     title="Builder unavailable"
-    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar's More menu."
+    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar’s More menu."
   />
 {:else}
   <div class="builder" style="--qb-palette-w:{paletteW}px">
@@ -833,7 +883,7 @@
       </div>
       <div class="pal-list">
         {#if paletteLoading}
-          <div class="pal-hint">Loading tables…</div>
+          <div class="pal-hint"><Skeleton rows={6} height={22} label="tables" /></div>
         {:else if paletteTables.length === 0}
           <div class="pal-hint">No tables in {dbName(selectedDb) || 'this database'}.</div>
         {:else if filteredPalette.length === 0}
@@ -859,11 +909,9 @@
     </aside>
 
     <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
       class="side-resizer"
       role="separator"
-      tabindex="0"
       aria-orientation="vertical"
       aria-label="Resize table list"
       title="Drag or use ←/→ to resize · double-click or Enter to reset"
@@ -875,18 +923,21 @@
     <div class="main" bind:this={mainEl}>
       <!-- ── Canvas ──────────────────────────────────────────────────────── -->
       <div class="canvas" style={canvasH ? `flex: 0 0 ${canvasH}px` : ''}>
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="canvas-scroll"
           class:dragging={dragUid !== null || pending !== null}
           role="application"
-          aria-label="Join canvas — drag from one column's dot to another table's column to join"
+          aria-label="Join canvas — drag from one column’s dot to another table’s column to join"
           bind:this={canvasEl}
           onpointermove={onCanvasMove}
           onpointerup={onCanvasUp}
           onpointercancel={onCanvasUp}
         >
-          <div class="content" style="width:{contentSize.w}px; height:{contentSize.h}px">
+          <!-- The join canvas is a coordinate space, not reading-order layout:
+               cards, edges (SVG x) and the left/right column handles are all
+               placed in physical px, so it stays LTR under an RTL locale.
+               Its text is SQL identifiers, which read LTR anyway. -->
+          <div class="content" dir="ltr" style="width:{contentSize.w}px; height:{contentSize.h}px">
             <svg class="edges" width={contentSize.w} height={contentSize.h} aria-hidden="true">
               <defs>
                 <marker id="qb-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -914,8 +965,9 @@
             {#each tables as t, ti (t.uid)}
               {@const nSel = clauses.select.filter((s) => s.kind === 'column' && s.ref.alias === t.alias).length}
               <div class="node" class:base={ti === 0} style="left:{cardX(t)}px; top:{cardY(t)}px; width:{CARD_W}px">
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="node-head" onpointerdown={(e) => startDrag(e, t.uid)}>
+                <!-- Pointer-only move handle (the canvas lays cards out on its own;
+                     moving is cosmetic), so the head stays presentational. -->
+                <div class="node-head" role="presentation" onpointerdown={(e) => startDrag(e, t.uid)}>
                   <input
                     class="node-all"
                     type="checkbox"
@@ -942,14 +994,15 @@
                 </div>
                 <div class="node-body" use:cardBody={t.uid}>
                   {#if !t.columns}
-                    <div class="node-loading">Loading columns…</div>
+                    <div class="node-loading"><Skeleton rows={3} height={16} label="columns" /></div>
                   {:else}
                     {#each t.columns as c (c.name)}
                       {@const pk = t.pk.includes(c.name)}
                       {@const fk = t.fks.some((f) => f.columns.includes(c.name))}
                       <div class="col-row" data-uid={t.uid} data-col={c.name} style="height:{ROW_H}px">
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <span class="handle l" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'l')}></span>
+                        <!-- Drag-to-join dots are a pointer shortcut; the keyboard path is
+                             the "Add join" designer and the FK suggestions. -->
+                        <span class="handle l" role="presentation" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'l')}></span>
                         <input
                           class="col-cb"
                           type="checkbox"
@@ -960,8 +1013,7 @@
                         <span class="col-name mono" class:pk class:fk title={c.name}>{c.name}</span>
                         <span class="col-ty mono" title={c.type}>{c.type}</span>
                         {#if pk}<span class="col-badge pk" title="Primary key">PK</span>{:else if fk}<span class="col-badge fk" title="Foreign key">FK</span>{:else}<span class="col-badge"></span>{/if}
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <span class="handle r" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'r')}></span>
+                        <span class="handle r" role="presentation" data-uid={t.uid} data-col={c.name} onpointerdown={(e) => startConnect(e, t.uid, c.name, 'r')}></span>
                       </div>
                     {/each}
                   {/if}
@@ -975,11 +1027,14 @@
           <div class="canvas-hint">
             <Icon name="layers" size={22} />
             <p class="ch-title">Build a query visually</p>
-            <p>Pick a table on the left. Add more and drag between columns to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
+            <p>Pick a table on the left. Add more and drag between columns (or use <strong>Add join…</strong>) to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
           </div>
         {/if}
-        {#if suggestions.length || unreached.length}
+        {#if tables.length > 1}
           <div class="canvas-bar">
+            <button class="btn small" onclick={openJoinForm} title="Join two columns without dragging">
+              <Icon name="merge" size={12} />Add join…
+            </button>
             {#if unreached.length}
               <span class="cb-warn"><Icon name="warning" size={12} />Not joined — left out of the SQL: {unreached.map((t) => t.alias).join(', ')}</span>
             {/if}
@@ -992,12 +1047,10 @@
         {/if}
       </div>
 
-      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ↑/↓, Home/End). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer sets its tabIndex and value, and adds ↑/↓, Home/End). -->
       <div
         class="split"
         role="separator"
-        tabindex="0"
         aria-orientation="horizontal"
         aria-label="Resize canvas"
         title="Drag or use ↑/↓ to resize"
@@ -1225,6 +1278,54 @@
       </div>
     </div>
   </div>
+
+  {#if joinOpen}
+    <Modal title="Add join" width={440} onclose={() => (joinOpen = false)}>
+      <div class="join-form">
+        <div class="join-side">
+          <div class="field">
+            <label for="qb-join-lt">Left table</label>
+            <select id="qb-join-lt" class="input" bind:value={jLeft} onchange={() => { jLeftCol = firstCol(jLeftT); joinError = null; }}>
+              {#each tables as t (t.uid)}<option value={t.uid}>{t.alias}</option>{/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="qb-join-lc">Left column</label>
+            <select id="qb-join-lc" class="input mono" bind:value={jLeftCol} disabled={!jLeftT?.columns} onchange={() => (joinError = null)}>
+              {#if !jLeftT?.columns}<option value="">Loading columns…</option>{/if}
+              {#each jLeftT?.columns ?? [] as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+            </select>
+          </div>
+        </div>
+        <div class="join-side">
+          <div class="field">
+            <label for="qb-join-rt">Right table</label>
+            <select id="qb-join-rt" class="input" bind:value={jRight} onchange={() => { jRightCol = firstCol(jRightT, jLeftCol); joinError = null; }}>
+              {#each tables as t (t.uid)}<option value={t.uid}>{t.alias}</option>{/each}
+            </select>
+          </div>
+          <div class="field">
+            <label for="qb-join-rc">Right column</label>
+            <select id="qb-join-rc" class="input mono" bind:value={jRightCol} disabled={!jRightT?.columns} onchange={() => (joinError = null)}>
+              {#if !jRightT?.columns}<option value="">Loading columns…</option>{/if}
+              {#each jRightT?.columns ?? [] as c (c.name)}<option value={c.name}>{c.name}</option>{/each}
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="qb-join-type">Join type</label>
+          <select id="qb-join-type" class="input" bind:value={jType}>
+            {#each JOIN_TYPES as t (t)}<option value={t}>{t === 'FULL' ? 'FULL OUTER' : t} JOIN</option>{/each}
+          </select>
+        </div>
+        {#if joinError}<p class="join-err" role="alert">{joinError}</p>{/if}
+      </div>
+      {#snippet footer()}
+        <button class="btn" onclick={() => (joinOpen = false)}>Cancel</button>
+        <button class="btn primary" onclick={addJoin} disabled={!jLeftCol || !jRightCol}>Add join</button>
+      {/snippet}
+    </Modal>
+  {/if}
 {/if}
 
 {#snippet groupEditor(g: CondGroup, depth: number, having: boolean)}
@@ -1283,7 +1384,7 @@
           {:else}
             <span class="val none"></span>
           {/if}
-          <button class="icon-btn" onclick={() => removeAt(g, i)} aria-label="Remove condition" title="Remove"><Icon name="x" size={12} /></button>
+          <button class="icon-btn" onclick={() => removeAt(g, i)} aria-label="Remove condition" title="Remove condition"><Icon name="x" size={12} /></button>
         </div>
       {/if}
     {/each}
@@ -1303,7 +1404,7 @@
     grid-row: 1;
     justify-self: end;
     width: 5px;
-    margin-inline-end: -3px;
+    margin-inline-end: -2px;
     cursor: col-resize;
     position: relative;
     z-index: 2;
@@ -1312,7 +1413,7 @@
   .side-resizer:hover,
   .side-resizer:focus-visible {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
 
   /* ── Palette ── */
@@ -1347,7 +1448,7 @@
     color: var(--text-dim);
   }
   .pal-search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .pal-search-input {
     flex: 1;
@@ -1375,7 +1476,7 @@
   .pal-item {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     height: 26px;
     margin-block-end: 1px;
@@ -1460,7 +1561,7 @@
   .edges {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the canvas is dir="ltr" (physical coordinates) */
     pointer-events: none;
     z-index: 1;
   }
@@ -1508,7 +1609,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: hidden;
   }
   .node.base {
@@ -1538,7 +1639,7 @@
     width: 96px;
     min-width: 0;
     height: 22px;
-    padding: 0 5px;
+    padding: 0 4px;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1551,8 +1652,8 @@
     border-color: var(--border);
   }
   .alias-input:focus {
-    border-color: var(--accent);
-    background: var(--surface);
+    border-color: var(--accent-text);
+    background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .node-src {
     flex: 1;
@@ -1567,7 +1668,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
     border: 1px solid var(--border);
   }
@@ -1582,8 +1683,6 @@
   }
   .node-loading {
     padding: 6px 12px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .col-row {
     position: relative;
@@ -1621,7 +1720,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     line-height: 14px;
-    padding: 0 3px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
   }
   .col-badge.pk {
@@ -1637,18 +1736,19 @@
     top: 50%;
     width: 10px;
     height: 10px;
-    margin-top: -5px;
+    margin-top: -5px; /* ui-guards: allow — centres the 10 px handle */
     border-radius: 50%;
     background: var(--surface);
-    border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1.5px solid var(--accent-line-strong);
     cursor: crosshair;
     z-index: 3;
   }
+  /* Physical on purpose: the canvas is dir="ltr" (see the markup). */
   .handle.l {
-    left: -5px;
+    left: -5px; /* ui-guards: allow */
   }
   .handle.r {
-    right: -5px;
+    right: -5px; /* ui-guards: allow */
   }
   .col-row:hover .handle,
   .handle:hover {
@@ -1657,7 +1757,7 @@
   .canvas-hint {
     position: absolute;
     top: 50%;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with the translate below: the same in RTL */
     transform: translate(-50%, -50%);
     display: flex;
     flex-direction: column;
@@ -1678,6 +1778,20 @@
     font-size: var(--fs-m);
     font-weight: 500;
   }
+  .join-form {
+    display: flex;
+    flex-direction: column;
+  }
+  .join-side {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .join-err {
+    margin: 0;
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
   .canvas-bar {
     position: absolute;
     inset-inline: 10px;
@@ -1695,7 +1809,7 @@
   .cb-warn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--warning);
   }
@@ -1704,9 +1818,9 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
-    border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px dashed var(--accent-line);
     background: transparent;
     color: var(--accent-text);
     font-size: var(--fs-xs);
@@ -1729,7 +1843,7 @@
   }
   .split:hover,
   .split:focus-visible {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .grip {
     width: 36px;
@@ -1802,7 +1916,7 @@
   .distinct {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     margin-inline-start: 6px;
@@ -1819,7 +1933,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-top: 5px;
+    margin-top: 4px;
     min-width: 0;
   }
   .row .input {
@@ -1882,12 +1996,6 @@
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 4px;
-  }
-  .chips .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding-inline-end: 3px;
   }
   .chip-x {
     display: inline-grid;

@@ -107,7 +107,7 @@ test('ui: a run survives a full page reload as history and reopens', async ({ pa
 
   // Run view appears and reaches a terminal state (stubbed → fast).
   await expect(panel.locator('.agent-card').first()).toBeVisible({ timeout: 15_000 });
-  await expect(panel.locator('.run-head .pill')).toContainText(/done|error/i, {
+  await expect(panel.locator('.run-head .badge')).toContainText(/done|error/i, {
     timeout: 30_000,
   });
 
@@ -139,7 +139,7 @@ test('ui: refine turns appear in the runs history with the note path', async ({ 
   // The refine turn recorded by the API test above is in the list.
   const refineRow = panel.locator('.run-row', { hasText: 'runbooks/deploy.md' }).first();
   await expect(refineRow).toBeVisible();
-  await expect(refineRow.locator('.kind-chip')).toHaveText('refine');
+  await expect(refineRow.locator('.kind-chip')).toHaveText('Refine');
 });
 
 test('ui: review history survives reload and exposes nested retry controls', async ({ page }) => {

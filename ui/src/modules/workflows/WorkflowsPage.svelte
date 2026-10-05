@@ -1,18 +1,23 @@
 <script lang="ts">
   import type { ProductPublicationPreview } from '../product/types';
+  import { toastError } from '../../lib/toastError';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { liveQuery } from '../../lib/live';
   import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
   // on the canvas. Left = generate + list + running; center = node-graph editor + run.
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { marked } from 'marked';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -25,7 +30,7 @@
   import TriggersPanel from './TriggersPanel.svelte';
   import { ui, WF_CTX_MIN, WF_CTX_MAX } from '../../lib/stores/ui.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
-  import { paneResizer } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth, paneResizer } from '../../lib/paneResizer';
   import { onTabKey } from '../../lib/tabKeys';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
@@ -39,6 +44,9 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import { workflowRunBus } from '../../lib/events.svelte';
   import { workflowsPagePort } from '../../lib/uiCommands/workflows';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { findPlaceholder, resultDestinations, runInputExample, runInputSkeleton } from './runInput';
@@ -52,6 +60,7 @@
     WorkflowTrigger,
     WorkflowVersionSummary,
     FsRead,
+    Repo,
     ReviewMode,
     RunWorkflowReq,
   } from '../../lib/api/types';
@@ -66,6 +75,10 @@
   let current = $state<Workflow | null>(null);
   let graph = $state<WorkflowGraph>({ nodes: [], edges: [] });
   let selectedId = $state<string | null>(null);
+  // The list pane's width: the shared LIST_PANE range, remembered per device.
+  // A width set under the old key (ui.wfSideWidth) carries over on first read.
+  const LIST_W_KEY = 'workflows.listW';
+  let listW = $state(loadPaneWidth(LIST_W_KEY, Math.max(LIST_PANE.min, Math.min(LIST_PANE.max, ui.wfSideWidth)), LIST_PANE.min, LIST_PANE.max));
   let dirty = $state(false);
   let savingGraph = $state(false);
 
@@ -118,8 +131,8 @@
   const selectedNode = $derived(graph.nodes.find((n) => n.id === selectedId) ?? null);
   const selectedSummary = $derived(selectedId ? (runStates[selectedId] ?? null) : null);
   let inspectorBody = $state<NodeRunState | null>(null);
-  /** The step-output fetch failed → "Couldn't load the step output · Retry". */
-  let inspectorError = $state(false);
+  /** Why the step-output fetch failed (null = ok) → "Couldn’t load the step output · Retry". */
+  let inspectorError = $state<string | null>(null);
   let inspectorRetry = $state(0);
   const selectedRun = $derived(inspectorBody ?? selectedSummary);
   // A RUNNING node's detail_version bumps per log line: refetch its body at
@@ -134,7 +147,7 @@
     if (target !== inspectorFor) {
       inspectorFor = target;
       inspectorBody = null;
-      inspectorError = false;
+      inspectorError = null;
     }
     if (!id || !node?.detail_version) return;
     const expected = node.detail_version;
@@ -152,11 +165,11 @@
       void sharedNodeBodies.fetch(id, node.node_id, (signal) => workflowNodeDetail(id, node.node_id, signal), ctl.signal).then(result => {
         if (!ctl.signal.aborted && result.detail_version === expected) {
           inspectorBody = result.body;
-          inspectorError = false;
+          inspectorError = null;
         }
-      }).catch(() => {
+      }).catch((e: unknown) => {
         // The previous body (if any) stays; a failure is said, not swallowed.
-        if (!ctl.signal.aborted) inspectorError = true;
+        if (!ctl.signal.aborted) inspectorError = loadErrorText(e);
       });
     }, delay);
     return () => { clearTimeout(timer); ctl.abort(); };
@@ -391,7 +404,7 @@
       if (requestedRunId !== runId || current?.id !== workflowId || destroyed) return;
       if (result.changed) run = result.run;
       runsOpen = false;
-    } catch (e) {toasts.error('Couldn’t open the run',e instanceof Error ? e.message : String(e));}
+    } catch (e) {toastError('Couldn’t open the run', e);}
   }
 
   // Never open onto an empty "build a workflow" pane when the workspace has
@@ -409,12 +422,52 @@
     const mine = workflows.filter((w) => w.workspace_id === wsId);
     if (mine.length === 0) return;
     autoPickedFor = wsId;
-    const id = initialSelection('workflows', mine, (w) => w.id);
+    // A deep link (`#/workflows/<id>`) wins over the remembered pick.
+    const linked = untrack(() => routeWorkflowId());
+    const id = linked && mine.some((w) => w.id === linked) ? linked : initialSelection('workflows', mine, (w) => w.id);
     const wf = mine.find((w) => w.id === id);
     if (wf) untrack(() => open(wf));
   });
+
+  /** The workflow id the URL names (`#/workflows/<id>`), or null. */
+  function routeWorkflowId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'workflows' && id ? id : null;
+  }
+  // The URL carries the open workflow so a reload / share / notification lands
+  // on it; the last pick is remembered as the fallback.
+  // (Nothing open yet on mount must not strip a deep link before it opens:
+  // only a CLOSE — an id going away — clears the URL.)
+  let routedId: string | null = null;
   $effect(() => {
-    if (current?.id) rememberSelection('workflows', current.id);
+    const id = current?.id ?? null;
+    if (id) rememberSelection('workflows', id);
+    const was = routedId;
+    routedId = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'workflows' && routeWorkflowId() !== id) router.replace(id ? `workflows/${id}` : 'workflows');
+    });
+  });
+  // A route change while the page is up (a notification, Back/Forward, a
+  // pasted link) opens that workflow — through the unsaved-edits guard; a
+  // declined switch puts the URL back on the open workflow.
+  $effect(() => {
+    const linked = routeWorkflowId();
+    // (Re-checked once the list lands, so a cold deep link opens on a phone
+    // too, where the auto-pick above stays off.)
+    if (!linked || wfLoading) return;
+    untrack(() => {
+      if (linked === current?.id) return;
+      void (async () => {
+        const wf = workflows.find((w) => w.id === linked);
+        if (!wf || !(await discardEditsOk())) {
+          if (current && router.module === 'workflows') router.replace(`workflows/${current.id}`);
+          return;
+        }
+        if (routeWorkflowId() === linked) open(wf);
+      })();
+    });
   });
 
   // Layout: with no workflows (and nothing running) the list pane is hidden
@@ -529,7 +582,7 @@
       { label: 'Tidy', icon: 'grid', title: 'Tidy layout into rows', action: tidy },
     );
     if (selectedId) {
-      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected });
+      items.push({ separator: true }, { label: 'Delete selected node', icon: 'trash', danger: true, action: removeSelected }); // ui-guards: allow — an unsaved canvas edit (Discard reverts it), no confirm
     }
     ctxMenu.show(e, items);
   }
@@ -578,7 +631,7 @@
       open(wf);
       toasts.success(`Created “${wf.name}”`, 'Ready to run.');
     } catch (e) {
-      toasts.error('Couldn’t create the workflow from the template', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the workflow from the template', e);
     }
   }
 
@@ -641,7 +694,7 @@
       prompt = '';
       toasts.success('Workflow generated', 'Tweak it on the canvas, then run.');
     } catch (e) {
-      toasts.error('Couldn’t generate the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t generate the workflow', e);
     } finally {
       generating = false;
     }
@@ -661,7 +714,7 @@
       workflows = [wf, ...workflows];
       open(wf);
     } catch (e) {
-      toasts.error('Couldn’t create the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the workflow', e);
     }
   }
 
@@ -683,7 +736,7 @@
       if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
       toasts.success('Saved');
     } catch (e) {
-      toasts.error('Couldn’t save the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the workflow', e);
     } finally {
       savingGraph = false;
     }
@@ -701,7 +754,7 @@
       applySavedWorkflow(wf);
       toasts.success('Instructions saved');
     } catch (e) {
-      toasts.error('Couldn’t save the instructions', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the instructions', e);
     } finally {
       savingInstructions = false;
     }
@@ -717,7 +770,7 @@
       });
       applySavedWorkflow(wf);
     } catch (e) {
-      toasts.error('Couldn’t save the restart policy', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the restart policy', e);
     }
   }
 
@@ -726,7 +779,7 @@
   // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can't be undone.`,
+      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can’t be undone.`,
       { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
     );
     if (!ok) return;
@@ -746,7 +799,7 @@
       }
       toasts.success('Workflow deleted', wf.name);
     } catch (e) {
-      toasts.error('Couldn’t delete the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the workflow', e);
     }
   }
 
@@ -766,7 +819,7 @@
       toasts.success(`Duplicated → “${copy.name}”`, 'Rename it to trigger it independently.');
       void open(copy);
     } catch (e) {
-      toasts.error('Couldn’t duplicate the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t duplicate the workflow', e);
     }
   }
 
@@ -802,7 +855,7 @@
       if (current?.id === wf.id) current = { ...current, name: updated.name };
       toasts.success(`Renamed to “${updated.name}”`);
     } catch (e) {
-      toasts.error('Couldn’t rename the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the workflow', e);
     } finally {
       cancelRename();
     }
@@ -872,7 +925,7 @@
       if (current?.id !== id) return false;
       validationIssues = result.issues;
       return result.valid;
-    } catch (e) { toasts.error('Couldn’t validate the workflow', e instanceof Error ? e.message : String(e)); return false; }
+    } catch (e) { toastError('Couldn’t validate the workflow', e); return false; }
     finally { validating = false; }
   }
 
@@ -900,7 +953,7 @@
       if (ownsView()) { requestedRunId = r.id; run = r; }
       return r;
     } catch (e) {
-      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the run', e);
       return null;
     } finally {
       running = false;
@@ -912,13 +965,36 @@
       const done = await waitRunTerminal(r.id);
       if (destroyed) return;
       if (done.status === 'success') toasts.success('Run complete');
-      else if (done.status === 'canceled') toasts.info('Run cancelled');
+      else if (done.status === 'canceled') toasts.info('Run canceled');
       else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
-      toasts.error('Couldn’t follow the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t follow the run', e);
     }
   }
+
+  /** ⌘K "New workflow…": the describe-it box (on a phone, back on the list first). */
+  async function focusGenerator(): Promise<void> {
+    if (viewport.isPhone && current) await backToList();
+    await tick();
+    document.getElementById('wf-prompt')?.focus();
+  }
+
+  // ⌘K: the page's verbs (run verbs only while a workflow is open).
+  $effect(() => {
+    const open = !!current;
+    const live = runActive;
+    return registry.register('workflows', [
+      { id: 'workflows.new', title: 'New workflow…', group: 'Workflows', keywords: 'create describe generate automation', run: () => void focusGenerator() },
+      { id: 'workflows.blank', title: 'New blank workflow', group: 'Workflows', keywords: 'create empty canvas', run: () => void createBlank() },
+      ...(open && !live
+        ? [{ id: 'workflows.run', title: 'Run workflow…', group: 'Workflows', keywords: 'start execute input', run: () => { runInputOpen = true; } }]
+        : []),
+      ...(open && live
+        ? [{ id: 'workflows.stop', title: 'Stop run…', group: 'Workflows', keywords: 'cancel halt', run: () => void stop() }]
+        : []),
+    ]);
+  });
 
   // Agent UI control (lib/uiCommands/workflows.ts): the agent opens a
   // workflow / run and starts runs through THIS editor, so the user watches
@@ -990,7 +1066,7 @@
       }
       return parsed;
     } catch (e) {
-      runInputError = `Run input isn't valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
+      runInputError = `Run input isn’t valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
       runInputOpen = true;
       return null; // signal: invalid
     }
@@ -1102,22 +1178,22 @@
     }
   }
 
-  // Cancelling can't be undone (the run halts after its current step and must
-  // be started again), so it asks first — the same rule as the inspector's
-  // "Cancel run" and a Stop in Goal Loops.
+  // Stopping can't be undone (the run halts after its current step and must
+  // be started again), so it asks first — the same Stop wording as the header's
+  // "Stop run…" and a Stop in Goal Loops; "Keep running" is the safe way out.
   async function stop(): Promise<void> {
     if (!run) return;
     const name = current?.name ?? 'this workflow';
     const ok = await confirmer.ask(
-      `Cancel this run of “${name}”? It finishes the current step, then halts. Completed steps and their output are kept; to continue you start a new run.`,
-      { title: 'Cancel run', confirmLabel: 'Cancel run' },
+      `Stop this run of “${name}”? It finishes the current step, then halts. Completed steps and their output are kept; to continue you start a new run.`,
+      { title: 'Stop run', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true },
     );
     if (!ok || !run) return;
     try {
       await api.post(`/workflow-runs/${run.id}/cancel`, {});
-      toasts.info('Cancelling run…', 'Finishes the current step, then halts.');
+      toasts.info('Stopping the run…', 'Finishes the current step, then halts.');
     } catch (e) {
-      toasts.error('Couldn’t cancel the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the run', e);
     }
   }
 
@@ -1154,15 +1230,6 @@
     const startY = e.clientY;
     const startH = ui.runDetailHeight;
     startMouseDrag(e, { cursor: 'row-resize', onMove: (ev) => ui.setRunDetailHeight(startH + (startY - ev.clientY)) });
-  }
-
-  // Left panel (Workflows list + Running) resize: drag its right edge (anchored
-  // left → dragging right widens it). Mirrors startCtxResize.
-  function startSideResize(e: MouseEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = ui.wfSideWidth;
-    startMouseDrag(e, { onMove: (ev) => ui.setWfSideWidth(startW + (ev.clientX - startX)) });
   }
 
   // Short run id + per-workflow ordinal, so two concurrent runs of the SAME
@@ -1277,7 +1344,7 @@
         approvalPreviewError = 'The publication preview changed. Reload and review it before deciding.';
         void refetchRun(runId);
       }
-      toasts.error('Couldn’t record the approval', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t record the approval', e);
     } finally {
       approving = false;
     }
@@ -1286,6 +1353,54 @@
   function nodeName(id: string): string {
     const n = graph.nodes.find((x) => x.id === id);
     return n?.name || n?.kind || id;
+  }
+  /** What a paused run's approval gates: the step(s) that fed it (whose work
+   *  is being approved), the node's own prompt, and the step(s) an approval
+   *  lets run next. */
+  function approvalGate(nodeId: string): { after: string[]; ask: string; next: string[] } {
+    const params = graph.nodes.find((n) => n.id === nodeId)?.params as { prompt?: unknown } | null | undefined;
+    return {
+      after: graph.edges.filter((e) => e.target === nodeId).map((e) => nodeName(e.source)),
+      ask: typeof params?.prompt === 'string' ? params.prompt.trim() : '',
+      next: graph.edges.filter((e) => e.source === nodeId).map((e) => nodeName(e.target)),
+    };
+  }
+  // The workspace's repositories, for the repo pickers on review / PR /
+  // manual-trigger nodes — fetched once per workspace, only when such a node
+  // is open in the inspector.
+  let wfRepos = $state<Repo[]>([]);
+  let reposLoading = $state(false);
+  let reposError = $state<string | null>(null);
+  let reposFor: string | null = null;
+  async function loadWfRepos(force = false): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId || (!force && reposFor === wsId)) return;
+    reposFor = wsId;
+    reposLoading = true;
+    reposError = null;
+    try {
+      const rows = await api.get<Repo[]>(`/workspaces/${wsId}/repos`);
+      if (reposFor === wsId) wfRepos = rows;
+    } catch (e) {
+      if (reposFor === wsId) {
+        reposError = loadErrorText(e);
+        reposFor = null;
+      }
+    } finally {
+      if (reposFor === wsId || reposFor === null) reposLoading = false;
+    }
+  }
+  const REPO_NODE_KINDS = new Set(['manual_trigger', 'review_run', 'git_pr']);
+  $effect(() => {
+    const kind = selectedNode?.kind;
+    void ws.currentId;
+    if (kind && REPO_NODE_KINDS.has(kind)) untrack(() => void loadWfRepos());
+  });
+  /** "you" for the signed-in approver, a name as given, nothing for a bare id. */
+  function approverLabel(by: string | null | undefined): string | null {
+    if (!by) return null;
+    if (by === auth.me?.id) return 'you';
+    return /^[0-9A-HJKMNP-TV-Z]{26}$/i.test(by) ? null : by;
   }
   const fmtMs = fmtStepMs;
 
@@ -1607,7 +1722,7 @@
       if (ownsView()) { open(wf); await loadVersions(); }
       toasts.success(`Restored v${v.version}`);
     } catch (e) {
-      toasts.error('Couldn’t restore the version', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t restore the version', e);
     }
   }
 
@@ -1655,7 +1770,7 @@
           title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
           onclick={generate}
         >
-          {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+          {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
         </button>
       </div>
       {#if templates.length > 0}
@@ -1683,7 +1798,7 @@
         title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
         onclick={generate}
       >
-        {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+        {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
       </button>
       <button class="btn ghost full" onclick={createBlank}>
         <Icon name="plus" size={13} /> Start blank
@@ -1727,6 +1842,31 @@
   </div>
 {/snippet}
 
+<!-- A node's `repo_id` param as a picker over the workspace's repositories
+     (it used to be a free-text "Repo ID" to copy from the Git tab). A value
+     that isn't in the list — another workspace's repo, or a stale id — stays
+     selectable so opening the node never silently rewrites it. -->
+{#snippet repoPicker(id: string, emptyLabel: string)}
+  {@const value = paramStr('repo_id')}
+  <select
+    {id}
+    {value}
+    disabled={reposLoading && wfRepos.length === 0}
+    onchange={(e) => onParam('repo_id', e.currentTarget.value)}
+  >
+    <option value="">{reposLoading && wfRepos.length === 0 ? 'Loading repositories…' : emptyLabel}</option>
+    {#each wfRepos as r (r.id)}
+      <option value={r.id} title={r.path}>{r.name}</option>
+    {/each}
+    {#if value && !wfRepos.some((r) => r.id === value)}
+      <option value={value}>{value} (not in this workspace)</option>
+    {/if}
+  </select>
+  {#if reposError}
+    <LoadState what="repositories" variant="compact" error={reposError} empty onretry={() => void loadWfRepos(true)} />
+  {/if}
+{/snippet}
+
 <div class="wf-root">
 <PageHeader class="wf-bar" title={current?.name ?? 'Workflows'}>
   {#snippet leading()}
@@ -1738,11 +1878,10 @@
   {/snippet}
   {#snippet titleContent()}
     {#if current && renamingId === current.id && renameInBar}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="wf-title-edit"
         bind:value={renameValue}
-        autofocus
+        use:focusOnMount
         aria-label="Workflow name"
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename(current!);
@@ -1760,7 +1899,7 @@
         <Icon name="edit" size={13} />
       </button>
     {/if}
-    {#if current && dirty}<span class="badge" title="The canvas has changes that aren't saved yet">Unsaved</span>{/if}
+    {#if current && dirty}<Badge tone="accent" label="Unsaved" title="The canvas has changes that aren’t saved yet" />{/if}
   {/snippet}
   {#snippet actions()}
     {#if current}
@@ -1793,9 +1932,9 @@
         </button>
       {/if}
       {#if runActive}
-        <!-- While the VIEWED run is live its Cancel takes the primary's place (same word as
-             the inspector's "Cancel run" and the run's final "Cancelled"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="square" size={11} /> Stop run…</button>
+        <!-- While the VIEWED run is live its Stop takes the primary's place (same
+             verb as the confirm dialog's "Stop run"). -->
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={11} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -1813,9 +1952,10 @@
     {/if}
   {/snippet}
 </PageHeader>
+<PageBody fill padded={false}>
 <div class="wf">
   {#if showSide}
-  <aside class="side" class:phone={viewport.isPhone} style={viewport.isPhone ? '' : `width:${ui.wfSideWidth}px`}>
+  <aside class="side" class:phone={viewport.isPhone} style={viewport.isPhone ? '' : `width:${listW}px`}>
     {@render generator('side')}
 
     {#if ws.activeWorkflowRuns.length > 0}
@@ -1832,6 +1972,7 @@
             title={`${r.workflow_name} — ${runStatusLabel(r.status)}`}
           >
             <span class="dot {dotKey(r.status)}" aria-hidden="true"></span>
+            <span class="sr-only">{runStatusLabel(r.status)}:</span>
             <span class="run-name">{r.workflow_name}</span>
             {#if activeWfRunCounts[r.workflow_id] > 1}
               <span class="run-ord" title={`run #${activeRunOrdinals[r.run_id]} of this workflow`}>#{activeRunOrdinals[r.run_id]}</span>
@@ -1854,12 +1995,11 @@
       {#each workflows as wf (wf.id)}
         <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="row-rename"
               data-testid="wf-rename-input"
               bind:value={renameValue}
-              autofocus
+              use:focusOnMount
               aria-label="Workflow name"
               onkeydown={(e) => {
                 if (e.key === 'Enter') commitRename(wf);
@@ -1887,26 +2027,14 @@
         <!-- A failed load is said ONCE: the main pane owns it (with Retry)
              unless a workflow is open there, then the rail does. -->
         <LoadState what="workflows" variant="compact" loading={wfLoading} error={wfError} empty onretry={() => void load()}>
-          {#snippet emptyView()}<p class="empty">No workflows yet — describe one above.</p>{/snippet}
+          {#snippet emptyView()}<EmptyState icon="split" title="No workflows yet" body="Describe one above, or start from a template." />{/snippet}
         </LoadState>
       {/if}
     </div>
-    {#if !viewport.isPhone}
-      <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-      <div
-        class="side-resize"
-        role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
-        aria-label="Resize workflows list"
-        title="Drag or use ←/→ to resize · double-click or Enter to reset"
-        onmousedown={startSideResize}
-        ondblclick={() => ui.setWfSideWidth(270)}
-        use:paneResizer={{ value: ui.wfSideWidth, min: 200, max: 600, onChange: (w) => ui.setWfSideWidth(w), onReset: () => ui.setWfSideWidth(270), text: pxText }}
-      ></div>
-    {/if}
   </aside>
+  {#if !viewport.isPhone}
+    <PaneDivider bind:width={listW} storageKey={LIST_W_KEY} label="Resize the workflows list" />
+  {/if}
   {/if}
 
   {#if showMain}
@@ -2024,6 +2152,7 @@
       {/if}
 
       {#if run?.waiting_approval && run.approval_node_id}
+        {@const gate = approvalGate(run.approval_node_id)}
         {#if approvalNeedsPreview}
           <section aria-label="Publication review">
             {#if approvalPreviewLoading}<p>Loading the content and destination for review…</p>
@@ -2043,8 +2172,9 @@
         <div class="approval-banner" role="group" aria-label="Approval needed">
           <Icon name="userCheck" size={14} />
           <span>
-            Run paused — waiting for your approval at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong>
-            <span class="approval-sub">Run started <RelTime iso={run.started_at} /> · approving continues the run, denying stops it with an error.</span>
+            Run paused at <strong title={run.approval_node_id}>{nodeName(run.approval_node_id)}</strong>{#if gate.after.length > 0}, after <strong>{gate.after.join(', ')}</strong>{/if} — waiting for your approval
+            {#if gate.ask}<span class="approval-ask">“{gate.ask}”</span>{/if}
+            <span class="approval-sub">Run started <RelTime iso={run.started_at} /> · approving runs {gate.next.length > 0 ? gate.next.join(', ') : 'the rest of the run'}; denying stops the run with an error.</span>
           </span>
           <ApprovalActions
             disabled={approvalNeedsPreview && (!approvalPreviewReady || approvalPreviewLoading || !!approvalPreviewError)}
@@ -2060,6 +2190,7 @@
         <div class="approval-outcome">
           <ApprovalOutcome
             outcome={run.approved_by ? 'approved' : 'denied'}
+            by={approverLabel(run.approved_by)}
             at={run.approved_at}
             note={run.approval_note && run.approval_note !== 'rejected' ? run.approval_note : null}
           />
@@ -2095,14 +2226,14 @@
         <div class="instructions-wrap">
           <div class="instructions-h">
             <span>Instructions</span>
-            {#if instructionsDirty}<span class="badge">unsaved</span>{/if}
+            {#if instructionsDirty}<Badge tone="accent" label="Unsaved" />{/if}
             <span class="grow"></span>
             <button class="btn small" disabled={!instructionsDirty || savingInstructions} title={instructionsDirty ? 'Save the instructions' : 'No unsaved changes'} onclick={saveInstructions}>
               {savingInstructions ? 'Saving…' : 'Save instructions'}
             </button>
           </div>
           <p class="instructions-hint">
-            Standing rules every step follows by the letter — distinct from the workflow's description.
+            Standing rules every step follows by the letter — distinct from the workflow’s description.
           </p>
           <textarea
             class="ri-text mono"
@@ -2158,7 +2289,7 @@
             empty={versions.length === 0}
             onretry={() => void loadVersions(versionsBefore)}
           >
-            {#snippet emptyView()}<p class="empty">{versionsBefore === undefined ? 'No saved versions yet — edits and restores create them.' : 'No older versions.'}</p>{/snippet}
+            {#snippet emptyView()}<EmptyState icon="clock" title={versionsBefore === undefined ? 'No saved versions yet' : 'No older versions'} body={versionsBefore === undefined ? 'Saving the canvas or restoring a version creates one.' : ''} />{/snippet}
             <ul class="versions">
               {#each versions as v (v.id)}
                 <li class="ver">
@@ -2177,20 +2308,15 @@
         <!-- Drag grip: bottom mode grows the height cap; side mode (docked to a
              right column) drags the left edge to change width. Double-click
              resets. (R6) -->
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
         <div
           class="insp-grip"
           class:side={sideDock}
           role="separator"
-          tabindex="0"
-          aria-orientation={sideDock ? 'vertical' : 'horizontal'}
           aria-label="Resize node inspector"
           title="Drag or use arrow keys to resize · double-click or Enter to reset"
-          onmousedown={startInspResize}
-          ondblclick={resetInsp}
           use:paneResizer={sideDock
-            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, text: pxText }
-            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, text: (v) => `${Math.round(v)} pixels tall` }}
+            ? { value: ui.wfInspSideWidth, min: 280, max: Math.max(300, Math.round(window.innerWidth * 0.6)), invert: true, onChange: (w) => ui.setWfInspSideWidth(w), onReset: resetInsp, onDragStart: startInspResize, text: pxText }
+            : { value: ui.runDetailHeight, min: 160, max: Math.max(160, Math.round(window.innerHeight * 0.85)), orientation: 'horizontal', invert: true, onChange: (h) => { runDetailMax = false; ui.setRunDetailHeight(h); }, onReset: resetInsp, onDragStart: startInspResize, text: (v) => `${Math.round(v)} pixels tall` }}
         ></div>
         <div
           class="inspector"
@@ -2216,7 +2342,7 @@
             </div>
           {/if}
           {#if run}
-            <!-- Run bar: live status + Cancel (R7) + maximize/zoom (R6). -->
+            <!-- Run bar: live status + Stop (R7) + maximize/zoom (R6). -->
             <div class="insp-bar">
               <span class="tl-label"><StatusBadge status={runStatus(run.status)} testid="run-status" /></span>
               <span class="grow"></span>
@@ -2227,7 +2353,7 @@
                   onclick={stop}
                   title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="square" size={11} /> Stop run…
+                  <Icon name="stop" size={11} /> Stop run…
                 </button>
               {/if}
               <button
@@ -2338,7 +2464,7 @@
                 value={paramStr('msg')}
                 oninput={(e) => onParam('msg', e.currentTarget.value)}
               ></textarea>
-              <label for="mt-wd">Working directory (where agents run)</label>
+              <label for="mt-wd">Working folder (where agents run)</label>
               <PathField value={paramStr('working_directory')} onpick={(path) => onParam('working_directory', path)}><input
                 id="mt-wd"
                 type="text"
@@ -2346,14 +2472,8 @@
                 value={paramStr('working_directory')}
                 oninput={(e) => onParam('working_directory', e.currentTarget.value)}
               /></PathField>
-              <label for="mt-repo">Repo ID (for review / PR steps)</label>
-              <input
-                id="mt-repo"
-                type="text"
-                placeholder="git repo id — copy from the Git tab"
-                value={paramStr('repo_id')}
-                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
-              />
+              <label for="mt-repo">Repository (for review / PR steps)</label>
+              {@render repoPicker('mt-repo', 'None')}
               <label for="mt-base">Base branch</label>
               <input
                 id="mt-base"
@@ -2671,7 +2791,7 @@
                 value={paramStr('expr')}
                 oninput={(e) => onParam('expr', e.currentTarget.value)}
               />
-              <p class="node-hint">Truthy → downstream nodes run; falsy → they're skipped.</p>
+              <p class="node-hint">Truthy → downstream nodes run; falsy → they’re skipped.</p>
             {:else if selectedNode.kind === 'loop'}
               <label for="np-maxiter">Max iterations (1–10)</label>
               <input
@@ -2791,17 +2911,11 @@
               </details>
             {:else if selectedNode.kind === 'review_run'}
               <p class="insp-note">
-                Leave Repo&nbsp;ID and Base empty to review exactly where the implementer worked
-                (the run's working directory + base). Set them only to override.
+                Leave Repository and Base on “inherit” to review exactly where the implementer worked
+                (the run’s working folder + base). Set them only to override.
               </p>
-              <label for="np-repo">Repo ID (optional — inherits from the implementer)</label>
-              <input
-                id="np-repo"
-                type="text"
-                placeholder="inherits from the working directory"
-                value={paramStr('repo_id')}
-                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
-              />
+              <label for="np-repo">Repository (optional — inherits from the implementer)</label>
+              {@render repoPicker('np-repo', 'Inherit from the working folder')}
               <label for="np-base">Base branch (optional — inherits, else main)</label>
               <input
                 id="np-base"
@@ -3088,19 +3202,13 @@
               {@render agentProviderModel()}
             {:else if selectedNode.kind === 'git_pr'}
               <p class="insp-note">
-                Leave Repo&nbsp;ID and Base empty to <strong>inherit the reference</strong> the
-                implementer/reviewer used (the run's working directory and base, or the upstream
+                Leave Repository and Base empty to <strong>inherit the reference</strong> the
+                implementer/reviewer used (the run’s working folder and base, or the upstream
                 review). Set them only to override. A run that changed several repos opens
                 <strong>one PR per repo</strong> (from fanned-in reviews, or enable “detect changed”).
               </p>
-              <label for="np-repo">Repo ID (optional — inherits from reference)</label>
-              <input
-                id="np-repo"
-                type="text"
-                placeholder="inherits from the upstream review / working directory"
-                value={paramStr('repo_id')}
-                oninput={(e) => onParam('repo_id', e.currentTarget.value)}
-              />
+              <label for="np-repo">Repository (optional — inherits from reference)</label>
+              {@render repoPicker('np-repo', 'Inherit from the upstream review / working folder')}
               <label for="np-base">Base branch (optional — inherits from reference)</label>
               <input
                 id="np-base"
@@ -3125,10 +3233,10 @@
               </label>
             {:else if selectedNode.kind === 'self_improve'}
               <p class="insp-note">
-                Reflects on the workspace's recent agent sessions and <strong>offers</strong>
+                Reflects on the workspace’s recent agent sessions and <strong>offers</strong>
                 skill/memory improvements. They are <strong>queued for approval</strong> in
                 Self-Improvement — never auto-applied — and the offered list is posted to the
-                trigger's chat thread.
+                trigger’s chat thread.
               </p>
               <span class="np-label">Providers — the agent(s) that reflect (override Self-Improvement settings)</span>
               <div class="rv-provs">
@@ -3204,10 +3312,7 @@
               </div>
             {/if}
             {#if inspectorError}
-              <div class="insp-load-err" role="alert">
-                Couldn’t load the step output ·
-                <button class="btn small ghost" onclick={() => { inspectorError = false; inspectorRetry++; }}>Retry</button>
-              </div>
+              <LoadState what="the step output" variant="compact" error={inspectorError} empty onretry={() => { inspectorError = null; inspectorRetry++; }} />
             {/if}
             {#if selectedRun?.error}
               <div class="err">{selectedRun.error}</div>
@@ -3289,16 +3394,12 @@
        no second full-height rail beside the app shell's right rail. Resizable. -->
   {#if viewport.isDesktop && run && run.context_dir && ui.wfCtxOpen}
     <aside class="ctx-sidebar" style="width:{ui.wfCtxWidth}px" data-testid="ctx-sidebar">
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="ctx-resize"
         role="separator"
-        tabindex="0"
-        aria-orientation="vertical"
         aria-label="Resize context panel"
         title="Drag or use ←/→ to resize"
-        onmousedown={startCtxResize}
-        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), text: pxText }}
+        use:paneResizer={{ value: ui.wfCtxWidth, min: WF_CTX_MIN, max: WF_CTX_MAX, invert: true, onChange: (w) => ui.setWfCtxWidth(w), onDragStart: startCtxResize, text: pxText }}
       ></div>
       <div class="ctx-head">
         <div class="ctx-tabs" role="tablist" aria-label="Context panel sections">
@@ -3361,6 +3462,7 @@
     </aside>
   {/if}
 </div>
+</PageBody>
 </div>
 
 <!-- Big editor for a cramped node-form JSON field (R10). Edits write straight
@@ -3405,7 +3507,7 @@
     border-color: var(--border-strong);
     color: var(--text);
   }
-  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
+  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); }
   .wf-root {
     display: flex;
     flex-direction: column;
@@ -3417,11 +3519,12 @@
     display: flex;
     min-height: 0;
   }
+  /* The list pane (Workflows + Running); its width + the hairline come from
+     the shared PaneDivider beside it. */
   .side {
     width: 270px;
     flex-shrink: 0;
     position: relative;
-    border-inline-end: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     background: var(--surface);
@@ -3477,29 +3580,9 @@
     border: 1px solid var(--border);
     background: var(--surface);
   }
-  /* Drag the left panel's right edge to resize it. */
-  .side-resize {
-    position: absolute;
-    inset-inline-end: -3px;
-    top: 0;
-    bottom: 0;
-    width: 7px;
-    cursor: col-resize;
-    z-index: 5;
-  }
-  .side-resize:focus-visible,
   .ctx-resize:focus-visible,
   .insp-grip:focus-visible {
     outline: none;
-  }
-  .side-resize:hover,
-  .side-resize:focus-visible {
-    background: linear-gradient(
-      to right,
-      transparent,
-      color-mix(in srgb, var(--accent) 40%, transparent),
-      transparent
-    );
   }
   .gen {
     padding: 12px;
@@ -3513,7 +3596,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   textarea {
     width: 100%;
@@ -3521,7 +3604,7 @@
     font: inherit;
     font-size: var(--fs-m);
     line-height: 1.45;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -3541,8 +3624,8 @@
   }
   textarea:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
      `rows` alone loses to the inspector's own scroll: a 3-row box holding a
@@ -3639,7 +3722,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 4px 6px;
   }
   /* Was `.row` — the global app.css class (whose gap it relied on), so it's
@@ -3662,7 +3745,7 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     color: var(--text);
@@ -3702,18 +3785,13 @@
     flex: 1;
     min-width: 0;
     margin: 4px 6px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     font-size: var(--fs-m);
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
     outline: none;
-  }
-  .empty {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    padding: 8px 6px;
   }
   /* "Running" sidebar list — in-flight runs across the workspace, live. */
   .run-error {
@@ -3739,15 +3817,15 @@
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--text);
   }
   .run-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     padding: 6px 8px;
     background: none;
@@ -3780,8 +3858,8 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 0 5px;
+    background: var(--accent-soft);
+    padding: 0 4px;
     border-radius: 999px;
     flex-shrink: 0;
   }
@@ -3907,14 +3985,8 @@
   }
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 1px 7px;
-    border-radius: 999px;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .grow {
     flex: 1;
@@ -3938,14 +4010,14 @@
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
-    padding: 5px;
+    padding: 4px;
   }
   .pal-item {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     border-radius: var(--radius-s);
@@ -3954,7 +4026,7 @@
     color: var(--text);
   }
   .pal-item:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .pal-ic {
     display: grid;
@@ -4025,7 +4097,7 @@
   .insp-grip:focus-visible {
     background: linear-gradient(
       to bottom,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4126,7 +4198,7 @@
     width: 100%;
     font: inherit;
     font-size: var(--fs-m);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -4136,14 +4208,14 @@
   .inspector input[type='url']:focus,
   .inspector input[type='number']:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .inspector select {
     width: 100%;
     font: inherit;
     font-size: var(--fs-m);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -4152,15 +4224,8 @@
   }
   .inspector select:focus {
     outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .insp-load-err {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-    color: var(--danger);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .err {
     color: var(--danger);
@@ -4202,7 +4267,7 @@
   .ctx-files {
     margin: 8px 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
   }
   .ctx-files > summary {
@@ -4236,7 +4301,7 @@
   .final-output {
     margin: 8px 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     flex-shrink: 0;
   }
@@ -4269,7 +4334,7 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface-2);
@@ -4325,7 +4390,7 @@
     background: linear-gradient(
       to right,
       transparent,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4333,7 +4398,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding-block: 7px 6px; padding-inline: 10px 8px;
+    padding-block: 6px 6px; padding-inline: 10px 8px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -4347,15 +4412,15 @@
   .ctx-tab {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 3px 8px;
+    letter-spacing: .06em;
+    padding: 2px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -4373,8 +4438,8 @@
     font-weight: 600;
     letter-spacing: 0;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    padding: 0 5px;
+    background: var(--accent-soft);
+    padding: 0 4px;
     border-radius: 999px;
   }
   .ctx-pathline {
@@ -4414,14 +4479,14 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    padding: 2px 5px;
+    padding: 2px 4px;
     border-radius: var(--radius-s);
     cursor: pointer;
     flex-shrink: 0;
   }
   .np-zoom:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .json-zoom {
     width: 100%;
@@ -4438,8 +4503,8 @@
     outline: none;
   }
   .json-zoom:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* Runs history popover */
@@ -4456,7 +4521,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     border-radius: var(--radius-s);
@@ -4465,7 +4530,7 @@
   }
   .run-item:hover,
   .run-item.active {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .run-status {
     flex: 1;
@@ -4475,10 +4540,6 @@
   .run-when {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .btn.danger {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--status-exited) 45%, var(--border));
   }
   .dot {
     width: 8px;
@@ -4512,15 +4573,6 @@
       animation: none;
     }
   }
-  .spin {
-    width: 11px;
-    height: 11px;
-    border: 2px solid currentColor;
-    border-inline-end-color: transparent;
-    border-radius: 50%;
-    display: inline-block;
-    animation: otto-spin 0.8s linear infinite;
-  }
   
   /* Triggers panel: collapsible section below the canvas */
   .triggers-wrap {
@@ -4547,7 +4599,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 6px;
   }
@@ -4652,6 +4704,12 @@
     flex: 1;
     min-width: 0;
   }
+  .approval-ask {
+    display: block;
+    margin-block-start: 2px;
+    font-style: italic;
+    overflow-wrap: anywhere;
+  }
   .approval-sub {
     display: block;
     font-size: var(--fs-s);
@@ -4752,21 +4810,21 @@
   .rv-provs {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
   }
   .rv-chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     cursor: pointer;
     color: var(--text-dim);
   }
   .rv-chip.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--text);
   }
@@ -4803,7 +4861,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .retry-row {
@@ -4833,7 +4891,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }

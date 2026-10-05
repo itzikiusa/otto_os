@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../../lib/plural';
   // The game-studio viewport: three.js (lazy-loaded — ~650 kB, only when a scene3d
   // artifact opens), orbit camera, grid + axes, PBR lighting from the doc, shadows,
   // click-to-select and a TransformControls gizmo (W/E/R, F frame, Del, ⌘D, Esc).
@@ -994,7 +995,7 @@
   onpointerleave={() => (hovering = false)}
 >
   {#if loading}
-    <div class="s3d-overlay center"><span class="s3d-dim">Loading 3D engine…</span></div>
+    <div class="s3d-overlay center"><span class="spinner" role="status" aria-label="Loading the 3D engine" title="Loading the 3D engine"></span></div>
   {:else if loadError}
     <div class="s3d-overlay center">
       <div class="s3d-error">
@@ -1033,7 +1034,7 @@
       {#if !compact}<span>{status}</span>{/if}
       {#if Object.keys(gltfErrors).length}
         <span class="s3d-warn" title={Object.values(gltfErrors).join('\n')}>
-          {Object.keys(gltfErrors).length} model{Object.keys(gltfErrors).length === 1 ? '' : 's'} failed to load
+          {plural(Object.keys(gltfErrors).length, 'model')} failed to load
         </span>
       {/if}
       {#if canEdit && !compact}
@@ -1111,7 +1112,7 @@
     background: transparent;
     color: var(--text);
     font: var(--fs-xs) / 1 var(--font-ui);
-    padding: 6px 9px;
+    padding: 6px 8px;
     cursor: pointer;
   }
   .s3d-seg button + button {
@@ -1158,7 +1159,7 @@
     font-variant-numeric: tabular-nums;
   }
   .s3d-pill {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-radius: var(--radius-m);
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1203,7 +1204,7 @@
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--text-dim);
     font: 600 var(--fs-xs) / 1 var(--font-ui);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     cursor: pointer;
     backface-visibility: hidden;

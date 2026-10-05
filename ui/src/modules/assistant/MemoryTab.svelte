@@ -7,6 +7,8 @@
   //    search, forget one, or forget everything matching a phrase (with Undo).
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -118,24 +120,30 @@
 
   // ── review queue ───────────────────────────────────────────────────────────
   let deciding = $state<string | null>(null);
+  /** Which button of the `deciding` row is in flight (its label reads "…ing"). */
+  let decidingAs = $state<'keep' | 'reject' | null>(null);
   async function accept(m: AssistantMemory): Promise<void> {
     deciding = m.id;
+    decidingAs = 'keep';
     try {
       await assistant.acceptMemory(m.id);
     } catch (e) {
       toasts.error('Couldn’t keep that memory', describeError(e));
     } finally {
       deciding = null;
+      decidingAs = null;
     }
   }
   async function reject(m: AssistantMemory): Promise<void> {
     deciding = m.id;
+    decidingAs = 'reject';
     try {
       await assistant.forgetMemory(m.id);
     } catch (e) {
       toasts.error('Couldn’t reject that memory', describeError(e));
     } finally {
       deciding = null;
+      decidingAs = null;
     }
   }
 
@@ -210,7 +218,7 @@
         <div class="block-head">
           <div>
             <h2 class="h">Waiting for review <span class="count warn">{pendingMem.length}</span></h2>
-            <p class="help">Otto keeps these only if you accept them.</p>
+            <p class="help">Otto keeps these only if you keep them.</p>
           </div>
         </div>
         <ul class="list">
@@ -219,14 +227,14 @@
               <div class="main">
                 <div class="text">{m.text}</div>
                 <div class="meta">
-                  <span>{ORIGIN[m.source.kind] ?? m.source.kind}</span>
+                  <span>{ORIGIN[m.source.kind] ?? sentenceCase(m.source.kind)}</span>
                   {#if m.source.file}<span class="mono" dir="ltr">· {m.source.file}</span>{/if}
                   <span>· <time datetime={m.created_at} title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</time></span>
                 </div>
               </div>
               <div class="acts">
-                <button class="btn small ghost" onclick={() => void reject(m)} disabled={deciding === m.id}>Reject</button>
-                <button class="btn small" onclick={() => void accept(m)} disabled={deciding === m.id}>Keep</button>
+                <button class="btn small" onclick={() => void reject(m)} disabled={deciding === m.id}>{deciding === m.id && decidingAs === 'reject' ? 'Rejecting…' : 'Reject'}</button>
+                <button class="btn small primary" onclick={() => void accept(m)} disabled={deciding === m.id}>{deciding === m.id && decidingAs === 'keep' ? 'Keeping…' : 'Keep'}</button>
               </div>
             </li>
           {/each}
@@ -253,7 +261,7 @@
       {#if memories.length}
         <div class="search">
           <Icon name="search" size={14} />
-          <input class="search-in" type="search" bind:value={query} placeholder="Search memories" aria-label="Search memories" />
+          <input class="search-in" type="search" bind:value={query} placeholder="Filter memories…" aria-label="Filter memories" />
         </div>
       {/if}
       {#if !memories.length}
@@ -267,13 +275,13 @@
               <div class="main">
                 <div class="text">{m.text}</div>
                 <div class="meta">
-                  <span>{ORIGIN[m.source.kind] ?? m.source.kind}</span>
+                  <span>{ORIGIN[m.source.kind] ?? sentenceCase(m.source.kind)}</span>
                   <span>· <time datetime={m.created_at} title={new Date(m.created_at).toLocaleString()}>{rel(m.created_at)}</time></span>
                   {#if m.source.thread_id}
                     <span>·</span>
                     <button class="link" onclick={() => onopenthread(m.source.thread_id!)} title="Open the conversation it came from">from {threadTitle(m.source.thread_id)}</button>
                   {/if}
-                  {#each m.tags as t (t)}<span class="tag">{t}</span>{/each}
+                  {#each m.tags as t (t)}<Badge variant="outline" label={t} title={t} />{/each}
                 </div>
               </div>
               <button class="icon-btn forget" onclick={() => void forgetOne(m)} aria-label={`Forget “${m.text}”`} title="Forget">
@@ -384,8 +392,8 @@
     max-width: 360px;
   }
   .search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search-in {
     flex: 1;
@@ -442,11 +450,6 @@
     .forget {
       opacity: 1;
     }
-  }
-  .tag {
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
   }
   .undo-bar {
     display: flex;

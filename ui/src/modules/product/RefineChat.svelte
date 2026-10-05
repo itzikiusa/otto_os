@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
@@ -9,6 +10,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { renderMarkdown } from '../../lib/md';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import type { RefinementMessage } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -112,15 +114,10 @@
 <div class="refine-chat">
   <!-- ── Messages ──────────────────────────────────────────────────────────── -->
   <div class="messages-area">
-    {#if loading && messages.length === 0}
-      <div class="muted center-hint">Loading messages…</div>
-    {:else if loadError && messages.length === 0}
-      <LoadState what="this thread" error={loadError} empty onretry={() => void loadThread(tid)} />
+    {#if (loading || loadError) && messages.length === 0}
+      <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
-      <div class="empty-state">
-        <p>No messages yet.</p>
-        <p>Type a message below to start the conversation with the agent.</p>
-      </div>
+      <EmptyState icon="comment" title="No messages yet" body="Type a message below to start the conversation with the agent." />
     {:else}
       {#each messages as m (m.id)}
         {@const meta = m.role === 'agent' ? parseMeta(m.meta_json) : {}}
@@ -154,9 +151,9 @@
       <!-- Thinking indicator while a turn is in flight -->
       {#if sending}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking">
-            <span class="bubble-role">Agent</span>
-            <span class="thinking-dots">thinking…</span>
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="bubble-header"><AgentByline {provider} model={threadModel} /></div>
+            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
           </div>
         </div>
       {/if}
@@ -214,20 +211,6 @@
     font-size: var(--fs-m);
     font-style: italic;
   }
-  .center-hint {
-    text-align: center;
-    padding: 24px 0;
-  }
-  .empty-state {
-    padding: 32px 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
-  }
 
   /* ── Bubbles ────────────────────────────────────────────────────────────── */
   .bubble-row {
@@ -243,14 +226,14 @@
   .bubble {
     max-width: 76%;
     border-radius: var(--radius-s);
-    padding: 8px 11px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
   .bubble-user {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--accent-soft-strong);
+    border: 1px solid var(--accent-line);
     border-bottom-right-radius: 3px;
   }
   .bubble-agent {
@@ -268,7 +251,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .bubble-header :global(.bubble-time) {
@@ -297,7 +280,7 @@
   }
   :global(.bubble-body code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     border-radius: var(--radius-s);
     padding: 1px 4px;
@@ -305,8 +288,7 @@
 
   /* Thinking bubble */
   .thinking {
-    opacity: 0.7;
-    font-style: italic;
+    color: var(--text-dim);
   }
   .thinking-dots {
     font-size: var(--fs-s);
@@ -321,18 +303,18 @@
     align-self: flex-start;
     margin-top: 4px;
     padding: 2px 8px;
-    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    border: 1px solid var(--accent-line-strong);
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
     white-space: nowrap;
   }
   .story-updated-chip:hover {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
   }
 
   /* ── Input area ─────────────────────────────────────────────────────────── */
@@ -355,14 +337,14 @@
     color: var(--text-dim);
   }
   .rc-provider select {
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
 
   .msg-input {
     flex: 1;
     min-width: 0;
     resize: none;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -370,11 +352,11 @@
     font-size: var(--fs-m);
     font-family: inherit;
     line-height: 1.5;
-    transition: border-color 120ms;
+    transition: border-color var(--dur-fast);
     outline: none;
   }
   .msg-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
     opacity: 0.55;
@@ -393,7 +375,7 @@
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: opacity 110ms;
+    transition: opacity var(--dur-fast);
   }
   .send-btn:hover:not(:disabled) {
     opacity: 0.88;

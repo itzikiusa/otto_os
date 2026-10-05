@@ -15,7 +15,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 1. Press `⌘T` (or **New session** in the tab bar) to open the New Session sheet.
 2. Choose where it runs: the current workspace, or **No workspace** for a one-off job in your home folder.
 3. Pick a provider card: `claude`, `codex`, `agy`, `shell`, or a custom provider. A card is greyed out when its CLI isn't installed; the tooltip says why.
-4. Optionally set a title, a working directory (**Browse…** opens the folder picker) and extra directories the agent may read.
+4. Optionally set a title, a working folder (**Browse…** opens the folder picker) and extra folders the agent may read.
 5. Press **Start Session** (or `⌘↵`). The session opens as a tab and its folder is trusted automatically, so the agent doesn't stop on a "do you trust this folder?" prompt.
 6. Type into the terminal, or switch the pane to **Chat** to read the conversation and send messages from a composer.
 
@@ -25,7 +25,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 - Providers: `claude` (Claude Code CLI), `codex` (Codex CLI), `agy` (Antigravity), `shell` (a login shell), plus custom providers added in Settings → Providers.
 - Start several at once: use the `−` / `+` stepper on each card (up to 20 per provider). "2 codex, 3 claude and 1 shell" is one trip; the batch opens tiled. A title becomes a numbered base name ("fix tests 1", "fix tests 2"…).
 - Pin a model for the session (single-provider batches only), pick a subscription account for `claude` or `codex` (**Add account**, **Sign in**, **Check sign-in**), and choose a network profile that tunnels named endpoints through an SSH bastion.
-- Working directory can be any folder on this Mac, inside a workspace or not. Recent folders are suggested. Missing folders are created.
+- The working folder can be any folder on this Mac, inside a workspace or not. Recent folders are suggested. Missing folders are created.
 - **Additional directories** are passed to the agent as `--add-dir` (ignored for `shell`).
 - **Browser tools** (`claude`, `codex`): gives the agent a real browser through MCP.
 - **Preview context** (`claude`, `codex`, in a workspace): shows exactly which skills, soul and context Otto will inject before the agent starts.
@@ -74,7 +74,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 
 **Around the session**
 - Pane ⋯ menu: Rename…, Additional directories…, Hand over to…, Attach Jira issue…, Attach product story… (injects the refined story into the session), Canvas…, Pin, Archive, Delete.
-- Right panel (`⌘J`): Git, Files, Notes, Activity (the agent's tool calls, commands, file edits and task progress, plus your own notes), Outputs (files, PRs, images and reports the agent produced, with previews), Canvas, Info, Browser and API.
+- Session panel (`⌘J`): Git, Files, Notes, Activity (the agent's tool calls, commands, file edits and task progress, plus your own notes), Outputs (files, PRs, images and reports the agent produced, with previews), Canvas, Info, Browser and API.
 - **Share…** creates a link to watch (Viewer) or type in (Editor) a session, with an expiry, an optional label and an optional emailed one-time code.
 - Sidebar: search all sessions, filter to **Needs you**, show sessions from all workspaces, sort by recent or drag to a manual order, and see Slack and Telegram sessions in their own groups.
 - **Update all CLIs** (`⌘U`) runs each provider's update command in a session.
@@ -107,7 +107,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 | `⌘+` / `⌘−` / `⌘0` | Terminal font larger / smaller / reset (terminal focused) |
 | `⌘⇧B` | Broadcast to sessions |
 | `⌘U` | Update all agent CLIs |
-| `⌘J` | Toggle the right panel |
+| `⌘J` | Toggle the Session panel |
 
 ## Tips and limits
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
@@ -84,7 +85,7 @@
       tokens = [resp.info, ...tokens];
       newLabel = '';
     } catch (e) {
-      toasts.error("Couldn't create the token", loadErrorText(e));
+      toasts.error("Couldn’t create the token", loadErrorText(e));
     } finally {
       minting = false;
     }
@@ -102,7 +103,7 @@
       tokens = tokens.filter((x) => x.id !== t.id);
       toasts.success('Token revoked', t.label ?? t.token_prefix);
     } catch (e) {
-      toasts.error("Couldn't revoke the token", loadErrorText(e));
+      toasts.error("Couldn’t revoke the token", loadErrorText(e));
     } finally {
       revoking = new Set([...revoking].filter((x) => x !== t.id));
     }
@@ -114,7 +115,7 @@
       await copyTextOrThrow(freshSecret);
       toasts.success('Token copied', 'Paste it into your script or CI secret now.');
     } catch {
-      toasts.error("Couldn't copy the token", 'Select it and copy it manually.');
+      toasts.error("Couldn’t copy the token", 'Select it and copy it manually.');
     }
   }
 
@@ -144,14 +145,14 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('tokens')} subtitle="For scripts, CI and the Otto CLI" />
   <PageBody width="readable">
-  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions can't create tokens.</SectionIntro>
+  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions can’t create tokens.</SectionIntro>
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}
     <div class="secret-banner" role="status">
       <div class="secret-header">
         <Icon name="key" size={14} />
-        <span class="secret-title">Copy your new token now — it won't be shown again.</span>
+        <span class="secret-title">Copy your new token now — it won’t be shown again.</span>
         <button class="btn small" onclick={copySecret}><Icon name="copy" size={12} /> Copy</button>
         <button class="btn small ghost" onclick={dismissSecret}>Done</button>
       </div>
@@ -204,7 +205,7 @@
     {/snippet}
     {#if orphaned.length}
       <div class="orphan-note">
-        <span>{orphaned.length} token{orphaned.length === 1 ? '' : 's'} belong to sessions that no longer exist.</span>
+        <span>{plural(orphaned.length, 'token')} belong to sessions that no longer exist.</span>
         <button class="btn small danger" disabled={revoking.size > 0} onclick={revokeOrphaned}>Revoke deleted-session tokens…</button>
       </div>
     {/if}
@@ -248,7 +249,7 @@
           </div>
         {/each}
       </div>
-      <p class="usage-note">Otto revokes a managed session's token when the session is deleted or replaced on restart. Older label-only tokens can be reviewed and revoked here.</p>
+      <p class="usage-note">Otto revokes a managed session’s token when the session is deleted or replaced on restart. Older label-only tokens can be reviewed and revoked here.</p>
     {/if}
   </LoadState>
 

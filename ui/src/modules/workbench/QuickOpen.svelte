@@ -78,7 +78,7 @@
     bind:this={input}
     class="wb-qo-input"
     type="search"
-    placeholder="Type a file name"
+    placeholder="e.g. deploy.sh"
     aria-label="File name"
     aria-controls="wb-qo-list"
     bind:value={query}
@@ -103,7 +103,7 @@
   .wb-qo-input {
     width: 100%;
     box-sizing: border-box;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

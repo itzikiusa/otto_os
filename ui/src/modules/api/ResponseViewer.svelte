@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
+  import { plural } from '../../lib/plural';
   // Response viewer shared by the page and the compact panel: status / time /
   // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
   // Timeline · Tests. A failed send shows inline with the reason and what to
@@ -15,6 +17,7 @@
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -235,7 +238,8 @@
       a.remove();
       toasts.success('Response downloaded', a.download);
     } catch (e) {
-      toasts.error('Couldn’t save the response', r.body_id && e instanceof Error ? e.message : 'The file could not be written.');
+      if (r.body_id) toastError('Couldn’t save the response', e);
+      else toasts.error('Couldn’t save the response', 'The file couldn’t be written.');
     } finally {
       const u = url;
       if (u) setTimeout(() => URL.revokeObjectURL(u), 1500);
@@ -293,7 +297,7 @@
       await ws.setApiAllowLocal(true);
       toasts.success('Private addresses allowed', 'Send the request again.');
     } catch (e) {
-      toasts.error('Couldn’t change the setting', e instanceof Error ? e.message : 'Only a workspace admin can change it.');
+      toasts.error('Couldn’t allow private addresses', e instanceof Error ? loadErrorText(e) : 'Only a workspace admin can change it.');
     }
   }
 </script>
@@ -310,7 +314,7 @@
     <div class="stream-console">
       <div class="head">
         <span class="chip" class:ok={apiStream.status === 'open'} class:bad={apiStream.status === 'error'}>{STREAM_STATUS[apiStream.status] ?? apiStream.status}</span>
-        <span class="meta">{apiStream.items.length} message{apiStream.items.length === 1 ? '' : 's'}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
+        <span class="meta">{plural(apiStream.items.length, 'message')}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
         <span class="grow"></span>
         <button class="btn small ghost" onclick={() => apiStream.clear()} disabled={apiStream.items.length === 0}>Clear</button>
       </div>
@@ -342,7 +346,7 @@
       </div>
       {#if streamKind === 'websocket'}
         <div class="ws-send">
-          <input class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? 'Message to send' : 'Connect first'}
+          <input class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
             bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
           <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>
@@ -461,7 +465,7 @@
               <Icon name="search" size={12} />
               <input
                 class="mono"
-                placeholder={bodyView === 'tree' ? 'Find a key or value' : 'Filter with a JSONPath, e.g. $.data[0].id'}
+                placeholder={bodyView === 'tree' ? 'Find a key or value…' : '$.data[0].id'}
                 aria-label={bodyView === 'tree' ? 'Find in the response' : 'JSONPath filter'}
                 bind:value={filter}
                 spellcheck="false"
@@ -577,7 +581,7 @@
   kbd {
     font-family: var(--font-ui);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border: 1px solid var(--border);
     border-bottom-width: 2px;
     border-radius: var(--radius-s);
@@ -650,9 +654,6 @@
     padding: 2px 0 8px;
     flex-wrap: wrap;
   }
-  .chip.ok {
-    color: var(--success);
-  }
   .meta {
     font-size: var(--fs-xs);
     color: var(--text-dim);
@@ -697,13 +698,13 @@
     border-bottom-color: var(--accent);
   }
   .count {
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .segmented.view {
     align-self: center;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
   }
   .rbody {
     flex: 1;
@@ -727,7 +728,7 @@
     flex-shrink: 0;
   }
   .filter:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .filter input {
     flex: 1;
@@ -846,9 +847,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-inline-start: 2px solid var(--border);
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     font-size: var(--fs-s);
   }
   .trace-dot {
@@ -895,7 +896,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .test-item {
     display: flex;
@@ -936,7 +937,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     padding: 4px 0;
   }
   :global(.stream-vlist) {

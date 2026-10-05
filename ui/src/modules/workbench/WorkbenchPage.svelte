@@ -10,6 +10,10 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import { registry } from '../../lib/commands.svelte';
+  import { router } from '../../lib/router.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -34,6 +38,9 @@
   import { canFormat, formatContent, validateContent, type ValidationIssue } from './lib/format';
 
   let quickOpen = $state(false);
+  /** The files list width (drag / ←→ on its divider; remembered per device). */
+  const FILES_W_KEY = 'workbench.filesW';
+  let filesW = $state(loadPaneWidth(FILES_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let mobilePane: 'files' | 'editor' = $state('editor');
   let issue: ValidationIssue | null = $state(null);
   /** The issue came from an explicit Format (sticky until the next edit). */
@@ -68,6 +75,38 @@
   $effect(() => {
     const id = wsId;
     if (id) untrack(() => void workbench.attach(id));
+  });
+
+  // ── The open file is in the URL (`#/workbench/<file id>`) ──────────────────
+  // so a reload, a shared link or Back lands on it. The store keeps restoring
+  // the last tabs; on arrival a link naming a DIFFERENT file wins (the second
+  // effect opens it) instead of being replaced by the restored tab.
+  function routeFileId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'workbench' && id ? id : null;
+  }
+  let routedId: string | null = null;
+  let arrived = false;
+  $effect(() => {
+    if (!workbench.loaded) return;
+    const id = workbench.active;
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    if (first && untrack(() => routeFileId()) && untrack(() => routeFileId()) !== id) return;
+    untrack(() => {
+      if (router.module === 'workbench' && routeFileId() !== id) router.replace(id ? `workbench/${id}` : 'workbench');
+    });
+  });
+  // A route change while the page is up (a link, Back/Forward) opens that file.
+  $effect(() => {
+    const linked = routeFileId();
+    if (!linked || !workbench.loaded) return;
+    untrack(() => {
+      if (linked !== workbench.active && workbench.docs.some((d) => d.id === linked)) open(linked);
+    });
   });
 
   onMount(() => {
@@ -158,7 +197,7 @@
       mobilePane = 'editor';
       focusEditorSoon();
     } catch (e) {
-      toasts.error("Couldn't create a file", loadErrorText(e));
+      toasts.error("Couldn’t create a file", loadErrorText(e));
     }
   }
 
@@ -227,7 +266,7 @@
     try {
       await workbench.patchMeta(id, { name });
     } catch (e) {
-      toasts.error("Couldn't rename", loadErrorText(e));
+      toasts.error("Couldn’t rename", loadErrorText(e));
     }
   }
 
@@ -236,7 +275,7 @@
     try {
       await workbench.patchMeta(doc.id, { language: value });
     } catch (e) {
-      toasts.error("Couldn't change the language", loadErrorText(e));
+      toasts.error("Couldn’t change the language", loadErrorText(e));
     }
   }
 
@@ -259,7 +298,7 @@
       await workbench.moveToTrash(doc.id);
       toasts.success('Moved to trash', `“${name}” and its history can be restored from the trash.`);
     } catch (e) {
-      toasts.error("Couldn't move to trash", loadErrorText(e));
+      toasts.error("Couldn’t move to trash", loadErrorText(e));
     }
   }
 
@@ -271,6 +310,16 @@
     );
     if (ok) await workbench.reload(doc.id);
   }
+
+  // ⌘K: the page's verbs (New file creates at once; Open asks which).
+  $effect(() =>
+    registry.register('workbench', wsId
+      ? [
+          { id: 'workbench.new', title: 'New file', group: 'Workbench', keywords: 'create scratch script json note', run: () => void newFile() },
+          { id: 'workbench.open', title: 'Open file…', group: 'Workbench', keywords: 'quick open find scratch', shortcut: '⌘P', run: () => (quickOpen = true) },
+        ]
+      : []),
+  );
 
   function moreMenu(e: MouseEvent): void {
     const has = !!doc;
@@ -286,12 +335,12 @@
         label: 'Duplicate',
         icon: 'copy',
         disabled: !has,
-        action: () => doc && void workbench.duplicate(doc.id).catch((err) => toasts.error("Couldn't duplicate", loadErrorText(err))),
+        action: () => doc && void workbench.duplicate(doc.id).catch((err) => toasts.error("Couldn’t duplicate", loadErrorText(err))),
       },
       { label: 'Download', icon: 'download', disabled: !has || isImage, action: download },
       { separator: true },
       { label: workbench.showTrash ? 'Back to files' : 'Show trash', icon: 'trash', action: toggleTrash },
-      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() },
+      { label: 'Move to trash', icon: 'trash', danger: true, disabled: !has, action: () => void trashActive() }, // ui-guards: allow — reversible (restore from the trash), so no confirm
     ];
     ctxMenu.show(e, items);
   }
@@ -329,7 +378,7 @@
           await workbench.create({ name, language: 'image', content: asset.id });
         }
       } catch (e) {
-        toasts.error(`Couldn't add ${f.name || 'the image'}`, loadErrorText(e));
+        toasts.error(`Couldn’t add ${f.name || 'the image'}`, loadErrorText(e));
       }
     }
   }
@@ -366,7 +415,7 @@
 </script>
 
 <div class="wb-page">
-  <PageHeader title="Workbench" icon="workbench" subtitle="Scratch files with full history">
+  <PageHeader title="Workbench" subtitle="Scratch files with full history">
     {#snippet actions()}
       {#if workbench.docs.length > 0 || workbench.showTrash}
         <button class="btn small primary" data-testid="wb-new" onclick={() => void newFile()} title="New scratch file">
@@ -425,6 +474,7 @@
         class:phone={isPhone}
         class:with-side={!!doc && workbench.panel !== 'none'}
         class:drag={dragOver}
+        style:--wb-files-w="{filesW}px"
         role="group"
         aria-label="Workbench"
         ondragover={onDragOver}
@@ -437,6 +487,9 @@
             <FileList onopen={open} onnew={() => void newFile()} onrename={(id) => void rename(id)} />
           </nav>
         {/if}
+        {#if !isPhone}
+          <PaneDivider bind:width={filesW} storageKey={FILES_W_KEY} label="Resize files list" />
+        {/if}
 
         {#if !isPhone || mobilePane === 'editor'}
           <section class="wb-col-main" aria-label="Editor">
@@ -446,7 +499,7 @@
             {:else if active.loadError && !doc}
               <div class="wb-inline-err" role="alert">
                 <Icon name="warning" size={13} />
-                <span>Couldn't load this file: {active.loadError}</span>
+                <span>Couldn’t load this file: {active.loadError}</span>
                 <button class="btn small" onclick={() => void workbench.retryLoad(active.id)}>Retry</button>
               </div>
             {:else if !doc}
@@ -535,7 +588,7 @@
               {#if active.saveError}
                 <div class="wb-inline-err" role="alert">
                   <Icon name="warning" size={13} />
-                  <span>Couldn't save: {active.saveError}. Your text is kept on this device until it saves.</span>
+                  <span>Couldn’t save: {active.saveError}. Your text is kept on this device until it saves.</span>
                   <button class="btn small" onclick={() => void workbench.save(active.id, false)}>Retry</button>
                 </div>
               {/if}
@@ -648,13 +701,14 @@
   }
   .wb-grid {
     display: grid;
-    grid-template-columns: minmax(200px, 250px) minmax(0, 1fr);
+    /* files | divider | editor (+ side panel) */
+    grid-template-columns: var(--wb-files-w) auto minmax(0, 1fr);
     height: 100%;
     min-height: 0;
     overflow: hidden;
   }
   .wb-grid.with-side {
-    grid-template-columns: minmax(200px, 250px) minmax(0, 1fr) minmax(260px, 340px);
+    grid-template-columns: var(--wb-files-w) auto minmax(0, 1fr) minmax(260px, 340px);
   }
   .wb-grid.phone,
   .wb-grid.phone.with-side {
@@ -667,8 +721,9 @@
     outline-offset: -4px;
   }
   .wb-col-files {
+    min-width: 0;
     min-height: 0;
-    border-inline-end: 1px solid var(--border);
+    /* The PaneDivider beside it draws the hairline. */
     background: var(--surface);
   }
   .wb-col-main {

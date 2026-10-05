@@ -129,7 +129,7 @@
     margin-top: 2px;
   }
   .s :global(mark) {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-line);
     color: var(--text);
     border-radius: var(--radius-s);
     padding: 0 1px;

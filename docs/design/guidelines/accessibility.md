@@ -81,6 +81,10 @@ in audits.
     <Icon name="trash" size={14} />
   </button>
   ```
+- **Shortcuts are not part of the label.** Put a button's chord in
+  `aria-keyshortcuts` (`aria-keyshortcuts="Meta+Shift+C"`), the ⌘K
+  command's `shortcut`, a menu row's `hint` and the `KEYMAP` table — never
+  appended to `title` ("Collapse panel (⌘J)" breaks the label = tooltip rule).
 - `Icon` renders `aria-hidden="true"`. The meaning must come from the control's
   label or visible text, never from the SVG.
 - **Form fields have labels**: `<label for>`, a wrapping `<label>`, or

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Local working-tree review panel: diff against a chosen base branch, run
   // the configured review agents, show findings with checkboxes, and hand
   // selected findings off to a new agent session.
@@ -315,7 +316,7 @@
         comment_ids: checkedIds,
       });
       ws.addSession(session); // navigates to the new session via addSession → navigateToSession
-      toasts.success(`Handed ${checkedIds.length} finding${checkedIds.length === 1 ? '' : 's'} to ${provider}`);
+      toasts.success(`Handed ${plural(checkedIds.length, 'finding')} to ${provider}`);
     } catch (e) {
       toastError('Couldn’t hand off the review', e);
     }
@@ -375,7 +376,7 @@
       onclick={startReview}
     >
       {#if starting}
-        <span class="spinner-xs"></span>Starting…
+        <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Starting…
       {:else}
         <Icon name="zap" size={12} />
         {review?.status === 'done' ? 'Review again' : 'Review changes'}
@@ -403,7 +404,7 @@
     {/if}
   {:else if review.status === 'running'}
     <div class="lrp-running-header">
-      <div class="spinner"></div>
+      <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
       <span class="lrp-running-title">Reviewing…</span>
     </div>
     {#if review.agents && review.agents.length > 0}
@@ -446,7 +447,7 @@
       </p>
     {:else}
       <div class="lrp-findings-header">
-        <span class="lrp-findings-count">{review.comments.length} finding{review.comments.length === 1 ? '' : 's'}</span>
+        <span class="lrp-findings-count">{plural(review.comments.length, 'finding')}</span>
         <div class="lrp-sel-btns">
           <button class="btn small ghost" onclick={selectAll} disabled={allSelected}>Select all</button>
           <button class="btn small ghost" onclick={selectNone} disabled={noneSelected}>None</button>
@@ -516,7 +517,7 @@
                 {#if run.agents && run.agents.length > 0}
                   <span class="dim" style="font-size:var(--fs-xs)">{run.agents.filter(a => a.status === 'done').length}/{run.agents.length} agents</span>
                 {/if}
-                <span class="dim" style="font-size:var(--fs-xs)">{run.comments.length} finding{run.comments.length === 1 ? '' : 's'}</span>
+                <span class="dim" style="font-size:var(--fs-xs)">{plural(run.comments.length, 'finding')}</span>
                 <span class="grow"></span>
                 <span class="dim" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               </button>
@@ -631,26 +632,6 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .spinner {
-    width: 18px;
-    height: 18px;
-    border: 2.5px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    flex-shrink: 0;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 3px;
-  }
 
   /* Agent cards */
   .lrp-agents {
@@ -729,7 +710,7 @@
     user-select: none;
   }
   .lrp-comment:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lrp-chk {
     margin-top: 2px;
@@ -785,15 +766,15 @@
   /* Severity chips */
   .severity-chip {
     display: inline-block;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .sev-warn {
@@ -854,7 +835,7 @@
     flex-wrap: wrap;
   }
   .lrp-history-run-header:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .lrp-history-run-body {
     padding: 4px 8px 8px;

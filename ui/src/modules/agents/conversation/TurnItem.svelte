@@ -190,7 +190,7 @@
   aria-label={item.role === 'user' ? `You${clock ? `, ${clock}` : ''}` : `${agentName}${clock ? `, ${clock}` : ''}`}
 >
   {#if item.role === 'user'}
-    <div class="bubble" dir="auto">
+    <div class="bubble chat-bubble-end" dir="auto">
       {#each item.blocks as b, i (i)}
         {#if b.kind === 'text'}
           {@const parts = splitAttachments(b.md)}
@@ -291,7 +291,7 @@
   .turn {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding: 10px 0;
     min-width: 0;
     scroll-margin-block: 16px;
@@ -308,13 +308,9 @@
     max-width: min(80%, 78ch);
     background: color-mix(in srgb, var(--you) 16%, var(--surface));
     border: 1px solid color-mix(in srgb, var(--you) 34%, var(--border));
-    border-radius: 18px 18px 5px 18px;
-    padding: 9px 15px;
+    padding: 8px 14px;
     min-width: 0;
     box-shadow: 0 1px 0 color-mix(in srgb, var(--you) 10%, transparent);
-  }
-  :global([dir='rtl']) .bubble {
-    border-radius: 18px 18px 18px 5px;
   }
   .bubble :global(.md) {
     --prose-measure: none;
@@ -328,9 +324,9 @@
   .attach-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     max-width: 100%;
-    padding: 3px 9px;
+    padding: 2px 8px;
     border-radius: var(--radius-m);
     border: 1px solid color-mix(in srgb, var(--you) 30%, var(--border));
     background: var(--surface);
@@ -367,7 +363,7 @@
     color: var(--text);
   }
   .agent-name {
-    font-weight: 650;
+    font-weight: 600;
   }
   .agent-model {
     font-size: var(--fs-xs);
@@ -389,7 +385,7 @@
     flex-direction: column;
     gap: 6px;
     min-width: 0;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     padding-block: 10px 12px;
     padding-inline: 18px 16px;
     border-inline-start: 2px solid var(--border-strong);
@@ -451,7 +447,7 @@
     color: var(--danger);
     background: var(--danger-soft);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .fold-body {
     display: flex;
@@ -471,7 +467,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     flex-wrap: wrap;
-    padding-inline-start: 31px;
+    padding-inline-start: 32px;
     min-width: 0;
   }
   .meta-grow {
@@ -499,7 +495,7 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms;
+    transition: opacity var(--dur-fast);
   }
   .turn:hover .act-btn,
   .turn:focus-within .act-btn {
@@ -540,7 +536,7 @@
     border-radius: 999px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     height: 18px;
     cursor: pointer;
   }
@@ -552,7 +548,7 @@
   .sys-list {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     width: 100%;
   }
   .turn.user .sys-list {
@@ -565,7 +561,7 @@
     background: var(--surface-2);
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
   }
   .sys-note summary {
     cursor: pointer;
@@ -619,7 +615,7 @@
   }
   .chip.artifact {
     align-self: flex-start;
-    gap: 5px;
+    gap: 4px;
     color: var(--text);
     cursor: pointer;
     font: inherit;
@@ -631,7 +627,7 @@
   .notice {
     display: flex;
     align-items: baseline;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     padding: 4px 8px;
@@ -645,7 +641,7 @@
   @container (max-width: 480px) {
     .resp {
       margin-inline-start: 4px;
-      padding-inline: 11px 8px;
+      padding-inline: 10px 8px;
     }
     .meta {
       padding-inline-start: 16px;

@@ -1,10 +1,12 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { api } from '../../lib/api/client';
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import TopicDetail from './TopicDetail.svelte';
@@ -43,6 +45,7 @@
   let newName = $state('');
   let newParts = $state(1);
   let newRf = $state(1);
+  let createBusy = $state(false);
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
@@ -235,6 +238,7 @@
       replication_factor: Number(newRf),
       confirm: guarded,
     };
+    createBusy = true;
     try {
       await api.post(`/brokers/clusters/${cluster.id}/topics`, req);
       toasts.success(`Created ${req.name}`);
@@ -244,6 +248,8 @@
       selected = req.name;
     } catch (e) {
       toastError('Couldn’t create the topic', e);
+    } finally {
+      createBusy = false;
     }
   }
 </script>
@@ -269,7 +275,7 @@
 {:else}
   <div class="topics">
     <div class="toolbar">
-      <input class="search" bind:value={query} placeholder="Search topics…" aria-label="Search topics" />
+      <input class="search" bind:value={query} placeholder="Filter topics…" aria-label="Filter topics" />
       <label class="chk"><input type="checkbox" bind:checked={showInternal} /> Show internal</label>
       {#if cleanupOptions.length}
         <select bind:value={cleanupFilter} title="Cleanup policy">
@@ -278,7 +284,7 @@
         </select>
       {/if}
       <span class="spacer"></span>
-      <span class="count">{filtered.length} topic{filtered.length === 1 ? '' : 's'}</span>
+      <span class="count">{plural(filtered.length, 'topic')}</span>
       {#if hasStatErrors}
         <button class="btn small" onclick={retryStats} title="Retry failed message-count fetches">
           <Icon name="refresh" size={12} /> Retry counts
@@ -300,31 +306,27 @@
 
     {#if creating}
       <div class="create">
-        <input bind:value={newName} placeholder="topic name" aria-label="Topic name" />
+        <input bind:value={newName} placeholder="orders.events" aria-label="Topic name" />
         <label title="Partitions">Parts <input type="number" min="1" bind:value={newParts} /></label>
         <label title="Replication factor">RF <input type="number" min="1" bind:value={newRf} /></label>
         <button
           class="btn primary small"
           onclick={createTopic}
-          disabled={!newName.trim()}
+          disabled={!newName.trim() || createBusy}
           title={newName.trim() ? 'Create topic' : 'Enter a topic name first'}
-        >Create</button>
-        <button class="btn small" onclick={() => (creating = false)}>Cancel</button>
+        >{createBusy ? 'Creating…' : 'Create'}</button>
+        <button class="btn small" onclick={() => (creating = false)} disabled={createBusy}>Cancel</button>
       </div>
     {/if}
 
     <div class="grid-wrap">
-      {#if loadError}
-        <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
-        <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} />
-      {/if}
-      {#if loadError && topics.length === 0}
-        <!-- rendered above -->
-      {:else if loading}
-        <p class="muted pad">Loading topics…</p>
-      {:else if topics.length === 0}
-        <p class="muted pad">No topics on this cluster yet.</p>
-      {:else if filtered.length === 0}
+      <!-- First load: skeleton; failed load: inline error (or a stale bar over
+           the last good list); a refresh keeps the rows on screen. -->
+      <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} rows={6}>
+        {#snippet emptyView()}
+          <EmptyState icon="layers" title="No topics on this cluster yet" actionLabel="New topic…" actionIcon="plus" actionKind="secondary" onaction={() => (creating = true)} />
+        {/snippet}
+      {#if filtered.length === 0}
         <!-- Filtered empty ≠ empty: say why and offer the way back. -->
         <p class="muted pad">
           No topics match the current filters.
@@ -366,15 +368,16 @@
                   title={stats[t.name] === 'err' ? 'Count unavailable — click "Retry counts" to try again' : undefined}
                 >{countText(t.name)}</td>
                 <td class="num" title="Production rate (msg/s) — high-watermark delta between polls">{rateText(t.name)}</td>
-                <td class="num muted" title="On-disk size isn't exposed by this Kafka client">—</td>
+                <td class="num muted" title="On-disk size isn’t exposed by this Kafka client">—</td>
               </tr>
             {/each}
           </tbody>
         </table>
       {/if}
+      </LoadState>
     </div>
 
-    {#if !loading && pageCount > 1}
+    {#if topics.length > 0 && pageCount > 1}
       <div class="pager">
         <span class="muted"
           >{pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}</span
@@ -460,7 +463,7 @@
   }
   .search {
     width: 240px;
-    padding: 6px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -470,13 +473,13 @@
   .chk {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     white-space: nowrap;
   }
   .toolbar select {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -496,7 +499,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    background: var(--accent-faint);
   }
   .create input {
     padding: 6px 8px;
@@ -516,10 +519,13 @@
   .create label input {
     width: 52px;
   }
+  /* A guaranteed height: on a short viewport (a phone in landscape) the grid
+     never collapses to a sliver — the topics column overflows into the brokers
+     tab body, which scrolls, so every row stays reachable. */
   .grid-wrap {
     flex: 1;
     overflow: auto;
-    min-height: 0;
+    min-height: 200px;
   }
   table.grid {
     width: 100%;
@@ -532,7 +538,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 8px 14px;
     position: sticky;
     top: 0;
@@ -544,7 +550,7 @@
     width: 110px;
   }
   table.grid td {
-    padding: 7px 14px;
+    padding: 6px 14px;
     border-bottom: 1px solid var(--border);
   }
   table.grid td.num {
@@ -627,24 +633,6 @@
     }
     .grid-wrap {
       min-height: 220px;
-    }
-  }
-
-  /* Short viewports (e.g. phones in landscape ~430px tall, which use the desktop
-     two-column layout because they're >640px wide): the header + tab strips +
-     toolbar eat the vertical budget, leaving the topics grid a sliver whose rows
-     end up behind the sticky toolbar / status bar and become unclickable. Let the
-     detail/topics containers grow past the viewport (the brokers tab-body scrolls
-     on short viewports) and give the grid a guaranteed height so rows stay
-     reachable. */
-  @media (max-height: 600px) {
-    .topics,
-    .detail-wrap {
-      height: auto;
-      min-height: 100%;
-    }
-    .grid-wrap {
-      min-height: 200px;
     }
   }
 </style>

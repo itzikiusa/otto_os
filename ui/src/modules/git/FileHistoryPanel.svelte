@@ -148,7 +148,7 @@
     cursor: pointer;
   }
   .fh-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .fh-subject {
     font-size: var(--fs-s);

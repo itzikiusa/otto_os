@@ -1,8 +1,6 @@
 // Module-local types for the B6 broker operator workflow features.
 // Shared wire contracts are re-exported from lib/api/types.ts.
 
-import { nextTabIndex } from '../../lib/tabKeys';
-
 // ---- Schema registry version history & compat --------------------------------
 
 export type {
@@ -80,15 +78,3 @@ export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
   { id: 'replay', label: 'Replay' },
   { id: 'alerts', label: 'Lag alerts' },
 ];
-
-/** ←/→/Home/End across a view tablist: returns the next view (and moves focus
- *  to its tab), or null when the key isn't a tablist key. */
-export function clusterViewKey(e: KeyboardEvent, current: ClusterView): ClusterView | null {
-  const list = e.currentTarget as HTMLElement | null;
-  const rtl = list ? getComputedStyle(list).direction === 'rtl' : false;
-  const j = nextTabIndex(e.key, CLUSTER_VIEWS.findIndex((v) => v.id === current), CLUSTER_VIEWS.length, { rtl });
-  if (j < 0) return null;
-  e.preventDefault();
-  queueMicrotask(() => list?.querySelectorAll<HTMLElement>('[role=tab]')[j]?.focus());
-  return CLUSTER_VIEWS[j].id;
-}

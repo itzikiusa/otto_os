@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -86,8 +87,8 @@
 
   function testLabel(r: Exclude<TestResult, 'busy'>): string {
     return r.ok
-      ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
-      : `Couldn't connect: ${r.error}`;
+      ? `Connected · ${plural(r.projects, 'project')} visible`
+      : `Couldn’t connect: ${r.error}`;
   }
 
   async function load(): Promise<void> {
@@ -142,7 +143,7 @@
       closeModal();
       toasts.success('Jira account added', a.label);
     } catch (e) {
-      toasts.error("Couldn't add the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t add the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -167,20 +168,29 @@
       closeModal();
       toasts.success('Jira account updated', updated.label);
     } catch (e) {
-      toasts.error("Couldn't save the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t save the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
   }
 
+  /** Accounts whose delete is in flight, by id — that row's button disables. */
+  let deleting = $state<Record<string, boolean>>({});
+
   async function remove(a: IssueAccount): Promise<void> {
-    if (!(await confirmer.ask(`Delete account "${a.label}"? Its token is removed from the Keychain.`, { title: 'Delete account' }))) return;
+    if (deleting[a.id]) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', confirmLabel: 'Delete account' }))) return;
+    deleting = { ...deleting, [a.id]: true };
     try {
       await api.del(`/issue/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
       toasts.success('Jira account deleted', a.label);
     } catch (e) {
-      toasts.error("Couldn't delete the Jira account", loadErrorText(e));
+      toasts.error('Couldn’t delete the Jira account', loadErrorText(e));
+    } finally {
+      const next = { ...deleting };
+      delete next[a.id];
+      deleting = next;
     }
   }
 </script>
@@ -190,7 +200,7 @@
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
-        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
       {/if}
     {/snippet}
   </PageHeader>
@@ -212,8 +222,9 @@
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
         <div
+          role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
@@ -256,8 +267,15 @@
           <button class="icon-btn acct-tool" title="Edit {a.label}" aria-label="Edit {a.label}" onclick={() => openEdit(a)}>
             <Icon name="edit" size={14} />
           </button>
-          <button class="icon-btn acct-tool" title="Delete {a.label}" aria-label="Delete {a.label}" onclick={() => remove(a)}>
-            <Icon name="trash" size={14} />
+          <button
+            class="icon-btn acct-tool"
+            title={deleting[a.id] ? `Deleting ${a.label}…` : `Delete ${a.label}`}
+            aria-label={deleting[a.id] ? `Deleting ${a.label}…` : `Delete ${a.label}`}
+            aria-busy={deleting[a.id] ? 'true' : undefined}
+            disabled={deleting[a.id]}
+            onclick={() => remove(a)}
+          >
+            {#if deleting[a.id]}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="trash" size={14} />{/if}
           </button>
         </div>
       {/each}
@@ -317,7 +335,7 @@
     <div class="field">
       <label for="ia-expiry">Token expiry <span class="dim">(optional)</span></label>
       <input id="ia-expiry" class="input" type="date" bind:value={tokenExpiresAt} />
-      <span class="hint">Set the token's expiry date to get a reminder before it lapses.</span>
+      <span class="hint">Set the token’s expiry date to get a reminder before it lapses.</span>
     </div>
 
     {#snippet footer()}
@@ -405,7 +423,7 @@
   .test-result {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     margin-top: 4px;
     overflow-wrap: anywhere;

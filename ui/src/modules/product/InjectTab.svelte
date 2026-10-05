@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { toastError } from '../../lib/toastError';
   // Inject tab — build/preview the inject bundle for the selected story, copy
   // markdown to clipboard, and open an agent session seeded with the bundle.
   import Icon from '../../lib/components/Icon.svelte';
@@ -45,7 +46,7 @@
     try {
       bundle = await product.loadInject();
     } catch (e) {
-      toasts.error('Could not build inject bundle', product.errMsg(e));
+      toastError('Couldn’t build inject bundle', e);
     } finally {
       loading = false;
     }
@@ -58,7 +59,7 @@
       await copyTextOrThrow(bundle.markdown);
       toasts.success('Copied to clipboard', 'Inject bundle markdown copied.');
     } catch (e) {
-      toasts.error('Copy failed', product.errMsg(e));
+      toastError('Couldn’t copy the bundle', e);
     } finally {
       copying = false;
     }
@@ -76,7 +77,7 @@
       // "Open in agent" means open it: land on the new session, not a toast with its id.
       ws.navigateToSession(session.id);
     } catch (e) {
-      toasts.error('Could not create agent session', product.errMsg(e));
+      toastError('Couldn’t create agent session', e);
     } finally {
       launching = false;
     }
@@ -194,7 +195,7 @@
       <EmptyState
         icon="zap"
         title="No bundle built yet"
-        body="Build / Preview assembles all of this story's context into one bundle, so an agent can start coding immediately."
+        body="Build / Preview assembles all of this story’s context into one bundle, so an agent can start coding immediately."
       />
     {/if}
   </div>
@@ -247,7 +248,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -257,7 +258,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 3px 7px;
+    padding: 2px 6px;
   }
   .cwd-input {
     background: var(--surface);
@@ -275,7 +276,7 @@
   }
   .cwd-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
 
   /* Sections */
@@ -303,7 +304,7 @@
   .sec-trigger {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     padding: 8px 12px;
     background: none;
@@ -311,7 +312,7 @@
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .sec-trigger:hover {
     background: var(--hover);

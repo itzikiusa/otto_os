@@ -8719,7 +8719,7 @@ export interface AwsLogsInsightsReq {
 }
 /** `GET …/logs/insights/{qid}` — `result` is the DB Explorer `QueryResult` shape. */
 export interface AwsLogsInsightsResults {
-  status: 'Scheduled' | 'Running' | 'Complete' | 'Failed' | 'Cancelled' | 'Timeout' | 'Unknown';
+  status: 'Scheduled' | 'Running' | 'Complete' | 'Failed' | 'Cancelled' | 'Timeout' | 'Unknown'; // AWS wire values; ui-guards: allow
   done: boolean;
   result: QueryResult;
   records_matched?: number | null;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Skills Lab → Review. A list of skill reviews + a detail pane that mirrors the
   // code-review UX: a deterministic static-analysis card, N visible embedded
   // agent terminals (SkillReviewAgents), and the summarizer's aggregated report.
@@ -20,7 +21,9 @@
   import { loadErrorText } from '../../lib/loadError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, type BadgeTone } from '../../lib/status';
+  import { severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { sourceLabel } from './skillGroups';
@@ -84,25 +87,38 @@
         (selected.static_report?.findings.length ?? 0) > 0),
   );
 
+  /** Skill sources that failed on the last load ("Library", "Bundled",
+   *  "Provider") — named under the picker with Retry instead of a picker that
+   *  silently lists fewer skills. */
+  let skillsFailed = $state<string[]>([]);
+  let skillsLoading = $state(false);
   async function loadSkills(): Promise<void> {
-    try {
-      const [lib, bundled, provider] = await Promise.all([
-        skillLabApi.listLibrary().catch(() => [] as LibrarySkill[]),
-        skillLabApi.listBundled().catch(() => [] as BundledSkillView[]),
-        skillLabApi.listProvider().catch(() => [] as ProviderSkillInfo[]),
-      ]);
-      const opts: SkillOpt[] = [];
-      for (const s of lib) opts.push({ name: s.name, source: 'library', label: `${s.name} · library` });
-      const libNames = new Set(lib.map((s) => s.name));
-      for (const b of bundled)
-        if (!libNames.has(b.name)) opts.push({ name: b.name, source: 'bundled', label: `${b.name} · bundled` });
-      for (const p of provider)
-        opts.push({ name: p.name, source: p.provider, label: `${p.name} · ${p.provider}` });
-      opts.sort((a, b) => a.name.localeCompare(b.name));
-      skillOpts = opts;
-    } catch {
-      skillOpts = [];
-    }
+    skillsLoading = true;
+    const [libR, bundledR, providerR] = await Promise.allSettled([
+      skillLabApi.listLibrary(),
+      skillLabApi.listBundled(),
+      skillLabApi.listProvider(),
+    ]);
+    skillsLoading = false;
+    const lib = libR.status === 'fulfilled' ? libR.value : ([] as LibrarySkill[]);
+    const bundled = bundledR.status === 'fulfilled' ? bundledR.value : ([] as BundledSkillView[]);
+    const provider = providerR.status === 'fulfilled' ? providerR.value : ([] as ProviderSkillInfo[]);
+    skillsFailed = [
+      libR.status === 'rejected' ? 'Library' : '',
+      bundledR.status === 'rejected' ? 'Bundled' : '',
+      providerR.status === 'rejected' ? 'Provider' : '',
+    ].filter(Boolean);
+    const opts: SkillOpt[] = [];
+    for (const s of lib) opts.push({ name: s.name, source: 'library', label: `${s.name} · library` });
+    const libNames = new Set(lib.map((s) => s.name));
+    for (const b of bundled)
+      if (!libNames.has(b.name)) opts.push({ name: b.name, source: 'bundled', label: `${b.name} · bundled` });
+    for (const p of provider)
+      opts.push({ name: p.name, source: p.provider, label: `${p.name} · ${p.provider}` });
+    opts.sort((a, b) => a.name.localeCompare(b.name));
+    // Keep a pre-filled hand-off target the fresh list doesn't carry.
+    const keep = skillOpts.filter((o) => `${o.source}:${o.name}` === fSkill && !opts.some((n) => n.source === o.source && n.name === o.name));
+    skillOpts = [...keep, ...opts];
   }
 
   async function loadList(): Promise<void> {
@@ -192,7 +208,7 @@
   async function cancelReview(): Promise<void> {
     if (!selected) return;
     if (
-      !(await confirmer.ask(`Stop the review of "${selected.skill_name}"? Agents still running are stopped and their partial findings are not summarized.`, {
+      !(await confirmer.ask(`Stop the review of “${selected.skill_name}”? Agents still running are stopped and their partial findings are not summarized.`, {
         title: 'Stop review',
         confirmLabel: 'Stop review',
       }))
@@ -211,7 +227,7 @@
     // fire on a single click of a bare ✕.
     if (
       !(await confirmer.ask(
-        `Delete the review of "${rev.skill_name}"? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
+        `Delete the review of “${rev.skill_name}”? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
         { title: 'Delete review' },
       ))
     )
@@ -311,8 +327,10 @@
     if (v === 'Ready with fixes') return 'verdict-fixes';
     return 'verdict-block';
   }
-  function sevClass(sev: string): string {
-    return `sev-${sev.toLowerCase()}`;
+  // Review severity → the shared Badge tone + wording (lib/labels severityLabel).
+  const SEV_TONE: Record<string, BadgeTone> = { critical: 'bad', high: 'bad', medium: 'warn', low: 'info' };
+  function sevTone(sev: string): BadgeTone {
+    return SEV_TONE[sev.toLowerCase()] ?? 'neutral';
   }
 </script>
 
@@ -370,6 +388,14 @@
             {/each}
           </select>
         </label>
+        {#if skillsFailed.length > 0}
+          <span class="lr-skills-failed" role="status">
+            <Icon name="warning" size={12} />
+            {skillsFailed.join(', ')} skills didn’t load
+            <span aria-hidden="true">·</span>
+            <button class="btn small ghost" type="button" onclick={() => void loadSkills()} disabled={skillsLoading}>{skillsLoading ? 'Retrying…' : 'Retry'}</button>
+          </span>
+        {/if}
         <fieldset class="lr-field">
           <span>Mode</span>
           <label class="lr-radio"><input type="radio" bind:group={fMode} value="static" /> Static analysis only (fast, no agents)</label>
@@ -396,7 +422,7 @@
           ></textarea>
         </label>
         <div class="lr-actions">
-          <span class="dim lr-cost">{fMode === 'static' ? 'No agents — runs instantly' : `${Math.max(1, fProviders.size)} review agent${fProviders.size === 1 ? '' : 's'} + a summarizer`}</span>
+          <span class="dim lr-cost">{fMode === 'static' ? 'No agents — runs instantly' : `${plural(Math.max(1, fProviders.size), 'review agent')} + a summarizer`}</span>
           <span class="grow"></span>
           <button class="btn primary" disabled={!fSkill || starting} title={!fSkill ? 'Pick a skill to review' : undefined} onclick={start} data-testid="start-skill-review">
             {starting ? 'Starting…' : 'Start review'}
@@ -414,7 +440,7 @@
           </div>
           <div class="grow"></div>
           {#if selected.status === 'running'}
-            <button class="btn small" onclick={cancelReview}><Icon name="square" size={12} /> Stop review</button>
+            <button class="btn small" onclick={cancelReview}><Icon name="stop" size={12} /> Stop review</button>
           {/if}
           <button class="icon-btn" onclick={() => selected && deleteReview(selected)} aria-label="Delete this review" title="Delete this review"><Icon name="trash" size={14} /></button>
         </div>
@@ -449,7 +475,7 @@
               <ul class="lr-findings">
                 {#each sr.findings as f, i (i + f.code)}
                   <li class="rp-finding">
-                    <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
+                    <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity.toLowerCase())} />
                     <span class="mono rp-loc">{f.code}</span>
                     <span class="rp-finding-body"><strong>{f.title}</strong> — {f.fix}</span>
                   </li>
@@ -487,7 +513,7 @@
               <ul class="lr-findings">
                 {#each sm.findings as f, i (i + f.code)}
                   <li class="rp-finding">
-                    <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
+                    <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity.toLowerCase())} />
                     <span class="mono rp-loc">{f.code}</span>
                     <span class="rp-finding-body"><strong>{f.title}</strong>{f.fix ? ` — ${f.fix}` : ''}</span>
                   </li>
@@ -574,10 +600,10 @@
   .lr-list li { display: flex; }
   .lr-item {
     flex: 1; min-width: 0; text-align: start; background: transparent; border: 1px solid transparent;
-    border-radius: var(--radius-m); padding: 7px 9px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
+    border-radius: var(--radius-m); padding: 6px 8px; cursor: pointer; color: var(--text); display: flex; flex-direction: column; gap: 4px;
   }
   .lr-item:hover { background: var(--hover); }
-  .lr-item.active { border-color: color-mix(in srgb, var(--accent) 28%, transparent); background: var(--accent-soft); }
+  .lr-item.active { border-color: var(--accent-soft-strong); background: var(--accent-soft); }
   .lr-item-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .lr-item-name { flex: 1; min-width: 0; font-size: var(--fs-m); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .lr-item-meta { display: flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-dim); min-width: 0; }
@@ -593,7 +619,8 @@
   .lr-hint { font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5; margin: 0; }
   .lr-field { display: flex; flex-direction: column; gap: 6px; border: none; margin: 0; padding: 0; }
   .lr-field > span { font-size: var(--fs-s); font-weight: 500; color: var(--text-dim); }
-  .lr-radio, .lr-check { display: flex; align-items: center; gap: 7px; font-size: var(--fs-s); }
+  .lr-skills-failed { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--warning); }
+  .lr-radio, .lr-check { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); }
   .lr-textarea { resize: vertical; }
   .lr-instructions {
     margin: 0; font-size: var(--fs-s); color: var(--text-dim); line-height: 1.5;
@@ -629,11 +656,11 @@
   .verdict-block .lr-verdict-badge { background: var(--danger-soft); color: var(--danger); }
   .lr-avg { font-size: var(--fs-xs); color: var(--text-dim); }
   .lr-score { width: 100%; border-collapse: collapse; font-size: var(--fs-xs); }
-  .lr-score td { padding: 3px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .lr-score td { padding: 2px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
   .lr-area { font-weight: 600; white-space: nowrap; }
   .lr-num { text-align: end; white-space: nowrap; color: var(--text-dim); }
   .lr-notes { color: var(--text-dim); }
-  .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .lr-findings { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .lr-agents-sec h4, .lr-summary h5 { margin: 8px 0 4px; }
   .lr-plan { margin-block: 4px 8px; margin-inline: 18px 0; font-size: var(--fs-s); line-height: 1.5; }
 
@@ -641,11 +668,6 @@
   .rp-finding { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
-  .severity-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize; }
-  .sev-critical { background: var(--danger-soft); color: var(--danger); }
-  .sev-high { background: var(--danger-soft); color: var(--danger); }
-  .sev-medium { background: var(--warning-soft); color: var(--warning); }
-  .sev-low { background: var(--info-soft); color: var(--info); }
   .mono { font-family: var(--font-mono); }
 
   /* Phone: the list stacks above the report, like the Evaluator's runs. */

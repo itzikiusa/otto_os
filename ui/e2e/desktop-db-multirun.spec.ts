@@ -161,7 +161,7 @@ for (const scheme of ['light', 'dark'] as const) {
     // Preview: every final statement, flagged.
     await expect(sheet.locator('.mr-runs > li')).toHaveCount(4);
     await expect(sheet).toContainText("UPDATE orders SET region = 'eu' WHERE brand_id = 2");
-    await expect(sheet.locator('.mr-tag.danger')).toHaveCount(2);
+    await expect(sheet.locator('.badge.bad')).toHaveCount(2);
     await expectNoHorizontalOverflow(page);
     await expectFullyInViewport(page, page.locator('.sheet[role="dialog"]').first(), 'multi-run sheet');
 

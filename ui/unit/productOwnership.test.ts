@@ -6,7 +6,7 @@ function fixture(api: Record<string, unknown>) {
   const ws = { currentId: 'ws' };
   const { product } = loadSource(new URL('../src/lib/stores/product.svelte.ts', import.meta.url), {
     '../api/client': { api }, '../loadError': { loadErrorText: String },
-    './workspace.svelte': { ws }, '../lazyModule': { announceModule() {} },
+    './workspace.svelte': { ws }, '../lazyModule': { announceModule() {} }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
   });
   product.selectedId = 'A';
   product.detail = detail('A');

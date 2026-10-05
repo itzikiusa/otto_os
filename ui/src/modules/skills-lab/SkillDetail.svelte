@@ -26,6 +26,7 @@
   import { renderMarkdownGfm } from '../../lib/md';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
   import SkillEditor from './SkillEditor.svelte';
@@ -217,7 +218,7 @@
     }
   }
   async function remove(): Promise<void> {
-    if (!(await confirmer.ask(`Delete "${group.name}" from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
+    if (!(await confirmer.ask(`Delete “${group.name}” from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
     try {
       await skillLabApi.remove(group.name);
       toasts.success('Skill deleted', group.name);
@@ -335,7 +336,7 @@
         {#if compareError}
           <p class="compare-err" role="alert">{compareError}</p>
         {:else if compareBefore == null || compareAfter == null}
-          <p class="dim" role="status">Loading both copies…</p>
+          <LoadState what="both copies" loading empty />
         {:else}
           <DiffView before={compareBefore} after={compareAfter} mode="word" contextLines={3} />
         {/if}
@@ -343,14 +344,10 @@
     {/if}
 
     {#if loadError && (tab === 'overview' || tab === 'edit')}
-      <div class="inline-error" role="alert">
-        <Icon name="warning" size={14} />
-        <div><strong>Couldn’t open the {sourceLabel(variant.source)} copy of {group.name}.</strong> <span class="dim">{loadError}</span></div>
-        <button class="btn small" onclick={() => load(group.name, variant.source)}>Retry</button>
-      </div>
+      <LoadState what="the {sourceLabel(variant.source)} copy of {group.name}" error={loadError} empty onretry={() => load(group.name, variant.source)} />
     {:else if tab === 'overview'}
       {#if loading && !body}
-        <p class="dim" role="status">Loading {group.name}…</p>
+        <LoadState what={group.name} loading empty rows={5} />
       {:else}
         <div class="overview">
           <aside class="meta card" aria-label="Skill metadata">
@@ -484,7 +481,7 @@
   .variant {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
     padding: 0 8px;
     border: 1px solid var(--border);
@@ -501,7 +498,7 @@
   }
   .variant.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .vdot {
@@ -513,7 +510,7 @@
   .sync {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -755,22 +752,6 @@
   .skill-md :global(ol) {
     padding-inline-start: 0;
     padding-inline-start: 22px;
-  }
-  .inline-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    font-size: var(--fs-s);
-  }
-  .inline-error > :global(svg) {
-    color: var(--danger);
-  }
-  .inline-error > div {
-    flex: 1;
   }
   @container skilldetail (max-width: 760px) {
     .overview {

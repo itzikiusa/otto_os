@@ -6,6 +6,7 @@
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { contextApi } from '../../lib/api/context';
   import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
   import type { AgentSchedule, AgentSkill, CreateAgentReq, SwarmAgent } from './types';
   import { agentProvidersWith, defaultAgentProvider } from '../../lib/providers';
   import ModelPicker from '../../lib/components/ModelPicker.svelte';
@@ -105,7 +106,7 @@
       toasts.success(editing ? 'Agent updated' : 'Agent hired');
       onclose();
     } catch (e) {
-      toasts.error(editing ? "Couldn't save the agent" : "Couldn't hire the agent", e instanceof Error ? e.message : String(e));
+      toastError(editing ? 'Couldn’t save the agent' : 'Couldn’t hire the agent', e);
     } finally {
       busy = false;
     }

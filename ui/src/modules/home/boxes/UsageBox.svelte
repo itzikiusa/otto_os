@@ -112,7 +112,7 @@
   {#if loading && !summary}
     <Skeleton rows={3} />
   {:else if error && !summary}
-    <EmptyState icon="warning" title="Couldn't load Usage" body={error}>
+    <EmptyState icon="warning" title="Couldn’t load Usage" body={error}>
       <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
     </EmptyState>
   {:else if status && !status.available}
@@ -178,11 +178,11 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     cursor: pointer;
   }
   .seg button.on {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   /* Widget figures: number over label, split by hairlines — no tile fills

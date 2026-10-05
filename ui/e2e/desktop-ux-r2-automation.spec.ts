@@ -99,7 +99,7 @@ test('rooms: failed messages never claim an empty conversation and Retry recover
     ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Messages temporarily unavailable' } })
     : r.continue());
   await page.goto('/#/personal-agents/rooms');
-  await expect(page.getByText("Couldn't load room messages")).toBeVisible();
+  await expect(page.getByText("Couldn’t load room messages")).toBeVisible();
   await expect(page.getByText(/No messages yet/)).toHaveCount(0);
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
@@ -182,10 +182,14 @@ test.describe('loaded automation visual and interaction fixtures', () => {
       await page.goto('/#/workflows');
       await page.getByTestId(`wf-row-${workflowId}`).locator('.row-main').click();
       await shot('workflow');
-      if (width <= 640) {
-        await page.getByRole('button', { name: 'More actions', exact: true }).click();
-        await page.getByRole('menuitem', { name: 'Runs', exact: true }).click();
-      } else await page.getByRole('button', { name: 'Runs', exact: true }).click();
+      // Runs lives in the workflow's ⋯ menu; on a narrow header that ⋯ is
+      // itself folded into the page header's overflow as "More actions…".
+      await page.getByRole('button', { name: 'More actions', exact: true }).first().click();
+      const runsItem = page.getByRole('menuitem', { name: 'Runs', exact: true });
+      const nested = page.getByRole('menuitem', { name: 'More actions…', exact: true });
+      await runsItem.or(nested).first().waitFor();
+      if (await nested.isVisible()) await nested.click();
+      await runsItem.click();
       await page.getByTestId('run-item').first().click();
       await expect(page.locator('.timeline')).toBeVisible();
       await shot('workflow-run');

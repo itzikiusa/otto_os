@@ -222,14 +222,14 @@
     flex: 1;
     min-width: 180px;
     max-width: 460px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
   }
   .gsb-box:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .gsb-input {
     flex: 1;
@@ -253,7 +253,7 @@
   .gsb-chip.on {
     border-color: var(--accent);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .gsb-x {
     border: none;
@@ -308,7 +308,7 @@
     cursor: pointer;
   }
   .gsb-result:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .gsb-sha {
     color: var(--text-dim);

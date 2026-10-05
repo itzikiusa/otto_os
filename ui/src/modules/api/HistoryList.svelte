@@ -5,6 +5,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import AgentChip from '../../lib/components/AgentChip.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
   import StatusChip from './StatusChip.svelte';
@@ -157,7 +159,7 @@
   <div class="tools">
     <label class="search">
       <Icon name="search" size={12} />
-      <input placeholder="Search URL, method or status" bind:value={search} aria-label="Search request history" />
+      <input placeholder="Filter by URL, method or status…" bind:value={search} aria-label="Search request history" />
       {#if search}
         <button class="icon-btn clear" onclick={() => (search = '')} aria-label="Clear search" title="Clear search"><Icon name="x" size={12} /></button>
       {/if}
@@ -193,15 +195,17 @@
     </div>
   {/if}
 
-  {#if apiClient.historyLoadingId}<div class="state" role="status">Loading request…</div>{/if}
+  {#if apiClient.historyLoadingId}<div class="state" role="status"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading request…</div>{/if}
 
-  {#if apiClient.history.length === 0 && apiClient.historyLoadError}
-    <div class="state err" role="alert">
-      <span>Couldn’t load history. {apiClient.historyLoadError}</span>
-      <button class="btn small" onclick={() => apiClient.retryHistory()}>Retry</button>
-    </div>
-  {:else if apiClient.history.length === 0 && !apiClient.historyLoaded}
-    <div class="state" role="status">Loading history…</div>
+  {#if apiClient.history.length === 0 && (apiClient.historyLoadError || !apiClient.historyLoaded)}
+    <LoadState
+      what="history"
+      variant="compact"
+      loading={!apiClient.historyLoaded && !apiClient.historyLoadError}
+      error={apiClient.historyLoadError}
+      empty
+      onretry={() => apiClient.retryHistory()}
+    />
   {:else if apiClient.history.length === 0}
     <EmptyState icon="clock" title="Nothing sent yet" body="Every request you send appears here, so you can open it again later." />
   {:else if filtered.length === 0}
@@ -222,7 +226,7 @@
           </span>
           <span class="l2">
             <span class="host" dir="ltr">{u.host || '—'}</span>
-            {#if src?.kind === 'agent'}<span class="chip agent src-chip" title="Sent by an agent session">Agent</span>{/if}
+            {#if src?.kind === 'agent'}<AgentChip title="Sent by an agent session" />{/if}
             <StatusChip status={h.status} small />
             <span class="when">{rel(h.executed_at)}</span>
           </span>
@@ -243,7 +247,7 @@
     margin-inline: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--info-soft);
     font-size: var(--fs-s);
     color: var(--text);
@@ -284,8 +288,8 @@
     color: var(--text-dim);
   }
   .search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search input {
     flex: 1;
@@ -326,13 +330,6 @@
     color: var(--text-dim);
     padding: 4px;
   }
-  .state.err {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    color: var(--danger);
-  }
   :global(.hist-vlist) {
     flex: 1;
     min-height: 0;
@@ -370,7 +367,7 @@
     color: var(--text);
   }
   .l2 {
-    padding-inline-start: 42px;
+    padding-inline-start: 40px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -384,8 +381,5 @@
   .when {
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
-  }
-  .chip.agent {
-    height: 18px;
   }
 </style>

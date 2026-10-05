@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { plural } from '../../lib/plural';
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import type { GitBackupStatus, GitBackupPreview, RestorePreview, RestoreResult, RestoreConflictPolicy } from '../../lib/api/types';
@@ -39,7 +40,7 @@
     if (!next.remotes.includes(remote)) remote = next.remotes[0] ?? '';
     try { localStorage.setItem(preferenceKey, next.repo_path); } catch { /* Browsing still works without storage. */ }
   }
-  // `what` names the step for the inline error ("Couldn't check the
+  // `what` names the step for the inline error ("Couldn’t check the
   // repository. <daemon reason>") — a bare daemon message didn't say which
   // of the six buttons failed.
   async function perform(what: string, action: () => Promise<void>) {
@@ -90,7 +91,7 @@
     if (
       action === 'push' &&
       !(await confirmer.ask(
-        `Push “${status.branch}” to the remote “${remote}”? This sends the branch's full history — the Otto snapshot and any other commits in this repository — to everyone with access to that remote.`,
+        `Push “${status.branch}” to the remote “${remote}”? This sends the branch’s full history — the Otto snapshot and any other commits in this repository — to everyone with access to that remote.`,
         { title: 'Push backup branch', confirmLabel: 'Push', danger: false },
       ))
     )
@@ -139,8 +140,8 @@
     <div class="controls"><button class="btn" disabled={busy} onclick={previewExport}>Preview snapshot</button></div>
     {#if preview}
       <div class="snapshot-preview" aria-label="Git snapshot preview">
-        <strong>{changes.length} changed file{changes.length === 1 ? '' : 's'}</strong>
-        <p class="dim">Only Otto's managed .otto-sync files are written. Local edits to those files require review before exporting again.</p>
+        <strong>{plural(changes.length, 'changed file')}</strong>
+        <p class="dim">Only Otto’s managed .otto-sync files are written. Local edits to those files require review before exporting again.</p>
         <div class="scroll"><ul>{#each changes as change}<li><span class="act">{change.action}</span> <code>{change.path}</code></li>{:else}<li>The snapshot matches this repository.</li>{/each}</ul></div>
         {#if preview.excluded.length}<details><summary>Excluded from Git</summary><ul>{#each preview.excluded as item}<li>{item}</li>{/each}</ul></details>{/if}
         {#if preview.reconnect.length}<details><summary>Reconnect after importing</summary><ul>{#each preview.reconnect as item}<li>{item}</li>{/each}</ul></details>{/if}

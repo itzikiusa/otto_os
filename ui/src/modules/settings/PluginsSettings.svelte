@@ -89,7 +89,7 @@
   async function remove(p: PluginRecord): Promise<void> {
     if (
       !(await confirmer.ask(
-        `Remove the plugin “${p.name}”? Its helper process stops and it leaves every user's sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
+        `Remove the plugin “${p.name}”? Its helper process stops and it leaves every user’s sidebar. Its files under ~/otto-plugins are kept, so you can install it again.`,
         { title: 'Remove plugin', confirmLabel: 'Remove' },
       ))
     )

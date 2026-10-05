@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Ask bar: one line of input that submits a `/browser/ask` turn into an
   // agent session — the page the user is on, the marks on it (fenced
   // server-side, same as send-to-session), and the question. The Browser
@@ -117,7 +118,7 @@
   <label class="marks-chip" class:off={!includeMarks || marks.length === 0} title={marks.length === 0 ? 'No marks on this page yet — use Mark passage to add one' : "Include this page's marks in the question so the agent knows which elements you mean"}>
     <input type="checkbox" bind:checked={includeMarks} disabled={marks.length === 0} />
     <Icon name="target" size={11} />
-    <span>{marks.length} mark{marks.length === 1 ? '' : 's'}</span>
+    <span>{plural(marks.length, 'mark')}</span>
   </label>
   {/if}
   <button class="send" onclick={send} disabled={!canSend} title="Send to the agent (⏎)" aria-label="Send">
@@ -143,14 +144,14 @@
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 10px;
+    padding: 4px 10px;
     font: inherit;
     font-size: var(--fs-m);
     line-height: 1.35;
   }
   textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   textarea:disabled {
     opacity: 0.6;
@@ -165,7 +166,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     cursor: pointer;
     white-space: nowrap;
     user-select: none;

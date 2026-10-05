@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../lib/labels';
   // Drawer "Terminal" tab: opens a `kubectl exec -it` terminal session for the pod
   // (`POST …/exec`, Edit) and renders it inline with `<Terminal preferDom>`
   // (agent-TUI renderer; shells in a pod redraw prompts constantly). The
@@ -42,7 +43,7 @@
     if (!canExec || opening) return;
     const wsId = ws.currentId;
     if (!wsId) {
-      error = 'Select a workspace first — the exec session is attached to it.';
+      error = `${NO_WORKSPACE} — the exec session is attached to it.`;
       return;
     }
     // A shell in a production pod can change anything in it — ask first.
@@ -152,7 +153,7 @@
   .term {
     flex: 1;
     min-height: 260px;
-    background: #000;
+    background: var(--term-bg);
   }
   .launch {
     padding: 16px;

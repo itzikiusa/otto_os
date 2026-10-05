@@ -5,7 +5,8 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import { nextTabIndex } from '../../lib/tabKeys';
+  import { toastError } from '../../lib/toastError';
+  import { tabKeys } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -14,10 +15,11 @@
   import { tick, untrack } from 'svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { recallSelection, rememberSelection } from '../../lib/lastSelection';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import AnalysisTab from './AnalysisTab.svelte';
@@ -79,7 +81,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Could not create the epic', product.errMsg(e));
+      toastError('Couldn’t create the epic', e);
     } finally {
       draftCreating = false;
     }
@@ -102,7 +104,7 @@
   }
   async function addChild(epic: ProductStory, kind: TreeKind): Promise<void> {
     if (!(await product.mayLeaveDraft())) return;
-    const title = await confirmer.promptText(`Title of the new ${kind} under "${epic.title}":`, {
+    const title = await confirmer.promptText(`Title of the new ${kind} under “${epic.title}”:`, {
       title: kind === 'doc' ? 'Add doc' : 'Add story', confirmLabel: 'Create', placeholder: 'e.g. Tier ladder screens',
     });
     if (!title) return;
@@ -117,7 +119,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Could not add the child', product.errMsg(e));
+      toastError('Couldn’t add the child', e);
     }
   }
 
@@ -153,7 +155,7 @@
       );
     }
     items.push({ separator: true });
-    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => void deleteStory(s) });
+    items.push({ label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteStory(s) });
     ctxMenu.show(e, items);
   }
   /** Picker: every top-level row can become the parent (epics first). The menu is
@@ -179,7 +181,7 @@
       await product.moveStory(s.id, epic.id, s.folder || '');
       collapsedEpics = { ...collapsedEpics, [epic.id]: false };
     } catch (e) {
-      toasts.error('Move failed', product.errMsg(e));
+      toastError('Couldn’t move the story', e);
     }
   }
   async function setFolder(s: ProductStory): Promise<void> {
@@ -192,21 +194,21 @@
     try {
       await product.patchStory(s.id, { folder: folder ?? '' });
     } catch (e) {
-      toasts.error('Could not set the folder', product.errMsg(e));
+      toastError('Couldn’t set the folder', e);
     }
   }
   async function detach(s: ProductStory): Promise<void> {
     try {
       await product.moveStory(s.id, null, '');
     } catch (e) {
-      toasts.error('Detach failed', product.errMsg(e));
+      toastError('Couldn’t detach', e);
     }
   }
   async function mark(s: ProductStory, kind: TreeKind): Promise<void> {
     try {
       await product.setTreeKind(s.id, kind);
     } catch (e) {
-      toasts.error('Could not change the tree role', product.errMsg(e));
+      toastError('Couldn’t change the tree role', e);
     }
   }
   function toggleEpic(id: string): void {
@@ -235,7 +237,7 @@
       // On mobile, reveal the new draft's content panel right away.
       mobileSection = 'content';
     } catch (e) {
-      toasts.error("Couldn't create the draft", product.errMsg(e));
+      toastError('Couldn’t create the draft', e);
     } finally {
       draftCreating = false;
     }
@@ -289,11 +291,59 @@
     untrack(() => {
       autoPickedFor = w;
       if (product.selectedId || viewport.isPhone) return;
+      // A routed story (`#/product/<id>`) opens from the route instead.
+      if (router.parts[0] === 'product' && router.parts[1]) return;
       const last = recallSelection('product');
       const pick = product.stories.find((x) => x.id === last) ?? tree[0]?.story ?? product.stories[0];
       if (pick) void openStory(pick.id);
     });
   });
+  // ── URL-addressable selection: `#/product/<story id>` ─────────────────────
+  // The route drives the selection (a deep link / reload / back lands on that
+  // story) and the selection writes the route back with `router.replace`, so
+  // the URL always names the open story. Opening still goes through
+  // `openStory` (the store's draft guard decides); `routePending` holds the
+  // write-back while a routed open is in flight so it can't clobber the link.
+  let routePending = $state<string | null>(null);
+  $effect(() => {
+    const [mod, storyId] = router.parts;
+    if (mod !== 'product' || !storyId) return;
+    untrack(() => {
+      if (storyId === product.selectedId && product.view === 'stories') return;
+      routePending = storyId;
+      void (async () => {
+        try {
+          if (product.view !== 'stories') await product.changeView('stories');
+          if (product.view !== 'stories') return;
+          await openStory(storyId);
+          if (product.selectedId !== storyId) return;
+          rememberSelection('product', storyId);
+          product.tab = 'overview';
+          mobileSection = 'content';
+        } finally {
+          if (routePending === storyId) routePending = null;
+        }
+      })();
+    });
+  });
+  $effect(() => {
+    const id = product.view === 'stories' ? product.selectedId : null;
+    if (routePending || router.module !== 'product') return;
+    const want = id ? `product/${id}` : 'product';
+    untrack(() => {
+      if (router.parts.join('/') !== want) router.replace(want);
+    });
+  });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('product', [
+      { id: 'product.new-draft', title: 'New draft story', group: 'Product', keywords: 'create story blank discovery', run: () => void createDraft() },
+      { id: 'product.new-epic', title: 'New epic', group: 'Product', keywords: 'create group folder stories', run: () => void createEpic() },
+      { id: 'product.import', title: 'Import story…', group: 'Product', keywords: 'jira confluence issue page', run: () => (importOpen = true) },
+    ]),
+  );
+
   /** The selected story's parent epic (breadcrumb) and epic-ness (Add child ▾). */
   const selectedStory = $derived(product.detail?.story ?? null);
   const selectedParent = $derived(product.parentOf(selectedStory));
@@ -404,18 +454,10 @@
     list.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
   }
 
-  function onTabKey(event: KeyboardEvent): void {
-    const list = event.currentTarget as HTMLElement;
-    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled):not([aria-disabled="true"])')];
-    const current = tabs.findIndex(tab => tab.getAttribute('aria-selected') === 'true');
-    if (current < 0) return;
-    const next = nextTabIndex(event.key, current, tabs.length, { rtl: getComputedStyle(list).direction === 'rtl' });
-    if (next < 0) return;
-    event.preventDefault();
-    // The click handler owns async activation and final focus. Moving focus
-    // first would make the discard dialog restore an unaccepted destination.
-    tabs[next].click();
-  }
+  // ←/→/Home/End only CLICK the target tab: the click handler owns async
+  // activation and final focus. Moving focus first would make the discard
+  // dialog restore an unaccepted destination.
+  const onTabKey = tabKeys({ activate: 'click' });
 
   function sourceIcon(kind: string): IconName {
     switch (kind) {
@@ -451,7 +493,7 @@
     // deleted with it; children are re-parented to the top level, not deleted.
     const kids = product.childrenOf(s.id).length;
     const ok = await confirmer.ask(
-      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
+      `Delete “${s.title}”? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
         'Its versions, questions, notes, analyses, test cases, transcripts and attachments are deleted too.' +
         (kids > 0 ? ` Its ${kids} child stor${kids === 1 ? 'y moves' : 'ies move'} to the top level.` : ''),
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
@@ -470,7 +512,7 @@
     try {
       await product.deleteStory(s.id);
     } catch (e) {
-      toasts.error(`Couldn't delete "${s.title}"`, product.errMsg(e));
+      toastError(`Couldn’t delete “${s.title}”`, e);
       return;
     }
     if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
@@ -576,7 +618,7 @@
 <PageHeader
   title={headerTitle}
   crumbs={headerCrumbs}
-  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyse, plan, test, publish back'}
+  subtitle={product.view === 'stories' && selectedStory ? undefined : 'Jira / Confluence stories — analyze, plan, test, publish back'}
 >
   {#snippet badge()}
     {#if product.view === 'stories' && selectedStory}
@@ -619,12 +661,18 @@
   {#snippet actions()}
     {#if product.view === 'stories'}
       {#if selectedStory && selectedIsEpic}
-        <button class="btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
+        <button class="btn small add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
           <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
         </button>
       {/if}
+      <!-- The ONE import affordance — secondary, before the one primary (the empty state owns it while the list is empty). -->
+      {#if !noStories}
+        <button class="btn small" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+          <Icon name="download" size={12} /> Import
+        </button>
+      {/if}
       <button
-        class="btn primary"
+        class="btn small primary"
         onclick={newMenu}
         title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
         disabled={draftCreating}
@@ -632,12 +680,6 @@
       >
         <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
       </button>
-      <!-- The ONE import affordance (the empty state owns it while the list is empty). -->
-      {#if !noStories}
-        <button class="btn" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
-          <Icon name="download" size={12} /> Import
-        </button>
-      {/if}
     {/if}
   {/snippet}
 </PageHeader>
@@ -684,7 +726,7 @@
         {#if (product.loadingStories || storiesError) && product.stories.length === 0}
           <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
         {:else if product.stories.length === 0}
-          <div class="list-empty">No stories yet.</div>
+          <EmptyState icon="file" title="No stories yet" body="Import one or start a blank draft from New." />
         {:else if storiesError}
           <!-- A refresh failed: keep the last good list, say so, offer Retry. -->
           <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} onretry={() => void loadStories()} />
@@ -692,10 +734,13 @@
         {#if product.stories.length === 0}
           <!-- the loading / error / empty states above own it -->
         {:else if filteredStories.length === 0}
-          <div class="list-empty">
-            No stories tagged “{activeTagFilter}”.
-            <button class="btn small ghost" onclick={() => (activeTagFilter = null)}>Clear filter</button>
-          </div>
+          <EmptyState
+            icon="filter"
+            title={`No stories tagged “${activeTagFilter}”`}
+            actionLabel="Clear filter"
+            actionKind="secondary"
+            onaction={() => (activeTagFilter = null)}
+          />
         {:else}
           {#each tree as node (node.story.id)}
             {@render storyRow(node.story, node)}
@@ -930,18 +975,12 @@
     gap: 2px;
     min-height: 0;
   }
-  .list-empty {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 8px 4px;
-    line-height: 1.5;
-  }
   /* Wrapper handles hover background + reveals the row's ⋯ button */
   .story-row-wrap {
     display: flex;
     align-items: center;
     border-radius: var(--radius-s);
-    transition: background 100ms ease-out;
+    transition: background var(--dur-fast) ease-out;
     position: relative;
   }
   .story-row-wrap:hover {
@@ -956,7 +995,7 @@
     gap: 8px;
     flex: 1;
     min-width: 0;
-    padding: 7px 8px;
+    padding: 6px 8px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -982,7 +1021,7 @@
     cursor: pointer;
     margin-inline-end: 6px;
     padding: 0;
-    transition: color 100ms, background 100ms;
+    transition: color var(--dur-fast), background var(--dur-fast);
   }
   .story-row-wrap:hover .row-menu-btn,
   .story-row-wrap:focus-within .row-menu-btn,
@@ -997,7 +1036,7 @@
     }
   }
   .row-menu-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .tree-toggle {
@@ -1021,7 +1060,7 @@
     margin-inline-start: calc(var(--depth, 1) * 14px);
   }
   .story-row-wrap.child .story-row {
-    padding-block: 5px;
+    padding-block: 4px;
   }
   .story-row-wrap.child .story-title {
     font-size: var(--fs-s);
@@ -1038,7 +1077,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-align: start;
   }
@@ -1060,7 +1099,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
@@ -1079,7 +1118,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .story-title {
     font-size: var(--fs-m);
@@ -1111,14 +1150,14 @@
     flex-shrink: 0;
   }
   .tag-filter-btn {
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
     white-space: nowrap;
   }
   .tag-filter-btn:hover {
@@ -1126,7 +1165,7 @@
     color: var(--accent-text);
   }
   .tag-filter-btn.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
     font-weight: 600;
@@ -1136,7 +1175,7 @@
   .story-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 3px;
+    gap: 2px;
     margin-top: 1px;
   }
   /* Tags are metadata, not selection: neutral chips. */
@@ -1175,7 +1214,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 3px;
+    padding: 2px;
     background: color-mix(in srgb, var(--text-dim) 7%, transparent);
     border-radius: var(--radius-m);
     overflow-x: auto;
@@ -1200,7 +1239,7 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .st:hover {
     color: var(--text);
@@ -1209,7 +1248,7 @@
   .tab-strip .st.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-xs);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1230,7 +1269,7 @@
   }
   .sub-tab-strip .st {
     height: 24px;
-    padding: 0 9px;
+    padding: 0 8px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px solid transparent;
@@ -1377,7 +1416,7 @@
       color: var(--text-dim);
       background: color-mix(in srgb, var(--text-dim) 14%, transparent);
       border-radius: 999px;
-      padding: 1px 9px;
+      padding: 1px 8px;
     }
 
     /* Panels: collapsed by default; the open one gets the remaining height and
@@ -1415,9 +1454,6 @@
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
-    .list-empty {
-      font-size: var(--fs-m);
-    }
     .story-title {
       font-size: var(--fs-l);
     }
@@ -1432,13 +1468,13 @@
     .st {
       height: 38px;
       font-size: var(--fs-m);
-      padding: 0 13px;
+      padding: 0 12px;
     }
     /* Keep the sub-nav touch-friendly but still a notch smaller than the groups. */
     .sub-tab-strip .st {
       height: 34px;
       font-size: var(--fs-m);
-      padding: 0 11px;
+      padding: 0 10px;
     }
     .product-body {
       padding: 14px;

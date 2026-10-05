@@ -8,6 +8,7 @@
   // Each session expands to a live <Terminal> attached in place — no navigation
   // to the global Agents panel. Nothing here is a general/all-workflows list.
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
@@ -218,7 +219,7 @@
       case 'skipped':
         return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
       case 'cancelled':
-        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was cancelled' };
+        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was canceled' };
       case 'fallback':
         return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
       case 'error':
@@ -233,11 +234,11 @@
 </script>
 
 {#if groups.length === 0}
-  <div class="empty">
-    No agent sessions for this run yet.{#if runActive}
-      <br />They’ll appear here as steps spawn them.
-    {/if}
-  </div>
+  <EmptyState
+    icon="terminal"
+    title="No agent sessions for this run yet"
+    body={runActive ? 'They’ll appear here as steps spawn them.' : undefined}
+  />
 {:else}
   <div class="agents" data-testid="run-agents">
     {#each groups as g (g.id)}
@@ -249,7 +250,7 @@
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
           <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
           <span class="grow"></span>
-          <span class="grp-count" title={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
+          <span class="grp-count" role="img" title={plural(g.sessions.length, 'session')} aria-label={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
@@ -296,12 +297,6 @@
 {/if}
 
 <style>
-  .empty {
-    padding: 16px 12px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    line-height: 1.5;
-  }
   .agents {
     display: flex;
     flex-direction: column;
@@ -319,12 +314,12 @@
   .grp-h {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 3px 4px;
+    gap: 6px;
+    padding: 2px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .grp-name {
@@ -346,7 +341,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     padding: 0 6px;
     border-radius: 999px;
   }
@@ -370,7 +365,7 @@
     text-align: start;
   }
   .sess-h:hover {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .s-title {
     color: var(--text);

@@ -6,6 +6,7 @@
   // budgetBus, ws.needsYou changes) — minimal new polling (30 s fallback).
 
   import { onMount, onDestroy } from 'svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
@@ -79,6 +80,10 @@
     ...(view ? Object.values(view).flat() as MissionItem[] : []).map((item) => item.repo ?? ''),
   ].filter(Boolean))].sort());
   let showNewViewForm = $state(false);
+  /** A saved view is being created — the Save button reads "Saving…". */
+  let savingView = $state(false);
+  /** Saved views whose delete is in flight, by id (that pill's × disables). */
+  let deletingViews = $state<Record<string, boolean>>({});
 
   /** The active saved view's ID (null = no filter active = show all).
    *  Tracked by id, not by filter-object identity — `load(false)` replaces
@@ -130,7 +135,7 @@
   // ---------------------------------------------------------------------------
 
   async function createView() {
-    if (!wsId || !newViewName.trim()) return;
+    if (!wsId || !newViewName.trim() || savingView) return;
     const owner = wsId;
     const name = newViewName.trim();
     const generation = loadGeneration;
@@ -143,9 +148,10 @@
       };
       if (!filter || typeof filter !== 'object' || Array.isArray(filter)) throw new Error('object required');
     } catch {
-      toasts.error('Filter must be valid JSON');
+      toasts.error('Couldn’t save the view', 'The filter must be a JSON object, like {"bucket":"needs_you"}.');
       return;
     }
+    savingView = true;
     try {
       await api.post(`/workspaces/${owner}/mission/views`, {
         name,
@@ -158,7 +164,9 @@
       showNewViewForm = false;
       await load(false);
     } catch (e: unknown) {
-      toasts.error(e instanceof Error ? e.message : 'Failed to save view');
+      toastError('Couldn’t save the view', e);
+    } finally {
+      savingView = false;
     }
   }
 
@@ -169,14 +177,19 @@
       title: 'Delete saved view?',
       confirmLabel: 'Delete view',
     });
-    if (!ok) return;
+    if (!ok || deletingViews[id]) return;
+    deletingViews = { ...deletingViews, [id]: true };
     try {
       await api.del(`/mission-views/${id}`);
       toasts.success('View deleted', name);
       if (!alive || wsId !== owner) return;
       await load(false);
     } catch (e: unknown) {
-      toasts.error('Couldn’t delete the view', loadErrorText(e));
+      toastError('Couldn’t delete the view', e);
+    } finally {
+      const next = { ...deletingViews };
+      delete next[id];
+      deletingViews = next;
     }
   }
 
@@ -363,7 +376,7 @@
     subtaskBusy = true;
     try {
       await activity.addTask(sid, title);
-      toasts.info('Sub-task queued', `"${title}" is handed to the agent when it is idle.`);
+      toasts.info('Sub-task queued', `“${title}” is handed to the agent when it’s idle.`);
       closeSubtask();
       if (wsId) void activity.loadSummary(wsId);
     } catch (e) {
@@ -423,8 +436,10 @@
         <button
           class="wq-view-del"
           onclick={() => void deleteView(sv.id)}
-          title="Delete view “{sv.name}”"
-          aria-label="Delete view {sv.name}"
+          disabled={deletingViews[sv.id]}
+          aria-busy={deletingViews[sv.id] ? 'true' : undefined}
+          title={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
+          aria-label={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
         ><Icon name="x" size={10} /></button>
       </span>
     {/each}
@@ -453,13 +468,13 @@
       <label class="checkbox-row adv"><input type="checkbox" bind:checked={advancedFilter} /> Advanced (JSON)</label>
       <span class="grow"></span>
       <button class="btn small" onclick={() => (showNewViewForm = false)}>Cancel</button>
-      <button class="btn small primary" onclick={createView} disabled={!newViewName.trim()}>Save view</button>
+      <button class="btn small primary" onclick={createView} disabled={!newViewName.trim() || savingView}>{savingView ? 'Saving…' : 'Save view'}</button>
     </div>
   {/if}
 
   <!-- Buckets -->
   {#if !wsId}
-    <EmptyState variant="page" icon="folder" title="No workspace selected" body="Pick a workspace in the sidebar to see its sessions by what they need." />
+    <EmptyState variant="page" icon="folder" title={NO_WORKSPACE} body="Pick a workspace in the sidebar to see its sessions by what they need." />
   {:else}
   <LoadState what="the work queue" variant="page" loading={loading} error={loadError} empty={!view} onretry={() => load()}>
     <div class="buckets">
@@ -481,23 +496,15 @@
               {#each items as item (item.id)}
                 {@const sid = sessionOf(item)}
                 {@const sum = sid ? activity.summary(sid) : null}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
-                <li
-                  class="item"
-                  class:clickable={!!sid}
-                  role={sid ? 'button' : undefined}
-                  tabindex={sid ? 0 : undefined}
-                  data-session-id={sid}
-                  onclick={() => openSession(item)}
-                  onkeydown={(e) => {
-                    if (e.target !== e.currentTarget) return;
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      openSession(item);
-                    }
-                  }}
-                >
-                  <span class="item-title" title={item.title}>{item.title}</span>
+                <!-- The title is the card's one real button; its ::after stretches over
+                     the card so a click anywhere opens the session, while the
+                     Sub-task controls sit above it as their own buttons. -->
+                <li class="item" class:clickable={!!sid} data-session-id={sid}>
+                  {#if sid}
+                    <button class="item-title item-open" title={item.title} onclick={() => openSession(item)}>{item.title}</button>
+                  {:else}
+                    <span class="item-title" title={item.title}>{item.title}</span>
+                  {/if}
                   <div class="item-meta">
                     {#if item.repo}
                       <span class="meta-tag repo" title={item.repo}>{item.repo}</span>
@@ -527,15 +534,13 @@
                         <button
                           class="subtask-btn"
                           onclick={(e) => openSubtask(e, item)}
-                          onkeydown={(e) => e.stopPropagation()}
                           title="Push a sub-task to this agent"
                           data-testid="subtask-btn"
                         ><Icon name="plus" size={10} /> Sub-task</button>
                       {/if}
                     </div>
                     {#if subtaskFor === item.id}
-                      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-                      <div class="subtask-form" data-subtask-for={item.id} onclick={(e) => e.stopPropagation()}>
+                      <div class="subtask-form" data-subtask-for={item.id}>
                         <input
                           class="input subtask-input"
                           placeholder="Sub-task for the agent…"
@@ -545,7 +550,7 @@
                           aria-label="Sub-task title"
                         />
                         <button class="btn small" onclick={closeSubtask}>Cancel</button>
-                        <button class="btn small primary" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>Add</button>
+                        <button class="btn small primary" disabled={subtaskTitle.trim() === '' || subtaskBusy} onclick={() => void submitSubtask(item)}>{subtaskBusy ? 'Adding…' : 'Add'}</button>
                       </div>
                     {/if}
                   {/if}
@@ -668,9 +673,13 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  .wq-view-del:hover {
-    background: var(--surface-2);
+  .wq-view-del:hover:not(:disabled) {
+    background: var(--hover);
     color: var(--danger);
+  }
+  .wq-view-del:disabled {
+    cursor: progress;
+    opacity: 0.5;
   }
 
   /* New-view form */
@@ -728,7 +737,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .bucket-icon {
@@ -743,7 +752,7 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     font-weight: 600;
   }
@@ -761,9 +770,10 @@
   }
 
   .item {
+    position: relative;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    transition: background 0.1s;
+    transition: background var(--dur-fast);
   }
   .item:last-child {
     border-bottom: none;
@@ -772,11 +782,36 @@
     cursor: pointer;
   }
   .item.clickable:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
-  .item.clickable:focus-visible {
+  /* The open button covers the whole card (stretched hit area); its focus
+     ring is drawn on the card. */
+  .item-open {
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .item-open::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .item-open:focus-visible {
+    outline: none;
+  }
+  .item.clickable:has(.item-open:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
+  }
+  /* Controls inside the card stay above the stretched hit area. */
+  .task-strip button,
+  .subtask-form {
+    position: relative;
+    z-index: 1;
   }
 
   .item-title {
@@ -791,7 +826,7 @@
   .item-meta {
     display: flex;
     gap: 4px;
-    margin-top: 3px;
+    margin-top: 2px;
     flex-wrap: wrap;
   }
 
@@ -800,7 +835,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
   }
   /* A repo is a full path — truncate it inside the card instead of letting
      the bucket's overflow:hidden chop it mid-character. */
@@ -849,7 +884,6 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width 200ms ease-out;
   }
   .strip-now {
     flex: 1;
@@ -864,10 +898,10 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     margin-inline-start: auto;
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px dashed var(--border);
     border-radius: 999px;
     background: transparent;

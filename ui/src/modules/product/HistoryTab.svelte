@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // History tab — sectioned event timeline with section filter for the selected story.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
@@ -114,9 +115,9 @@
         {/each}
       </select>
       {#if product.loadingEvents}
-        <span class="dim">Loading events…</span>
+        <span class="spinner" role="status" aria-label="Loading events" title="Loading events"></span>
       {:else}
-        <span class="dim">{events.length} event{events.length !== 1 ? 's' : ''}</span>
+        <span class="dim">{plural(events.length, 'event')}</span>
       {/if}
     </div>
 
@@ -191,7 +192,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .htab-select {
@@ -237,7 +238,7 @@
     flex: 1;
     width: 1px;
     background: var(--border);
-    margin: 3px 0;
+    margin: 2px 0;
     min-height: 18px;
   }
   .event-row:last-child .ev-connector {
@@ -251,9 +252,9 @@
   .ev-header {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex-wrap: wrap;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .hist-sec-chip {
     text-transform: capitalize;

@@ -26,7 +26,7 @@ function workspace(mayChangeWorkspace: () => boolean | Promise<boolean> = () => 
   } };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
     '../api/client': { api }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
-    '../router.svelte': { router: { mayChangeWorkspace } }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
+    '../router.svelte': { router: { mayChangeWorkspace } }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
@@ -58,7 +58,7 @@ function bootWorkspace(saved: string, list: { id: string }[], archivedIn: string
   const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {} };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
     '../api/client': { api, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
-    '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../confirm.svelte': { confirmer: {} },
+    '../router.svelte': { router: {} }, '../toast.svelte': { toasts: {} }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer: {} },
     './ui.svelte': { ui: { sessionIsolation: false }, clientId: () => 'test' },
     '../win': { winKey: (key: string) => key }, './splitLayout.svelte': { layout }, './splitLayout': { MAX_PANES: 15, LS_PANES: 'otto_panes_' },
     '../storage': { lsGet: (k: string) => (k === 'otto_workspace' ? saved : null), lsSet() {}, lsRemove() {} },

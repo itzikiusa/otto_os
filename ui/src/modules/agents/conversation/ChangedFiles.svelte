@@ -43,7 +43,7 @@
       <span class="cf-stat mono"><span class="add">+{add}</span> <span class="del">−{del}</span></span>
       <span class="cf-show">{open ? 'Hide files' : 'Show files'}</span>
     </button>
-    <button class="btn small cf-diff" onclick={() => openDiff()} title="Open this response's changes in the side panel"><Icon name="split" size={12} /> Open diff</button>
+    <button class="btn small cf-diff" onclick={() => openDiff()} title="Open this response’s changes in the side panel"><Icon name="split" size={12} /> Open diff</button>
   </div>
   {#if open}
     <ul class="cf-list">
@@ -78,14 +78,14 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding-block: 3px; padding-inline: 3px 5px;
+    padding-block: 2px; padding-inline: 2px 4px;
     min-width: 0;
   }
   .cf-toggle {
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     padding: 4px 6px;
     border: 0;
@@ -132,12 +132,12 @@
   }
   .cf-diff {
     flex-shrink: 0;
-    gap: 5px;
+    gap: 4px;
   }
   .cf-list {
     list-style: none;
     margin: 0;
-    padding: 2px 4px 5px;
+    padding: 2px 4px 4px;
     border-top: 1px solid var(--border);
   }
   .cf-row {
@@ -150,7 +150,7 @@
     flex: 1;
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     padding: 4px 8px;
     border: 0;

@@ -5,6 +5,7 @@
   // explicitly — renaming or removing it does not re-point them.
   import type { RemoteInfo, RemoteOpReq } from '../../lib/api/types';
   import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -47,7 +48,8 @@
       });
   });
 
-  async function send(req: RemoteOpReq, label: string): Promise<void> {
+  /** `label` is the success title; `verb` names the failure ("Couldn’t add the remote"). */
+  async function send(req: RemoteOpReq, label: string, verb: string): Promise<void> {
     busy = req.name;
     error = null;
     try {
@@ -55,9 +57,8 @@
       loadFailed = false;
       toasts.success(label, req.name);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      error = msg;
-      toasts.error(`${label} failed`, msg);
+      error = loadErrorText(e);
+      toastError(`Couldn’t ${verb}`, e);
     } finally {
       busy = '';
     }
@@ -76,7 +77,7 @@
       placeholder: 'https://github.com/owner/repo.git',
     });
     if (!url) return;
-    await send({ op: 'add', name, url }, 'Remote added');
+    await send({ op: 'add', name, url }, 'Remote added', 'add the remote');
   }
 
   async function editUrl(r: RemoteInfo): Promise<void> {
@@ -86,7 +87,7 @@
       initial: r.fetch_url,
     });
     if (!url || url === r.fetch_url) return;
-    await send({ op: 'set_url', name: r.name, url }, 'Remote updated');
+    await send({ op: 'set_url', name: r.name, url }, 'Remote updated', 'update the remote');
   }
 
   async function removeRemote(r: RemoteInfo): Promise<void> {
@@ -96,7 +97,7 @@
       danger: true,
     });
     if (!ok) return;
-    await send({ op: 'remove', name: r.name }, 'Remote removed');
+    await send({ op: 'remove', name: r.name }, 'Remote removed', 'remove the remote');
   }
 </script>
 
@@ -107,7 +108,7 @@
     {:else if loadFailed}
       <div class="rp-err" role="alert">
         <Icon name="warning" size={12} />
-        <span>Couldn't load remotes: {error}</span>
+        <span>Couldn’t load remotes: {error}</span>
         <button class="btn small" onclick={() => loadRev++}>Retry</button>
       </div>
     {:else if remotes.length === 0}
@@ -167,7 +168,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);

@@ -209,7 +209,7 @@
               }}
             >
               <div class="row" class:active={sel && !selectedBlock} class:muted={s.hidden}>
-                {#if !readonly}<span class="grip" aria-hidden="true"><Icon name="grip" size={12} /></span>{/if}
+                {#if !readonly}<span class="grip reveal-on-hover" aria-hidden="true"><Icon name="grip" size={12} /></span>{/if}
                 <button class="row-main" onclick={() => onselect(s.id, null)} aria-pressed={sel} data-testid="site-layer">
                   <Icon name={familyIcon(s.block)} size={12} />
                   <span class="name">{sectionLabel(s)}</span>
@@ -217,7 +217,7 @@
                   {#if off}<span class="glyph warn" title={off}><Icon name="eyeOff" size={12} /></span>{/if}
                 </button>
                 {#if !readonly}
-                  <button class="icon-btn eye" onclick={() => ontogglehidden(s.id)} aria-label={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`} title={s.hidden ? 'Show section' : 'Hide section everywhere'}>
+                  <button class="icon-btn eye reveal-on-hover" onclick={() => ontogglehidden(s.id)} aria-label={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`} title={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`}>
                     <Icon name={s.hidden ? 'eyeOff' : 'eye'} size={12} />
                   </button>
                 {/if}
@@ -246,7 +246,7 @@
     {:else}
       <label class="search">
         <Icon name="search" size={12} />
-        <input class="input" placeholder="Search blocks" bind:value={query} aria-label="Search blocks" data-testid="site-block-search" />
+        <input class="input" placeholder="Filter blocks…" bind:value={query} aria-label="Filter blocks" data-testid="site-block-search" />
       </label>
       {#if readonly}<p class="dim hint">Read-only — blocks can’t be added.</p>{/if}
       {#each groups as g (g.id)}
@@ -323,7 +323,7 @@
   .tabs button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .body {
     flex: 1;
@@ -408,11 +408,9 @@
     padding-inline-start: 4px;
     color: var(--text-dim);
     cursor: grab;
-    opacity: 0;
   }
-  .layer:hover .grip {
-    opacity: 1;
-  }
+  /* .grip / .eye use app.css `.reveal-on-hover`: shown on row hover, keyboard
+     focus in the row, their own focus, and always on touch (no hover). */
   .glyph {
     display: inline-flex;
     color: var(--text-dim);
@@ -424,12 +422,8 @@
   .glyph.warn :global(svg) {
     color: var(--warning);
   }
-  .eye {
-    opacity: 0;
-  }
-  .row:hover .eye,
-  .row.muted .eye,
-  .eye:focus-visible {
+  /* A hidden section keeps its eye-off visible: it is the state, not a verb. */
+  .muted > .eye {
     opacity: 1;
   }
   .kids {
@@ -506,11 +500,11 @@
     color: var(--text);
     text-align: start;
     cursor: grab;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .tile:hover {
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .tile:focus-visible {
     outline: 2px solid var(--accent-text);

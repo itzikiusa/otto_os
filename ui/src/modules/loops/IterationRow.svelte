@@ -3,6 +3,8 @@
   import { toastError } from '../../lib/toastError';
   import type { GoalLoopIteration, LoopAgentState } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
 
@@ -35,16 +37,29 @@
   // idx+status in the store, so a finished iteration is fetched once).
   const needsBodies = $derived(!iter.plan && !iter.context_out && !iter.context_in);
   let bodyError = $state<string | null>(null);
+  let bodyLoading = $state(false);
+  /** Bumped by Retry to re-run the read for the same iteration. */
+  let bodyRetry = $state(0);
   $effect(() => {
+    void bodyRetry;
     if (!expanded || !needsBodies) return;
     const it = iter;
     if (loops.fullIteration(loopId, it)) return;
     const ctl = new AbortController();
     bodyError = null;
-    loops.loadIteration(loopId, it, ctl.signal).catch((e: unknown) => {
-      if (!ctl.signal.aborted) bodyError = e instanceof Error ? e.message : String(e);
-    });
-    return () => ctl.abort();
+    bodyLoading = true;
+    loops
+      .loadIteration(loopId, it, ctl.signal)
+      .catch((e: unknown) => {
+        if (!ctl.signal.aborted) bodyError = loadErrorText(e);
+      })
+      .finally(() => {
+        if (!ctl.signal.aborted) bodyLoading = false;
+      });
+    return () => {
+      ctl.abort();
+      bodyLoading = false;
+    };
   });
   const bodies = $derived(needsBodies ? (loops.fullIteration(loopId, iter) ?? iter) : iter);
 
@@ -92,8 +107,10 @@
 
   {#if expanded}
     <div class="body">
-      {#if bodyError}
-        <p class="fb" role="status">Couldn’t load this iteration’s plan: {bodyError}</p>
+      {#if needsBodies && !bodies.plan && (bodyLoading || bodyError)}
+        <!-- An older iteration's plan is read on expand: name the wait, and a
+             failure stays inline with Retry. -->
+        <LoadState what="this iteration’s plan" variant="compact" loading={bodyLoading} error={bodyError} empty onretry={() => bodyRetry++} />
       {/if}
       {#if bodies.plan}
         <section>
@@ -111,7 +128,7 @@
             <span class="aprov">{a.provider}</span>
             <span class="anote" title={a.note || a.output_summary || a.status}>{a.note || a.output_summary || a.status}</span>
             {#if a.session_id}
-              <button class="btn ghost small" title="Open {a.name}'s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
+              <button class="btn ghost small" title="Open {a.name}’s session" onclick={() => onopensession(a.session_id ?? '')}>Open session</button>
             {/if}
             {#if i < executorCount && canRetry(a)}
               <button class="btn small" onclick={() => retry(i)}>Retry</button>
@@ -189,7 +206,7 @@
   h4 {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin: 12px 0 6px;
   }

@@ -1,6 +1,7 @@
 <script lang="ts">
   // Notes tab — list, add, edit, delete internal notes for the selected story.
   import { rel } from '../../lib/stores/now.svelte';
+  import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { renderMarkdown } from '../../lib/md';
@@ -75,7 +76,7 @@
       addOpen = false;
       toasts.success('Note added');
     } catch (e) {
-      toasts.error('Could not add note', product.errMsg(e));
+      toastError('Couldn’t add note', e);
     } finally {
       addWorking = false;
     }
@@ -89,7 +90,7 @@
       await product.updateNote(nid, { body });
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save note', product.errMsg(e));
+      toastError('Couldn’t save note', e);
     } finally {
       savingId = null;
     }
@@ -102,7 +103,7 @@
     try {
       await product.deleteNote(n.id);
     } catch (e) {
-      toasts.error('Could not delete note', product.errMsg(e));
+      toastError('Couldn’t delete note', e);
     } finally {
       deletingId = null;
     }
@@ -171,7 +172,8 @@
                     class="edit-text"
                     bind:value={editBody}
                     rows={4}
-                    placeholder="Note body (markdown)"
+                    aria-label="Note (Markdown)"
+                    placeholder="e.g. **Decision:** limits are per brand, not per player"
                     disabled={savingId === n.id}
                   ></textarea>
                   <div class="edit-actions">
@@ -207,7 +209,7 @@
               class="form-textarea"
               bind:value={newBody}
               rows={5}
-              placeholder="Write a note… Markdown supported."
+              placeholder="e.g. **Decision:** limits are per brand, not per player"
               disabled={addWorking}
             ></textarea>
           </label>
@@ -279,7 +281,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transition: border-color 100ms;
+    transition: border-color var(--dur-fast);
   }
   .n-card:hover {
     border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
@@ -303,10 +305,10 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 2px 7px;
+    letter-spacing: .06em;
+    padding: 2px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .n-meta {
@@ -354,11 +356,11 @@
   .form-label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .req {

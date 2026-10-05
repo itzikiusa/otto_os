@@ -10,7 +10,8 @@
   // The left pane only lists things; whatever you EDIT (a request, the
   // environments, an automation) opens in the main area. A brand-new
   // workspace shows an onboarding empty state instead of an empty editor.
-  import { paneResizer, pxWide, RESIZE_TITLE, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import { LIST_PANE, loadPaneWidth, paneResizer, RESIZE_TITLE_VERTICAL } from '../../lib/paneResizer';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
@@ -36,6 +37,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { keyContext } from '../../lib/keys';
+  import { router } from '../../lib/router.svelte';
   import type { Id } from '../../lib/api/types';
 
   type Side = 'collections' | 'automations' | 'history';
@@ -146,6 +148,8 @@
   $effect(() => {
     const wid = ws.currentId;
     const reqs = apiClient.requests;
+    // A `#/api/<id>` link wins over the "most recent" landing.
+    if (routePending) return;
     if (!wid || autoOpenedFor === wid || apiClient.loading || reqs.length === 0) return;
     if (reqs[0].workspace_id !== wid) return;
     untrack(() => {
@@ -156,6 +160,50 @@
       if (persisted || !only || only.requestId || apiClient.isDirty(only)) return;
       const latest = reqs.reduce((a, b) => ((b.updated_at ?? '') > (a.updated_at ?? '') ? b : a));
       void apiClient.openRequest(latest.id);
+    });
+  });
+
+  // ── URL ↔ open request ─────────────────────────────────────────────────────
+  // The URL carries the saved request in the editor (`#/api/<requestId>`) so a
+  // reload / share / link lands on it. Route → page: once the list knows the
+  // id, open it in the request editor; page → route: switching tabs or opening
+  // a request rewrites the URL in place (an unsaved draft or another view is
+  // plain `#/api`). Until a routed id is resolved the page leaves the URL alone,
+  // so restoring the last tabs can't overwrite the link being opened.
+  let routePending = $state<string | null>(untrack(() => (router.parts[0] === 'api' ? (router.parts[1] ?? null) : null)));
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'api') return;
+    if (!id) {
+      routePending = null;
+      return;
+    }
+    const reqs = apiClient.requests;
+    const loaded = !apiClient.loading && (reqs.length === 0 || reqs[0].workspace_id === ws.currentId);
+    if (!reqs.some((r) => r.id === id)) {
+      // Unknown once loaded (deleted / another workspace): let the page own the URL.
+      if (loaded) routePending = null;
+      return;
+    }
+    untrack(() => {
+      if (view.kind === 'request' && apiClient.draft.requestId === id) {
+        routePending = null;
+        return;
+      }
+      void changeView({ kind: 'request' })
+        .then((ok) => (ok ? apiClient.openRequest(id) : false))
+        .finally(() => (routePending = null));
+    });
+  });
+  let routedReq: string | null = null;
+  $effect(() => {
+    const id = view.kind === 'request' ? (apiClient.draft.requestId ?? null) : null;
+    if (routePending) return;
+    const was = routedReq;
+    routedReq = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'api' && (router.parts[1] ?? null) !== id) router.replace(id ? `api/${id}` : 'api');
     });
   });
 
@@ -205,19 +253,12 @@
   let gitOpen = $state(false);
 
   // ── drag-to-resize: sidebar width + builder height (both persisted) ────────
+  // The sidebar is the shared list pane (PaneDivider + LIST_PANE); it keeps the
+  // old storage key so a width saved before the switch carries over (clamped).
   // Overlay cursor + one size write per frame + one localStorage write on
-  // release (lib/dragCursor.ts) — no per-mousemove persist, no body.style
-  // restyle of the whole app.
-  function startSideResize(e: MouseEvent): void {
-    const startX = e.clientX;
-    const startW = ui.apiSideWidth;
-    const rtl = document.documentElement.dir === 'rtl';
-    startMouseDrag(e, {
-      cursor: 'col-resize',
-      onMove: (ev) => ui.setApiSideWidth(startW + (rtl ? startX - ev.clientX : ev.clientX - startX), false),
-      onEnd: () => ui.setApiSideWidth(ui.apiSideWidth),
-    });
-  }
+  // release (lib/dragCursor.ts) — no per-mousemove persist.
+  const SIDE_W_KEY = 'otto_api_side_width';
+  let sideW = $state(loadPaneWidth(SIDE_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let builderEl: HTMLDivElement | null = $state(null);
   function startBuilderResize(e: MouseEvent): void {
     const startY = e.clientY;
@@ -304,7 +345,7 @@
     {:else}
       <div class="api-page">
         {#if showList}
-          <aside class="api-side" style:width={viewport.isPhone ? null : `${ui.apiSideWidth}px`} aria-label="Collections, automations and history">
+          <aside class="api-side" style:width={viewport.isPhone ? null : `${sideW}px`} aria-label="Collections, automations and history">
             <div class="segmented side-seg" role="tablist" aria-label="Show">
               {#each SIDES as s (s.id)}
                 <button role="tab" aria-selected={side === s.id} class:active={side === s.id} tabindex={side === s.id ? 0 : -1}
@@ -325,25 +366,14 @@
           </aside>
 
           {#if !viewport.isPhone}
-            <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds the keys). -->
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-            <div
-              class="resizer col"
-              role="separator"
-              tabindex="0"
-              aria-label="Resize the sidebar"
-              title={RESIZE_TITLE}
-              onmousedown={startSideResize}
-              ondblclick={() => ui.setApiSideWidth(280)}
-              use:paneResizer={{ value: ui.apiSideWidth, min: 220, max: 520, step: 10, bigStep: 40, onChange: (w) => ui.setApiSideWidth(w), onReset: () => ui.setApiSideWidth(280), text: pxWide }}
-            ></div>
+            <PaneDivider bind:width={sideW} storageKey={SIDE_W_KEY} label="Resize the sidebar" />
           {/if}
         {/if}
 
         {#if showMain}
           <div class="api-main">
             <div class="req-tabs">
-              <div class="req-tablist">
+              <div class="req-tablist scroll-thin">
                 {#each apiClient.tabs as t, i (t.tabId ?? i)}
                   {@const active = view.kind === 'request' && apiClient.activeTab === i}
                   {@const st = apiClient.tabStatus(t.tabId)}
@@ -353,7 +383,7 @@
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
-                      {#if st === 'sending'}<span class="req-tab-status sending" role="status" aria-label="Sending" title="Sending…"></span>
+                      {#if st === 'sending'}<span class="spinner" style="--spinner-size: 9px" role="status" aria-label="Sending" title="Sending…"></span>
                       {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}></span>{/if}
                     </button>
                     <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
@@ -388,16 +418,13 @@
                 <RequestBuilder bind:tab={builderTab} />
               </div>
               {#if !viewport.isPhone}
-                <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+                <!-- paneResizer makes it the focusable window splitter and wires the drag + double-click reset. -->
                 <div
                   class="resizer row"
                   role="separator"
-                  tabindex="0"
                   aria-label="Resize the request and response panes"
                   title={RESIZE_TITLE_VERTICAL}
-                  onmousedown={startBuilderResize}
-                  ondblclick={() => ui.resetApiBuilderHeight()}
-                  use:paneResizer={{ value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
+                  use:paneResizer={{ onDragStart: startBuilderResize, value: ui.apiBuilderHeight || builderEl?.offsetHeight || 300, min: 180, max: Math.round((typeof window === 'undefined' ? 900 : window.innerHeight) * 0.8), orientation: 'horizontal', step: 10, bigStep: 40, onChange: (h) => ui.setApiBuilderHeight(h), onReset: () => ui.resetApiBuilderHeight(), text: (v) => `${Math.round(v)} pixels tall` }}
                 ></div>
               {/if}
               <section class="resp-pane" aria-label="Response">
@@ -477,7 +504,6 @@
     gap: 10px;
     min-height: 0;
     padding: 12px 10px 10px;
-    border-inline-end: 1px solid var(--border);
     background: var(--bg);
     container-type: inline-size;
   }
@@ -533,7 +559,6 @@
     display: flex;
     gap: 2px;
     overflow-x: auto;
-    scrollbar-width: thin;
     min-width: 0;
   }
   .req-tab {
@@ -596,18 +621,6 @@
   .req-tab-status.fail {
     background: var(--danger);
   }
-  .req-tab-status.sending {
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid var(--accent-soft);
-    border-block-start-color: var(--accent-solid);
-    animation: req-tab-spin 0.8s linear infinite;
-  }
-  @keyframes req-tab-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
   .req-tab-close {
     width: 20px;
     height: 20px;
@@ -636,18 +649,10 @@
     background: transparent;
     flex-shrink: 0;
   }
-  .resizer.col {
-    width: 6px;
-    margin-inline-start: -3px;
-    margin-inline-end: -3px;
-    cursor: col-resize;
-    position: relative;
-    z-index: 2;
-  }
   .resizer.row {
     height: 6px;
-    margin-top: -3px;
-    margin-bottom: -3px;
+    margin-top: -2px;
+    margin-bottom: -2px;
     cursor: row-resize;
     border-top: 1px solid var(--border);
     background-clip: content-box;
@@ -656,7 +661,7 @@
   }
   .resizer:hover,
   .resizer:focus-visible {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-line);
   }
 
   @media (max-width: 640px) {
@@ -686,10 +691,6 @@
   @media (prefers-reduced-motion: reduce) {
     .resizer {
       transition: none;
-    }
-    .req-tab-status.sending {
-      animation: none;
-      background: var(--accent-solid);
     }
   }
 </style>

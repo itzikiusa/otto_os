@@ -15,6 +15,8 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { runStatus } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import Sparkline from '../../lib/components/Sparkline.svelte';
@@ -153,15 +155,11 @@
 </script>
 
 {#if error}
-  <div class="inline-error" role="alert">
-    <Icon name="warning" size={14} />
-    <div><strong>Couldn't load activity for this skill.</strong> <span class="dim">{error}</span></div>
-    <button class="btn small" onclick={() => { void load(wsId); void loadEvals(wsId, group.name); }}>Retry</button>
-  </div>
+  <LoadState what="activity for this skill" {error} empty onretry={() => { void load(wsId); void loadEvals(wsId, group.name); }} />
 {:else if !wsId}
-  <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill's activity." icon="folder" />
+  <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill’s activity." icon="folder" />
 {:else if evals == null}
-  <p class="dim" role="status">Loading activity for {group.name}…</p>
+  <LoadState what="activity for {group.name}" loading empty rows={3} />
 {:else if view === 'evals'}
   {#if myEvals.length === 0}
     <EmptyState
@@ -222,7 +220,7 @@
           </span>
           <span class="src-name">{sourceLabel(v.source)}</span>
           <span class="grow dim mono ellipsis" dir="ltr" title={location(v.source)}>{location(v.source)}</span>
-          {#if group.driftedSources.includes(v.source)}<span class="chip tone-warning">Drifted</span>{/if}
+          {#if group.driftedSources.includes(v.source)}<Badge tone="warn" label="Drifted" />{/if}
           {#if v.source === 'bundled'}
             <span class="chip">v{v.bundledVersion}{v.bundledState === 'not_installed' ? ' · not installed' : ''}</span>
           {/if}
@@ -264,7 +262,7 @@
         <div class="stat-sub dim">{myGolden.length ? 'Regression cases pinned to it' : 'None pinned to this skill'}</div>
       </div>
     </div>
-    <p class="dim note"><Icon name="info" size={12} /> Otto doesn't record when an agent loads a skill during a session, so there's no "last used by an agent" yet — these counts are Otto's own reviews and evaluations of it.</p>
+    <p class="dim note"><Icon name="info" size={12} /> Otto doesn’t record when an agent loads a skill during a session, so there’s no "last used by an agent" yet — these counts are Otto’s own reviews and evaluations of it.</p>
   </section>
 {/if}
 
@@ -411,27 +409,6 @@
   .note :global(svg) {
     margin-top: 2px;
     flex: none;
-  }
-  .chip.tone-warning {
-    color: var(--warning);
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-  }
-  .inline-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .inline-error > :global(svg) {
-    color: var(--danger);
-  }
-  .inline-error > div {
-    flex: 1;
-    font-size: var(--fs-s);
   }
   @media (max-width: 640px) {
     .rowi .mono {

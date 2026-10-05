@@ -3,7 +3,13 @@
   // (wheel), drag nodes, drag output→input ports to connect, live run-status
   // coloring. Pure SVG + absolutely-positioned cards inside one transformed
   // viewport, so everything works in graph coordinates.
+  //
+  // Keyboard: every node is a button (Tab to it; Enter selects; ←↑→↓ nudge it,
+  // ⇧ for 10×; Delete removes it), its output port is a sibling button
+  // ("Connect from <node>…" opens a menu of targets), and every connection is
+  // focusable (Enter selects it, Delete removes it).
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
+  import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { runStatus } from '../../lib/status';
   import type { WorkflowGraph, WorkflowNode, NodeTypeSpec, NodeRunState } from '../../lib/api/types';
 
@@ -131,13 +137,93 @@
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
 
+  // A port press that turned into a drag must not also open the "Connect to…"
+  // menu from the click that follows the pointerup.
+  let connectFrom: { x: number; y: number } | null = null;
+  let connectDragged = false;
   function startConnect(e: PointerEvent, n: WorkflowNode): void {
     e.stopPropagation();
     if (!editable || e.button !== 0) return;
     const g = toGraph(e.clientX, e.clientY);
     drag = { mode: 'connect', from: n.id, mx: g.x, my: g.y };
+    connectFrom = { x: e.clientX, y: e.clientY };
+    connectDragged = false;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   }
+
+  function nodeLabel(n: WorkflowNode): string {
+    return n.name || spec(n.kind)?.label || n.kind;
+  }
+
+  /** The output port's menu: every other node that takes an input, with the
+   *  ones already connected shown checked (and not offered twice). */
+  function connectMenu(e: MouseEvent, n: WorkflowNode): void {
+    e.stopPropagation();
+    if (connectDragged) {
+      connectDragged = false;
+      return;
+    }
+    const targets = graph.nodes.filter((t) => t.id !== n.id && (spec(t.kind)?.inputs ?? 1) > 0);
+    const items: MenuItem[] = targets.length
+      ? targets.map((t) => {
+          const linked = graph.edges.some((x) => x.source === n.id && x.target === t.id);
+          return {
+            label: nodeLabel(t),
+            checked: linked,
+            disabled: linked,
+            title: linked ? 'Already connected' : `Connect “${nodeLabel(n)}” to “${nodeLabel(t)}”`,
+            action: () => connect(n.id, t.id),
+          };
+        })
+      : [{ label: 'No other step takes an input', disabled: true }];
+    ctxMenu.show(e, items);
+  }
+
+  const NUDGE = 8;
+  /** Keys on a focused node: arrows nudge it (⇧ = 10×), Delete removes it. */
+  function onNodeKey(e: KeyboardEvent, n: WorkflowNode): void {
+    if (!editable || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      graph.nodes = graph.nodes.filter((x) => x.id !== n.id);
+      graph.edges = graph.edges.filter((x) => x.source !== n.id && x.target !== n.id);
+      onselect?.(null);
+      onchange?.(graph);
+      return;
+    }
+    const step = e.shiftKey ? NUDGE * 10 : NUDGE;
+    const d: Record<string, [number, number]> = {
+      ArrowLeft: [-step, 0],
+      ArrowRight: [step, 0],
+      ArrowUp: [0, -step],
+      ArrowDown: [0, step],
+    };
+    const v = d[e.key];
+    if (!v) return;
+    e.preventDefault();
+    n.x = Math.max(0, n.x + v[0]);
+    n.y = Math.max(0, n.y + v[1]);
+    graph = graph;
+    if (selectedId !== n.id) {
+      onselect?.(n.id);
+      onedgeselect?.(null);
+    }
+    onchange?.(graph);
+  }
+
+  /** Keys on a focused connection: Enter / Space selects it, Delete removes it. */
+  function onEdgeKey(e: KeyboardEvent, id: string): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectEdge(id);
+    } else if (editable && (e.key === 'Delete' || e.key === 'Backspace')) {
+      e.preventDefault();
+      graph.edges = graph.edges.filter((x) => x.id !== id);
+      onedgeselect?.(null);
+      onchange?.(graph);
+    }
+  }
+  const hintId = $props.id();
 
   function onMove(e: PointerEvent): void {
     if (!drag) return;
@@ -156,6 +242,7 @@
       const g = toGraph(e.clientX, e.clientY);
       drag.mx = g.x;
       drag.my = g.y;
+      if (connectFrom && Math.hypot(e.clientX - connectFrom.x, e.clientY - connectFrom.y) > 4) connectDragged = true;
     }
   }
 
@@ -239,9 +326,12 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The pan / zoom surface: a pointer-driven application region (every step
+     and port inside it is a real button with its own keys). -->
 <div
   class="canvas"
+  role="application"
+  aria-label="Workflow canvas"
   bind:this={surface}
   onpointerdown={startPan}
   onpointermove={onMove}
@@ -249,7 +339,11 @@
   onwheel={onWheel}
 >
   <div class="dots"></div>
-  <div class="viewport" style="transform: translate({tx}px,{ty}px) scale({scale});">
+  <!-- Graph coordinates are physical (x grows right; edges are SVG paths and
+       cards use left/top from the saved layout), so the world layer is pinned
+       LTR: under RTL the cards would mirror but the edges and ports wouldn't.
+       Card text still reads in its own direction (dir="auto" on .body). -->
+  <div class="viewport" dir="ltr" style="transform: translate({tx}px,{ty}px) scale({scale});">
     <svg class="edges" width="6000" height="4000">
       {#each graph.edges as e (e.id)}
         {@const s = nodeOf(e.source)}
@@ -263,8 +357,12 @@
               ev.stopPropagation();
               selectEdge(e.id);
             }}
+            onkeydown={(ev) => onEdgeKey(ev, e.id)}
             role="button"
-            tabindex="-1"
+            tabindex="0"
+            aria-pressed={selectedEdgeId === e.id}
+            aria-label={`Connection from ${nodeLabel(s)} to ${nodeLabel(t)}${e.condition ? `, when ${e.condition}` : ''}`}
+            aria-describedby={editable ? `${hintId}-edge` : undefined}
           />
           {#if e.condition}
             {@const m = edgeMid(s, t)}
@@ -283,68 +381,86 @@
 
     {#each graph.nodes as n (n.id)}
       {@const st = statusOf(n.id)}
-      <button
-        type="button"
+      <!-- The card is a plain box: the node itself is the button inside it
+           (select / move / delete), the output port a sibling button — never
+           one control nested in another. -->
+      <div
         class="node"
-        aria-label={`Edit ${n.name || spec(n.kind)?.label || n.kind}`}
-        aria-pressed={selectedId === n.id}
-        onclick={() => { onselect?.(n.id); onedgeselect?.(null); }}
         class:invalid={invalidNodes.includes(n.id)}
         class:selected={selectedId === n.id}
         class:loop={n.kind === 'loop'}
         data-status={st}
         style="left:{n.x}px; top:{n.y}px; width:{NODE_W}px; height:{nodeHeight(n)}px; --accent:{color(n.kind)};"
-        onpointerdown={(e) => startNode(e, n)}
       >
-        <span class="stripe"></span>
-        <div class="head">
-          <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
-          <span class="body">
-            <span class="title" title={n.name || spec(n.kind)?.label || n.kind}>{n.name || spec(n.kind)?.label || n.kind}</span>
-            <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
+        <!-- The press that selects / starts a move belongs to the node's own
+             button (it fills the card), not to the box around it. -->
+        <button
+          type="button"
+          class="node-main"
+          onpointerdown={(e) => startNode(e, n)}
+          aria-label={`Edit ${nodeLabel(n)}`}
+          aria-pressed={selectedId === n.id}
+          aria-describedby={editable ? `${hintId}-node` : undefined}
+          onclick={() => { onselect?.(n.id); onedgeselect?.(null); }}
+          onkeydown={(e) => onNodeKey(e, n)}
+        >
+          <span class="stripe"></span>
+          <span class="head">
+            <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
+            <span class="body" dir="auto">
+              <span class="title" title={nodeLabel(n)}>{nodeLabel(n)}</span>
+              <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
+            </span>
+            {#if st}<span class="dot {st}" role="img" title={runStatus(st).label} aria-label={runStatus(st).label}></span>{/if}
           </span>
-          {#if st}<span class="dot {st}" role="img" title={runStatus(st).label} aria-label={runStatus(st).label}></span>{/if}
-        </div>
 
-        {#if n.kind === 'loop'}
-          <!-- The exact loop, expanded: its inner steps + stop condition. -->
-          <div class="steps">
-            {#each loopSteps(n) as s, i}
-              <div class="step">
-                <span class="si">{i + 1}</span>
-                <span class="sn" title={s.name}>{s.name}</span>
-                <span class="sk">{spec(s.kind)?.label ?? s.kind}</span>
-              </div>
-            {/each}
-            {#if loopUntil(n)}
-              <div class="until" title={loopUntil(n)}>
-                <Icon name="refresh" size={12} /> until <code>{condLabel(loopUntil(n))}</code>{#if loopMax(n)}{' · max '}{loopMax(n)}{/if}
-              </div>
-            {/if}
-          </div>
-        {/if}
+          {#if n.kind === 'loop'}
+            <!-- The exact loop, expanded: its inner steps + stop condition. -->
+            <span class="steps">
+              {#each loopSteps(n) as s, i}
+                <span class="step">
+                  <span class="si">{i + 1}</span>
+                  <span class="sn" title={s.name}>{s.name}</span>
+                  <span class="sk">{spec(s.kind)?.label ?? s.kind}</span>
+                </span>
+              {/each}
+              {#if loopUntil(n)}
+                <span class="until" title={loopUntil(n)}>
+                  <Icon name="refresh" size={12} /> until <code>{condLabel(loopUntil(n))}</code>{#if loopMax(n)}{' · max '}{loopMax(n)}{/if}
+                </span>
+              {/if}
+            </span>
+          {/if}
+        </button>
 
         {#if (spec(n.kind)?.inputs ?? 1) > 0}
-          <span class="port in" title="input"></span>
+          <span class="port in" aria-hidden="true"></span>
         {/if}
-        {#if (spec(n.kind)?.outputs ?? 1) > 0}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span
+        {#if editable && (spec(n.kind)?.outputs ?? 1) > 0}
+          <button
+            type="button"
             class="port out"
-            title="drag to connect"
+            aria-label={`Connect from ${nodeLabel(n)}`}
+            title={`Connect from ${nodeLabel(n)} — drag to a step’s input, or click to choose…`}
+            aria-haspopup="menu"
             onpointerdown={(e) => startConnect(e, n)}
-          ></span>
+            onclick={(e) => connectMenu(e, n)}
+          ></button>
+        {:else if (spec(n.kind)?.outputs ?? 1) > 0}
+          <span class="port out" aria-hidden="true"></span>
         {/if}
-      </button>
+      </div>
     {/each}
   </div>
 
   <div class="hud">
-    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in">+</button>
-    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out">−</button>
+    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={12} /></button>
+    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out"><Icon name="minus" size={12} /></button>
     <button class="zbtn" onclick={fit} title="Reset view" aria-label="Reset view"><Icon name="maximize" size={12} /></button>
     <span class="zpct">{Math.round(scale * 100)}%</span>
   </div>
+  <span class="sr-only" id="{hintId}-node">Arrow keys move the step, Shift moves it further, Delete removes it.</span>
+  <span class="sr-only" id="{hintId}-edge">Enter selects the connection, Delete removes it.</span>
 </div>
 
 <style>
@@ -376,13 +492,13 @@
   .viewport {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     transform-origin: 0 0;
   }
   .edges {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     overflow: visible;
     pointer-events: none;
   }
@@ -424,27 +540,46 @@
   .edge-hit:hover {
     stroke: var(--status-exited);
   }
-  .node:focus-visible {
-    outline: 2px solid var(--accent-solid);
-    outline-offset: 2px;
+  /* A focused connection: a soft accent band along the curve (an SVG path
+     has no outline box). */
+  .edge-hit:focus {
+    outline: none;
+  }
+  .edge-hit:focus-visible {
+    stroke: color-mix(in srgb, var(--accent-solid) 45%, transparent);
+    stroke-width: 8;
   }
   .node {
-    padding: 0;
-    color: var(--text);
-    font: inherit;
-    text-align: start;
     position: absolute;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     cursor: grab;
     user-select: none;
+    transition: border-color var(--dur-fast) ease-out;
+  }
+  /* The node's own button fills the card (the ports sit outside it, so the
+     card itself doesn't clip — this does, for the stripe + loop rows). */
+  .node-main {
+    all: unset;
+    box-sizing: border-box;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
     overflow: hidden;
-    transition: border-color 120ms ease-out;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
+    cursor: inherit;
+  }
+  .node-main:focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
   }
   .head {
     display: flex;
@@ -465,7 +600,7 @@
     flex: 1;
     flex-direction: column;
     gap: 2px;
-    padding-block: 5px 6px; padding-inline: 14px 10px;
+    padding-block: 4px 6px; padding-inline: 14px 10px;
     min-height: 0;
   }
   .step {
@@ -484,7 +619,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -496,12 +631,13 @@
   }
   .sk {
     font-size: var(--fs-xs);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     flex-shrink: 0;
   }
   .until {
+    display: block;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     margin-top: 2px;
@@ -521,7 +657,7 @@
   }
   .node.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow);
+    box-shadow: 0 0 0 2px var(--accent-line), var(--glass-shadow);
   }
   /* Run status uses the shared run vocabulary (lib/status.ts): running is
      info-blue and pulses, succeeded is green — they used to share one green,
@@ -534,7 +670,7 @@
   }
   .stripe {
     position: absolute;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     top: 8px;
     bottom: 8px;
     width: 4px;
@@ -547,7 +683,7 @@
     width: 26px;
     height: 26px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -568,7 +704,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -604,6 +740,7 @@
   }
   .port {
     position: absolute;
+    box-sizing: content-box;
     width: 12px;
     height: 12px;
     border-radius: 50%;
@@ -612,13 +749,26 @@
     top: calc(50% - 6px);
   }
   .port.in {
-    left: -7px;
+    left: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
   }
   .port.out {
-    right: -7px;
+    right: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
+    padding: 0;
     cursor: crosshair;
   }
+  /* The visible port is 12 px; the press target around it is 28 px. */
+  button.port.out::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+    border-radius: 50%;
+  }
   .port.out:hover {
+    background: var(--accent);
+  }
+  button.port.out:focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
     background: var(--accent);
   }
   .hud {
@@ -632,7 +782,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zbtn {
     display: grid;
@@ -647,7 +797,7 @@
     cursor: pointer;
   }
   .zbtn:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .zpct {
     font-size: var(--fs-xs);

@@ -107,10 +107,10 @@
   }
 </script>
 <div class="room-page">
-  <PageHeader title={room?.session_title ?? 'Session room'} icon="people" subtitle={room ? `${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
+  <PageHeader title={room?.session_title ?? 'Session room'} subtitle={room ? `${room.members?.filter(m => m.admission === 'admitted').length ?? 1}/4 people` : ''}>
     {#snippet actions()}{#if room?.admission === 'admitted'}
-      <button class="btn danger" data-overflow="-2" disabled={finishing} onclick={leave}>{finishing ? waitingForRecap ? 'Finishing recap…' : 'Ending…' : host ? 'End room…' : 'Leave room…'}</button>
-      {#if host}<button class="btn primary" disabled={!connected} onclick={() => { invitation = null; inviteOpen = true; }}>Invite someone…</button>{/if}
+      <button class="btn small danger" data-overflow="-2" disabled={finishing} onclick={leave}>{finishing ? waitingForRecap ? 'Finishing recap…' : 'Ending…' : host ? 'End room…' : 'Leave room…'}</button>
+      {#if host}<button class="btn small primary" disabled={!connected} onclick={() => { invitation = null; inviteOpen = true; }}>Invite someone…</button>{/if}
     {/if}{/snippet}
   </PageHeader>
   <PageBody fill padded={false}>

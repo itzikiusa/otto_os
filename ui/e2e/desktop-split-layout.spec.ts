@@ -157,7 +157,7 @@ test('a v1 payload restores as the legacy 3-pane shape', async ({ page }) => {
   expect(v).toBe(2);
 });
 
-test('⋯ → "Layout: One beside two" rebuilds the tree', async ({ page }) => {
+test('⋯ → "Use one-beside-two layout" rebuilds the tree', async ({ page }) => {
   await openSession(page, 'Pirlo');
   await page.keyboard.press('Meta+d');
   await page.keyboard.press('Meta+d');
@@ -165,7 +165,7 @@ test('⋯ → "Layout: One beside two" rebuilds the tree', async ({ page }) => {
 
   await page.locator('button[title="More…"]').first().click();
   const menu = page.locator('.ctx-menu');
-  await menu.getByRole('menuitem', { name: 'Layout: One beside two' }).click();
+  await menu.getByRole('menuitem', { name: 'Use one-beside-two layout' }).click();
   await expect(menu).toBeHidden();
 
   const [a, b, c] = await leafBoxes(page);
@@ -204,7 +204,7 @@ test('closing a session whose neighbour is already on screen collapses its split
   await expect(page.locator('.gutter'), 'the collapsed node took its gutter with it').toHaveCount(1);
 });
 
-test('⌘D stops at 15 panes and Layout: Grid re-equalises them', async ({ page }) => {
+test('⌘D stops at 15 panes and Use grid layout re-equalises them', async ({ page }) => {
   test.slow();
   await openSession(page, 'Pirlo');
   for (let i = 0; i < 14; i++) await page.keyboard.press('Meta+d');
@@ -213,7 +213,7 @@ test('⌘D stops at 15 panes and Layout: Grid re-equalises them', async ({ page 
   await page.keyboard.press('Meta+d');
   await expect(leaves(page)).toHaveCount(15);
 
-  await runCommand(page, 'Layout: grid');
+  await runCommand(page, 'Use grid layout');
   const boxes = await leafBoxes(page);
   expect(boxes).toHaveLength(15);
   // 15 tiles ⇒ 4 columns (the same rule the tiled view uses): the top row holds

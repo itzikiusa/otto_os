@@ -58,7 +58,7 @@ test('Groups ignores delayed details after choosing another group', async ({page
   });
   await setup(page,'broker');
   await page.locator('.tabs button', {hasText:'Groups'}).click();
-  await expect(page.getByText('Loading group…', {exact:true})).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Loading this group' })).toBeVisible();
   await page.locator('.grow-row', {hasText:'beta'}).click();
   await expect(page.locator('.detail .gid.big')).toHaveText('beta');
   const done = page.waitForResponse(r => r.url().endsWith('/groups/alpha'));
@@ -113,14 +113,14 @@ test('Database saved and history failures offer retry; tabs follow keyboard focu
   const tabs = page.getByRole('tablist',{name:'Sidebar view'});
   await tabs.getByRole('tab',{name:'Saved',exact:true}).click();
   await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
-  await expect(page.getByText('No saved queries. Save one from the Query tab.')).toHaveCount(0);
+  await expect(page.getByText('No saved queries', { exact: true })).toHaveCount(0);
   fail = false;
   await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
-  await expect(page.getByText('No saved queries. Save one from the Query tab.')).toBeVisible();
+  await expect(page.getByText('No saved queries', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).click();
   await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
   await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
-  await expect(page.getByText('No query history yet.')).toBeVisible();
+  await expect(page.getByText('No query history yet', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).press('Home');
   await expect(tabs.getByRole('tab',{name:'Connections',exact:true})).toBeFocused();
   await page.getByRole('button', {name:'New query tab',exact:true}).click();
@@ -256,7 +256,7 @@ test('Kafka topic search opens a failed detail with recovery', async ({page}) =>
   await page.route('**/topics/customer-notifications',r => r.fulfill({status:503,json:{code:'upstream',message:'Topic details unavailable'}}));
   await setup(page,'broker');
   await page.locator('.tabs button',{hasText:'Topics'}).click();
-  await page.getByLabel('Search topics').fill('customer');
+  await page.getByLabel('Filter topics').fill('customer');
   await expect(page.locator('.grid tbody tr')).toHaveCount(1);
   await page.getByText('customer-notifications',{exact:true}).click();
   await expect(page.getByText('Topic details unavailable',{exact:true})).toBeVisible();

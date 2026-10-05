@@ -3,6 +3,7 @@
   // plus an itemized checklist. Each item shows satisfied ✓ / missing ✗, its
   // label, a required/optional tag, and the human-readable detail text.
   import Icon from './Icon.svelte';
+  import Badge from './Badge.svelte';
   import type { DoneContract } from '../api/types';
 
   interface Props {
@@ -62,7 +63,7 @@
             <div class="item-body">
               <div class="item-top">
                 <span class="item-label">{it.label}</span>
-                <span class="tag {it.required ? 'req' : 'opt'}">{it.required ? 'required' : 'optional'}</span>
+                <Badge tone={it.required ? 'accent' : 'neutral'} variant="outline" label={it.required ? 'Required' : 'Optional'} />
               </div>
               {#if it.detail}
                 <span class="item-detail">{it.detail}</span>
@@ -83,8 +84,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    padding: 14px 16px;
-    margin-bottom: 14px;
+    padding: 12px 16px;
+    margin-block-end: 16px;
   }
   .ring-wrap {
     position: relative;
@@ -102,7 +103,6 @@
   }
   .value {
     stroke: currentColor;
-    transition: stroke-dasharray 240ms ease-out;
   }
   .ring-wrap.ok {
     color: var(--success);
@@ -145,7 +145,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .dim {
@@ -194,7 +194,7 @@
   .item-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .item-label {
@@ -203,24 +203,6 @@
   }
   .item.miss .item-label {
     color: var(--text-dim);
-  }
-  .tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    border-radius: 999px;
-    padding: 0 6px;
-    line-height: 14px;
-    border: 1px solid transparent;
-  }
-  .tag.req {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  }
-  .tag.opt {
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .item-detail {
     font-size: var(--fs-xs);

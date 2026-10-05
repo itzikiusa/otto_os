@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Policy-as-code rules (global + this workspace). List / create / edit /
   // delete, export the whole ruleset to JSON, import a ruleset (append or
   // replace), and an Evaluate preview that shows the decision a (server, tool)
   // would get under the current rules.
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -65,7 +68,7 @@
       toasts.success('Policy deleted', p.name);
       await load();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -80,7 +83,7 @@
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t export', e);
     }
   }
 
@@ -95,7 +98,7 @@
     try {
       parsed = JSON.parse(importText);
     } catch (e) {
-      toasts.error('Invalid JSON', e instanceof Error ? e.message : String(e));
+      toastError('Invalid JSON', e);
       return;
     }
     // Accept either the exported {version, policies} doc or a bare policies array.
@@ -132,7 +135,7 @@
       importText = '';
       await load();
     } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = false;
     }
@@ -162,7 +165,7 @@
         workspace_id: wsId,
       });
     } catch (e) {
-      toasts.error('Evaluate failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t evaluate', e);
     } finally {
       evaluating = false;
     }
@@ -178,7 +181,7 @@
 
 <div class="pol">
   <div class="bar">
-    <span class="count">{policies.length} rule{policies.length === 1 ? '' : 's'}</span>
+    <span class="count">{plural(policies.length, 'rule')}</span>
     <span class="grow"></span>
     <button class="btn small" onclick={() => void exportJson()}><Icon name="arrowDown" size={13} /> Export</button>
     <button class="btn small" onclick={() => (importOpen = !importOpen)}><Icon name="arrowUp" size={13} /> Import</button>
@@ -232,11 +235,7 @@
 
   <LoadState what="policies" {loading} error={loadError} empty={policies.length === 0} onretry={() => void load()}>
     {#snippet emptyView()}
-    <div class="empty">
-      <Icon name="split" size={22} />
-      <p>No policy rules. Calls fall through to allowlists + per-tool permission.</p>
-      <button class="btn primary" onclick={openNew}>Create a rule</button>
-    </div>
+      <EmptyState icon="split" title="No policy rules yet" body="Without rules, calls fall through to allowlists and per-tool permission." actionLabel="Create a rule" onaction={openNew} />
     {/snippet}
     <div class="grid">
       <div class="thead">
@@ -254,14 +253,16 @@
             <span class="nm">{p.name}</span>
             {#if p.reason}<span class="desc" title={p.reason}>{p.reason}</span>{/if}
           </div>
-          <span class="cell"><span class="scope">{p.workspace_id == null ? 'global' : 'workspace'}</span></span>
-          <span class="cell num">{p.priority}</span>
-          <span class="cell"><McpPill kind="decision" value={p.effect === 'allow' ? 'allowed' : p.effect === 'deny' ? 'denied' : p.effect === 'require_approval' ? 'pending_approval' : 'dry_run'} small /></span>
-          <span class="cell mono"><span class="match" title={matchSummary(p.match)}>{matchSummary(p.match)}</span></span>
-          <span class="cell">{#if p.enabled}<Icon name="check" size={14} />{:else}<span class="off">off</span>{/if}</span>
+          <!-- `.cl`: the column name, announced on every row and shown inline once
+               the header row is hidden (phone). -->
+          <span class="cell"><span class="cl">Scope</span><span class="scope">{p.workspace_id == null ? 'Global' : 'Workspace'}</span></span>
+          <span class="cell num"><span class="cl">Priority</span>{p.priority}</span>
+          <span class="cell"><span class="cl">Effect</span><McpPill kind="decision" value={p.effect === 'allow' ? 'allowed' : p.effect === 'deny' ? 'denied' : p.effect === 'require_approval' ? 'pending_approval' : 'dry_run'} small /></span>
+          <span class="cell mono match-cell"><span class="cl">Match</span><span class="match" title={matchSummary(p.match)}>{matchSummary(p.match)}</span></span>
+          <span class="cell"><span class="cl">Enabled</span>{#if p.enabled}<Icon name="check" size={14} /><span class="sr-only">On</span>{:else}<span class="off">Off</span>{/if}</span>
           <span class="cell actions">
             <button class="btn small" onclick={() => openEdit(p)}>Edit</button>
-            <button class="btn small danger" onclick={() => void remove(p)}>Delete</button>
+            <button class="btn small danger" onclick={() => void remove(p)}>Delete…</button>
           </span>
         </div>
       {/each}
@@ -347,7 +348,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .prow {
@@ -429,16 +430,41 @@
     font-size: var(--fs-m);
     color: var(--text);
   }
-  .btn.danger {
-    color: var(--danger);
+  .cl {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 36px 24px;
+
+  /* Phone: the header row goes; each rule stacks — name across the top, then
+     labelled cells two to a line, actions at the end (as ToolsTab does). */
+  @media (max-width: 640px) {
+    .thead {
+      display: none;
+    }
+    .prow {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px 12px;
+    }
+    .pname,
+    .match-cell,
+    .actions {
+      grid-column: 1 / -1;
+    }
+    .cell.num {
+      justify-content: flex-start;
+    }
+    .cl {
+      position: static;
+      inline-size: auto;
+      block-size: auto;
+      overflow: visible;
+      clip-path: none;
+      font-size: var(--fs-xs);
+      color: var(--text-dim);
+    }
   }
 </style>

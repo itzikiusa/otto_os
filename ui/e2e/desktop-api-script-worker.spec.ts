@@ -19,7 +19,7 @@ test('infinite interactive scripts stay cancellable without freezing the page', 
     await openApiEditor(page);await page.getByLabel('Request URL').fill('https://example.test/worker');
     await setScript(page,'while(true){}');
     await page.locator('.builder').getByRole('button',{name:'Send',exact:true}).click();
-    const cancel=page.getByTitle('Cancel in-flight request');
+    const cancel=page.getByTitle('Stop the in-flight request');
     await expect(cancel).toBeVisible();
     // The browser can service a frame and a user action while the Worker loops.
     await page.evaluate(()=>new Promise<void>(resolve=>requestAnimationFrame(()=>resolve())));

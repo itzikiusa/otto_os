@@ -181,7 +181,7 @@
     {#if skillState === 'missing'}
       <p class="skill-warn" role={anyOn ? 'alert' : undefined}>
         <Icon name="warning" size={12} />
-        <span>The <span class="mono">insights</span> skill isn't installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
+        <span>The <span class="mono">insights</span> skill isn’t installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
         <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
       </p>
     {/if}
@@ -197,7 +197,7 @@
       <p role="alert">{agentSaveError} <button class="btn small" disabled={saving || !!modelSaveTimer} onclick={retryAgent}>Retry saving report agent</button></p>
     {/if}
     <div class="card agent-row">
-      <div class="field agent-fld">
+      <div class="field agent-field">
         <label for="ins-provider">Provider</label>
         <select
           id="ins-provider"
@@ -217,11 +217,11 @@
       </div>
       <!-- Catalog-backed; hides itself when the provider has no model-flag
            template. Empty provider = default → resolve for the model list. -->
-      <div class="agent-fld model">
+      <div class="agent-field model">
         <ModelPicker
           provider={(failedAgent?.provider ?? cfg.provider) || defaultAgentProvider()}
           value={modelDraft}
-          hint="Model the report agent runs with (blank = the provider's default)."
+          hint="Model the report agent runs with (blank = the provider’s default)."
           onchange={onModelChange}
         />
       </div>
@@ -279,11 +279,11 @@
     max-width: var(--settings-col);
     flex-wrap: wrap;
   }
-  .agent-fld {
+  .agent-field {
     margin: 0;
     min-width: 180px;
   }
-  .agent-fld.model {
+  .agent-field.model {
     flex: 1;
     min-width: 240px;
   }
@@ -297,7 +297,7 @@
   .mono {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);

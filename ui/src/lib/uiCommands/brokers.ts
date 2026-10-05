@@ -59,7 +59,7 @@ const VIEWS: ClusterView[] = ['overview', 'topics', 'groups', 'schema', 'replay'
 
 async function clusterFor(key: string, ctx: UiCommandCtx): Promise<BrokerCluster> {
   if (brokers.clusters.length === 0 && ws.currentId) await brokers.load(ws.currentId);
-  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   return resolveByIdOrName(brokers.clusters, key, (c) => c.id, (c) => c.name, 'Kafka cluster');
 }
 
@@ -190,7 +190,7 @@ registerUiCommands('connections', {
       key_filter: args.key_filter,
       value_filter: args.value_filter,
     });
-    if (!r) throw new UiCommandError('failed', `Couldn't read messages from “${args.topic}” (the page shows why).`);
+    if (!r) throw new UiCommandError('failed', `Couldn’t read messages from “${args.topic}” (the page shows why).`);
     return { cluster: c.name, topic: args.topic, ...summarizeMessages(r) };
   },
 

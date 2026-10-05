@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import { loadErrorText } from '../../lib/loadError';
   import { TableWindow } from '../../lib/tableWindow.svelte';
   import type { BrokerCluster, SchemaSubject } from '../../lib/api/types';
@@ -32,23 +34,6 @@
   $effect(() =>
     tw.findRows(() => listEl, () => subjects, (s) => `${s.subject}\nv${s.version} · ${s.schema_type} · #${s.id}`, '.srow'),
   );
-
-  function onViewKeydown(event: KeyboardEvent) {
-    const tabs = Array.from(event.currentTarget instanceof HTMLElement ? event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]') : []);
-    const current = tabs.indexOf(event.target as HTMLButtonElement);
-    if (current < 0) return;
-    let next: number;
-    if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = tabs.length - 1;
-    else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      const rtl = getComputedStyle(event.currentTarget as HTMLElement).direction === 'rtl';
-      const step = (event.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-      next = (current + step + tabs.length) % tabs.length;
-    } else return;
-    event.preventDefault();
-    showVersions = next === 1;
-    tabs[next]?.focus();
-  }
 
   function prettySchema(s: SchemaSubject): string {
     try {
@@ -85,7 +70,7 @@
 <div class="schema-host">
 <div class="schema">
   {#if loading}
-    <p class="muted pad">Loading subjects…</p>
+    <div class="pad"><Skeleton rows={6} label="schema subjects" /></div>
   {:else if error}
     <div class="empty">
       {#if cluster.schema_registry_url}
@@ -118,13 +103,13 @@
         </button>
       {/each}
       {#if win.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{win.bottom}px"></div>{/if}
-      {#if subjects.length === 0}<p class="muted pad">No subjects registered.</p>{/if}
+      {#if subjects.length === 0}<p class="muted pad">No subjects in this registry.</p>{/if}
     </div>
     <div class="view">
       {#if selected}
         <div class="view-head">
           <span class="sn-big">{selected.subject}</span>
-          <div class="view-tabs" role="tablist" aria-label="Subject views" tabindex="-1" onkeydown={onViewKeydown}>
+          <div class="view-tabs" role="tablist" aria-label="Subject views" tabindex="-1" onkeydown={onTabKey}>
             <button class:on={!showVersions} role="tab" aria-selected={!showVersions} tabindex={showVersions ? -1 : 0} onclick={() => (showVersions = false)}>Schema</button>
             <button class:on={showVersions} role="tab" aria-selected={showVersions} tabindex={showVersions ? 0 : -1} onclick={() => (showVersions = true)}>Versions &amp; Compat</button>
           </div>
@@ -170,7 +155,7 @@
     background: var(--hover);
   }
   .srow.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .sn {
@@ -237,7 +222,7 @@
     word-break: break-word;
   }
   .empty {
-    padding: 30px;
+    padding: 28px;
     text-align: center;
     color: var(--text-dim);
   }

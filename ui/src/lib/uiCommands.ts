@@ -170,11 +170,11 @@ export function registerLazyUiCommands(
       try {
         await ensure();
       } catch {
-        throw new UiCommandError('failed', `Couldn't load the ${module} controls. Check the connection and retry.`);
+        throw new UiCommandError('failed', `Couldn’t load the ${module} controls. Check the connection and retry.`);
       }
       const real = handlers.get(name);
       if (!real || real.handler === stub) {
-        throw new UiCommandError('not_found', `“${name}” isn't available in this window.`);
+        throw new UiCommandError('not_found', `“${name}” isn’t available in this window.`);
       }
       return real.handler(args, ctx);
     };
@@ -356,7 +356,7 @@ function abortOne(id: string, reason: string): void {
   if (!r) return;
   running.delete(id);
   if (r.guard) clearTimeout(r.guard);
-  r.controller.abort(new UiCommandError('cancelled', reason || 'Cancelled'));
+  r.controller.abort(new UiCommandError('cancelled', reason || 'Canceled'));
 }
 
 /** Abort every running command (socket closed). */
@@ -468,7 +468,7 @@ export function whenMounted(selector: string, signal?: AbortSignal, timeoutMs = 
     });
     mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
     const timer = setTimeout(
-      () => finish(() => reject(new UiCommandError('failed', `The page didn't show ${selector} in time`))),
+      () => finish(() => reject(new UiCommandError('failed', `The page didn’t show ${selector} in time`))),
       timeoutMs,
     );
     const onAbort = (): void => finish(() => reject(signal?.reason));
@@ -577,7 +577,7 @@ async function run(frame: UiCommandFrame): Promise<void> {
   if (!reg) {
     running.delete(frame.id);
     if (r.guard) clearTimeout(r.guard);
-    postError(r, 'not_found', `This Otto window doesn't implement ${frame.command} (update the app?)`);
+    postError(r, 'not_found', `This Otto window doesn’t implement ${frame.command} (update the app?)`);
     return;
   }
 

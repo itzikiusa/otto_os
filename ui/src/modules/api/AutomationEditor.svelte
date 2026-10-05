@@ -1,9 +1,11 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One automation, edited in the main area: an ordered list of saved requests
   // ("steps"). Each step can CHECK its response (assertions) and SAVE values
   // from it into variables that later steps use as {{name}}. Edits are a
   // working copy until Save; Run saves first, then runs in the daemon and
   // polls the saved report.
+  import { toastError } from '../../lib/toastError';
   import { router } from '../../lib/router.svelte';
   import { editableSteps } from './automationInput';
   import Icon from '../../lib/components/Icon.svelte';
@@ -207,22 +209,17 @@
   }
 
   // Stop the in-flight run: the requests already sent stay sent, the remaining
-  // steps never fire — so it confirms first, and a failure says so.
+  // steps never fire. Halting HTTP steps ends no agent work and can simply be
+  // re-run, so it is a neutral Stop without a confirm; a failure says so.
   let stopping = $state(false);
   async function stopRun(runId: Id): Promise<void> {
     if (stopping) return;
-    const ok = await confirmer.ask('Stop this run? Steps that already ran stay run; the remaining steps won’t be sent.', {
-      title: 'Stop this run?',
-      confirmLabel: 'Stop run',
-      cancelLabel: 'Keep running',
-    });
-    if (!ok) return;
     stopping = true;
     try {
       await apiClient.cancelAutomationRun(runId);
       await apiClient.loadAutomationRuns(automationId);
     } catch (e) {
-      toasts.error('Couldn’t stop the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the run', e);
     } finally {
       stopping = false;
     }
@@ -282,7 +279,7 @@
         <button class="icon-btn" onclick={menu} aria-label="Automation options" title="Automation options"><Icon name="more" size={14} /></button>
         <button class="btn small" onclick={() => void save()} disabled={!canEdit || !dirty || apiClient.running}>Save</button>
         {#if runDetails?.status === 'running' && runDetails.automation_id === automationId}
-          <button class="btn small" onclick={() => void stopRun(runDetails!.id)} disabled={stopping} data-testid="automation-stop"><Icon name="stop" size={12} />{stopping ? 'Stopping…' : 'Stop run'}</button>
+          <button class="btn small" onclick={() => void stopRun(runDetails!.id)} disabled={stopping} data-testid="automation-stop" title="Stop the run — steps already sent stay sent"><Icon name="stop" size={12} />{stopping ? 'Stopping…' : 'Stop run'}</button>
         {/if}
         <button class="btn small primary" onclick={run} disabled={!canEdit || steps.length === 0 || apiClient.running} title={steps.length === 0 ? 'Add a step first' : 'Save and run every step'}>
           <Icon name="play" size={12} />{apiClient.running ? 'Running…' : 'Run'}
@@ -402,7 +399,7 @@
         </div>
         {#if runDetails && runDetails.automation_id === automationId}
           <p class="run-meta">
-            Run <span class="mono" title="Run id">{runDetails.id}</span> · {RUN_STATUS[runDetails.status]} · {rel(runDetails.created_at)}{#if runDetails.dataset_rows}{' '}· {runDetails.dataset_rows} data row{runDetails.dataset_rows === 1 ? '' : 's'}{/if}
+            Run <span class="mono" title="Run id">{runDetails.id}</span> · {RUN_STATUS[runDetails.status]} · {rel(runDetails.created_at)}{#if runDetails.dataset_rows}{' '}· {plural(runDetails.dataset_rows, 'data row')}{/if}
           </p>
           {#if runDetails.error}<p class="err" role="status">{runDetails.error}</p>{/if}
         {/if}
@@ -582,7 +579,7 @@
   .req-pick:focus-visible {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .step-idx {
     display: grid;

@@ -6,7 +6,7 @@ summary: Every shortcut that works across Otto, from the command bar to sessions
 ---
 ## What it's for
 
-This page lists every shortcut that works everywhere in Otto, plus the system-wide chords the desktop app adds. Shortcuts that only work on one page are listed in that page's guide.
+This page lists every shortcut that works everywhere in Otto, the system-wide chords the desktop app adds, and the page shortcuts that reuse a global chord. A page with many of its own keys (Database, Kubernetes) lists the rest in its guide.
 
 You can also press `?` anywhere outside a text field to open the shortcut sheet over the current page.
 
@@ -18,14 +18,14 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 
 ## Everything it can do
 
-- **Shortcut sheet**: press `?` outside a text field for a sheet of the global shortcuts, grouped into General, Sessions, API client, View and Zoom.
+- **Shortcut sheet**: press `?` outside a text field for the same tables as this page, over whatever you are doing.
 - **Shortcuts in the command bar**: every ⌘K result that has a shortcut shows it, so searching for a command also teaches its keys.
 - **App-wide shortcuts**: navigation, panels, find, reload, zoom and CLI updates work on every page.
 - **Sessions and panes**: open, close, reopen and cycle tabs, jump to a tab by number, split the view and move panes around.
 - **Terminal keys**: new lines in an agent prompt, copy and paste, scrollback search and a per-terminal font size.
 - **Desktop menus**: new windows, quit, hide, minimise and full screen from the macOS menu bar.
 - **System-wide chords**: the desktop app adds chords that work in any app: the Otto bar and snipping.
-- **Page overrides**: a few pages reuse a global chord for their own action while you're on them. They're listed at the end of the tables below.
+- **Page shortcuts**: a few pages add a chord or reuse a global one for their own action while you're on them. They're listed in the last table below.
 
 ## Keyboard shortcuts
 
@@ -33,16 +33,19 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 
 | Keys | Action |
 |---|---|
-| `⌘K` | Open the floating command bar (the palette sheet on phone, tablet, in a pop-out or with the bar hidden) |
-| `⌘I` | Ask Otto in plain English |
+| `⌘K` | Floating bar — commands and Ask Otto (the palette sheet on phone, tablet, in a pop-out or with the bar hidden) |
+| `⌘I` | Ask Otto in plain English (not in a code editor) |
 | `⌘,` | Open Settings |
 | `?` | Show the keyboard shortcut sheet |
 | `⌘1` | Show or hide the sidebar |
-| `⌘J` | Show or hide the right panel |
+| `⌘J` | Show or hide the Session panel |
 | `⌘⇧←` / `⌘⇧→` | Go back / forward through the pages you visited (not while typing in a field) |
+| `⌘\` | Open or close the side-by-side pane |
+| `⌥-click` | On a sidebar item: open it side by side |
+| `⌥↑` / `⌥↓` | In the sidebar: move a Favorite up / down (any row while customizing) |
 | `⌘F` | Find: in the focused terminal or query editor, else in the active session's terminal, otherwise on the page |
 | `⌘⇧R` | Reload the UI. Sessions keep running in the daemon |
-| `⌘U` / `⌘⇧U` | Update all installed agent CLIs |
+| `⌘U` / `⌘⇧U` | Update all installed agent CLIs (asks first; not in a text field) |
 | `⌘⇧S` | Take a snip: capture a screen region and annotate it |
 | `⌘⇧B` | Broadcast a message to your sessions |
 
@@ -68,9 +71,11 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌃⇧W` | Close the current tab, when Otto runs in a browser tab |
 | `⌘⇧T` | Reopen the last closed tab |
 | `⌃⇥` / `⌃⇧⇥` | Next / previous tab |
-| `⌘]` / `⌘[` | Next / previous session |
+| `⌘]` / `⌘[` | Next / previous session (not in a code editor) |
 | `⌃1` – `⌃9` | Jump to session tab 1–9 |
 | `←` / `→` | Move between tabs when a tab has focus (`Home` / `End` for the first / last) |
+| `⌥⇧←` / `⌥⇧→` | Move the focused tab left / right (also in the tab's right-click menu) |
+| `⌫` | Close the focused tab |
 | `⌘⇧C` | Toggle the focused agent session between the terminal and chat views |
 
 **New session dialog**
@@ -85,7 +90,7 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 
 | Keys | Action |
 |---|---|
-| `⌘D` | Split vertically |
+| `⌘D` | Split vertically (not in a code editor) |
 | `⌘⇧D` | Split horizontally |
 | `⌘⌥←` / `⌘⌥→` | Move the focused pane left / right |
 | `⌘⌥↑` / `⌘⌥↓` | Move the focused pane up / down |
@@ -136,10 +141,18 @@ You can also press `?` anywhere outside a text field to open the shortcut sheet 
 | `⌥Space` | Show or hide the Otto bar over any app |
 | `⌘⌃⇧2` | Take a snip |
 
-**Pages that change a global shortcut**
+**Page shortcuts**
 
 | Keys | Action |
 |---|---|
+| `⌘S` | Save what you are editing: a Vault note, a skill, a Design Hall artifact, a brand kit, an API request or a database query |
+| `⌘E` | In a Vault note: switch between editing and reading |
+| `⌘O` / `⌘N` | On the Vault page: open or switch vault / new note |
+| `⌘F` | In the Git graph: search commits instead of the page |
+| `⌘B` | In a Database query: collapse or restore the schema sidebar |
+| `⌥⌘V` | In a Database query: paste from the clipboard ring (copies made in Otto) |
+| `⌘R` | In a live browser tab: reload the page instead of Otto |
+| `⌘↵` | On the API page: send the request |
 | `⌘T` | On the API page: new request tab instead of a new session |
 | `⌘D` | On the API page: duplicate the request instead of splitting |
 | `⌘⌥←` / `⌘⌥→` | In a Database pane: previous / next query tab instead of moving the pane |

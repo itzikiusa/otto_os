@@ -15,8 +15,8 @@
   onMount(() => { void load(); });
   async function load() { loading = true; error = ''; try { archives = await recapRequest<RecapMetadata[]>('/room-recaps'); if (!archives.some(a => a.id === selected)) selected = archives[0]?.id ?? ''; } catch (e) { error = loadErrorText(e); } finally { loading = false; } }
 </script>
-<div class="recaps-page"><PageHeader title="Room recaps" icon="people" subtitle="Your local archives">
-  {#snippet actions()}<button class="btn" onclick={() => router.go('rooms')}>Rooms</button>{#if auth.isRoot}<button class="btn" onclick={() => settings = true}>Local engines…</button>{/if}<button class="btn" disabled={loading} onclick={load}>{loading ? 'Refreshing…' : 'Refresh'}</button>{/snippet}
+<div class="recaps-page"><PageHeader title="Room recaps" subtitle="Your local archives">
+  {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms')}>Rooms</button>{#if auth.isRoot}<button class="btn small" onclick={() => settings = true}>Local engines…</button>{/if}<button class="btn small" disabled={loading} onclick={load}>{loading ? 'Refreshing…' : 'Refresh'}</button>{/snippet}
 </PageHeader><PageBody>
   <!-- The skeleton shows only before the first archives arrive: a Refresh keeps the panel mounted. -->
   <LoadState what="room recaps" variant="page" {loading} {error} empty={!archives.length} onretry={load}>

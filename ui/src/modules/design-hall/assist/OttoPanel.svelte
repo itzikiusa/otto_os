@@ -470,7 +470,7 @@
     </div>
     {#if pickerOpen}
       <div class="agent-settings">
-        <label class="fld">
+        <label class="field">
           <span>Agent</span>
           <select class="input" value={effectiveProvider} onchange={(e) => { provider = (e.currentTarget as HTMLSelectElement).value; model = ''; }}
             aria-label="Agent provider">
@@ -589,7 +589,7 @@
         {/each}
         {#if refs.length > 4}<span class="chip ctx">+{refs.length - 4} references</span>{/if}
       </div>
-      <div class="quick" role="group" aria-label="Quick actions">
+      <div class="quick scroll-thin" role="group" aria-label="Quick actions">
         {#each QUICK_ACTIONS as q (q.id)}
           <button class="chip as-btn" disabled={busy || sending} title={q.hint} onclick={() => quick(q.id)} data-testid={`design-quick-${q.id}`}>
             <Icon name={asIcon(q.icon)} size={11} /> {q.label}
@@ -640,7 +640,7 @@
   .picker {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: 0;
     background: none;
     padding: 2px 4px;
@@ -678,10 +678,8 @@
     border-radius: var(--radius-s);
     background: var(--surface-2);
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .field {
+    margin-bottom: 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -769,7 +767,7 @@
   .st {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -851,7 +849,6 @@
   .quick {
     flex-wrap: nowrap;
     overflow-x: auto;
-    scrollbar-width: thin;
     padding-block-end: 2px;
   }
   .quick .chip {
@@ -889,17 +886,5 @@
     position: absolute;
     inset-inline-end: 6px;
     inset-block-end: 8px;
-  }
-  .as-btn {
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .as-btn:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
-  .as-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 </style>

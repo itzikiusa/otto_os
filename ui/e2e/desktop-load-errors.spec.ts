@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
-// "Design every state": a FAILED list load must render inline ("Couldn't load
+// "Design every state": a FAILED list load must render inline ("Couldn’t load
 // X" + Retry, via the shared LoadState), never masquerade as the empty state
 // ("No scheduled tasks yet", "No external servers yet"), and Retry must
 // recover once the endpoint answers again. The endpoint is forced to 500 with
@@ -72,7 +72,7 @@ test('scheduled tasks: a failed list load shows Couldn’t load + Retry, not the
 
   const err = page.getByTestId('load-error');
   await expect(err).toBeVisible({ timeout: 30_000 });
-  await expect(err).toContainText('Couldn\'t load scheduled tasks');
+  await expect(err).toContainText('Couldn’t load scheduled tasks');
   await expect(err).toContainText('forced failure (e2e)');
   await expect(page.getByText('No scheduled tasks yet')).toHaveCount(0);
 
@@ -87,7 +87,7 @@ test('MCP servers: a failed list load shows Couldn’t load + Retry, not "No ext
 
   const err = page.getByTestId('load-error');
   await expect(err).toBeVisible({ timeout: 30_000 });
-  await expect(err).toContainText('Couldn\'t load MCP servers');
+  await expect(err).toContainText('Couldn’t load MCP servers');
   await expect(page.getByText(/No external servers yet/)).toHaveCount(0);
 
   heal();
@@ -114,7 +114,7 @@ test('workflows: a failed list load says so ONCE, and a workspace switch never k
   await expect(err).toBeVisible({ timeout: 30_000 });
   // Said once — not in both the list rail and the main pane.
   await expect(err).toHaveCount(1);
-  await expect(err).toContainText('Couldn\'t load workflows');
+  await expect(err).toContainText('Couldn’t load workflows');
   await expect(page.getByText('No workflows yet')).toHaveCount(0);
 
   heal();

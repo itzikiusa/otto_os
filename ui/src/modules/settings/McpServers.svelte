@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SectionIntro from './SectionIntro.svelte';
@@ -66,7 +67,7 @@
       );
     } catch (e) {
       // SettingToggle re-syncs the box to ottoEnabled (unchanged) after this.
-      toasts.error("Couldn't change the Connections MCP setting", errMsg(e));
+      toasts.error("Couldn’t change the Connections MCP setting", errMsg(e));
     } finally {
       ottoSaving = false;
     }
@@ -223,7 +224,7 @@
       closeForm();
       await load(wsId);
     } catch (e) {
-      toasts.error(editing ? "Couldn't save the MCP server" : "Couldn't add the MCP server", errMsg(e));
+      toasts.error(editing ? "Couldn’t save the MCP server" : "Couldn’t add the MCP server", errMsg(e));
     } finally {
       saving = false;
     }
@@ -236,7 +237,7 @@
       await mcpApi.update(s.id, { enabled: !s.enabled });
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn't ${s.enabled ? 'disable' : 'enable'} ${s.name}`, errMsg(e));
+      toasts.error(`Couldn’t ${s.enabled ? 'disable' : 'enable'} ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -246,7 +247,7 @@
     if (!wsId) return;
     if (
       !(await confirmer.ask(
-        `Remove MCP server “${s.name}”? It stops being written to this workspace's .mcp.json for new sessions${s.secret_env_keys.length ? ', and its secret values are removed from the Keychain' : ''}.`,
+        `Remove MCP server “${s.name}”? It stops being written to this workspace’s .mcp.json for new sessions${s.secret_env_keys.length ? ', and its secret values are removed from the Keychain' : ''}.`,
         { title: 'Remove MCP server', confirmLabel: 'Remove' },
       ))
     )
@@ -257,7 +258,7 @@
       toasts.success('MCP server removed', s.name);
       await load(wsId);
     } catch (e) {
-      toasts.error(`Couldn't remove ${s.name}`, errMsg(e));
+      toasts.error(`Couldn’t remove ${s.name}`, errMsg(e));
     } finally {
       busyId = null;
     }
@@ -269,7 +270,7 @@
     {#snippet actions()}
       {#if wsId && servers.length > 0}
         <button
-          class="btn primary"
+          class="btn small primary"
           disabled={!auth.isRoot}
           title={auth.isRoot ? undefined : 'Only the owner can add MCP servers (they run a command on this Mac)'}
           onclick={openCreate}><Icon name="plus" size={13} /> Add server</button
@@ -278,7 +279,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>Enabled servers are merged into this workspace's <code>.mcp.json</code> when an agent session spawns here, alongside Otto's own entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</SectionIntro>
+  <SectionIntro>Enabled servers are merged into this workspace’s <code>.mcp.json</code> when an agent session spawns here, alongside Otto’s own entries (e.g. the browser). Nothing is auto-enabled — a server is only written once you turn it on.</SectionIntro>
 
   <div class="section-title">Built in</div>
   <div class="card mcp-card otto" data-testid="connections-mcp">
@@ -286,17 +287,17 @@
       label="Attach the Connections MCP to agent sessions"
       checked={ottoEnabled}
       disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
-      title={!wsId ? 'Select a workspace first' : ottoError ? "Couldn't read the current value — Retry below" : undefined}
+      title={!wsId ? NO_WORKSPACE : ottoError ? "Couldn’t read the current value — Retry below" : undefined}
       onchange={toggleOtto}
     >
-      Otto's own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
+      Otto’s own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
       connections and run read-only queries (<code>otto_list_connections</code>, <code>otto_db_schema</code>,
       <code>otto_db_query</code>, …). Writes and DDL are refused; rows are capped, PII-masked and audited.
       For this workspace; the same switch as “Attach to sessions” on the MCP page.
     </SettingToggle>
     {#if ottoError}
       <div class="otto-error" role="alert">
-        <span>Couldn't read this workspace's setting: {ottoError}</span>
+        <span>Couldn’t read this workspace’s setting: {ottoError}</span>
         <button class="btn small" onclick={() => ws.currentId && void loadOttoSetting(ws.currentId)}>Retry</button>
       </div>
     {/if}
@@ -306,7 +307,7 @@
   {#if !wsId}
     <EmptyState
       icon="server"
-      title="Select a workspace first"
+      title={NO_WORKSPACE}
       body="MCP servers are per-workspace. Choose a workspace from the sidebar to configure them."
     />
   {:else}
@@ -328,8 +329,9 @@
       <div class="server-list">
         {#each servers as s (s.id)}
           {@const locked = busyId === s.id || !canConfigure(s.id)}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- Right-click is a pointer shortcut; Edit / Remove are buttons on the card. -->
           <div
+            role="presentation"
             class="card server"
             class:off={!s.enabled}
             oncontextmenu={(e) => ctxMenu.show(e, [
@@ -356,7 +358,7 @@
             </div>
             <div class="server-actions">
               <!-- The same inline "Enabled" switch as a Channels row. -->
-              <label class="checkbox-row srv-enabled" title={!canConfigure(s.id) ? "You can't configure this server" : s.enabled ? `Stop writing ${s.name} to .mcp.json` : `Write ${s.name} to .mcp.json for new sessions`}>
+              <label class="checkbox-row srv-enabled" title={!canConfigure(s.id) ? "You can’t configure this server" : s.enabled ? `Stop writing ${s.name} to .mcp.json` : `Write ${s.name} to .mcp.json for new sessions`}>
                 <input
                   type="checkbox"
                   checked={s.enabled}
@@ -373,7 +375,7 @@
               <button
                 class="icon-btn srv-tool"
                 disabled={locked}
-                title={!canConfigure(s.id) ? "You can't configure this server" : `Edit ${s.name}`}
+                title={!canConfigure(s.id) ? "You can’t configure this server" : `Edit ${s.name}`}
                 aria-label="Edit {s.name}"
                 onclick={() => openEdit(s)}
               >
@@ -447,7 +449,7 @@
         spellcheck="false"
         placeholder={'LOG_LEVEL=info'}
       ></textarea>
-      <span class="hint">Non-secret values only — stored in Otto's database. Put tokens and keys below.</span>
+      <span class="hint">Non-secret values only — stored in Otto’s database. Put tokens and keys below.</span>
     </div>
     <div class="field">
       <label for="mcp-secret-env"><Icon name="lock" size={12} /> Secret environment <span class="dim">(KEY=value, one per line)</span></label>
@@ -461,7 +463,7 @@
         placeholder={'API_TOKEN=…'}
       ></textarea>
       <span class="hint">
-        Stored in the macOS Keychain, never in Otto's database, and written into <code>.mcp.json</code>
+        Stored in the macOS Keychain, never in Otto’s database, and written into <code>.mcp.json</code>
         only when a session spawns (the agent CLI needs the real value on disk). When editing, a bare
         <code>KEY=</code> line keeps the stored value.
       </span>
@@ -494,7 +496,7 @@
   }
   code {
     font-family: var(--font-mono);
-    font-size: 0.92em;
+    font-size: var(--fs-s);
   }
   .mcp-card {
     max-width: var(--settings-col);

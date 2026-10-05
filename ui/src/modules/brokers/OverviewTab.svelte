@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluralNoun } from '../../lib/plural';
   import { api } from '../../lib/api/client';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -143,7 +144,7 @@
           <span class="v" class:warn-v={overview.under_replicated_partitions > 0}>
             {overview.under_replicated_partitions}
           </span>
-          <span class="sub">partition{overview.under_replicated_partitions === 1 ? '' : 's'}</span>
+          <span class="sub">{pluralNoun(overview.under_replicated_partitions, 'partition')}</span>
         </div>
       {/if}
       {#if overview.leadership_imbalance != null}
@@ -280,7 +281,7 @@
   .card .k {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .card .v {

@@ -8,6 +8,7 @@
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import { logsRoute } from './util';
@@ -74,7 +75,7 @@
         ? [
             { label: 'Edit account…', icon: 'edit', action: () => onedit(a) },
             { separator: true },
-            { label: 'Delete account', icon: 'trash', danger: true, action: () => ondelete(a) },
+            { label: 'Delete account…', icon: 'trash', danger: true, action: () => ondelete(a) },
           ]
         : []),
     ]);
@@ -89,8 +90,7 @@
     {@const open = !collapsed[a.id]}
     {@const note = sessionNote(a)}
     <div class="acct" class:active={a.id === activeId}>
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="acct-row" oncontextmenu={(e) => menu(e, a)}>
+      <div class="acct-row" role="group" aria-label={a.name} oncontextmenu={(e) => menu(e, a)}>
         <button
           class="acct-toggle"
           aria-expanded={open}
@@ -148,7 +148,7 @@
       {/if}
     </div>
   {:else}
-    <p class="empty">No accounts yet.</p>
+    <EmptyState icon="cloud" title="No AWS accounts yet" />
   {/each}
 </nav>
 
@@ -203,7 +203,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding-block: 3px;
+    padding-block: 2px;
     padding-inline: 8px 6px;
     color: var(--text);
     border-inline-start: 2px solid transparent;
@@ -226,7 +226,7 @@
     cursor: pointer;
   }
   .acct-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .dot {
     width: 8px;
@@ -273,7 +273,7 @@
     border-inline-start: 2px solid transparent;
   }
   .svcs a:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .svcs a.active {
     background: var(--accent-soft);
@@ -287,12 +287,7 @@
     margin-inline-start: auto;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
-  }
-  .empty {
-    margin: 8px 12px;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
   }
 </style>

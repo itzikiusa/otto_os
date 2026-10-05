@@ -1,7 +1,9 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // PR detail: meta, editable markdown description, diff with inline comment
   // threads, general comments, approve/merge/decline, "open as session".
-  // Three tabs: Summary | Files | Review (AI agents).
+  // Four tabs in the header's tab row: Summary | Files | Commits | Review (AI agents).
   import { onDestroy, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { api, isAbortError } from '../../lib/api/client';
@@ -22,7 +24,8 @@
   import PrMergeModal from './PrMergeModal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import Icon from '../../lib/components/Icon.svelte';
+  import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import PageBody from '../../lib/components/PageBody.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { rel } from '../../lib/stores/now.svelte';
@@ -38,6 +41,12 @@
 
   type Tab = 'summary' | 'files' | 'commits' | 'review';
   const TABS: Tab[] = ['summary', 'files', 'commits', 'review'];
+  const PR_TABS: { id: Tab; label: string; icon: IconName }[] = [
+    { id: 'summary', label: 'Summary', icon: 'comment' },
+    { id: 'files', label: 'Files', icon: 'file' },
+    { id: 'commits', label: 'Commits', icon: 'commit' },
+    { id: 'review', label: 'Review', icon: 'zap' },
+  ];
   let activeTab: Tab = $state('summary');
 
   // Remember the last-used tab per PR so returning to a PR with a running
@@ -209,7 +218,7 @@
       title: `Request changes on PR #${number}?`,
       where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
       what: requestChangesBody.trim() || 'A “changes requested” review with no message.',
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
     });
     if (!ok || disposed || busy !== '') return;
     busy = 'request-changes';
@@ -224,7 +233,7 @@
       requestChangesBody = '';
       await load(repoId, number);
     } catch (e) {
-      toasts.error('Request changes failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t request changes', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -253,7 +262,7 @@
       title: `Update PR #${number} on ${providerName}?`,
       where: `${repoLabel} · PR #${number}`,
       what: `Title: ${editTitle.trim() || '(empty)'}${editDesc !== pr?.description_md ? '\nThe description is replaced with your text.' : ''}`,
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers see the change.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers see the change.`,
     });
     if (!ok || disposed || busy !== '') return;
     busy = 'edit';
@@ -265,7 +274,7 @@
       await load(repoId, number);
       toasts.success('Pull request updated');
     } catch (e) {
-      toasts.error('Update failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update the PR', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -331,7 +340,7 @@
       toasts.success(resolved ? 'Thread resolved' : 'Thread reopened');
       await load(repoId, number);
     } catch (e) {
-      toasts.error(resolved ? 'Resolve failed' : 'Reopen failed', e instanceof Error ? e.message : String(e));
+      toastError(resolved ? 'Couldn’t resolve the thread' : 'Couldn’t reopen the thread', e);
     }
   }
 
@@ -350,7 +359,7 @@
       await postComment(newComment.trim());
       if (!disposed) newComment = '';
     } catch (e) {
-      toasts.error('Couldn’t post the comment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t post the comment', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -369,7 +378,7 @@
       what: approve
         ? 'Your approval, posted under your git account.'
         : 'The PR is closed without merging. It can be reopened on the provider.',
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
       danger: !approve,
     });
     if (!ok || disposed || busy !== '') return;
@@ -381,7 +390,7 @@
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
-      toasts.error(approve ? "Couldn't approve the PR" : "Couldn't decline the PR", e instanceof Error ? e.message : String(e));
+      toastError(approve ? 'Couldn’t approve the PR' : 'Couldn’t decline the PR', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -412,18 +421,49 @@
       });
       // createSession → addSession → navigateToSession handles routing.
     } catch (e) {
-      toasts.error('Could not open session', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t open a session', e);
     } finally {
       if (!disposed) busy = '';
     }
   }
 </script>
 
+{#snippet prTabs()}
+  <div class="segmented prd-tabs" role="tablist" aria-label="Pull request views" tabindex="-1" onkeydown={onTabKey}>
+    {#each PR_TABS as t (t.id)}
+      <button
+        class="tab-btn"
+        role="tab"
+        aria-selected={activeTab === t.id}
+        tabindex={activeTab === t.id ? 0 : -1}
+        class:active={activeTab === t.id}
+        onclick={() => selectTab(t.id)}
+      >
+        <Icon name={t.icon} size={12} /> {t.label}
+      </button>
+    {/each}
+  </div>
+{/snippet}
+
 <div class="prd-page">
+<!-- The PR's own title is the page title (#N + state ride in the badge slot);
+     the subtabs live in the header's tab row, so the body never repeats a
+     second heading. `.prd-title` stays the hook the git e2e reads. -->
 <PageHeader
-  title={pr ? `Pull request #${pr.number}` : 'Pull request'}
+  title={pr ? pr.title || `Pull request #${pr.number}` : 'Pull request'}
   crumbs={[{ label: prRepo ? `${prRepo.name} · Pull requests` : 'Pull requests', onclick: () => router.go(`git/${repoId}/prs`) }]}
+  tabs={pr ? prTabs : undefined}
+  tabsPlacement="below"
 >
+  {#snippet titleContent()}
+    <span class="prd-title">{pr ? pr.title || `Pull request #${pr.number}` : 'Pull request'}</span>
+  {/snippet}
+  {#snippet badge()}
+    {#if pr}
+      <span class="prd-num dim">#{pr.number}</span>
+      <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{PR_STATE_LABEL[pr.state] ?? pr.state}</span>
+    {/if}
+  {/snippet}
   {#snippet actions()}
     {#if pr}
       <select class="prd-provider-select" bind:value={reviewProvider} disabled={busy !== ''} title="Agent to open the review session on" aria-label="Review agent">
@@ -440,6 +480,7 @@
     {/if}
   {/snippet}
 </PageHeader>
+<PageBody>
 <div class="prd">
   {#if !pr && (loading || prError)}
     <LoadState
@@ -456,71 +497,17 @@
     <div class="prd-title-block">
       {#if editMode}
         <input class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
-      {:else}
-        <h2 class="prd-title">
-          <span class="dim">#{pr.number}</span>
-          {pr.title}
-        </h2>
       {/if}
       <div class="prd-meta">
-        <span class="chip {pr.state === 'open' ? 'ok' : pr.state === 'merged' ? 'accent' : 'bad'}">{PR_STATE_LABEL[pr.state] ?? pr.state}</span>
         <span class="dim">{pr.author}</span>
         <span class="mono dim">{pr.source_branch} <span class="dir-arrow">→</span> {pr.target_branch}</span>
         {#if pr.mergeable === false}<span class="chip bad"><Icon name="warning" size={12} /> Conflicts</span>{/if}
         {#if pr.approved_by.length > 0}
           <span class="chip ok" title={pr.approved_by.join(', ')}>
-            <Icon name="check" size={12} /> {pr.approved_by.length} approval{pr.approved_by.length === 1 ? '' : 's'}
+            <Icon name="check" size={12} /> {plural(pr.approved_by.length, 'approval')}
           </span>
         {/if}
       </div>
-    </div>
-
-    <!-- Tab bar -->
-    <div class="prd-tabs" role="tablist" aria-label="Pull request views">
-      <button
-        class="tab-btn"
-        role="tab"
-        aria-selected={activeTab === 'summary'}
-        tabindex={activeTab === 'summary' ? 0 : -1}
-        class:active={activeTab === 'summary'}
-        onclick={() => selectTab('summary')}
-        onkeydown={onTabKey}
-      >
-        <Icon name="comment" size={12} /> Summary
-      </button>
-      <button
-        class="tab-btn"
-        role="tab"
-        aria-selected={activeTab === 'files'}
-        tabindex={activeTab === 'files' ? 0 : -1}
-        class:active={activeTab === 'files'}
-        onclick={() => selectTab('files')}
-        onkeydown={onTabKey}
-      >
-        <Icon name="file" size={12} /> Files
-      </button>
-      <button
-        class="tab-btn"
-        role="tab"
-        aria-selected={activeTab === 'commits'}
-        tabindex={activeTab === 'commits' ? 0 : -1}
-        class:active={activeTab === 'commits'}
-        onclick={() => selectTab('commits')}
-        onkeydown={onTabKey}
-      >
-        <Icon name="commit" size={12} /> Commits
-      </button>
-      <button
-        class="tab-btn"
-        role="tab"
-        aria-selected={activeTab === 'review'}
-        tabindex={activeTab === 'review' ? 0 : -1}
-        class:active={activeTab === 'review'}
-        onclick={() => selectTab('review')}
-        onkeydown={onTabKey}
-      >
-        <Icon name="zap" size={12} /> Review
-      </button>
     </div>
 
     <!-- Summary tab -->
@@ -590,8 +577,9 @@
             {busy === 'approve' ? 'Approving…' : 'Approve…'}
           </button>
           <button
-            class="btn warn"
+            class="btn"
             disabled={busy !== ''}
+            aria-expanded={showRequestChanges}
             onclick={() => (showRequestChanges = !showRequestChanges)}
           >
             <Icon name="warning" size={12} />
@@ -631,7 +619,7 @@
               <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
               <button class="btn small ghost" disabled={busy === 'request-changes'} onclick={() => (showRequestChanges = false)}>Cancel</button>
               <button
-                class="btn small warn"
+                class="btn small primary"
                 disabled={busy === 'request-changes'}
                 onclick={requestChanges}
               >
@@ -728,6 +716,7 @@
     {/if}
   {/if}
 </div>
+</PageBody>
 </div>
 
 {#if mergeOpen && pr}
@@ -757,12 +746,9 @@
     height: 100%;
     min-height: 0;
   }
+  /* PageBody owns the scroll + padding; this only spaces the sections. */
   .prd {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 14px 20px 48px;
+    padding-block-end: 8px;
   }
   .prd-provider-select {
     height: 28px;
@@ -773,11 +759,14 @@
     color: var(--text);
     font-size: var(--fs-xs);
   }
+  /* The header h1 sets the size; the PR title just ellipsizes in it. */
   .prd-title {
-    font-size: var(--fs-xl);
-    font-weight: 600;
-    margin: 0;
-    letter-spacing: -0.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .prd-num {
+    font-size: var(--fs-s);
+    font-variant-numeric: tabular-nums;
   }
   .prd-title-input {
     width: 100%;
@@ -792,34 +781,11 @@
     font-size: var(--fs-s);
   }
 
-  /* Tabs */
-  .prd-tabs {
-    display: flex;
-    gap: 0;
-    border-bottom: 1px solid var(--border);
-    margin: 14px 0 0;
-  }
+  /* Tabs (header tab row; .segmented draws them) */
   .tab-btn {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 7px 14px;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-    transition: color 120ms, border-color 120ms;
-    margin-bottom: -1px;
-  }
-  .tab-btn:hover {
-    color: var(--text);
-  }
-  .tab-btn.active {
-    color: var(--accent-text);
-    border-bottom-color: var(--accent);
-    font-weight: 600;
+    gap: 4px;
   }
 
   /* Summary tab */
@@ -836,10 +802,15 @@
     top: 8px;
     inset-inline-end: 8px;
     opacity: 0;
-    transition: opacity 130ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
-  .prd-desc:hover .edit-btn {
+  .prd-desc:hover .edit-btn,
+  .prd-desc:focus-within .edit-btn,
+  .edit-btn:focus-visible {
     opacity: 1;
+  }
+  @media (hover: none) {
+    .edit-btn { opacity: 1; }
   }
   .prd-reviewers {
     padding: 10px 16px 6px;
@@ -849,15 +820,15 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 8px;
   }
   .reviewer-row {
     display: flex;
     align-items: center;
-    gap: 9px;
-    padding: 5px 0;
+    gap: 8px;
+    padding: 4px 0;
     font-size: var(--fs-s);
   }
   .reviewer-avatar {
@@ -943,14 +914,6 @@
     min-width: 0;
     font-size: var(--fs-xs);
   }
-  .btn.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
-  }
-  .btn.warn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--warning) 24%, transparent);
-  }
   .prd-request-changes {
     padding: 12px 16px;
     margin-top: 6px;
@@ -968,7 +931,7 @@
     grid-template-columns: 72px 1fr auto auto;
     align-items: center;
     gap: 10px;
-    padding: 7px 12px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-s);
   }
@@ -1009,27 +972,11 @@
   /* ── Mobile + tablet (≤1024px): wrap dense rows, scroll the tab strip, legible
      text. 1024 so iPad portrait (834) + real-phone landscape (932) also wrap. ── */
   @media (max-width: 1024px) {
-    .prd { padding: 12px 12px 48px; }
     /* Header actions wrap instead of overflowing; comfortable touch targets. */
-    .prd-title { font-size: var(--fs-xl); overflow-wrap: anywhere; }
-    .prd-title-input { height: 38px; font-size: 16px; }
+    .prd-title-input { height: 38px; font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
     .prd-meta { flex-wrap: wrap; gap: 8px; font-size: var(--fs-m); min-width: 0; }
     /* Long branch names break instead of forcing horizontal overflow. */
     .prd-meta .mono { overflow-wrap: anywhere; min-width: 0; }
-
-    /* Tab strip scrolls horizontally; bigger touch targets. */
-    .prd-tabs {
-      overflow-x: auto;
-      scrollbar-width: none;
-      flex-wrap: nowrap;
-    }
-    .prd-tabs::-webkit-scrollbar { display: none; }
-    .tab-btn {
-      font-size: var(--fs-l);
-      padding: 10px 14px;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
 
     /* Action bar wraps so every button stays reachable, full-height for touch. */
     .prd-actions { flex-wrap: wrap; gap: 8px; }

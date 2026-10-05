@@ -346,7 +346,7 @@
         <EmptyState
           icon="shield"
           title="No audit entries yet"
-          body="Sign-ins, API token changes and security settings changes are recorded here, and can't be edited or deleted."
+          body="Sign-ins, API token changes and security settings changes are recorded here, and can’t be edited or deleted."
         />
       {/if}
     {:else}
@@ -516,7 +516,7 @@
     text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     font-weight: 600;
     padding: 8px;

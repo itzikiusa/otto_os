@@ -132,8 +132,8 @@
       { id: 'design.new', title: 'New design…', group: 'Design Hall', keywords: 'create frame graphic 3d whiteboard mockup', run: () => openNew({}) },
       { id: 'design.new-project', title: 'New design project…', group: 'Design Hall', keywords: 'create project epic', run: () => void newProject() },
       { id: 'design.import', title: 'Import design file…', group: 'Design Hall', keywords: 'upload png svg glb html excalidraw', run: pickFile },
-      { id: 'design.brand', title: 'Open Brand Kit', group: 'Design Hall', keywords: 'tokens colours typography', run: () => router.go('design/brand') },
-      { id: 'design.learned', title: 'Open what Otto learned', group: 'Design Hall', keywords: 'signals rules memory learning', run: () => router.go('design/learned') },
+      { id: 'design.brand', title: 'Go to Brand Kit', group: 'Design Hall', keywords: 'tokens colors palette typography', run: () => router.go('design/brand') },
+      { id: 'design.learned', title: 'Go to what Otto learned', group: 'Design Hall', keywords: 'signals rules memory learning', run: () => router.go('design/learned') },
     ]);
   });
 </script>

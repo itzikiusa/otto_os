@@ -21,6 +21,8 @@
     onsaved?: (a: PersonalAgentAutonomy) => void;
   }
   let { agentId, editable, onsaved }: Props = $props();
+  /** Prefix for the label↔control ids. */
+  const uid = $props.id();
 
   interface GoalDraft { id?: string; text: string; enabled: boolean; last_run_at: string | null }
   interface RuleDraft { id?: string; text: string; enforce: PersonalAgentRule['enforce'] }
@@ -146,15 +148,15 @@
           </div>
           <p class="mode-body">Works its standing goals in the background and reports findings. It can read, search and browse, but can’t send, post, write or change anything.</p>
           <label class="chk"><input type="checkbox" bind:checked={proactiveOn} disabled={!editable || saving} /> Work on standing goals in the background</label>
-          <div class="fld-row">
-            <label class="fld">
-              <span>Runs per day (max)</span>
-              <input type="number" min="1" max="24" bind:value={runsPerDay} disabled={!editable || saving} />
-            </label>
-            <label class="fld">
-              <span>Minutes per run (max)</span>
-              <input type="number" min="1" max="60" bind:value={maxMinutes} disabled={!editable || saving} />
-            </label>
+          <div class="field-row">
+            <div class="field">
+              <label for="{uid}-runs">Runs per day (max)</label>
+              <input id="{uid}-runs" class="input" type="number" min="1" max="24" bind:value={runsPerDay} disabled={!editable || saving} />
+            </div>
+            <div class="field">
+              <label for="{uid}-minutes">Minutes per run (max)</label>
+              <input id="{uid}-minutes" class="input" type="number" min="1" max="60" bind:value={maxMinutes} disabled={!editable || saving} />
+            </div>
           </div>
         </div>
         <div class="mode on">
@@ -201,7 +203,7 @@
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
               <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label="Goal enabled" title="Enabled" />
-              <input class="grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
+              <input class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
                 <button class="btn small" disabled={workingGoal !== null || dirty || saving} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
@@ -233,7 +235,7 @@
         <ul class="list">
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input class="grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
+              <input class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
                   {#if r.enforce}<Icon name="lock" size={11} />{/if}{enforceLabel(r)}
@@ -282,16 +284,10 @@
   .list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
   .item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 16ch; }
-  .item input.grow, .fld input {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 6px 8px; font: inherit; font-size: var(--fs-m);
-  }
-  .item input:focus-visible, .fld input:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 1px; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
-  .pa-enf { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
-  .fld-row { display: flex; gap: 10px; flex-wrap: wrap; }
-  .fld { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 120px; }
-  .fld span { color: var(--text-dim); font-size: var(--fs-s); }
+  .pa-enf { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
+  .field-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .field-row > .field { flex: 1; min-width: 120px; margin-bottom: 0; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); }
   .link { border: 0; background: none; padding: 0; font: inherit; font-size: var(--fs-s); color: var(--accent-text); cursor: pointer; align-self: flex-start; }
   .link:hover { text-decoration: underline; }

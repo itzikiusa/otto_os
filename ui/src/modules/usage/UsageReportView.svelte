@@ -31,7 +31,7 @@
     // day×model table, fetched once on demand.
     const full = await usage.fullReport();
     if (!full) {
-      toasts.error('Could not load the full usage report', usage.reportError ?? undefined);
+      toasts.error('Couldn’t load the full usage report', usage.reportError ?? undefined);
       return;
     }
     const file = reportFileName(full);
@@ -179,7 +179,7 @@
   }
   th,
   td {
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid var(--separator);
     text-align: start;
     white-space: nowrap;

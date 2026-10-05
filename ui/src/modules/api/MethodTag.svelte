@@ -29,7 +29,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     flex-shrink: 0;
   }

@@ -152,6 +152,6 @@ test('round trip: Open in Builder parses a query tab; unsupported SQL is refused
   await page.waitForTimeout(300);
   await page.locator('.qe-tab').first().click({ button: 'right' });
   await page.locator('.ctx-item', { hasText: 'Open in Builder' }).click();
-  await expect(page.locator('.notice.err')).toContainText("can't be edited in the builder");
+  await expect(page.locator('.notice.err')).toContainText('can’t be edited in the builder');
   await expect(page.locator('.builder .content > .node')).toHaveCount(1);
 });

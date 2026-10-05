@@ -6,6 +6,7 @@
   // the daemon needs a row to run `sts get-caller-identity`, so the test runs
   // right after save and its result (identity / login required) is shown in a
   // final panel with a "Sign in" shortcut. Editing skips discovery.
+  import { onTabKey } from '../../lib/tabKeys';
   import { untrack } from 'svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -166,19 +167,6 @@
     if (saved) toasts.success(editing ? 'Account updated' : 'Account added', saved.name);
     onclose();
   }
-  function sourceKey(e: KeyboardEvent): void {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const button = e.currentTarget as HTMLButtonElement;
-    const tabs = Array.from(button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
-    const rtl = getComputedStyle(button).direction === 'rtl';
-    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-    const i = tabs.indexOf(button);
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
-    tabs[j]?.click();
-    tabs[j]?.focus();
-  }
-
 </script>
 
 <Modal title={editing ? `Edit ${init?.name ?? 'account'}` : 'Add AWS account'} width={620} {onclose}>
@@ -191,10 +179,10 @@
 
     {#if step === 1}
       <div class="modes" role="tablist" aria-label="Credential source">
-        <button role="tab" aria-selected={mode === 'profile'} tabindex={mode === 'profile' ? 0 : -1} onkeydown={sourceKey} class:on={mode === 'profile'} onclick={() => (mode = 'profile')}>
+        <button role="tab" aria-selected={mode === 'profile'} tabindex={mode === 'profile' ? 0 : -1} onkeydown={onTabKey} class:on={mode === 'profile'} onclick={() => (mode = 'profile')}>
           Use an existing AWS profile
         </button>
-        <button role="tab" aria-selected={mode === 'access_keys'} tabindex={mode === 'access_keys' ? 0 : -1} onkeydown={sourceKey} class:on={mode === 'access_keys'} onclick={() => (mode = 'access_keys')}>
+        <button role="tab" aria-selected={mode === 'access_keys'} tabindex={mode === 'access_keys' ? 0 : -1} onkeydown={onTabKey} class:on={mode === 'access_keys'} onclick={() => (mode = 'access_keys')}>
           Enter access keys
         </button>
       </div>
@@ -357,7 +345,7 @@
     {:else}
       <div class="test" aria-live="polite">
         {#if testing}
-          <p><span class="spinner"></span> Running <code>sts get-caller-identity</code>…</p>
+          <p><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span> Running <code>sts get-caller-identity</code>…</p>
         {:else if testResult?.ok}
           <p class="ok"><Icon name="check" size={14} /> Connected in {testResult.latency_ms} ms</p>
           {#if testResult.identity}
@@ -443,7 +431,7 @@
   }
   .modes button.on {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .hint {
     margin: 0;
@@ -486,7 +474,7 @@
   }
   .prof:hover,
   .prof.on {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .pname {
     font-weight: 600;
@@ -621,14 +609,6 @@
   .idn dd {
     margin: 0;
     word-break: break-all;
-  }
-  .spinner {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .err {

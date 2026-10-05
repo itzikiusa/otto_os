@@ -116,7 +116,7 @@
   <LoadState what="metrics" {loading} {error} empty={!metrics} rows={3} onretry={() => (poller ? void poller.now() : void load())}>
     {#snippet emptyView()}
       {#if !available}
-        <div class="dim">metrics-server isn't installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
+        <div class="dim">metrics-server isn’t installed in this cluster, so <span class="mono">kubectl top</span> has nothing to report.</div>
       {:else}
         <div class="dim">No metrics for this pod yet (new pods take a minute to show up in metrics-server).</div>
       {/if}
@@ -198,7 +198,7 @@
   .lbl {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     width: 32px;
   }
@@ -216,7 +216,7 @@
     grid-template-columns: 32px 1fr 90px;
     gap: 8px;
     align-items: center;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .bar {
     height: 8px;
@@ -227,7 +227,7 @@
   .fill {
     height: 100%;
     border-radius: 999px;
-    transition: width 300ms ease-out;
+    /* Data-driven width: no transition (a poll would animate every tick). */
   }
   .fill.cpu {
     background: var(--accent);

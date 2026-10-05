@@ -1,6 +1,10 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -445,7 +449,7 @@
     } catch (e) {
       if (owner !== consumeUrl()) return;
       tailError = loadErrorText(e);
-      if (!autoPoll) toasts.error("Couldn't read messages", tailError);
+      if (!autoPoll) toasts.error("Couldn’t read messages", tailError);
     } finally {
       consuming = false;
     }
@@ -553,7 +557,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error("Couldn't update the config", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t update the config", e);
     } finally {
       cfgSaving = false;
     }
@@ -567,7 +571,7 @@
     if (typed === null) return;
     if (typed !== topic) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Topic not deleted', `The name you typed didn't match "${topic}".`);
+      toasts.warn('Topic not deleted', `The name you typed didn’t match "${topic}".`);
       return;
     }
     try {
@@ -577,7 +581,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error("Couldn't delete the topic", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t delete the topic", e);
     }
   }
 
@@ -595,7 +599,7 @@
         const full: ConsumeReq = { ...lastReq, preview: false };
         messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
       } catch (e) {
-        toasts.error("Couldn't export the messages", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t export the messages", e);
         return;
       } finally {
         exporting = false;
@@ -630,7 +634,7 @@
       });
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
+      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write.');
     }
   }
 </script>
@@ -655,7 +659,7 @@
   {#if detailErr}
     <div class="err" role="alert">
       <Icon name="warning" size={13} />
-      <span class="err-text">Couldn't load topic details. <span class="muted">{detailErr}</span></span>
+      <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
       <button class="btn small" onclick={() => loadDetail(detail !== null)}>
         <Icon name="refresh" size={12} /> Retry
       </button>
@@ -772,7 +776,7 @@
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
         {/if}
         {#if result?.masked}
-          <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
+          <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && (tailOffsets.size > 0 || tailError)}
           <p class="muted pad small tail-note" role="status">
@@ -792,17 +796,15 @@
             <span class="mono">P{selected.partition} · offset {selected.offset}</span>
             <span class="muted">{fmtTs(selected.timestamp_ms)}</span>
             {#if selected.value?.format}
-              <span class="badge">{selected.value.format}{selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}</span>
+              <Badge tone="accent" label={`${selected.value.format}${selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}`} />
             {/if}
             {#if selected.headers.length > 0}
-              <span class="badge muted-badge">{selected.headers.length} header{selected.headers.length === 1 ? '' : 's'}</span>
+              <Badge label={plural(selected.headers.length, 'header')} />
             {/if}
             {#if result}
               {@const pct = offsetPct(selected, result.partitions)}
               {#if pct !== null}
-                <span class="badge pos-badge" title="Offset position within partition watermarks">
-                  {pct.toFixed(1)}%
-                </span>
+                <Badge label={`${pct.toFixed(1)}%`} title="Offset position within partition watermarks" />
               {/if}
             {/if}
             {#if selected.value?.raw_base64}
@@ -850,8 +852,8 @@
     </div>
   {:else if tab === 'partitions'}
     {#if !detail && !detailErr}
-      <p class="muted pad">Loading partitions…</p>
-    {/if}
+      <div class="pad"><Skeleton rows={4} label="partitions" /></div>
+    {:else if detail}
     <table class="grid">
       <thead>
         <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>ISR</th><th>Low</th><th>High</th><th>Messages</th></tr>
@@ -870,10 +872,11 @@
         {/each}
       </tbody>
     </table>
+    {/if}
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" aria-label="Config name" />
-      <input class="grow" bind:value={cfgValue} placeholder="value" aria-label="Config value" />
+      <input class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
+      <input class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
       <button
         class="btn small"
         onclick={setConfig}
@@ -882,8 +885,8 @@
       >{cfgSaving ? 'Setting…' : 'Set'}</button>
     </div>
     {#if !detail && !detailErr}
-      <p class="muted pad">Loading config…</p>
-    {/if}
+      <div class="pad"><Skeleton rows={6} label="config" /></div>
+    {:else if detail}
     <table class="grid">
       <thead><tr><th>Name</th><th>Value</th><th>Source</th></tr></thead>
       <tbody>
@@ -896,6 +899,7 @@
         {/each}
       </tbody>
     </table>
+    {/if}
   {:else if tab === 'produce'}
     <div class="produce">
       <div class="produce-opts">
@@ -1052,7 +1056,7 @@
   }
   .consume-bar select,
   .consume-bar input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1066,7 +1070,7 @@
   .filter-group {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex: 1;
     min-width: 100px;
   }
@@ -1085,7 +1089,7 @@
   .auto {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
@@ -1095,7 +1099,7 @@
     color: var(--accent-text);
   }
   /* Server-side PII masking active badge — shown below the message list. */
-  .masked-badge {
+  .masked-note {
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -1103,10 +1107,13 @@
     flex: 1;
     min-width: 100px;
   }
+  /* A guaranteed height so the list/detail never shrink to a sliver on a short
+     viewport (a phone in landscape): the detail overflows into the brokers tab
+     body, which scrolls, instead of compressing behind the header. */
   .msg-layout {
     display: flex;
     flex: 1;
-    min-height: 0;
+    min-height: 180px;
   }
   .msg-list {
     flex: 1;
@@ -1130,14 +1137,14 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 6px 10px;
     position: sticky;
     top: 0;
     background: var(--surface);
   }
   tbody td {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
   }
   .message-open {
@@ -1161,7 +1168,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .msg-list tbody tr.sel {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .key {
     max-width: 180px;
@@ -1176,7 +1183,7 @@
   /* Offset-position bar cell */
   .pos-cell {
     width: 56px;
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
   .pos-bar-wrap {
     width: 48px;
@@ -1192,10 +1199,6 @@
     min-width: 2px;
   }
   /* Offset-position badge in the detail pane */
-  .pos-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .tail-note {
     padding-top: 4px;
     padding-bottom: 6px;
@@ -1220,20 +1223,11 @@
     flex-wrap: wrap;
     margin-bottom: 8px;
   }
-  .badge {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
-  }
   h5 {
     margin: 12px 0 4px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .payload {
@@ -1264,7 +1258,7 @@
     border-bottom: 1px solid var(--border);
   }
   .cfg-set input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1287,7 +1281,7 @@
   .chk-opt {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
@@ -1296,7 +1290,7 @@
   .headers-section {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .headers-title {
     display: flex;
@@ -1309,12 +1303,12 @@
   }
   .header-row {
     display: flex;
-    gap: 5px;
+    gap: 4px;
     align-items: center;
   }
   .header-key {
     width: 140px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1323,7 +1317,7 @@
   }
   .header-val {
     flex: 1;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1337,10 +1331,6 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .muted-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .field {
     display: flex;
     flex-direction: column;
@@ -1353,7 +1343,7 @@
   .field input,
   .field select,
   .field textarea {
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1437,34 +1427,6 @@
     }
     .cfg-set {
       flex-wrap: wrap;
-    }
-  }
-
-  /* Short viewports (phones in landscape): the message layout stays side-by-side
-     (wide enough), but the panes get a guaranteed height so the message list
-     doesn't shrink to a sliver whose rows fall behind the sticky chrome. The
-     detail container is allowed to grow past the viewport (the brokers tab-body
-     scrolls on short viewports) so the produce form / message rows scroll into
-     view rather than being compressed behind the header + status bar. */
-  @media (max-height: 600px) {
-    .td {
-      height: auto;
-      min-height: 100%;
-    }
-    .msg-layout {
-      flex: none;
-    }
-    .msg-list {
-      min-height: 180px;
-    }
-    .msg-list.windowed {
-      max-height: 70vh;
-    }
-    .msg-detail {
-      min-height: 180px;
-    }
-    .produce {
-      overflow: visible;
     }
   }
 </style>

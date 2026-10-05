@@ -2,7 +2,7 @@
   // Capability & Health Registry (B3) — one page answering "what can Otto do
   // right now, what's degraded, and how do I fix it?". Root-only: backed by
   // GET /capabilities (5 s cached on the server) and GET /support-bundle.
-  import { capabilitiesApi, featureLabel, settingsRoute, statusLabel } from './capabilities';
+  import { capabilitiesApi, depKindLabel, featureLabel, settingsRoute, statusLabel } from './capabilities';
   import type { ModuleCapability } from './capabilities';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -161,7 +161,7 @@
                   <span class="dep-ok" class:bad={!dep.ok} role="img" aria-label={dep.ok ? 'OK' : 'Not OK'} title={dep.ok ? 'OK' : 'Not OK'}>
                     <Icon name={dep.ok ? 'check' : 'x'} size={12} />
                   </span>
-                  <span class="dep-kind dim">{dep.kind}</span>
+                  <span class="dep-kind dim">{depKindLabel(dep.kind)}</span>
                   <span class="dep-name">{dep.name}</span>
                   {#if dep.detail}
                     <span class="dep-detail dim" title={dep.detail}>{dep.detail}</span>
@@ -239,11 +239,11 @@
   .dep-list { list-style: none; margin: 0; border-block-start: 1px solid var(--border); padding-block: 8px; padding-inline: 36px 14px; }
   .dep-row  {
     display: flex; align-items: center; gap: 8px;
-    padding: 3px 0; font-size: var(--fs-s); min-width: 0;
+    padding: 2px 0; font-size: var(--fs-s); min-width: 0;
   }
   .dep-ok  { display: flex; align-items: center; flex-shrink: 0; color: var(--success); }
   .dep-ok.bad { color: var(--danger); }
-  .dep-kind  { text-transform: uppercase; font-size: var(--fs-xs); letter-spacing: .04em; width: 56px; flex-shrink: 0; }
+  .dep-kind  { font-size: var(--fs-xs); min-inline-size: 13ch; flex-shrink: 0; }
   .dep-name  { font-weight: 500; flex-shrink: 0; }
   .dep-detail { font-size: var(--fs-xs); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

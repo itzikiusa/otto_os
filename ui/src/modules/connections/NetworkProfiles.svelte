@@ -101,7 +101,7 @@
   {#if editing}<label class="archive"><input type="checkbox" bind:checked={archived} disabled={busy} />Archived (unavailable for new launches)</label>{/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   <div class="profiles"><button class="btn small" type="button" disabled={busy || connectionsLoading || !!connectionsError || !name.trim() || !sshId || invalidEndpoints} onclick={save}>{busy ? 'Saving…' : 'Save network profile'}</button>
-  {#if editing}<button class="btn small" type="button" disabled={busy} onclick={reloadSaved}>Reload saved profile</button>{/if}
+  {#if editing}<button class="btn small" type="button" disabled={busy} onclick={reloadSaved}>Refresh saved profile</button>{/if}
   <button class="btn small" type="button" disabled={busy} onclick={() => edit(null)}>Cancel edits</button></div>
 </div>
 <style>

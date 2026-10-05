@@ -24,6 +24,7 @@ import type {
   Vec3,
 } from './types';
 import { applyMaterialPreset } from './presets';
+import { plural } from '../../../../lib/plural';
 
 // JSON round-trip rather than `structuredClone`: the doc is pure JSON, and the
 // caller may hand us a Svelte `$state` proxy, which structuredClone refuses to clone.
@@ -478,8 +479,8 @@ export function summarize(doc: Scene3dDoc): string {
   const o = doc.objects.length;
   const l = doc.lights.length;
   const g = doc.groups.length;
-  const parts = [`${o} object${o === 1 ? '' : 's'}`, `${l} light${l === 1 ? '' : 's'}`];
-  if (g) parts.push(`${g} group${g === 1 ? '' : 's'}`);
+  const parts = [`${plural(o, 'object')}`, `${plural(l, 'light')}`];
+  if (g) parts.push(`${plural(g, 'group')}`);
   return parts.join(' · ');
 }
 

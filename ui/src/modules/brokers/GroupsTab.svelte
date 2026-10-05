@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { untrack } from 'svelte';
@@ -103,8 +105,9 @@
     const current = () => request === detailRequest && cluster.id === clusterId && selected === id;
     dryRunResult = null;
     dryRunLoading = false;
+    // Refreshing the open group keeps its rows on screen; switching blanks them.
+    if (selected !== id) detail = null;
     selected = id;
-    detail = null;
     detailError = null;
     detailLoading = true;
     resetTopic = '';
@@ -172,7 +175,7 @@
     groupsTw.findRows(
       () => groupsEl,
       () => groups,
-      (g) => `${g.group_id}\n${g.state}\n${g.members} member${g.members === 1 ? '' : 's'}`,
+      (g) => `${g.group_id}\n${g.state}\n${plural(g.members, 'member')}`,
       '.grow-row',
     ),
   );
@@ -236,7 +239,7 @@
       );
       if (current()) dryRunResult = preview;
     } catch (e) {
-      if (current()) toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toastError("Couldn’t preview the reset", e);
     } finally {
       if (request === detailRequest) dryRunLoading = false;
     }
@@ -263,7 +266,7 @@
     if (typed === null || !current()) return;
     if (typed !== groupId) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
+      toasts.warn('Offsets not reset', `The name you typed didn’t match "${selected}".`);
       return;
     }
 
@@ -276,7 +279,7 @@
       if (current()) detail = updated;
       toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
-      toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t reset offsets", e);
     } finally {
       resetting = false;
     }
@@ -293,37 +296,33 @@
     bind:clientHeight={groupsTw.viewH}
     onscroll={groupsTw.onscroll}
   >
-    {#if loadError}
-      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups} />
-    {/if}
-    {#if loadError && groups.length === 0}
-      <!-- rendered above -->
-    {:else if loading}
-      <p class="muted pad">Loading consumer groups…</p>
-    {:else if accessDenied}
+    {#if accessDenied}
       <div class="acl-denied pad">
         <p class="acl-title">Consumer-group access not granted</p>
         <p class="muted">{accessMsg}</p>
         <p class="muted">
           Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
-          Otto probed once and won't keep retrying (so it stops hitting the broker with denied
+          Otto probed once and won’t keep retrying (so it stops hitting the broker with denied
           requests); grant the ACL and re-test the cluster, and this tab will populate.
         </p>
       </div>
-    {:else if groups.length === 0}
-      <p class="muted pad">No consumer groups.</p>
     {:else}
+      <!-- First load: skeleton; failed load: inline error (or a stale bar over
+           the last good list); a refresh keeps the rows on screen. -->
+      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups}>
+        {#snippet emptyView()}<p class="muted pad">No consumer groups on this cluster.</p>{/snippet}
       {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
       {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
         <button class="grow-row" class:sel={selected === g.group_id} onclick={() => open(g.group_id)}>
           <span class="gid" title={g.group_id}>{g.group_id}</span>
           <span class="badges">
             <span class="state {stateClass(g.state)}">{g.state}</span>
-            <span class="muted">{g.members} member{g.members === 1 ? '' : 's'}</span>
+            <span class="muted">{plural(g.members, 'member')}</span>
           </span>
         </button>
       {/each}
       {#if groupsWin.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.bottom}px"></div>{/if}
+      </LoadState>
     {/if}
   </div>
 
@@ -331,12 +330,14 @@
   <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="brokers.groupsListW" label="Resize the group list" /></div>
 
   <div class="detail">
-    {#if detailLoading}
-      <p class="muted pad">Loading group…</p>
-    {:else if detailError && selected}
+    {#if (detailLoading || detailError) && !detail && selected}
       {@const gid = selected}
-      <LoadState what="this group" error={detailError} empty onretry={() => open(gid)} />
+      <LoadState what="this group" loading={detailLoading} error={detailError} empty onretry={() => open(gid)} />
     {:else if detail}
+      {#if detailError && selected}
+        {@const gid = selected}
+        <LoadState what="this group" error={detailError} empty={false} onretry={() => open(gid)} />
+      {/if}
       <header>
         <span class="gid big">{detail.group_id}</span>
         <span class="state {stateClass(detail.state)}">{detail.state}</span>
@@ -348,6 +349,7 @@
           <button
             class="icon-btn"
             onclick={() => open(gid)}
+            disabled={detailLoading}
             aria-label="Refresh lag"
             title="Refresh lag"
           >
@@ -486,7 +488,7 @@
             → <strong class:ok={dryRunResult.total_lag_after < dryRunResult.total_lag_before}
                        class:warn={dryRunResult.total_lag_after > dryRunResult.total_lag_before}>
               {dryRunResult.total_lag_after.toLocaleString()}</strong>
-            ({dryRunResult.partitions.length} partition{dryRunResult.partitions.length === 1 ? '' : 's'} affected)
+            ({plural(dryRunResult.partitions.length, 'partition')} affected)
             </span>
             <button
               class="icon-btn close-dry"
@@ -551,10 +553,10 @@
     text-align: start;
     border: none;
     background: transparent;
-    padding: 9px 12px;
+    padding: 8px 12px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     cursor: pointer;
     border-inline-start: 2px solid transparent;
   }
@@ -562,7 +564,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .grow-row.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   /* Windowed rows must be uniform: one-line ids (full id in the title). */
@@ -603,7 +605,7 @@
   .state {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: var(--radius-s);
   }
@@ -650,7 +652,7 @@
   .sort-toggle {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
@@ -684,7 +686,7 @@
   }
   .reset-bar select,
   .reset-bar input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -701,7 +703,7 @@
     margin: 16px 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   table {
@@ -714,7 +716,7 @@
     font-weight: 500;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
   td {
     padding: 4px 8px;
@@ -763,7 +765,7 @@
     display: flex;
     align-items: center;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     font-size: var(--fs-s);
     gap: 8px;
   }
@@ -791,7 +793,7 @@
     border-bottom: 1px solid var(--border);
   }
   .dryrun-table td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-top: 1px solid var(--border);
   }
   .dryrun-table td.ok {
@@ -801,7 +803,7 @@
     color: var(--warning);
   }
   .dryrun-preview p {
-    padding: 5px 10px;
+    padding: 4px 10px;
     margin: 0;
   }
 

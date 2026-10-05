@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Explicit merge approval. Opened by dropping one local branch onto another in
   // the graph's refs panel — NOTHING merges until the user clicks Merge here.
   // Shows source → target, a strategy picker, a dry-run conflict preview, and a
@@ -171,7 +172,7 @@
     <!-- pre-merge conflict check -->
     {#if previewLoading}
       <div class="warn check">
-        <span class="spinner-xs"></span>
+        <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
         <span>Checking for conflicts…</span>
       </div>
     {:else if willConflict}
@@ -180,8 +181,7 @@
           <Icon name="merge" size={14} />
           <span>
             Merging <span class="mono">{source}</span> into <span class="mono">{target}</span>
-            will conflict in {preview?.conflicted_files.length}
-            file{preview && preview.conflicted_files.length === 1 ? '' : 's'}. Otto will start the
+            will conflict in {plural(preview?.conflicted_files.length ?? 0, 'file')}. Otto will start the
             merge and open the conflict resolver so you can fix them here — or abort and leave
             <span class="mono">{target}</span> untouched.
           </span>
@@ -202,8 +202,8 @@
       <div class="warn">
         <Icon name="info" size={14} />
         <span>
-          You have {status?.changes.length} uncommitted change{status && status.changes.length === 1 ? '' : 's'}.
-          They'll be <strong>stashed</strong>, the merge applied, then <strong>restored</strong>.
+          You have {plural(status?.changes.length ?? 0, 'uncommitted change')}.
+          They’ll be <strong>stashed</strong>, the merge applied, then <strong>restored</strong>.
         </span>
       </div>
     {/if}
@@ -268,7 +268,7 @@
     color: var(--success);
   }
   .bchip.tgt {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .arrow {
@@ -289,7 +289,7 @@
   .section-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     text-transform: uppercase;
   }
@@ -301,19 +301,19 @@
   .strat {
     display: flex;
     align-items: flex-start;
-    gap: 9px;
+    gap: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     cursor: pointer;
-    transition: border-color 110ms, background 110ms;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .strat:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .strat.active {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-soft);
   }
   .strat input {
     margin-top: 2px;
@@ -354,7 +354,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    padding: 9px 11px;
+    padding: 8px 10px;
     border-radius: var(--radius-m);
     background: color-mix(in srgb, var(--warning) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
@@ -383,16 +383,6 @@
     margin-inline-start: -14px;
     color: var(--text-dim);
     font-style: italic;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 11px;
-    height: 11px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    flex-shrink: 0;
   }
   
   .err {
@@ -423,7 +413,7 @@
     .conflict-files li { overflow-wrap: anywhere; }
     .block-head .mono,
     .note .mono { overflow-wrap: anywhere; }
-    .strat { padding: 11px 12px; }
+    .strat { padding: 10px 12px; }
     .strat input { width: 18px; height: 18px; }
     .strat-label { font-size: var(--fs-m); }
     .strat-hint { font-size: var(--fs-xs); }

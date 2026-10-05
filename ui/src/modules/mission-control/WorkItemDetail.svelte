@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { toastError } from '../../lib/toastError';
   import { router } from '../../lib/router.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { missionControlBus } from '../../lib/events.svelte';
@@ -24,6 +25,7 @@
   } from './lib';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { now } from '../../lib/stores/now.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -178,7 +180,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Work item saved');
     } catch (e) {
-      toasts.error("Couldn't save the work item", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toastError('Couldn’t save the work item', e);
     } finally {
       if (ownsView(workspaceId, itemId, view)) { busy = false; loading = false; }
     }
@@ -196,7 +198,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Approval requested');
     } catch (e) {
-      toasts.error("Couldn't request approval", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toastError('Couldn’t request approval', e);
     } finally {
       if (ownsView(workspaceId, itemId, view)) busy = false;
     }
@@ -217,7 +219,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success(decision === 'approved' ? 'Approved' : 'Denied');
     } catch (e) {
-      toasts.error("Couldn't record the decision", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toastError('Couldn’t record the decision', e);
     } finally {
       if (ownsView(workspaceId, itemId, view)) { busy = false; deciding = null; }
     }
@@ -294,7 +296,7 @@
     <div class="d-body">
       <div class="d-err" role="alert">
         <Icon name="warning" size={14} />
-        <span>Couldn't load this work item. {err}</span>
+        <span>Couldn’t load this work item. {err}</span>
       </div>
       <div><button class="btn small" onclick={() => void load()}><Icon name="refresh" size={12} />Retry</button></div>
     </div>
@@ -317,7 +319,7 @@
       <dl class="facts">
         <div><dt>Owner</dt><dd title={detail.owner ?? undefined}>{who(detail.owner)} <span class="dim">({ACTOR_LABEL[detail.owner_kind]})</span></dd></div>
         <div><dt>Cost so far</dt><dd class="mono">{fmtCost(detail.cost_so_far)}</dd></div>
-        <div><dt>Repo</dt><dd class="mono" title={detail.repo_id ?? undefined}>{detail.repo_id ?? '—'}</dd></div>
+        <div><dt>Repository</dt><dd class="mono" title={detail.repo_id ?? undefined}>{detail.repo_id ?? '—'}</dd></div>
         <div><dt>Branch</dt><dd class="mono" title={detail.branch ?? undefined}>{detail.branch ?? '—'}</dd></div>
         <div><dt>Created</dt><dd title={localTime(detail.created_at)}>{ago(detail.created_at)}</dd></div>
         <div><dt>Updated</dt><dd title={localTime(detail.updated_at)}>{ago(detail.updated_at)}</dd></div>
@@ -330,11 +332,11 @@
           {#if !editing}<button class="btn ghost small" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
         </div>
         {#if editing}
-          <label class="fld"><span class="flabel">Goal</span><textarea class="input fld-in" rows="2" bind:value={editGoal}></textarea></label>
-          <label class="fld"><span class="flabel">Result summary</span><textarea class="input fld-in" rows="2" bind:value={editResult}></textarea></label>
-          <label class="fld">
+          <label class="field"><span class="flabel">Goal</span><textarea class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
+          <label class="field"><span class="flabel">Result summary</span><textarea class="input field-input" rows="2" bind:value={editResult}></textarea></label>
+          <label class="field">
             <span class="flabel">Risk (policy)</span>
-            <select class="input fld-in" bind:value={editRisk}>
+            <select class="input field-input" bind:value={editRisk}>
               {#each RISK_LEVELS as r (r)}<option value={r}>{RISK_LABEL[r]}</option>{/each}
             </select>
           </label>
@@ -372,10 +374,11 @@
                     ondeny={(reason) => decide(a.id, 'rejected', reason)}
                   />
                 {:else if a.decided_by}
-                  <ApprovalActions
-                    onapprove={() => {}}
-                    ondeny={() => {}}
-                    decided={{ outcome: a.status === 'approved' ? 'approved' : 'denied', by: who(a.decided_by), at: a.decided_at, note: a.decision_note }}
+                  <ApprovalOutcome
+                    outcome={a.status === 'approved' ? 'approved' : 'denied'}
+                    by={who(a.decided_by)}
+                    at={a.decided_at}
+                    note={a.decision_note}
                   />
                 {/if}
               </li>
@@ -597,12 +600,10 @@
     margin: 2px 0 0;
     font-size: var(--fs-s);
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .field {
+    margin-bottom: 0;
   }
-  .fld-in {
+  .field-input {
     width: 100%;
   }
   .edit-actions {

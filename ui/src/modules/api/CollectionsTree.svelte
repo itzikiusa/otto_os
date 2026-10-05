@@ -6,6 +6,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import MethodTag, { methodWord } from './MethodTag.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
@@ -284,7 +285,7 @@
     <label class="search">
       <Icon name="search" size={12} />
       <input
-        placeholder="Search requests"
+        placeholder="Filter requests…"
         bind:value={search}
         aria-label="Search collections and requests"
         disabled={isEmpty}
@@ -300,17 +301,15 @@
     {/if}
   </div>
 
-  {#if apiClient.requestsLoadError && isEmpty}
-    <div class="state err" role="alert">
-      <Icon name="warning" size={14} />
-      <div class="grow">
-        <div>Couldn’t load saved requests.</div>
-        <div class="dim-line">{apiClient.requestsLoadError}</div>
-      </div>
-      <button class="btn small" onclick={() => void apiClient.loadAll()}>Retry</button>
-    </div>
-  {:else if apiClient.loading && isEmpty}
-    <div class="state dim" role="status">Loading saved requests…</div>
+  {#if isEmpty && (apiClient.requestsLoadError || apiClient.loading)}
+    <LoadState
+      what="saved requests"
+      variant="compact"
+      loading={apiClient.loading}
+      error={apiClient.requestsLoadError}
+      empty
+      onretry={() => void apiClient.loadAll()}
+    />
   {:else if isEmpty}
     <EmptyState
       icon="folder"
@@ -405,8 +404,8 @@
     color: var(--text-dim);
   }
   .search:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search input {
     flex: 1;
@@ -428,30 +427,12 @@
     font-size: var(--fs-s);
     padding: 8px 4px;
   }
-  .state.dim,
-  .no-match {
-    color: var(--text-dim);
-  }
   .no-match {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 6px;
-  }
-  .state.err {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    color: var(--text);
-  }
-  .state.err :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .dim-line {
     color: var(--text-dim);
-    font-size: var(--fs-xs);
-    word-break: break-word;
   }
   /* Windowed list: every row is a fixed 29 px slot (28 px + 1 px gap). */
   .tree-wrap :global(.tree) {

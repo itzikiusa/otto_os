@@ -177,7 +177,7 @@
   }
   .rule {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
     cursor: pointer;
     max-width: 100%;
     overflow: hidden;
@@ -204,7 +204,7 @@
     position: relative;
     height: 76px;
     border-block-end: 1px solid var(--border);
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .swc-c.invalid {
     background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 6px, var(--surface-3) 6px, var(--surface-3) 12px) !important;
@@ -222,7 +222,7 @@
     color: var(--text);
     border: 1px solid var(--border);
     cursor: pointer;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+    box-shadow: var(--shadow-xs);
   }
   .pick:focus-within {
     outline: 2px solid color-mix(in srgb, var(--accent-text) 70%, transparent);
@@ -272,12 +272,12 @@
   }
   .hex:hover:not(:disabled) {
     border-color: var(--border);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .hex:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     background: var(--surface-2);
-    outline: none;
+    outline: none; box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .hex.bad {
     color: var(--danger);

@@ -69,14 +69,14 @@ export async function startSnip(): Promise<void> {
   capturing = true;
   try {
     const resp = await snipApi.capture();
-    if (resp.cancelled || !resp.snip) return; // Esc — silent, like the native tool
+    if (resp.cancelled || !resp.snip) return; // Esc — silent, like the native tool (wire field; ui-guards: allow)
     await openSnipEditor(resp.snip.id);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes('already in progress')) {
       toasts.warn('A screen capture is already in progress');
     } else {
-      toasts.error('Screen capture failed', msg);
+      toasts.error('Couldn’t capture the screen', msg);
     }
   } finally {
     capturing = false;

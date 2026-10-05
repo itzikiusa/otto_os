@@ -233,7 +233,7 @@
   .lg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
   .lg i {

@@ -11,7 +11,7 @@
   //  • memory   — a suggested memory to accept or reject.
   // A decided card stays in the thread with its outcome.
   import ActionCard from './ActionCard.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import ApprovalActions from '../../../lib/components/ApprovalActions.svelte';
   import DenySheet from '../../../lib/components/DenySheet.svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
@@ -91,7 +91,11 @@
     try {
       await assistant.act(task.id, action, body);
     } catch (e) {
-      toasts.error(action === 'deny' ? 'Couldn’t deny the request' : `Couldn’t ${label.toLowerCase()}`, describeError(e));
+      // A memory proposal speaks Keep/Reject, not approve/deny.
+      const title = label === 'accept' ? 'Couldn’t keep that memory'
+        : label === 'reject' ? 'Couldn’t reject that memory'
+        : action === 'deny' ? 'Couldn’t deny the request' : `Couldn’t ${label.toLowerCase()}`;
+      toasts.error(title, describeError(e));
     } finally {
       busy = null;
     }
@@ -105,12 +109,12 @@
   const suggestion = $derived(ny?.suggestion?.provider ?? null);
 </script>
 
-<ActionCard icon={ICON[kind] ?? 'hand'} kind={headKind} summary={pending ? (kind === 'approval' ? ny?.prompt || task.title : task.title) : task.title} attention={pending} testid={`card-needs-${kind}`}>
+<ActionCard icon={ICON[kind] ?? 'hand'} heading={headKind} summary={pending ? (kind === 'approval' ? ny?.prompt || task.title : task.title) : task.title} attention={pending} testid={`card-needs-${kind}`}>
   {#snippet pill()}
     {#if pending}
-      <StatePill tone="warn" label="Needs you" />
+      <Badge tone="warn" label="Needs you" />
     {:else if outcome}
-      <StatePill tone={outcome.tone} label={outcome.label} />
+      <Badge tone={outcome.tone} label={outcome.label} />
     {/if}
   {/snippet}
 
@@ -196,8 +200,8 @@
       {:else if kind === 'takeover'}
         <button class="btn small primary" onclick={() => void run('handback', {}, 'hand back')} disabled={busy !== null}>{busy ? 'Handing back…' : 'Hand back'}</button>
       {:else if kind === 'memory'}
-        <button class="btn small" onclick={() => void run('deny', {}, 'reject')} disabled={busy !== null}>Reject</button>
-        <button class="btn small primary" onclick={() => void run('approve', {}, 'accept')} disabled={busy !== null}>Keep</button>
+        <button class="btn small" onclick={() => void run('deny', {}, 'reject')} disabled={busy !== null}>{busy === 'reject' ? 'Rejecting…' : 'Reject'}</button>
+        <button class="btn small primary" onclick={() => void run('approve', {}, 'accept')} disabled={busy !== null}>{busy === 'accept' ? 'Keeping…' : 'Keep'}</button>
       {:else if kind === 'question'}
         <button class="btn small ghost" onclick={() => (denying = true)} disabled={busy !== null}>Skip…</button>
       {/if}

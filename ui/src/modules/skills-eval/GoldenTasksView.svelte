@@ -436,7 +436,7 @@
     margin: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
   }
@@ -454,7 +454,7 @@
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 6px;
     background: var(--surface);
   }
   .gt-card.disabled {
@@ -463,7 +463,7 @@
   .gt-card-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .gt-name {
     min-width: 0;
@@ -477,7 +477,7 @@
   .gt-actions {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
   }
   .gt-badge {
@@ -501,7 +501,7 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .gt-pill {
     display: inline-flex;
@@ -534,12 +534,12 @@
   .gt-tags {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
   }
   .gt-tag {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

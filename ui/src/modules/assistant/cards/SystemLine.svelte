@@ -4,7 +4,7 @@
   // other system line the daemon posted. Attributed, never louder than chat.
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import { router } from '../../../lib/router.svelte';
   import { taskStateLabel, taskTone } from '../model';
   import type { AssistantTask, AssistantTurn } from '../../../lib/api/types';
@@ -27,7 +27,7 @@
     {#if task?.agent_id}
       <button class="link" onclick={() => router.go(`personal-agents/${task.agent_id}`)}>Open agent</button>
     {/if}
-    {#if task}<StatePill tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />{/if}
+    {#if task}<Badge tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />{/if}
   </p>
 {:else if turn?.kind === 'route'}
   <p class="line center" data-testid="line-route">

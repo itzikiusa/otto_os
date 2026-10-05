@@ -6,6 +6,7 @@
   // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
   // second "Results" section below commands.
   import { dialogFocus } from '../lib/dialogFocus';
+  import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
@@ -330,7 +331,7 @@
   async function submitEnglish(): Promise<void> {
     if (englishText.trim() === '' || busy) return;
     if (!ws.currentId) {
-      toasts.error('No workspace selected', 'Pick a workspace in the navigator first.');
+      toasts.error(NO_WORKSPACE, 'Pick one in the navigator, then try again.');
       return;
     }
     busy = true;
@@ -401,7 +402,7 @@
         return done();
       case 'unparsed':
         toasts.warn(
-          "Couldn't parse that",
+          "Couldn’t parse that",
           'Try e.g. "open 2 claude sessions", or enable AI fallback for free-form requests.',
         );
         return;
@@ -532,7 +533,6 @@
             </div>
           {/if}
           {#each searchHits as hit, h (hit.kind + ':' + hit.id)}
-            <!-- svelte-ignore a11y_click_events_have_key_events (keyboard: ↑/↓ + Enter in the input) -->
             <div
               class="pal-hit"
               class:selected={selected === hitBase + h}
@@ -551,12 +551,13 @@
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
               </div>
-              <!-- The pills are a mouse shortcut only (an option holds no interactive
-                   children); the keyboard path is ⏎ / ⌥⏎ / ⇧⏎ on the selected hit. -->
+              <!-- The pills are a mouse shortcut only: out of the tab order and
+                   hidden from AT (an option holds no interactive children); the
+                   keyboard path is ⏎ / ⌥⏎ / ⇧⏎ on the selected hit. mousedown
+                   keeps focus in the palette input. -->
               <div class="pal-hit-actions" aria-hidden="true">
                 {#each hitActions(hit) as action (action)}
-                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <span class="pal-hit-btn" onclick={() => void hitAction(hit, action)}>{HIT_ACTION_LABEL[action]}{selected === hitBase + h ? ` ${HIT_ACTION_KEY[action]}` : ''}</span>
+                  <button type="button" class="pal-hit-btn" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => void hitAction(hit, action)}>{HIT_ACTION_LABEL[action]}{selected === hitBase + h ? ` ${HIT_ACTION_KEY[action]}` : ''}</button>
                 {/each}
               </div>
             </div>
@@ -587,7 +588,7 @@
               class="pill-toggle"
               class:on={aiFallback}
               aria-pressed={aiFallback}
-              title="When the request isn't a known command, ask the AI planner for a plan (you still confirm it)"
+              title="When the request isn’t a known command, ask the AI planner for a plan (you still confirm it)"
               onclick={() => setFallback(!aiFallback)}
             >
               <Icon name="sparkle" size={12} /> AI planner fallback
@@ -640,7 +641,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    animation: fade-in 120ms ease-out;
+    animation: otto-fade-in var(--dur-fast) var(--ease-out);
   }
   /* The 12% top gap and the 60% height cap are percentages of the inset:0
      backdrop (= the window), never vh — in the WKWebView vh resolves to the
@@ -660,7 +661,7 @@
     /* Raised glass (tokens.css .glass-raised), like Spotlight. */
     border-radius: var(--radius-l);
     overflow: hidden;
-    animation: pal-in 150ms ease-out;
+    animation: otto-pop-in var(--dur-enter) var(--ease-out);
   }
   .pal-mode-row {
     display: flex;
@@ -712,7 +713,7 @@
     text-align: start;
   }
   .pal-item.selected {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   /* One line per row (30px): a long "Focus session: …" title ellipsizes
      instead of wrapping out of the row and shoving the group / shortcut. */
@@ -746,7 +747,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
   }
   .pal-ask {
     border-top: 1px solid var(--border);
@@ -777,7 +778,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    padding: 9px 11px;
+    padding: 8px 10px;
     font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
@@ -785,7 +786,7 @@
   }
   .pal-english textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .pal-english-row {
     display: flex;
@@ -796,8 +797,8 @@
     font-size: var(--fs-s);
     padding: 8px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
   }
   .pal-plan {
     border: 1px solid var(--border);
@@ -811,7 +812,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .pal-plan-item {
@@ -854,13 +855,13 @@
     border-radius: var(--radius-s);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .pal-hit:hover {
     background: var(--hover);
   }
   .pal-hit.selected {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .pal-hit-main {
     display: flex;
@@ -894,6 +895,7 @@
   }
   .pal-hit-btn {
     padding: 1px 6px;
+    font-family: inherit;
     font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -903,19 +905,8 @@
     line-height: 1.6;
   }
   .pal-hit-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  @keyframes fade-in {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes pal-in {
-    from {
-      opacity: 0;
-      transform: translateY(-6px) scale(0.99);
-    }
   }
 </style>

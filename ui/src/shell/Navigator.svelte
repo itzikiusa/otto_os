@@ -1,4 +1,8 @@
 <script lang="ts">
+  import { plural } from '../lib/plural';
+  import Skeleton from '../lib/components/Skeleton.svelte';
+  import { focusOnMount } from '../lib/focusOnMount';
+  import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
@@ -122,7 +126,7 @@
     const ids = agentSelIds;
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `Delete ${ids.length} session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      `Delete ${plural(ids.length, 'session')} and their entire history? This cannot be undone.`,
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -158,7 +162,7 @@
     const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `Delete ${ids.length} archived session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      `Delete ${plural(ids.length, 'archived session')} and their entire history? This cannot be undone.`,
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -361,12 +365,12 @@
     try {
       await ws.updateWorkspace(w.id, { name });
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
   async function changeWorkspaceDir(w: WorkspaceWithRole): Promise<void> {
-    const root = await confirmer.promptText('Working directory (absolute path, ~ ok)', {
+    const root = await confirmer.promptText('Working folder (absolute path, ~ ok)', {
       title: `Change folder of “${w.name}”`,
       browseFolder: true,
       confirmLabel: 'Change',
@@ -378,7 +382,7 @@
       await ws.updateWorkspace(w.id, { root_path: root });
       toasts.success('Folder changed', `${w.name} → ${root}`);
     } catch (e) {
-      toasts.error('Change failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change it', e);
     }
   }
 
@@ -395,7 +399,7 @@
       if (!(await ws.archiveWorkspace(w.id))) return;
       toasts.info('Workspace removed', w.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the workspace', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the workspace', e);
     }
   }
 
@@ -724,17 +728,13 @@
 </script>
 
 <nav class="navigator sidebar-material" class:resizing aria-label="Navigator" style="width:{ui.railWidth}px">
-  <!-- A focusable separator is the ARIA window-splitter widget (paneResizer adds ←/→, Home/End, Enter). -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+  <!-- The window splitter (paneResizer: focus, ←/→, Home/End, Enter, drag, double-click reset). -->
   <div
     class="rail-resize"
     role="separator"
-    tabindex="0"
     aria-label="Resize the navigator"
-    onmousedown={startResize}
-    ondblclick={() => ui.setRailWidth(240)}
     title={RESIZE_TITLE}
-    use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), text: pxWide }}
+    use:paneResizer={{ value: ui.railWidth, min: RAIL_MIN, max: RAIL_MAX, onChange: (w) => ui.setRailWidth(w), onReset: () => ui.setRailWidth(240), onDragStart: startResize, text: pxWide }}
   ></div>
   <div class="nav-head" class:tauri-pad={false}>
     <img class="nav-logo" src="/otto-mark-64.png" alt="" width="20" height="20" />
@@ -747,8 +747,9 @@
       class="icon-btn nav-back"
       onclick={() => router.back()}
       disabled={!router.canBack}
-      title="Back (⌘⇧←)"
-      aria-label="Back"
+      title="Go back"
+      aria-label="Go back"
+      aria-keyshortcuts="Meta+Shift+ArrowLeft"
     >
       <Icon name="chevronLeft" size={14} />
     </button>
@@ -756,8 +757,9 @@
       class="icon-btn"
       onclick={() => router.forward()}
       disabled={!router.canForward}
-      title="Forward (⌘⇧→)"
-      aria-label="Forward"
+      title="Go forward"
+      aria-label="Go forward"
+      aria-keyshortcuts="Meta+Shift+ArrowRight"
     >
       <Icon name="chevronRight" size={14} />
     </button>
@@ -791,8 +793,8 @@
         <Icon name="search" size={12} />
         <input
           class="nav-search-input"
-          placeholder="Search all sessions…"
-          aria-label="Search all sessions"
+          placeholder="Filter sessions…"
+          aria-label="Filter sessions"
           bind:value={sessionQuery}
           onkeydown={(e) => {
             if (e.key !== 'Escape') return;
@@ -859,8 +861,10 @@
           ondragleave={secMovable ? () => { if (secDragOverId === sec.group.id) secDragOverId = null; } : undefined}
           ondrop={secMovable ? (e) => onSecDrop(e, sec.group.id) : undefined}
         >
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- Drag to reorder is the pointer path (presentation); the keyboard
+               path is the header menu’s "Move section up/down". -->
           <div
+            role="presentation"
             class="group-head-row"
             draggable={secMovable}
             ondragstart={secMovable ? (e) => onSecDragStart(e, sec.group.id) : undefined}
@@ -881,7 +885,7 @@
               <span class="group-label">{sec.group.label}</span>
               {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
               {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
-                <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
+                <span class="count-chip working" title="Working sessions">{ws.workingCount}</span>
               {/if}
               {#if !pinned}
                 <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
@@ -1017,6 +1021,7 @@
       class:active={router.module === 'walkthroughs'}
       aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
       onclick={() => router.go('walkthroughs')}
+      title="Help"
     >
       <Icon name="info" size={14} />
       <span class="grow">Help</span>
@@ -1026,7 +1031,8 @@
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
-      title="Settings (⌘,)"
+      title="Settings"
+      aria-keyshortcuts="Meta+,"
     >
       <Icon name="gear" size={14} />
       <span class="grow">Settings</span>
@@ -1086,8 +1092,9 @@
 
 {#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
   {@const fav = isFav(m.id)}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- Drag is the pointer path (presentation); the row’s ↑/↓ buttons and ⌥↑/⌥↓ reorder from the keyboard. -->
   <div
+    role="presentation"
     class="edit-row"
     class:hidden-row={isHidden(m.id)}
     class:dragging={dragId === m.id}
@@ -1129,8 +1136,9 @@
         class="row-action mv"
         onclick={() => move(m, -1)}
         disabled={first}
-        title="Move up (⌥↑)"
+        title={`Move ${m.label} up`}
         aria-label={`Move ${m.label} up`}
+        aria-keyshortcuts="Alt+ArrowUp"
       >
         <Icon name="arrowUp" size={12} />
       </button>
@@ -1138,8 +1146,9 @@
         class="row-action mv"
         onclick={() => move(m, 1)}
         disabled={last}
-        title="Move down (⌥↓)"
+        title={`Move ${m.label} down`}
         aria-label={`Move ${m.label} down`}
+        aria-keyshortcuts="Alt+ArrowDown"
       >
         <Icon name="arrowDown" size={12} />
       </button>
@@ -1289,8 +1298,9 @@
          group in every workspace and with none. Plain `sessionRow`s — they are
          already in `ws.sessions`, so open / rename / archive work as above. -->
     {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
       <div
+        role="presentation"
         class="ws-group-label"
         title="Sessions not tied to any workspace"
         data-testid="scratch-group"
@@ -1425,14 +1435,15 @@
               {#if ws.canEditSession(s)}
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
               {/if}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
               <div
+                role="presentation"
                 class="nav-item nested-item archived"
                 title={s.title}
                 oncontextmenu={(e) => ctxMenu.show(e, [
                   ...(ws.canEditSession(s) ? [
                     { label: 'Unarchive', icon: 'refresh', action: () => ws.unarchiveSession(s.id) },
-                    { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
+                    { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
                   ] : []),
                   { separator: true },
                   { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
@@ -1463,7 +1474,7 @@
               <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
             </div>
           {:else if ws.archivedLoading}
-            <div class="arch-state" aria-live="polite">Loading…</div>
+            <div class="arch-state"><Skeleton rows={2} height={22} label="archived sessions" /></div>
           {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
             <div class="arch-state">No archived sessions.</div>
           {:else if ws.archivedHasMore}
@@ -1483,8 +1494,10 @@
   {@const st = sessionState(s, status, needsYou, { stale: staleEvents })}
   {@const resumable = st.resumable}
   {@const dnd = rowsDraggable && reorderable}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- A drag source/target for reordering sessions (presentation); the row's
+       own button and menu carry every action for the keyboard. -->
   <div
+    role="presentation"
     class="nested-row"
     class:needs-you={st.key === 'needs-you'}
     class:selected={agentSelMode && agentSel.has(s.id)}
@@ -1500,11 +1513,10 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="nav-rename"
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         onblur={commitRename}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename();
@@ -1535,7 +1547,7 @@
               ? [{ label: 'Restart session', icon: 'refresh', action: () => void restartAgent(s.id) }]
               : []),
             { label: 'Archive', icon: 'archive', action: () => ws.archiveSession(s.id) },
-            { label: 'Delete', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
+            { label: 'Delete…', icon: 'trash', danger: true as const, action: () => void deleteSession(s.id) },
           ] : []),
           { separator: true },
           { label: 'New session…', icon: 'plus', action: () => (ui.newSessionOpen = true) },
@@ -1624,8 +1636,8 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      color-mix(in srgb, var(--accent) 40%, transparent) 45%,
-      color-mix(in srgb, var(--accent) 40%, transparent) 55%,
+      var(--accent-line) 45%,
+      var(--accent-line) 55%,
       transparent 100%
     );
   }
@@ -1640,7 +1652,7 @@
     margin-inline-start: 6px;
   }
   .nav-logo {
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     display: block;
     flex-shrink: 0;
   }
@@ -1665,7 +1677,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 8px 4px;
   }
@@ -1712,7 +1724,7 @@
     font-size: var(--fs-m);
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -1769,7 +1781,7 @@
   /* A focused session row is the quieter variant: a lighter tint, no bar —
      the Agents row above it already carries the strong marker. */
   .nav-item.nested-item.active {
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    background: var(--accent-soft);
     font-weight: 500;
   }
   .nav-item.nested-item.active::before {
@@ -1822,7 +1834,7 @@
     opacity: 1;
   }
   .group-head-row .row-action:last-child {
-    margin-inline-end: 27px;
+    margin-inline-end: 28px;
   }
   /* The module list is a size container so edit mode can make room for the
      label in a narrow (resized) sidebar: the module glyph (the grip + label
@@ -1839,7 +1851,7 @@
       width: 20px;
     }
     .group-head-row .row-action:last-child {
-      margin-inline-end: 25px;
+      margin-inline-end: 24px;
     }
   }
   .group-head-row .row-action:disabled {
@@ -1870,7 +1882,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1889,7 +1901,7 @@
     display: grid;
     place-items: center;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .group-head:hover .group-chev,
   .group-head:focus-visible .group-chev,
@@ -2029,7 +2041,7 @@
   /* Agents' sub-content hangs off one hairline guide under the Agents icon
      (8px row padding + half the 14px icon), outline-view style. */
   .agents-sub {
-    margin-inline-start: 15px;
+    margin-inline-start: 14px;
     padding-inline-start: 4px;
     border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
@@ -2038,7 +2050,7 @@
   .ws-chip {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     max-width: calc(100% - 4px);
     margin: 1px 0 2px;
     padding: 2px 6px;
@@ -2070,7 +2082,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 8px 2px;
+    padding: 4px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -2084,7 +2096,7 @@
      since they change what the list below shows. The fold chevron stays. */
   .agents-row > .twisty:not(.on):not([aria-expanded]) {
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .agents-row:hover > .twisty:not(.on):not([aria-expanded]),
   .agents-row:focus-within > .twisty:not(.on):not([aria-expanded]) {
@@ -2151,7 +2163,7 @@
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
   .sel-toggle.on { color: var(--accent-text); }
-  .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .nested-row.selected .nested-item { background: var(--accent-soft); }
   .row-action {
     display: grid;
     place-items: center;
@@ -2163,7 +2175,7 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .nested-row:hover .row-action {
     opacity: 1;
@@ -2174,7 +2186,7 @@
     opacity: 1;
   }
   .row-action:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .row-action.danger:hover {
@@ -2185,7 +2197,7 @@
      wrapped under the icon and spilled past the sidebar edge. */
   .arch-tools .row-action {
     display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
-    padding: 0 7px; flex-shrink: 0; opacity: 1;
+    padding: 0 6px; flex-shrink: 0; opacity: 1;
     border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
   .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
@@ -2278,7 +2290,7 @@
      green when all complete. */
   .task-chip {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     height: 16px;
     line-height: 16px;
     border-radius: 999px;
@@ -2326,7 +2338,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .needs-you-filter:hover {
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);
@@ -2392,7 +2404,7 @@
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;

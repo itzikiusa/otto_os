@@ -206,7 +206,7 @@ registerUiCommands('api', {
     await ready(ctx.signal);
     const env = resolveByIdOrName(apiClient.environments, args.environment_id, (e) => e.id, (e) => e.name, 'environment');
     await apiClient.activateEnvironment(env.id);
-    if (apiClient.activeEnv?.id !== env.id) throw new UiCommandError('failed', `Couldn't activate “${env.name}”.`);
+    if (apiClient.activeEnv?.id !== env.id) throw new UiCommandError('failed', `Couldn’t activate “${env.name}”.`);
     return { environment_id: env.id, name: env.name };
   },
 
@@ -253,7 +253,7 @@ registerUiCommands('api', {
         // Read the initiating tab's slot — the user may have switched tabs.
         const failed = tabId ? apiClient.responses.get(tabId)?.error : apiClient.lastError;
         if (failed) throw new UiCommandError('failed', failed);
-        throw new UiCommandError('cancelled_by_user', 'The send was cancelled (a new-host secret confirm was declined, or it was stopped).');
+        throw new UiCommandError('cancelled_by_user', 'The send was canceled (a new-host secret confirm was declined, or it was stopped).');
       }
       return responseResult(resp);
     } catch (e) {

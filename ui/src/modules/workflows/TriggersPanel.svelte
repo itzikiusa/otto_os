@@ -6,6 +6,7 @@
   import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Switch from '../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -149,7 +150,7 @@
       adding = false;
       toasts.success(editingId ? 'Trigger updated' : 'Trigger added');
     } catch (e) {
-      toasts.error(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e instanceof Error ? e.message : String(e));
+      toastError(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e);
     } finally {
       saving = false;
     }
@@ -357,14 +358,13 @@
         <span class="trig-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>
         <span class="trig-spec" title={describeSpec(t)}>{describeSpec(t)}</span>
       </div>
-      <button
-        class="toggle"
-        aria-pressed={t.enabled}
+      <Switch
+        checked={t.enabled}
+        onchange={() => toggle(t)}
+        tone="success"
+        label={`Enable ${KIND_LABEL[t.kind] ?? t.kind} trigger`}
         title={t.enabled ? 'On — click to pause this trigger' : 'Off — click to enable this trigger'}
-        onclick={() => toggle(t)}
-      >
-        {t.enabled ? 'On' : 'Off'}
-      </button>
+      />
       {#if t.kind === 'webhook' && webhookUrl(t)}
         <button class="icon-btn" title="Copy the webhook URL (POST a JSON body to start a run)" aria-label="Copy webhook URL" onclick={() => copyWebhook(t)}><Icon name="copy" size={12} /></button>
       {/if}
@@ -452,7 +452,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     flex: 1;
   }
   .add-form {
@@ -467,7 +467,7 @@
   .fl {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .fl span {
     font-size: var(--fs-xs);
@@ -479,7 +479,7 @@
   .fl textarea {
     font: inherit;
     font-size: var(--fs-m);
-    padding: 4px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -521,7 +521,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 6px;
+    padding: 4px 6px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface);
@@ -552,25 +552,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .toggle {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 2px 6px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .toggle[aria-pressed='true'] {
-    color: var(--success);
-    background: var(--success-soft);
-    border-color: transparent;
-  }
-  .toggle:hover {
-    background: var(--hover);
   }
   .row-del {
     background: none;

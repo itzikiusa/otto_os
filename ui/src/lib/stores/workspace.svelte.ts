@@ -1,6 +1,7 @@
 // Workspaces + sessions + tab/split state for the shell and Agent Mode.
 
 import { api, getToken } from '../api/client';
+import { plural } from '../plural';
 import { listActiveWorkflowRuns } from '../api/workflows';
 import { fetchWorkspace } from '../api/workspaces';
 import { router } from '../router.svelte';
@@ -29,6 +30,7 @@ import { SCRATCH_WORKSPACE_ID } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
+import { toastError } from '../toastError';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -1286,7 +1288,7 @@ class WorkspaceStore {
       if (action === 'delete') await this.killSession(id);
       else await this.archiveSession(id);
     } catch (e) {
-      toasts.error(action === 'delete' ? 'Delete failed' : 'Archive failed', e instanceof Error ? e.message : String(e));
+      toastError(action === 'delete' ? 'Couldn’t delete the session' : 'Couldn’t archive the session', e);
       this.closeTab(id);
     }
   }
@@ -1319,7 +1321,7 @@ class WorkspaceStore {
     if (pref === 'archive' || pref === 'delete') {
       const del = pref === 'delete';
       const what = del
-        ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can't be undone.`
+        ? `Closing these tabs deletes ${n} sessions: they stop and their history is removed for good. This can’t be undone.`
         : `Closing these tabs archives ${n} sessions: they stop and keep their history (resumable from the Archived list).`;
       const ok = await confirmer.ask(
         `${what}\n\nYour remembered choice is “Always ${pref}” — change it in Settings → Appearance.`,
@@ -1508,7 +1510,7 @@ class WorkspaceStore {
     try {
       await this.killSession(id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -1571,8 +1573,8 @@ class WorkspaceStore {
       }
     }
     const ok = ids.length - failed;
-    if (ok > 0) toasts.info(`${ok} session${ok === 1 ? '' : 's'} archived`);
-    if (failed > 0) toasts.error('Archive failed', `${failed} session${failed === 1 ? '' : 's'} could not be archived.`);
+    if (ok > 0) toasts.info(`${plural(ok, 'session')} archived`);
+    if (failed > 0) toasts.error('Couldn’t archive', `${plural(failed, 'session')} couldn’t be archived.`);
     return failed;
   }
 
@@ -1582,7 +1584,7 @@ class WorkspaceStore {
     for (const id of ids) {
       try { await this.killSession(id); } catch { failed++; }
     }
-    if (failed > 0) toasts.error('Delete failed', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
+    if (failed > 0) toasts.error('Couldn’t delete', `${plural(failed, 'session')} couldn’t be deleted.`);
     return failed;
   }
 
@@ -1638,7 +1640,7 @@ class WorkspaceStore {
     try {
       await this.restartSession(id);
     } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t restart', e);
     }
   }
 

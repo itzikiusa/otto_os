@@ -248,7 +248,7 @@
         bind:value={query}
         class="settings-filter-input"
         type="search"
-        placeholder="Filter settings"
+        placeholder="Filter settings…"
         aria-label="Filter settings"
         aria-controls="settings-nav-list"
         autocomplete="off"
@@ -287,7 +287,7 @@
         <EmptyState
           variant="page"
           icon="lock"
-          title={`You don't have access to ${section.label}`}
+          title={`You don’t have access to ${section.label}`}
           body={gateHint(section)}
           actionLabel="Open Appearance"
           onaction={() => router.go('settings/appearance')}
@@ -357,11 +357,11 @@
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text-dim);
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .settings-nav-filter:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .settings-filter-input {
     flex: 1;
@@ -392,7 +392,7 @@
   }
   /* Same section-label treatment as the main sidebar's groups. */
   .settings-nav-heading {
-    padding: 8px 10px 3px;
+    padding: 8px 10px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.06em;
@@ -413,7 +413,7 @@
     font-size: var(--fs-m);
     color: var(--text);
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .settings-nav-label {
     flex: 1;

@@ -9,7 +9,7 @@ import { expectNoHorizontalOverflow, runBarCommand } from './helpers';
 // unreachable film shows its inline "can't load" state with Retry (network is
 // stubbed so this never depends on GitHub); the rail search finds a guide by a
 // shortcut; ↑/↓ walk the rail; #/walkthroughs/<id> deep-links; "Open <module>"
-// routes; ⌘K has one "Guide: …" command per README.
+// routes; ⌘K has one "Open the … guide" command per README.
 // ─────────────────────────────────────────────────────────────────────────────
 
 test.setTimeout(120_000);
@@ -124,15 +124,15 @@ test('deep link opens a guide with kbd shortcut chips; Open <module> routes ther
 
   // An unknown id is an inline "not found" with a way back.
   await openHelp(page, 'no-such-guide');
-  await expect(page.getByText('There\'s no guide called')).toBeVisible();
+  await expect(page.getByText('There’s no guide called')).toBeVisible();
   await page.getByRole('button', { name: 'Open Getting started' }).click();
   await expect(article(page)).toHaveAttribute('data-guide-id', 'getting-started');
   expect(errors, errors.join('\n')).toEqual([]);
 });
 
-test('⌘K lists a Guide: command per README', async ({ page }) => {
+test('⌘K lists an Open the … guide command per README', async ({ page }) => {
   await openHelp(page, 'git');
-  await runBarCommand(page, 'Guide: Vault');
+  await runBarCommand(page, 'Open the Vault guide');
   await expect(page).toHaveURL(/#\/walkthroughs\/vault$/);
   await expect(article(page)).toHaveAttribute('data-guide-id', 'vault');
 });

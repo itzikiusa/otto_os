@@ -23,6 +23,7 @@ import { api } from '../api/client';
 import type { Id, OttoEvent, Session, UiAgentRef, UiControlGrant } from '../api/types';
 import { lsGet, lsSet } from '../storage';
 import { toasts } from '../toast.svelte';
+import { toastError } from '../toastError';
 import { ws } from './workspace.svelte';
 import { router } from '../router.svelte';
 import { isEmbedded } from '../desktop';
@@ -185,10 +186,7 @@ class UiControlStore {
       return true;
     } catch (e) {
       if (!opts.quiet) {
-        toasts.error(
-          enabled ? "Couldn't allow UI control" : "Couldn't turn off UI control",
-          e instanceof Error ? e.message : String(e),
-        );
+        toastError(enabled ? 'Couldn’t allow UI control' : 'Couldn’t turn off UI control', e);
       }
       return false;
     } finally {
@@ -386,7 +384,7 @@ class UiControlStore {
     this.driving = null;
     const ok = await this.setGrant(sid, false);
     if (ok) {
-      toasts.info('UI control turned off', `${agentName(d.agent)} can't drive Otto until you allow it again.`);
+      toasts.info('UI control turned off', `${agentName(d.agent)} can’t drive Otto until you allow it again.`);
     }
   }
 

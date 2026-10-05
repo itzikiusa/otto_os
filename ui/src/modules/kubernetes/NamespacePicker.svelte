@@ -167,7 +167,7 @@
 {:else}
   <div class="ns" class:has-error={!!error} data-testid="k8s-ns-picker">
     {#if error}
-      <span class="ns-warn" title="Namespaces couldn't be listed — type one to use it"><Icon name="warning" size={13} /></span>
+      <span class="ns-warn" title="Namespaces couldn’t be listed — type one to use it"><Icon name="warning" size={13} /></span>
     {:else}
       <Icon name="layers" size={13} />
     {/if}
@@ -184,7 +184,7 @@
       autocapitalize="off"
       autocorrect="off"
       spellcheck={false}
-      title={disabled ? 'This kind is cluster-scoped — no namespace applies' : error ? `Namespaces couldn't be listed: ${error}` : shown}
+      title={disabled ? 'This kind is cluster-scoped — no namespace applies' : error ? `Namespaces couldn’t be listed: ${error}` : shown}
       value={open ? query : shown}
       {disabled}
       onblur={() => { open = false; query = ''; }}
@@ -204,7 +204,7 @@
       aria-label="Namespaces"
       style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxH}px"
     >
-      {#if error}<div class="ns-err">Couldn't list namespaces (RBAC) — showing ones you've used; type any other to use it.</div>{/if}
+      {#if error}<div class="ns-err">Couldn’t list namespaces (RBAC) — showing ones you’ve used; type any other to use it.</div>{/if}
       {#each options as o, i (o.value + ':' + o.label)}
         <div
           id="k8s-ns-opt-{i}"
@@ -243,8 +243,8 @@
     width: 220px;
   }
   .ns:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* Degraded, not broken: the list failed (often RBAC) but typing still works. */
   .ns.has-error {

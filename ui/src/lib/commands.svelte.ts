@@ -13,6 +13,9 @@ export interface Command {
   keywords?: string;
   /** display-only shortcut hint, e.g. "⌘T" */
   shortcut?: string;
+  /** A status row that can't run (e.g. "Couldn’t load sessions"): shown dim,
+   *  announced as disabled, and Enter/click do nothing. */
+  disabled?: boolean;
   run: () => unknown;
 }
 

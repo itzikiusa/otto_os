@@ -44,7 +44,7 @@
   let formTest: GitAccountTestResp | 'busy' | null = $state(null);
 
   function testLabel(r: GitAccountTestResp): string {
-    if (!r.ok) return `Couldn't connect: ${r.error ?? 'the provider refused the token'}`;
+    if (!r.ok) return `Couldn’t connect: ${r.error ?? 'the provider refused the token'}`;
     const scopes = r.scopes?.length ? ` · scopes: ${r.scopes.join(', ')}` : '';
     return `Connected as ${r.login ?? 'an unknown user'}${scopes}`;
   }
@@ -128,7 +128,7 @@
 
   // What the org/namespace is called on each provider (for browsing repos).
   const namespaceLabel: Record<GitProviderKind, string> = {
-    github: 'Organisation / user',
+    github: 'Organization / user',
     bitbucket: 'Workspace',
     gitlab: 'Group / user',
   };
@@ -200,7 +200,7 @@
       closeModal();
       toasts.success('Git account added', a.label);
     } catch (e) {
-      toasts.error("Couldn't add the Git account", loadErrorText(e));
+      toasts.error("Couldn’t add the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -226,20 +226,20 @@
       closeModal();
       toasts.success('Git account updated', updated.label);
     } catch (e) {
-      toasts.error("Couldn't save the Git account", loadErrorText(e));
+      toasts.error("Couldn’t save the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
   }
 
   async function remove(a: GitAccount): Promise<void> {
-    if (!(await confirmer.ask(`Delete account "${a.label}"? Its token is removed from the Keychain.`, { title: 'Delete account' }))) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account' }))) return;
     try {
       await api.del(`/git/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
       toasts.success('Git account deleted', a.label);
     } catch (e) {
-      toasts.error("Couldn't delete the Git account", loadErrorText(e));
+      toasts.error("Couldn’t delete the Git account", loadErrorText(e));
     }
   }
 </script>
@@ -249,7 +249,7 @@
     {#snippet actions()}
       <!-- While the list is empty the EmptyState owns the one "Add account". -->
       {#if accounts.length > 0}
-        <button class="btn primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
+        <button class="btn small primary" onclick={openAdd}><Icon name="plus" size={13} /> Add account</button>
       {/if}
     {/snippet}
   </PageHeader>
@@ -267,12 +267,12 @@
         onaction={openAdd}
       />
     {/snippet}
-    <div class="acct-list">
+    <div class="acct-list" role="list">
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="acct card"
+          role="listitem"
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },
             { label: 'Edit…', icon: 'edit', action: () => openEdit(a) },
@@ -383,7 +383,7 @@
       <input id="ga-expiry" class="input" type="date" bind:value={tokenExpiresAt} />
       <span class="hint">
         {#if provider === 'bitbucket'}
-          Bitbucket doesn't expose token expiry — set it here to get an expiry reminder.
+          Bitbucket doesn’t expose token expiry — set it here to get an expiry reminder.
         {:else}
           GitHub/GitLab auto-detect expiry; set a value here only to override.
         {/if}
@@ -492,7 +492,7 @@
   .test-result {
     display: flex;
     align-items: flex-start;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     margin-top: 4px;
     overflow-wrap: anywhere;

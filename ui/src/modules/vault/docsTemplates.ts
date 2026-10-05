@@ -30,10 +30,10 @@ export interface DocsTemplate {
 const QUALITY_BAR = `
 Quality bar (read twice):
 - ELABORATE but NOT BLOATED: every sentence must carry information a reader acts on. Prefer tables, real examples and diagrams over paragraphs. No boilerplate, no restating code line-by-line — turning 1M lines of code into 500k lines of docs is failure; nobody reads that.
-- A note a reader can't consume in ~5 minutes must be split or tightened.
+- A note a reader can’t consume in ~5 minutes must be split or tightened.
 - Every factual claim cites the source file path (backticked, relative to the repo).
 - Realistic examples lifted from code/tests/fixtures — sanitize secrets.
-- Cross-link liberally with markdown links; every note must be reachable from the bundle's index.md.
+- Cross-link liberally with markdown links; every note must be reachable from the bundle’s index.md.
 
 Diagrams (rendered live in the vault — a broken diagram shows as a red parse error, so VERIFY each one):
 - Flows/sequences: mermaid fences (flowchart / sequenceDiagram). Data models: PREFER d2 fences with its sql_table shape (one table per store entity, columns + types) — d2 is stronger for schemas.
@@ -55,17 +55,17 @@ FLOWS — partial by nature in a library:
  *  infra bundles that implement their calls, and infra links back to consumers. */
 const CROSS_REPO_RULES = `
 CROSS-REPO LINKS + DEPENDENCY DEEP-DIVE — the vault is a graph, connect this repo to its dependencies:
-1. BEFORE writing, list the vault's existing top-level bundles (otto_vault_list) — each is another repo already documented. ALWAYS resolve internal/platform dependencies to LOCAL source checkouts — they are usually on this machine: take the repo name from the module path's last segment (<host>/<org>/<repo> → <repo>) and look for a sibling of the scanned repo or ~/<repo>; also honor go.mod replace directives / vendor / workspace deps.
-2. Whenever a flow step, data access, or client call is IMPLEMENTED by an internal dependency, link to that repo's bundle at the exact mention — e.g. "opens the tenant DB connection via [<dep-repo> multi-tenant SQL](../<dep-repo>/data.md)". Link the most specific existing note; fall back to index.md. Bundles are folders named after the repo, so when the dependency is NOT scanned yet, still write the FORWARD link (../<dep-repo>/index.md) — it resolves the moment that repo gets scanned. Never omit the link.
-3. DEEP-DIVE: for each such call, open the dependency's local source and document what actually happens inside as it matters to THIS flow (discovery lookup, connection pooling, retries, caching, transactionality), citing <dep-repo>:path:line. The reader must not need to reverse-engineer the library to understand the flow.
+1. BEFORE writing, list the vault’s existing top-level bundles (otto_vault_list) — each is another repo already documented. ALWAYS resolve internal/platform dependencies to LOCAL source checkouts — they are usually on this machine: take the repo name from the module path’s last segment (<host>/<org>/<repo> → <repo>) and look for a sibling of the scanned repo or ~/<repo>; also honor go.mod replace directives / vendor / workspace deps.
+2. Whenever a flow step, data access, or client call is IMPLEMENTED by an internal dependency, link to that repo’s bundle at the exact mention — e.g. "opens the tenant DB connection via [<dep-repo> multi-tenant SQL](../<dep-repo>/data.md)". Link the most specific existing note; fall back to index.md. Bundles are folders named after the repo, so when the dependency is NOT scanned yet, still write the FORWARD link (../<dep-repo>/index.md) — it resolves the moment that repo gets scanned. Never omit the link.
+3. DEEP-DIVE: for each such call, open the dependency’s local source and document what actually happens inside as it matters to THIS flow (discovery lookup, connection pooling, retries, caching, transactionality), citing <dep-repo>:path:line. The reader must not need to reverse-engineer the library to understand the flow.
 4. Write dependencies.md: one table of every internal repo/library dependency the code ACTUALLY uses — import path → local source path → what this repo uses it for (with a file citation) → vault bundle link (live, or forward-marked "not scanned yet"). Link it from index.md.`;
 
 /** Scope pivot appended when the "infra repo" box is ticked. */
 const INFRA_SCOPE = `
 INFRA / LIBRARY REPO — scope pivot (this repository is a library or infrastructure component, NOT a deployed service):
 - It exposes NO HTTP API of its own. Document the EXPORTED surface instead: every public package/module with its exported types, functions, interfaces and their signatures (a table per package); skip internal helpers.
-- Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don't exist.
-- Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers. When the vault already documents an app repo that imports this library, LINK to that app's bundle (its flow/data note when one names this library, else its index.md) so the app↔infra edge exists in both directions.
+- Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don’t exist.
+- Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers. When the vault already documents an app repo that imports this library, LINK to that app’s bundle (its flow/data note when one names this library, else its index.md) so the app↔infra edge exists in both directions.
 - Config surface: every option / env var / parameter the library reads, its default and its effect.`;
 
 const COVERAGE_RULES = `
@@ -102,7 +102,7 @@ Deliverables (all cross-linked; index.md links everything):
 8. dependencies.md — the cross-repo dependency table (see CROSS-REPO LINKS above).
 ${QUALITY_BAR}
 
-Scan marker (REQUIRED — incremental updates depend on it): record in overview.md's frontmatter the absolute repo path, the current git commit hash (\`git rev-parse HEAD\` in the repo), and the scan date, e.g. \`repo:\`, \`commit:\`, \`scanned_at:\`.
+Scan marker (REQUIRED — incremental updates depend on it): record in overview.md’s frontmatter the absolute repo path, the current git commit hash (\`git rev-parse HEAD\` in the repo), and the scan date, e.g. \`repo:\`, \`commit:\`, \`scanned_at:\`.
 
 Finish: verify every link resolves and flows/index.md covers every flow you enumerated.`,
   },
@@ -116,14 +116,14 @@ Finish: verify every link resolves and flows/index.md covers every flow you enum
 ${infra ? INFRA_SCOPE : ''}
 
 Method:
-1. Locate the repo's bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
+1. Locate the repo’s bundle in the vault (folder named after the repo); read its index.md and overview.md. The overview frontmatter records the last scanned commit (\`commit:\`).
 2. Verify the recorded commit exists and is an ancestor of HEAD. If it is missing, invalid, or diverged, FALL BACK TO A FULL CURRENT-TREE SCAN; never infer changes by comparing only existing docs. Otherwise list the commit range and diff.
 3. Map each change to the affected notes: flows added → NEW flow note (one per flow, all of them); flows removed → delete/mark the note; changed routes/payloads/schemas/workers → update ONLY the affected sections and examples; new tables/topics → extend data.md / messaging.md. Regenerate api-openapi.yaml only if the API surface changed. New/removed library or service dependencies → update dependencies.md and its cross-repo links (create it per the rules below if the bundle predates it).
 ${CROSS_REPO_RULES}
 4. Run the staged inventory with \`--changed-since <commit>\` and repeat \`--include-file <path>\` for affected registration/contract dependencies. Require \`mode: incremental\`; if it reports \`full-fallback\`, perform the full scan. Update manifest.json and coverage.md for every added, changed, or removed candidate; preserve unaffected rows and reasons.
-5. Keep every touched note's citations and mermaid diagrams in sync with the new code. Use otto_vault_write_file when api-openapi.yaml changes.
+5. Keep every touched note’s citations and mermaid diagrams in sync with the new code. Use otto_vault_write_file when api-openapi.yaml changes.
 6. Run OKF validation and the staged repository-bundle audit with the updated manifest; source-check every changed claim.
-7. Refresh overview.md's \`commit:\` and \`scanned_at:\` to the new HEAD, and update index.md if notes were added/removed.
+7. Refresh overview.md’s \`commit:\` and \`scanned_at:\` to the new HEAD, and update index.md if notes were added/removed.
 ${QUALITY_BAR}
 
 Finish: one-line summary listing which notes you added / updated / removed and the commit range covered.`,

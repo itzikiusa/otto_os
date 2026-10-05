@@ -66,7 +66,7 @@
               <div class="edit">
                 <textarea
                   bind:value={editText}
-                  placeholder="Add a note"
+                  placeholder="Check this claim against the spec"
                   aria-label="Note for this mark"
                   rows="2"
                   spellcheck="false"

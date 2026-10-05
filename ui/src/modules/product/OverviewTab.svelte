@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
+  import Badge from '../../lib/components/Badge.svelte';
   // Overview tab — shows the selected story's detail: title, source link, stage
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
@@ -91,6 +94,8 @@
   // body column, mirroring Jira's own inline-edit affordances).
   let editingTitle = $state(false);
   let titleDraft = $state('');
+  /** Inline validation for the title editor — Save stays disabled while empty. */
+  const titleEmpty = $derived(!titleDraft.trim());
   let titleSaving = $state(false);
   let editingDesc = $state(false);
   let descDraft = $state('');
@@ -208,7 +213,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Could not save tag', product.errMsg(e));
+      toastError('Couldn’t save tag', e);
     } finally {
       tagSaving = false;
     }
@@ -220,7 +225,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Could not remove tag', product.errMsg(e));
+      toastError('Couldn’t remove tag', e);
     }
   }
 
@@ -346,7 +351,7 @@
   async function runDiscovery(): Promise<void> {
     if (runningDiscovery) return;
     const targetSwarm = swarm.swarms.find((s) => s.id === discoverySwarmId);
-    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const teamName = targetSwarm ? `“${targetSwarm.name}”` : 'a swarm';
     const attCount = 0; // attachments listed in the panel; count not tracked here
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
@@ -356,10 +361,10 @@
     runningDiscovery = true;
     try {
       await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
-      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      toasts.success('Discovery started', 'The swarm is now analyzing the story.');
       await product.changeTab('discovery');
     } catch (e) {
-      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start discovery', e);
     } finally {
       runningDiscovery = false;
     }
@@ -478,7 +483,7 @@
       );
       transitionsLoaded = true;
     } catch (e) {
-      toasts.error('Could not load transitions', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load transitions', e);
     } finally {
       transitionsLoading = false;
     }
@@ -554,7 +559,7 @@
       await loadIssueFull();
       await product.refresh();
     } catch (e) {
-      toasts.error('Transition failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move the issue', e);
     } finally {
       transitionWorking = false;
     }
@@ -569,7 +574,7 @@
       );
       assignablesLoaded = true;
     } catch (e) {
-      toasts.error('Could not load assignable users', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load assignable users', e);
     } finally {
       assignablesLoading = false;
     }
@@ -596,7 +601,7 @@
       toasts.info('Assignee updated');
       await loadIssueFull();
     } catch (e) {
-      toasts.error('Assign failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t assign', e);
     } finally {
       assigneeWorking = false;
     }
@@ -614,7 +619,7 @@
         `/issue/${story.account_id}/${story.source_key}/editmeta`,
       );
     } catch (e) {
-      toasts.error('Could not load editable fields', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t load editable fields', e);
       editmeta = []; // loaded-but-empty: every field stays read-only
     } finally {
       editmetaLoading = false;
@@ -763,7 +768,7 @@
       fieldDraft = null;
       toasts.info('Field updated');
     } catch (e) {
-      toasts.error('Could not update field', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update field', e);
     } finally {
       fieldSaving = false;
     }
@@ -783,10 +788,7 @@
   async function saveTitle(): Promise<void> {
     if (!story) return;
     const next = titleDraft.trim();
-    if (!next) {
-      toasts.error('Title cannot be empty');
-      return;
-    }
+    if (!next) return; // the empty field says so inline (titleEmpty)
     if (next === story.title) {
       cancelEditTitle();
       return;
@@ -803,7 +805,7 @@
       titleDraft = '';
       toasts.info('Title updated');
     } catch (e) {
-      toasts.error('Could not update title', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update title', e);
     } finally {
       titleSaving = false;
     }
@@ -828,7 +830,7 @@
       title: `Replace the description of ${story.source_key}?`,
       where: jiraWhere(),
       what: descDraft.trim() || '(empty description)',
-      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira's history.`,
+      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira’s history.`,
     });
     if (!ok) return;
     descSaving = true;
@@ -844,7 +846,7 @@
       descDraft = '';
       toasts.info('Description updated');
     } catch (e) {
-      toasts.error('Could not update description', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t update description', e);
     } finally {
       descSaving = false;
     }
@@ -888,7 +890,7 @@
       await product.loadVersions();
       versionsLoaded = true;
     } catch (e) {
-      toasts.error('Could not load versions', product.errMsg(e));
+      toastError('Couldn’t load versions', e);
     }
   }
 
@@ -902,7 +904,7 @@
     try {
       viewingVersion = await product.getVersion(vid);
     } catch (err) {
-      toasts.error('Could not load version', product.errMsg(err));
+      toastError('Couldn’t load version', err);
     } finally {
       versionLoading = false;
     }
@@ -923,7 +925,7 @@
         await loadDevStatus();
       }
     } catch (e) {
-      toasts.error('Refresh failed', product.errMsg(e));
+      toastError('Couldn’t refresh the story', e);
     } finally {
       refreshing = false;
     }
@@ -935,7 +937,7 @@
       await product.updateDraft({ title: draftTitle, body_md: draftBody });
       toasts.success('Draft saved');
     } catch (e) {
-      toasts.error('Save failed', product.errMsg(e));
+      toastError('Couldn’t save the draft', e);
     } finally {
       draftSaving = false;
     }
@@ -965,10 +967,7 @@
           draftBody =
             draftBody.slice(0, caretPos) + token + draftBody.slice(caretPos);
         } catch (ex) {
-          toasts.error(
-            'Screenshot upload failed',
-            ex instanceof Error ? ex.message : String(ex),
-          );
+          toastError('Couldn’t upload the screenshot', ex);
         }
         return; // only handle the first image item
       }
@@ -987,7 +986,7 @@
       newTranscriptBody = '';
       toasts.success('Transcript added');
     } catch (e) {
-      toasts.error('Add transcript failed', product.errMsg(e));
+      toastError('Couldn’t add transcript', e);
     } finally {
       addingTranscript = false;
     }
@@ -995,7 +994,7 @@
 
   async function doDeleteTranscript(t: ProductTranscriptSummary): Promise<void> {
     const ok = await confirmer.ask(
-      `Remove transcript "${t.title || 'untitled'}"?`,
+      `Remove transcript “${t.title || 'untitled'}”?`,
       { title: 'Remove transcript', confirmLabel: 'Remove', danger: true },
     );
     if (!ok) return;
@@ -1003,7 +1002,7 @@
       await product.deleteTranscript(t.id);
       toasts.info('Transcript removed');
     } catch (e) {
-      toasts.error('Remove failed', product.errMsg(e));
+      toastError('Couldn’t remove the transcript', e);
     }
   }
 
@@ -1065,7 +1064,7 @@
     try {
       await product.updateStory({ watch_enabled: !story.watch_enabled });
     } catch (e) {
-      toasts.error('Could not update watch', product.errMsg(e));
+      toastError('Couldn’t update watch', e);
     } finally {
       watchWorking = false;
     }
@@ -1091,7 +1090,7 @@
       toasts.success('Comment posted');
       await loadIssueFull();
     } catch (e) {
-      toasts.error('Could not post comment', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t post comment', e);
     } finally {
       postingComment = false;
     }
@@ -1117,7 +1116,7 @@
     try {
       await product.updateStory({ stage });
     } catch (e) {
-      toasts.error('Could not update stage', product.errMsg(e));
+      toastError('Couldn’t update stage', e);
     }
   }
 
@@ -1170,15 +1169,16 @@
     {:else if ef.schema_type === 'datetime'}
       <input class="field-input" type="datetime-local" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'user'}
-      <select class="field-input" bind:value={fieldDraft}>
-        <option value="">Unassigned</option>
-        {#if assignablesLoading}
-          <option disabled>Loading people…</option>
-        {/if}
-        {#each assignables as u (u.account_id)}
-          <option value={u.account_id}>{u.display_name}</option>
-        {/each}
-      </select>
+      {#if assignablesLoading && assignables.length === 0}
+        <Skeleton rows={1} height={27} label="people" />
+      {:else}
+        <select class="field-input" bind:value={fieldDraft}>
+          <option value="">Unassigned</option>
+          {#each assignables as u (u.account_id)}
+            <option value={u.account_id}>{u.display_name}</option>
+          {/each}
+        </select>
+      {/if}
     {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
       <select class="field-input" bind:value={fieldDraft}>
         {#if !ef.required}
@@ -1203,7 +1203,7 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="comma,separated" bind:value={fieldDraft} />
+      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
       <input class="field-input" type="text" bind:value={fieldDraft} />
@@ -1242,7 +1242,7 @@
           <Icon name="chevronDown" size={10} />
         </button>
         {#if story.issue_type}
-          <span class="chip">{story.issue_type}</span>
+          <Badge label={story.issue_type} />
         {/if}
         {#if story.url}
           <a class="source-link mono" href={story.url} target="_blank" rel="noopener noreferrer" title="Open in source">
@@ -1260,15 +1260,18 @@
             bind:value={titleDraft}
             spellcheck="false"
             aria-label="Story title"
+            aria-invalid={titleEmpty}
+            aria-describedby={titleEmpty ? 'ov-title-err' : undefined}
             onkeydown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); void saveTitle(); }
               else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
             }}
           />
-          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving} title="Writes to the live Jira issue — everyone with access sees it">
+          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving || titleEmpty} title={titleEmpty ? 'Give the story a title first' : 'Writes to the live Jira issue — everyone with access sees it'}>
             {titleSaving ? 'Saving…' : `Save to ${story.source_key}`}
           </button>
           <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
+          {#if titleEmpty}<p class="title-err" id="ov-title-err">The title can’t be empty.</p>{/if}
         </div>
       {:else if !isDraft}
         <!-- The page header already names the story; this row is the Jira
@@ -1288,11 +1291,11 @@
 
       <!-- counts row -->
       <div class="counts-row">
-        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{detail.counts.versions} version{detail.counts.versions !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} analys{detail.counts.analyses !== 1 ? 'es' : 'is'}</span>
-        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} open question{detail.counts.open_questions !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{detail.counts.notes} note{detail.counts.notes !== 1 ? 's' : ''}</span>
-        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{detail.counts.testcases} test{detail.counts.testcases !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{plural(detail.counts.versions, 'version')}</span>
+        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{plural(detail.counts.analyses, 'analysis', 'analyses')}</span>
+        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{plural(detail.counts.open_questions, 'open question')}</span>
+        <span class="count-chip" title="Notes"><Icon name="note" size={11} />{plural(detail.counts.notes, 'note')}</span>
+        <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{plural(detail.counts.testcases, 'test')}</span>
       </div>
 
       <!-- tags row -->
@@ -1315,7 +1318,7 @@
           <input
             class="tag-input"
             bind:value={tagInput}
-            placeholder="+ tag"
+            placeholder="Add tag…"
             disabled={tagSaving}
             aria-label="Add tag"
             spellcheck="false"
@@ -1344,7 +1347,7 @@
           {/each}
         </select>
         {#if versionLoading}
-          <span class="ver-loading">Loading the version…</span>
+          <span class="spinner" role="status" aria-label="Loading the version" title="Loading the version"></span>
         {/if}
       </div>
 
@@ -1414,9 +1417,9 @@
               <label class="label" for="draft-title">Title</label>
               <input
                 id="draft-title"
-                class="input"
+                class="input wide-input"
                 bind:value={draftTitle}
-                placeholder="Story title…"
+                placeholder="e.g. Players can set a weekly deposit limit"
                 spellcheck="false"
               />
             </div>
@@ -1428,7 +1431,7 @@
                 class="textarea"
                 bind:value={draftBody}
                 rows={14}
-                placeholder="Write your story or paste notes here…"
+                placeholder="e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)"
                 spellcheck="false"
                 onpaste={handleBodyPaste}
               ></textarea>
@@ -1470,7 +1473,7 @@
               <button class="btn small" onclick={() => void product.loadTranscripts()}>Retry</button>
             {/if}
             {#if product.loadingTranscripts}
-              <div class="muted">Loading transcripts…</div>
+              <LoadState what="transcripts" variant="compact" loading empty />
             {:else if product.transcripts.length === 0 && !product.transcriptsError}
               <div class="muted">No transcripts yet. Paste a conversation below.</div>
             {:else}
@@ -1519,7 +1522,7 @@
             <!-- Add transcript form -->
             <div class="add-transcript-form">
               <input
-                class="input"
+                class="input wide-input"
                 bind:value={newTranscriptTitle}
                 placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
@@ -1528,7 +1531,7 @@
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
-                placeholder="Paste conversation or notes here…"
+                placeholder="e.g. PO: the limit resets every Monday at midnight…"
                 spellcheck="false"
               ></textarea>
               <button
@@ -1581,7 +1584,7 @@
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
-                  placeholder="Write the description in Markdown…"
+                  placeholder="e.g. ## Goal — let players cap their weekly deposits"
                   spellcheck="false"
                   aria-label="Description (Markdown)"
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
@@ -1641,7 +1644,8 @@
                       class="textarea comment-textarea"
                       bind:value={newCommentBody}
                       rows={3}
-                      placeholder="Add a comment…"
+                      aria-label="Comment"
+                      placeholder="e.g. Should the limit also cover bonus funds?"
                       spellcheck="true"
                       disabled={postingComment}
                     ></textarea>
@@ -1790,8 +1794,7 @@
         <div class="col-right">
           <div class="jira-section">
             {#if issueLoading}
-              <Skeleton rows={6} height={36} />
-              <div class="jira-loading">Loading Jira details…</div>
+              <Skeleton rows={6} height={36} label="Jira details" />
             {:else if issueError}
               <LoadState what="Jira details" variant="compact" error={issueError} empty onretry={() => void loadIssueFull()} />
             {:else if issueFull}
@@ -2031,10 +2034,8 @@
                 </button>
                 {#if !collapsed.development}
                   <div class="dev-body">
-                    {#if devLoading}
-                      <div class="dropdown-loading">Loading development info…</div>
-                    {:else if devError}
-                      <LoadState what="development info" variant="compact" error={devError} empty onretry={() => { devLoaded = false; void loadDevStatus(); }} />
+                    {#if devLoading || devError}
+                      <LoadState what="development info" variant="compact" loading={devLoading} error={devError} empty onretry={() => { devLoaded = false; void loadDevStatus(); }} />
                     {:else if devStatus && (devStatus.branches.length || devStatus.commits.length || devStatus.pull_requests.length)}
                       {#if devStatus.pull_requests.length}
                         <div class="dev-group">
@@ -2220,20 +2221,20 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
     margin-top: 8px;
   }
   .tag-chip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    padding-block: 2px; padding-inline: 9px 8px;
+    gap: 2px;
+    padding-block: 2px; padding-inline: 8px 8px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 500;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 1px solid var(--accent-line);
   }
   .tag-remove {
     display: inline-flex;
@@ -2246,7 +2247,7 @@
     line-height: 1;
     color: var(--accent-text);
     opacity: 0.6;
-    transition: opacity 100ms;
+    transition: opacity var(--dur-fast);
   }
   .tag-remove:hover {
     opacity: 1;
@@ -2260,14 +2261,14 @@
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 2px 9px;
+    padding: 2px 8px;
     width: 72px;
     outline: none;
-    transition: border-color 120ms, width 120ms;
+    transition: border-color var(--dur-fast);
   }
   .tag-input:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
     color: var(--text);
     width: 100px;
   }
@@ -2304,12 +2305,12 @@
     background: transparent;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 10px;
+    padding: 4px 10px;
     cursor: pointer;
     text-align: start;
     font-size: var(--fs-s);
     color: var(--text);
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .related-item:hover {
     background: var(--hover);
@@ -2329,9 +2330,9 @@
     font-size: var(--fs-xs);
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border: 1px solid var(--accent-soft-strong);
   }
 
   /* Story header */
@@ -2344,7 +2345,7 @@
   .ov-stage-btn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     padding-block: 0; padding-inline: 0 4px;
     border: none;
     border-radius: 999px;
@@ -2397,7 +2398,7 @@
     font-size: var(--fs-m);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms, color 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
   }
   .title-row:hover .title-edit-btn,
   .title-row:focus-within .title-edit-btn,
@@ -2433,17 +2434,16 @@
     font-size: var(--fs-xl);
     font-weight: 600;
   }
+  .title-err {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
   .title-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .source-link {
     display: inline-flex;
@@ -2498,7 +2498,7 @@
     color: var(--text-dim);
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     white-space: nowrap;
   }
   .ver-select {
@@ -2509,10 +2509,6 @@
     font-size: var(--fs-s);
     padding: 4px 8px;
     max-width: 280px;
-  }
-  .ver-loading {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
   }
   .grow {
     flex: 1;
@@ -2536,8 +2532,8 @@
   .version-banner {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 6px 12px;
     margin-bottom: 12px;
@@ -2606,7 +2602,7 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     border-radius: var(--radius-s);
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .jira-coll-trigger:hover {
     background: var(--hover);
@@ -2649,12 +2645,12 @@
   .user-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .user-row-sm {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
   }
   .avatar {
@@ -2675,7 +2671,7 @@
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -2699,8 +2695,8 @@
     height: 24px;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
-    padding: 0 9px;
+    gap: 2px;
+    padding: 0 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -2708,7 +2704,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .change-btn:hover:not(:disabled) {
     background: var(--hover);
@@ -2755,7 +2751,7 @@
   }
   .label-chip {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
@@ -2787,7 +2783,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms, color 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
   }
   .detail-val-row:hover .field-edit-btn,
   .detail-val-row:focus-within .field-edit-btn,
@@ -2824,12 +2820,12 @@
   .field-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .field-multiselect {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     max-height: 160px;
     overflow-y: auto;
     padding: 4px;
@@ -2880,7 +2876,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
   }
   .desc-edit-btn:hover {
     background: var(--hover);
@@ -2909,7 +2905,7 @@
   .desc-textarea:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .desc-editor-actions {
     display: flex;
@@ -2936,7 +2932,7 @@
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     min-width: 70px;
   }
   .link-key {
@@ -2959,9 +2955,9 @@
   }
   .status-sm {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .mono-sm {
@@ -2986,7 +2982,7 @@
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 6px 0 2px;
   }
   .dev-row {
@@ -3000,7 +2996,7 @@
     color: inherit;
   }
   .dev-row:hover {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
   .dev-pr-name,
   .dev-commit-msg {
@@ -3015,7 +3011,7 @@
   }
   .dev-pr-status {
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
   }
   .dev-repo {
     margin-inline-start: auto;
@@ -3078,7 +3074,7 @@
     display: inline-block;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 2px 9px;
+    padding: 2px 8px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--warning) 15%, transparent);
     color: var(--warning);
@@ -3192,10 +3188,10 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .att-load-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
   }
@@ -3222,8 +3218,8 @@
   .draft-hint {
     font-size: var(--fs-s);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 12px;
     line-height: 1.5;
@@ -3238,22 +3234,12 @@
     font-weight: 500;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
-  .input {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-m);
-    padding: 6px 10px;
-    outline: none;
+  /* Shared .input (app.css); these two span their form's width. */
+  .wide-input {
     width: 100%;
     box-sizing: border-box;
-  }
-  .input:focus {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .textarea {
     background: var(--surface);
@@ -3271,7 +3257,7 @@
   }
   .textarea:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .draft-save-row {
     display: flex;
@@ -3326,7 +3312,7 @@
     text-align: start;
     color: var(--text);
     font-size: var(--fs-s);
-    transition: background 80ms;
+    transition: background var(--dur-fast);
   }
   .transcript-toggle:hover {
     background: var(--hover);
@@ -3355,7 +3341,7 @@
     cursor: pointer;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    transition: color 80ms, background 80ms;
+    transition: color var(--dur-fast), background var(--dur-fast);
     margin-inline-end: 4px;
     border-radius: var(--radius-s);
   }

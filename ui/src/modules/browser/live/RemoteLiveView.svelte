@@ -18,6 +18,7 @@
   // gives the page the keyboard; Esc hands it back (⇧Esc sends Esc to the
   // page). Otto's own chords (⌘K, ⌘T, ⌘J…) never reach the page — lib/keys.ts
   // handles them first on window capture.
+  import AgentChip from '../../../lib/components/AgentChip.svelte';
   import { untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
@@ -340,7 +341,7 @@
           watchOnly = true;
           releaseKeys();
         } else if (msg.code === 'nav_failed') {
-          toasts.error("Couldn't open the page", msg.message);
+          toasts.error("Couldn’t open the page", msg.message);
         } else if (msg.code === 'engine_unavailable') {
           errorNote = msg.message;
         }
@@ -408,7 +409,7 @@
       // The card's DenySheet already collected the (optional) reason.
       note = reason?.trim() || undefined;
     } else if (choice === 'deny') {
-      const why = await confirmer.promptText("Tell the agent why (optional). It won't send this request.", {
+      const why = await confirmer.promptText("Tell the agent why (optional). It won’t send this request.", {
         title: 'Deny the request',
         confirmLabel: 'Deny',
         placeholder: 'Wrong time slot',
@@ -845,7 +846,7 @@
   {#if driver === 'agent'}
     <div class="drive-bar" role="status" data-testid="live-drive-bar">
       <Icon name="cursor" size={14} />
-      <span class="who"><span class="chip">Agent</span> An agent is driving this page. Its actions pause while you drive.</span>
+      <span class="who"><AgentChip title="An agent is driving this page" /> An agent is driving this page. Its actions pause while you drive.</span>
       <span class="grow"></span>
       <button class="btn small primary" onclick={takeOver} disabled={watchOnly}>Take over</button>
     </div>
@@ -859,7 +860,7 @@
   {:else if watchOnly}
     <div class="drive-bar mine" role="status" data-testid="live-drive-bar">
       <Icon name="eye" size={14} />
-      <span class="who">You're watching. Driving this page needs Edit access to Browser in this workspace.</span>
+      <span class="who">You’re watching. Driving this page needs Edit access to Browser in this workspace.</span>
     </div>
   {/if}
 
@@ -891,7 +892,7 @@
 
   <!-- chrome over the frame: ONE quiet status chip in the bottom corner, so
        the page's own header (logo, nav) is never covered -->
-  <div class="badge" class:warn={conn.status !== 'live'} data-testid="live-badge">
+  <div class="live-status" class:warn={conn.status !== 'live'} data-testid="live-badge">
     <span class="dot" aria-hidden="true"></span>
     <span>{statusText}</span>
     {#if conn.status === 'live' && engineLabel}<span class="dim">· {engineLabel}</span>{/if}
@@ -1012,7 +1013,7 @@
   .drive-bar .who {
     min-width: 0;
   }
-  .drive-bar .chip {
+  .drive-bar .who :global(.agent-chip) {
     margin-inline-end: 4px;
   }
   .grow {
@@ -1030,7 +1031,7 @@
   /* Keyboard focus lives in the invisible sink: show it as an inset ring on
      the frame (an outset ring would be clipped by the pane). */
   .surface.kbd {
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   canvas {
     position: absolute;
@@ -1038,7 +1039,7 @@
     width: 100%;
     height: 100%;
     display: block;
-    transition: opacity 140ms ease-out, filter 140ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, filter var(--dur-fast) ease-out;
   }
   .surface.stale canvas {
     opacity: 0.55;
@@ -1058,9 +1059,11 @@
     pointer-events: none;
     /* 16px so iOS Safari doesn't zoom the page when the sink takes focus —
        the element is invisible, nothing is read at this size. */
-    font-size: 16px;
+    font-size: 16px; /* ui-guards: allow — iOS no-zoom size (invisible sink) */
   }
-  .badge {
+  /* The HUD status line over the live frame (absolutely placed, several
+     segments) — not a Badge. */
+  .live-status {
     position: absolute;
     inset-inline-end: 10px;
     bottom: 10px;
@@ -1080,13 +1083,13 @@
   .drive-bar ~ .hint {
     top: 46px;
   }
-  .badge .dot {
+  .live-status .dot {
     width: 7px;
     height: 7px;
     border-radius: 50%;
     background: var(--status-working);
   }
-  .badge.warn .dot {
+  .live-status.warn .dot {
     background: var(--status-warn);
   }
   .dim {

@@ -13,6 +13,7 @@
   //   board → source   `onchange(JSON)` of the FULL scene after a manual edit,
   //                    at most once per 250 ms (trailing; flushed on unmount).
   import { onMount, onDestroy } from 'svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
   import { ui } from '../../../lib/stores/ui.svelte';
   import { buildExcalidrawElements, isSimplified } from '../../canvas/excalidraw-build';
 
@@ -230,10 +231,10 @@
 </script>
 
 <div class="design-board" class:readonly bind:this={host}>
-  {#if loadError}
-    <div class="board-err">Board failed to load: {loadError}</div>
-  {:else if !ready}
-    <div class="board-loading">Loading board…</div>
+  {#if loadError || !ready}
+    <div class="board-state">
+      <LoadState what="the board" loading={!ready && !loadError} error={loadError} empty variant="compact" />
+    </div>
   {/if}
 </div>
 
@@ -247,17 +248,11 @@
   .design-board :global(.excalidraw) {
     height: 100%;
   }
-  .board-loading,
-  .board-err {
+  .board-state {
     position: absolute;
     inset: 0;
     display: grid;
     place-items: center;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    pointer-events: none;
-  }
-  .board-err {
-    color: var(--danger);
+    padding: 16px;
   }
 </style>

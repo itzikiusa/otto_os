@@ -27,7 +27,7 @@
 
 <div class="picker" data-testid="site-templates">
   <header>
-    <span class="badge"><Icon name="layout" size={16} /></span>
+    <span class="studio-tile"><Icon name="layout" size={16} /></span>
     <div>
       <h2>Start your site</h2>
       <p>Pick a starting point — every template uses your brand tokens, real copy and motion that respects reduced-motion. You can swap any section later.</p>
@@ -61,7 +61,7 @@
     max-width: 760px;
     margin-block-end: 22px;
   }
-  .badge {
+  .studio-tile {
     display: grid;
     place-items: center;
     flex: none;
@@ -97,11 +97,11 @@
     color: var(--text);
     text-align: start;
     cursor: pointer;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out, transform 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out, transform var(--dur-fast) ease-out;
   }
   .tpl:hover:not(:disabled) {
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     transform: translateY(-2px);
   }
   .tpl:focus-visible {

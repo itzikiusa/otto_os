@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Athena: three-pane like the DB Explorer — catalog tree (databases → tables
   // → columns) feeding `CodeEditor` sql completion, an editor with workgroup /
@@ -118,7 +119,7 @@
       try {
         await aws.loadAthenaTables(account.id, db, rq);
       } catch (e) {
-        toasts.error(`Couldn't list tables in ${db}`, e instanceof Error ? e.message : String(e));
+        toastError(`Couldn’t list tables in ${db}`, e);
       } finally {
         tablesLoading = { ...tablesLoading, [db]: false };
       }
@@ -302,7 +303,7 @@
       await awsApi.athenaCancel(account.id, qid, qRegion || undefined);
       toasts.info('Cancel requested');
     } catch (e) {
-      toasts.error('Cancel failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t cancel', e);
     }
   }
 
@@ -355,7 +356,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -383,15 +384,15 @@
           <Icon name="search" size={12} />
           <input type="search" bind:value={treeFilter} placeholder="Filter catalog…" aria-label="Filter catalog" />
         </label>
-        <button class="icon-btn" onclick={() => void loadCatalog()} title="Reload catalog" aria-label="Reload catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
+        <button class="icon-btn" onclick={() => void loadCatalog()} title="Refresh catalog" aria-label="Refresh catalog" disabled={catLoading}><Icon name="refresh" size={12} /></button>
         {#if viewport.isMobile}
           <button class="icon-btn" onclick={() => (treeOpen = false)} aria-label="Hide catalog" title="Hide catalog"><Icon name="x" size={12} /></button>
         {/if}
       </div>
       {#if catLoading && !catalog}
-        <div class="pad" role="status"><p class="load-note">Loading the data catalog…</p><Skeleton rows={6} /></div>
+        <div class="pad"><Skeleton rows={6} label="the data catalog" /></div>
       {:else if catError && !catalog}
-        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't load the catalog" body={awsErrorText(catError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
+        <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t load the catalog" body={awsErrorText(catError)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void loadCatalog()} />
       {:else}
         <ul class="dbs">
           {#each treeDbs as db (db)}
@@ -520,9 +521,9 @@
           <ResultsGrid {result} error={resultError} statement={ranSql} connectionId={null} running={running} oncancel={() => void cancel()} />
         {/if}
       {:else if historyLoading && history.length === 0}
-        <div class="pad" role="status"><p class="load-note">Loading query history…</p><Skeleton rows={6} /></div>
+        <div class="pad"><Skeleton rows={6} label="query history" /></div>
       {:else if historyError}
-        <EmptyState actionKind="secondary" icon="warning" title="Couldn't load query history" body={awsErrorText(historyError)} actionLabel="Retry" onaction={() => void loadHistory()} />
+        <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load query history" body={awsErrorText(historyError)} actionLabel="Retry" onaction={() => void loadHistory()} />
       {:else if history.length === 0}
         <EmptyState icon="clock" title="No recent executions" body={`Nothing has run in workgroup ${workgroup || '—'} lately.`} />
       {:else}
@@ -551,11 +552,6 @@
 </div>
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .ath {
     flex: 1;
     min-height: 0;
@@ -602,7 +598,7 @@
   }
   .tf:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .tf input {
     flex: 1;
@@ -631,7 +627,7 @@
     align-items: center;
     gap: 4px;
     width: 100%;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border: 0;
     background: transparent;
     color: var(--text);
@@ -641,7 +637,7 @@
     font-size: var(--fs-m);
   }
   .node:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .node.cur .nlabel {
     font-weight: 600;
@@ -744,11 +740,11 @@
   .st {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .st.succeeded {
     color: var(--success);
@@ -769,7 +765,7 @@
     gap: 2px;
   }
   .tabs button {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 0;
     border-bottom: 2px solid transparent;
     background: transparent;
@@ -802,7 +798,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -822,7 +818,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);

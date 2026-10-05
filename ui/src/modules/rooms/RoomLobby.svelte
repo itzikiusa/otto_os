@@ -11,6 +11,7 @@
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { parseRoomInvite } from './room-state';
   import { recallRoom } from './room-access';
   import { openHostedRoom } from './room-window';
@@ -22,10 +23,21 @@
   async function openRoom(id: string) {
     opening = id; lastOpened = id; openError = '';
     try { await openHostedRoom(id); }
-    catch (e) { openError = e instanceof Error ? e.message : String(e); }
+    catch (e) { openError = loadErrorText(e); }
     finally { opening = ''; }
   }
   onMount(() => { void load(); });
+  // ⌘K verbs while the lobby is open.
+  $effect(() =>
+    registry.register('rooms', [
+      { id: 'rooms.join', title: 'Join room…', group: 'Rooms', keywords: 'invite link connect session room', run: () => (joinOpen = true) },
+      { id: 'rooms.recaps', title: 'Open recap archives', group: 'Rooms', keywords: 'room recap summary history', run: () => router.go('rooms/recaps') },
+      ...(auth.isRoot ? [{ id: 'rooms.settings', title: 'Room connection settings…', group: 'Rooms', keywords: 'relay host server', run: () => (settingsOpen = true) }] : []),
+      ...rooms.filter((r) => recallRoom(r.room_id)).map((r) => ({
+        id: `rooms.open.${r.room_id}`, title: `Open room ${r.session_title ?? 'Session room'}`, group: 'Rooms', keywords: 'room session', run: () => void openRoom(r.room_id),
+      })),
+    ]),
+  );
   async function load() {
     loading = true; error = '';
     try { rooms = await api.get<RoomSnapshot[]>('/rooms'); }
@@ -47,8 +59,8 @@
   }
 </script>
 <div class="rooms-page">
-  <PageHeader title="Rooms" icon="people" subtitle="Work together in a session">
-    {#snippet actions()}<button class="btn" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
+  <PageHeader title="Rooms" subtitle="Work together in a session">
+    {#snippet actions()}<button class="btn small" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn small" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn small primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
   </PageHeader>
   <PageBody>
     {#if openError}<p role="alert">Couldn’t open the room. {openError} <button class="btn small" disabled={!!opening || !lastOpened} onclick={() => openRoom(lastOpened)}>Retry</button></p>{/if}

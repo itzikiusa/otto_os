@@ -159,7 +159,7 @@
           <select
             class="picker"
             bind:value={selectedRunId}
-            title="Seed the thread with a discovery run's findings"
+            title="Seed the thread with a discovery run’s findings"
           >
             <option value="">New from discovery run…</option>
             {#each discoveryRuns as dr (dr.run.id)}
@@ -182,9 +182,11 @@
       {#if (loading || loadError) && threads.length === 0}
         <LoadState what="threads" variant="compact" loading={loading} error={loadError} empty onretry={() => void loadThreads()} />
       {:else if threads.length === 0}
-        <div class="empty-state">
-          <p>No threads yet.</p>
-        </div>
+        <EmptyState
+          icon="comment"
+          title="No threads yet"
+          body={discoveryRuns.length > 0 ? 'Start one with New thread, or seed it from a discovery run above.' : 'Start one with New thread.'}
+        />
       {:else}
         <div class="thread-list">
           {#each threads as t (t.id)}
@@ -207,7 +209,7 @@
               </button>
               {#if t.status === 'active'}
                 <button
-                  class="archive-btn"
+                  class="archive-btn reveal-on-hover"
                   onclick={() => archiveThread(t.id)}
                   title="Archive this thread"
                   aria-label="Archive thread"
@@ -262,7 +264,7 @@
     flex: 1;
     min-width: 0;
     height: 26px;
-    padding: 0 5px;
+    padding: 0 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
@@ -283,14 +285,14 @@
     display: flex;
     align-items: center;
     border-radius: 0;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
     position: relative;
   }
   .thread-item:hover {
     background: var(--hover);
   }
   .thread-item.active {
-    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    background: var(--accent-soft);
   }
   .thread-item.archived {
     opacity: 0.65;
@@ -325,16 +327,16 @@
   .thread-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .thread-status {
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
+    letter-spacing: .06em;
+    padding: 1px 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .thread-status.status-archived {
@@ -349,7 +351,7 @@
   .archive-btn {
     flex-shrink: 0;
     margin-inline-end: 8px;
-    padding: 2px 7px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -357,29 +359,25 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast);
     white-space: nowrap;
   }
+  /* Revealed on row hover / keyboard focus, and always shown on a touch
+     screen (no hover there) — the shared .reveal-on-hover recipe. */
   .thread-item:hover .archive-btn,
+  .thread-item:focus-within .archive-btn,
   .thread-item.active .archive-btn,
   .archive-btn:focus-visible {
     opacity: 1;
   }
+  @media (hover: none) {
+    .archive-btn {
+      opacity: 1;
+    }
+  }
   .archive-btn:hover {
     background: var(--hover);
     color: var(--text);
-  }
-
-  /* States */
-  .empty-state {
-    padding: 24px 12px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
   }
 
   /* ── Right pane ─────────────────────────────────────────────────────────── */

@@ -13,6 +13,7 @@
   let loading = $state(false);
   let lookupError = $state('');
   let resolvedQuery = $state<string | null>(null);
+  const canCreate = $derived(!loading && !lookupError && resolvedQuery === query && hits.length === 0 && !!query.trim());
 
   $effect(() => {
     if (vault.switcherOpen) {
@@ -86,25 +87,32 @@
         class="vs-input"
         placeholder="Open note… (Shift+Enter creates)"
         aria-label="Open note"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-controls="vs-list"
+        aria-expanded={hits.length > 0 || canCreate}
+        aria-activedescendant={hits.length > 0 ? `vs-opt-${sel}` : canCreate ? 'vs-opt-create' : undefined}
         oninput={() => void refresh(query)}
         onkeydown={onKey}
       />
-      <div class="hits">
-        {#if loading}
-          <div role="status">Searching notes…</div>
-        {:else if lookupError}
-          <div role="alert">Couldn’t search notes. {lookupError}</div>
-          <button class="btn small" onclick={() => void refresh(query)}>Retry</button>
-        {/if}
+      {#if loading}
+        <div role="status">Searching notes…</div>
+      {:else if lookupError}
+        <div role="alert">Couldn’t search notes. {lookupError}</div>
+        <button class="btn small" onclick={() => void refresh(query)}>Retry</button>
+      {/if}
+      <!-- Combobox + listbox: focus stays in the input, ↑/↓ move the active
+           option (aria-activedescendant); options are clickable too. -->
+      <div class="hits" id="vs-list" role="listbox" aria-label="Matching notes">
         {#each hits.slice(0, 30) as h, i (h.path + (h.alias ?? ''))}
-          <button class="hit" class:sel={i === sel} onclick={() => pick(h)}>
+          <button class="hit" class:sel={i === sel} id="vs-opt-{i}" role="option" aria-selected={i === sel} tabindex="-1" onclick={() => pick(h)}>
             <span class="t">{h.alias ?? h.title}</span>
             {#if h.alias}<span class="via">→ {h.title}</span>{/if}
             <span class="p" title={h.path}>{h.path}</span>
           </button>
         {/each}
-        {#if !loading && !lookupError && resolvedQuery === query && hits.length === 0 && query.trim()}
-          <button class="hit create-btn" onclick={() => createFromQuery()}>
+        {#if canCreate}
+          <button class="hit create-btn sel" id="vs-opt-create" role="option" aria-selected="true" tabindex="-1" onclick={() => createFromQuery()}>
             <span class="t">Create “{query.trim()}”</span>
             <span class="p">New note · Enter</span>
           </button>
@@ -131,7 +139,7 @@
   }
   .vs-input:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .hits {
     padding: 6px 0 0;
@@ -145,7 +153,7 @@
     background: none;
     border: none;
     border-radius: var(--radius-s);
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     color: var(--text);
   }

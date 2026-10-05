@@ -108,24 +108,24 @@
   async function generate(): Promise<void> {
     if (generating) return;
     const emailTo = recipientEmail.trim();
-    if (role === 'editor' || emailTo) {
-      const windowLabel = (emailTo ? DURATION_OPTIONS : TTL_OPTIONS).find(
-        (o) => o.secs === (emailTo ? durationSecs : ttlSecs),
-      )?.label;
-      const expiry = windowLabel ? windowLabel.replace(' (max)', '') : 'the chosen time';
-      const can = role === 'editor' ? 'type commands into this terminal' : 'watch this terminal (read-only)';
-      const ok = await confirmOutward({
-        verb: role === 'editor' ? 'Create editor link' : 'Send code',
-        title: role === 'editor' ? 'Create an editor link?' : 'Send the access code?',
-        where: emailTo
-          ? `A share link for this session; a 6-digit code is emailed to ${emailTo}`
-          : 'A new share link for this session (anyone with the URL can open it)',
-        what: `${role === 'editor' ? 'Editor' : 'Viewer'} access — they can ${can}. Expires after ${expiry}; you can revoke it at any time.`,
-        who: emailTo ? `${emailTo}, who must enter the code to attach.` : 'Anyone who gets the link.',
-        danger: role === 'editor',
-      });
-      if (!ok) return;
-    }
+    // Every link is outward-facing (anyone with the URL can watch), so viewer
+    // links confirm too — not only editor and emailed-code links.
+    const windowLabel = (emailTo ? DURATION_OPTIONS : TTL_OPTIONS).find(
+      (o) => o.secs === (emailTo ? durationSecs : ttlSecs),
+    )?.label;
+    const expiry = windowLabel ? windowLabel.replace(' (max)', '') : 'the chosen time';
+    const can = role === 'editor' ? 'type commands into this terminal' : 'watch this terminal (read-only)';
+    const ok = await confirmOutward({
+      verb: emailTo ? 'Send code' : role === 'editor' ? 'Create editor link' : 'Create viewer link',
+      title: emailTo ? 'Send the access code?' : role === 'editor' ? 'Create an editor link?' : 'Create a viewer link?',
+      where: emailTo
+        ? `A share link for this session; a 6-digit code is emailed to ${emailTo}`
+        : 'A new share link for this session (anyone with the URL can open it)',
+      what: `${role === 'editor' ? 'Editor' : 'Viewer'} access — they can ${can}. Expires after ${expiry}; you can revoke it at any time.`,
+      who: emailTo ? `${emailTo}, who must enter the code to attach.` : 'Anyone who gets the link.',
+      danger: role === 'editor',
+    });
+    if (!ok) return;
     generating = true;
     mintedUrl = null;
     mintedToken = null;
@@ -168,7 +168,7 @@
       await copyTextOrThrow(mintedUrl);
       toasts.success('Link copied', 'The share link is in your clipboard.');
     } catch {
-      toasts.error('Copy failed', 'Could not access clipboard.');
+      toasts.error('Couldn’t copy the link', 'The clipboard isn’t available.');
     }
   }
 
@@ -204,7 +204,7 @@
     if (revokingAll || shares.length === 0) return;
     const n = shares.length;
     const ok = await confirmer.ask(
-      `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and the link${n === 1 ? '' : 's'} can't be used again.`,
+      `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and ${n === 1 ? 'the link' : 'the links'} can’t be used again.`,
       { title: 'Revoke share links', confirmLabel: n === 1 ? 'Revoke link' : `Revoke ${n} links` },
     );
     if (!ok) return;
@@ -280,9 +280,8 @@
         <div class="sm-sender-warn">
           <Icon name="warning" size={12} />
           No verified email sender.
-          <!-- svelte-ignore a11y_invalid_attribute -->
           <a
-            href="#"
+            href="#/settings/sharing"
             onclick={(e) => { e.preventDefault(); onclose(); router.go('settings/sharing'); }}
           >
             Set one up in Settings → Sharing
@@ -446,7 +445,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sm-optional {
@@ -458,7 +457,7 @@
   .sm-sender-warn {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--warning);
     padding: 4px 0;
@@ -480,7 +479,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
-    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 10px;
     margin: 0;
@@ -495,13 +494,13 @@
     border-radius: var(--radius-m);
     color: var(--text);
     font-size: var(--fs-m);
-    padding: 7px 10px;
+    padding: 6px 10px;
     appearance: auto;
   }
   .sm-select:focus,
   .sm-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .sm-generate {
     align-self: flex-start;
@@ -537,9 +536,9 @@
     flex-shrink: 0;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
-    padding: 5px 10px;
+    padding: 4px 10px;
   }
   .sm-qr-wrap {
     display: flex;
@@ -559,7 +558,7 @@
   .sm-role-note {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     margin: 0;
@@ -578,7 +577,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sm-spacer {
@@ -630,7 +629,7 @@
     font-size: var(--fs-s);
   }
   .sm-share-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .sm-share-info {
     display: flex;
@@ -658,8 +657,8 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 1px 5px;
+    letter-spacing: .06em;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 15%, transparent);
     color: var(--text-dim);
@@ -681,7 +680,7 @@
   }
   .sm-revoke-btn {
     font-size: var(--fs-xs);
-    padding: 3px 8px;
+    padding: 2px 8px;
     color: var(--danger);
     border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   }

@@ -97,7 +97,7 @@
       fBaseUrl = savedBaseUrl = v;
       toasts.success('Public link domain saved', v ? 'New share links use this domain.' : 'Share links use the request host again.');
     } catch (e) {
-      toasts.error("Couldn't save the public link domain", loadErrorText(e));
+      toasts.error("Couldn’t save the public link domain", loadErrorText(e));
     } finally {
       savingBaseUrl = false;
     }
@@ -125,7 +125,7 @@
         toasts.warn('Saved — SMTP unverified', 'The error is shown under the sender address.');
       }
     } catch (e) {
-      toasts.error("Couldn't save the email sender", loadErrorText(e));
+      toasts.error("Couldn’t save the email sender", loadErrorText(e));
     } finally {
       saving = false;
     }
@@ -145,7 +145,7 @@
         toasts.warn('SMTP still unverified', 'The error is shown under the sender address.');
       }
     } catch (e) {
-      toasts.error("Couldn't verify the email sender", loadErrorText(e));
+      toasts.error("Couldn’t verify the email sender", loadErrorText(e));
     } finally {
       verifying = false;
     }
@@ -170,7 +170,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('sharing')} subtitle="Emails one-time codes to guests of shared sessions" />
   <PageBody width="readable">
-  <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest's mailbox.</SectionIntro>
+  <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest’s mailbox.</SectionIntro>
 
   <!-- ── Gmail sender: status + setup form in one card ── -->
   <div class="section-title">Gmail sender</div>
@@ -268,9 +268,8 @@
   <div class="section-title">Public link domain</div>
   <div class="card s-card">
     {#if baseUrlError}
-      <div class="inline-error" role="alert">
-        <span>Couldn't read the saved domain: {baseUrlError}</span>
-        <button class="btn small" onclick={() => void loadBaseUrl()}>Retry</button>
+      <div class="domain-error">
+        <LoadState variant="compact" what="the saved domain" error={baseUrlError} empty onretry={() => void loadBaseUrl()} />
       </div>
     {/if}
     <div class="field">
@@ -394,13 +393,8 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .inline-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
+  .domain-error {
     margin-bottom: 10px;
-    font-size: var(--fs-s);
-    color: var(--danger);
   }
   .smtp-error {
     margin-top: 10px;

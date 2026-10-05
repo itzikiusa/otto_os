@@ -6,6 +6,7 @@ import { api, isDirtyGitRefusal } from '../../lib/api/client';
 import type { PullMode, PullReq, PullResp, RepoStatusResp } from '../../lib/api/types';
 import { toasts } from '../../lib/toast.svelte';
 import { confirmer } from '../../lib/confirm.svelte';
+import { plural } from '../../lib/plural';
 
 /** Apply a pull response: propagate the status, then say what happened.
  *  A pull whose merge conflicted comes back 200 with unmerged paths (the daemon
@@ -18,7 +19,7 @@ export function reportPull(r: PullResp, onstatus: (s: RepoStatusResp) => void): 
     toasts.warn(
       'Pulled with conflicts',
       r.note ??
-        `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts"`,
+        `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts"`,
     );
   } else {
     toasts.success('Pulled', r.note ?? undefined);
@@ -60,6 +61,6 @@ export async function runPull(
       if (ok) await runPull(repoId, onstatus, { ...opts, autoStash: true });
       return;
     }
-    toasts.error('Pull failed', msg);
+    toasts.error('Couldn’t pull', msg);
   }
 }

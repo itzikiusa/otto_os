@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpTokensApi } from '../../lib/api/mcp';
-  import { api, baseUrl } from '../../lib/api/client';
+  import { api, ApiError, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -49,11 +50,17 @@
     }
   }
 
+  /** The owner list failed to load: the picker falls back to "Me" and says why. */
+  let usersError = $state<string | null>(null);
   async function loadUsers(): Promise<void> {
     try {
       users = await api.get<User[]>('/users');
-    } catch {
+      usersError = null;
+    } catch (e) {
       users = [];
+      // Only the owner may list users (403 otherwise): then "Me" is the whole
+      // list by design, not a failure.
+      usersError = e instanceof ApiError && e.status === 403 ? null : loadErrorText(e);
     }
   }
 
@@ -136,7 +143,7 @@
     const toolPart =
       scope.tools == null
         ? 'all tools'
-        : `${scope.tools.length} tool${scope.tools.length === 1 ? '' : 's'}`;
+        : `${plural(scope.tools.length, 'tool')}`;
     const writePart = scope.allow_writes ? 'read + write' : 'read-only';
     const wsPart = scope.workspace_id ? ' • 1 workspace' : '';
     return `${toolPart} • ${writePart}${wsPart}`;
@@ -151,7 +158,7 @@
       await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
-      toasts.error('Copy failed', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', 'Select and copy manually.');
     }
   }
 
@@ -209,28 +216,35 @@
   {#if showCreate}
     <div class="create">
       <div class="frow">
-        <label class="fld">
-          <span class="lbl">Owner</span>
-          <select class="inp" bind:value={fOwner}>
+        <!-- The Retry sits beside the select, not inside its label. -->
+        <div class="field tok-field">
+          <label for="mcp-token-owner">Owner</label>
+          <select id="mcp-token-owner" class="input" bind:value={fOwner} aria-describedby={usersError ? 'mcp-token-owner-err' : undefined}>
             <option value="">Me ({auth.me?.username ?? 'self'})</option>
             {#each users as u (u.id)}
               <option value={u.id}>{u.username}</option>
             {/each}
           </select>
-        </label>
-        <label class="fld">
-          <span class="lbl">Label</span>
-          <input class="inp" placeholder="e.g. ci-readonly" bind:value={fLabel} />
-        </label>
-        <label class="fld">
-          <span class="lbl">Workspace pin (optional)</span>
-          <select class="inp" bind:value={fWorkspace}>
+          {#if usersError}
+            <span class="hint tok-note" id="mcp-token-owner-err">
+              Couldn’t load other users — the token can only be yours.
+              <button type="button" class="btn small ghost" onclick={() => void loadUsers()}>Retry</button>
+            </span>
+          {/if}
+        </div>
+        <div class="field tok-field">
+          <label for="mcp-token-label">Label</label>
+          <input id="mcp-token-label" class="input" placeholder="ci-readonly" bind:value={fLabel} />
+        </div>
+        <div class="field tok-field">
+          <label for="mcp-token-workspace">Workspace pin (optional)</label>
+          <select id="mcp-token-workspace" class="input" bind:value={fWorkspace}>
             <option value="">Any workspace</option>
             {#each ws.workspaces as workspace (workspace.id)}
               <option value={workspace.id}>{workspace.name}</option>
             {/each}
           </select>
-        </label>
+        </div>
       </div>
       <label class="chk">
         <input type="checkbox" bind:checked={fAllowWrites} />
@@ -276,7 +290,7 @@
     {#if tokensError && !tokens.length}
       <LoadState what="MCP tokens" variant="compact" error={tokensError} empty onretry={() => void loadTokens()} />
     {:else if !tokens.length}
-      <p class="muted small pad">{tokensLoaded ? 'No MCP tokens yet.' : 'Loading…'}</p>
+      <p class="muted small pad">{tokensLoaded ? 'No MCP tokens yet.' : 'Loading MCP tokens…'}</p>
     {:else}
       {#each tokens as tokenInfo (tokenInfo.id)}
         <div
@@ -323,7 +337,7 @@
     margin: 4px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .create {
@@ -340,23 +354,16 @@
     gap: 12px;
     flex-wrap: wrap;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .tok-field {
     flex: 1 1 160px;
+    margin-block-end: 0;
   }
-  .lbl {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
-  .inp {
-    font-size: var(--fs-s);
-    padding: 5px 9px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--bg);
-    color: var(--text);
+  .hint.tok-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    color: var(--warning);
   }
   .chk {
     display: flex;
@@ -378,7 +385,7 @@
   .pick-grp {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .grp-name {
     font-size: var(--fs-s);
@@ -388,7 +395,7 @@
   .ptool {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-s);
     color: var(--text);
   }
@@ -399,7 +406,7 @@
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 16%, transparent);
     border-radius: var(--radius-s);
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .cactions {
     display: flex;
@@ -449,7 +456,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 9px 12px;
+    padding: 8px 12px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .tok-row:last-child {
@@ -486,9 +493,6 @@
   }
   .pad {
     padding: 16px;
-  }
-  .btn.danger {
-    color: var(--danger);
   }
 
   @media (max-width: 640px) {

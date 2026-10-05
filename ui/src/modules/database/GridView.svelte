@@ -867,8 +867,9 @@
                   <span class="th-type">{c.type_hint ?? ' '}</span>
                 </span>
               </button>
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Pointer-only refinement: columns size to their content by default (double-click restores that). -->
               <span
+                role="presentation"
                 class="th-resize"
                 class:active={dragName === c.name}
                 title="Drag to resize · double-click to fit"
@@ -897,7 +898,7 @@
                 type="text"
                 spellcheck="false"
                 autocomplete="off"
-                placeholder="filter"
+                placeholder="Filter…"
                 value={colFilters[ci] ?? ''}
                 aria-label="Filter {c.name}"
                 title="Contains · =exact · >n <n · NULL · !NULL"
@@ -1096,7 +1097,7 @@
   .th-line {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
   th.num .th-line {
@@ -1118,7 +1119,7 @@
     line-height: 1;
     color: var(--text-dim);
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .th-sort:hover .th-sort-ind {
     opacity: 0.6;
@@ -1161,7 +1162,7 @@
     position: absolute;
     top: 6px;
     bottom: 6px;
-    left: 3px;
+    inset-inline-start: 3px;
     width: 1px;
     background: transparent;
   }
@@ -1202,7 +1203,7 @@
   }
   .col-filter:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .grid :global(td) {
     padding: 4px 10px;
@@ -1276,7 +1277,7 @@
   }
   .grid tbody tr.odd td.rownum,
   .grid tbody tr:not(.spacer):hover td.rownum {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .grid thead .rownum {
     z-index: 3;
@@ -1347,7 +1348,7 @@
     color: var(--text-dim);
     font-style: italic;
     font-size: var(--fs-xs);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .grid :global(.cell.bool) {
     color: var(--text);
@@ -1404,18 +1405,22 @@
   }
   .grid :global(.cell-expand:hover) {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .grid :global(.cell.editable) {
     cursor: text;
   }
   .grid :global(.cell.editable:hover) {
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+    box-shadow: inset 0 0 0 1px var(--accent-line);
   }
   .grid :global(.cell.editing) {
     padding: 0;
     background: var(--surface) !important;
     box-shadow: inset 0 0 0 1.5px var(--accent);
+  }
+  /* The editor input drops its outline for an inset ring of its own. */
+  .grid :global(.cell-input:focus-visible) {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   /* A parked (pending) cell draft: visibly different until reviewed & applied. */
   .grid :global(.cell.dirty) {
@@ -1427,7 +1432,7 @@
   .grid :global(.cell-input) {
     width: 100%;
     height: 100%;
-    border: none;
+    border: none; /* ui-guards: allow (next line) — ring: .cell-input:focus-visible below; the guard can’t see into :global */
     outline: none;
     background: transparent;
     color: var(--text);
@@ -1438,7 +1443,7 @@
     opacity: 0.6;
   }
   .grid :global(td mark) {
-    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--accent-line);
     color: var(--text);
     border-radius: 2px;
   }

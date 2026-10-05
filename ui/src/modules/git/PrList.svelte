@@ -174,8 +174,8 @@
       class="input pr-search"
       type="search"
       bind:value={query}
-      placeholder="Search title, author, branch…"
-      aria-label="Search pull requests"
+      placeholder="Filter by title, author, branch…"
+      aria-label="Filter pull requests"
     />
     <span class="grow"></span>
     <!-- While the list is empty the empty state carries the one "New" CTA. -->
@@ -236,9 +236,9 @@
     {#if hasMore}
       <div class="pr-more">
         <button class="btn small" disabled={loadingMore} onclick={loadMore}>
-          {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
+          {loadingMore ? 'Loading more pull requests…' : moreError ? 'Retry' : 'Load more'}
         </button>
-        {#if moreError}<span class="pr-more-err" role="status">Couldn't load more: {moreError}</span>{/if}
+        {#if moreError}<span class="pr-more-err" role="status">Couldn’t load more: {moreError}</span>{/if}
       </div>
     {/if}
   {/if}
@@ -327,7 +327,7 @@
     text-align: start;
     padding: 10px 14px;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .pr-row:hover {
     border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
@@ -344,7 +344,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 5px;
+    margin-top: 4px;
     font-size: var(--fs-xs);
   }
   /* source→target separator mirrors in place under RTL. */

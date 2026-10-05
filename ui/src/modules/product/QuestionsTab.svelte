@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // Questions tab — filters by status/category; inline edit, answer/discard,
   // delete, add question; multi-select + post to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
@@ -159,7 +161,7 @@
       await product.updateQuestion(editingId, req);
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save question', product.errMsg(e));
+      toastError('Couldn’t save question', e);
     } finally {
       savingId = null;
     }
@@ -176,7 +178,7 @@
       await product.updateQuestion(answeringId, req);
       answeringId = null;
     } catch (e) {
-      toasts.error('Could not save answer', product.errMsg(e));
+      toastError('Couldn’t save answer', e);
     } finally {
       savingId = null;
     }
@@ -187,7 +189,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'discarded' });
     } catch (e) {
-      toasts.error('Could not discard question', product.errMsg(e));
+      toastError('Couldn’t discard question', e);
     } finally {
       savingId = null;
     }
@@ -199,7 +201,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'open' });
     } catch (e) {
-      toasts.error('Could not reopen question', product.errMsg(e));
+      toastError('Couldn’t reopen question', e);
     } finally {
       savingId = null;
     }
@@ -225,7 +227,7 @@
       await product.deleteQuestion(q.id);
       selectedIds = new Set([...selectedIds].filter((id) => id !== q.id));
     } catch (e) {
-      toasts.error('Could not delete question', product.errMsg(e));
+      toastError('Couldn’t delete question', e);
     } finally {
       deletingId = null;
     }
@@ -245,7 +247,7 @@
       addOpen = false;
       toasts.success('Question added');
     } catch (e) {
-      toasts.error('Could not add question', product.errMsg(e));
+      toastError('Couldn’t add question', e);
     } finally {
       addWorking = false;
     }
@@ -264,7 +266,7 @@
     const n = ids.length;
     const ok = await confirmOutward({
       verb: 'Post comment',
-      title: `Post ${n} question${n !== 1 ? 's' : ''} to ${postTarget}?`,
+      title: `Post ${plural(n, 'question')} to ${postTarget}?`,
       where: isJira
         ? `Jira ${story?.source_key ?? ''} “${story?.title ?? ''}” — as one comment`
         : `Confluence page “${story?.title ?? ''}” — as one comment`,
@@ -276,9 +278,9 @@
     try {
       await product.postQuestions({ ids });
       selectedIds = new Set();
-      toasts.success(`Posted ${ids.length} question${ids.length !== 1 ? 's' : ''}`);
+      toasts.success(`Posted ${plural(ids.length, 'question')}`);
     } catch (e) {
-      toasts.error('Post failed', product.errMsg(e));
+      toastError('Couldn’t post the questions', e);
     } finally {
       postingIds = false;
     }
@@ -372,7 +374,7 @@
             onchange={toggleSelectAll}
           />
           <span class="sel-count">
-            {selectedIds.size > 0 ? `${selectedIds.size} selected` : `${filtered.length} question${filtered.length !== 1 ? 's' : ''}`}
+            {selectedIds.size > 0 ? `${selectedIds.size} selected` : `${plural(filtered.length, 'question')}`}
           </span>
         </label>
       </div>
@@ -399,12 +401,14 @@
                     class="edit-text"
                     bind:value={editText}
                     rows={3}
-                    placeholder="Question text"
+                    aria-label="Question"
+                    placeholder="e.g. Does the limit reset weekly or on a rolling 7 days?"
                   ></textarea>
                   <input
                     class="edit-input"
                     bind:value={editRationale}
-                    placeholder="Rationale (optional)"
+                    aria-label="Rationale (optional)"
+                    placeholder="e.g. Changes how we store the reset date"
                   />
                   <select class="edit-sel" bind:value={editCategory}>
                     <option value="scope">Scope</option>
@@ -482,7 +486,8 @@
                   class="edit-text"
                   bind:value={answerText}
                   rows={3}
-                  placeholder="Write answer or additional context…"
+                  aria-label="Answer"
+                  placeholder="e.g. Yes — limits apply per brand, confirmed with compliance"
                 ></textarea>
                 <div class="edit-actions">
                   <button
@@ -512,7 +517,7 @@
               class="form-textarea"
               bind:value={newText}
               rows={3}
-              placeholder="What needs clarification?"
+              placeholder="e.g. Does the limit reset weekly or on a rolling 7 days?"
               disabled={addWorking}
             ></textarea>
           </label>
@@ -520,7 +525,7 @@
             <input
               class="form-input"
               bind:value={newRationale}
-              placeholder="Why is this question important?"
+              placeholder="e.g. Changes how we store the reset date"
               disabled={addWorking}
             />
           </label>
@@ -628,7 +633,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transition: border-color 100ms;
+    transition: border-color var(--dur-fast);
   }
   .q-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
@@ -649,7 +654,7 @@
   }
   .q-cb {
     flex-shrink: 0;
-    margin-top: 3px;
+    margin-top: 2px;
     accent-color: var(--accent);
     cursor: pointer;
   }
@@ -660,7 +665,7 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .q-top {
     display: flex;
@@ -681,7 +686,7 @@
   .q-chips {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
   }
   .q-rationale {
@@ -695,7 +700,7 @@
     color: var(--text);
     line-height: 1.45;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    background: var(--accent-faint);
     border-inline-start: 3px solid var(--accent);
     border-radius: 0 var(--radius-s) var(--radius-s) 0;
   }
@@ -767,7 +772,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     font-family: inherit;
   }
   .edit-sel {
@@ -802,11 +807,11 @@
   .form-label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .req {
@@ -835,7 +840,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 5px 8px;
+    padding: 4px 8px;
     align-self: flex-start;
   }
 

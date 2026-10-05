@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Per-session agent activity: a normalized task tracker + a live trail of
   // what's going on (skills loaded, commands run, files touched, prompts,
   // notes) — by user and by agent. Fed by REST load + the events WS.
@@ -15,6 +16,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
 
   const session = $derived(ws.activeSession);
@@ -160,13 +162,6 @@
     return s === 'user' ? 'you' : s === 'otto' ? 'otto' : 'agent';
   }
 
-  function onRowKeydown(e: KeyboardEvent, id: string): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      toggle(id);
-    }
-  }
-
   function pretty(detail: unknown): string {
     try {
       return JSON.stringify(detail, null, 2);
@@ -186,13 +181,16 @@
   <div class="activity">
     {#if loadError}
       <!-- The trail + tasks didn't load: say so (an empty board would read as
-           "the agent has done nothing"), with Retry. -->
-      <div class="load-error" role="alert">
-        <Icon name="warning" size={14} />
-        <span class="grow">Couldn't load this session's activity. {loadError}</span>
-        <button class="btn small" onclick={() => session && wsId && void activity.load(wsId, session.id, true)}>
-          <Icon name="refresh" size={12} /> Retry
-        </button>
+           "the agent has done nothing"), with Retry — inline when nothing is
+           loaded, a slim stale bar over what is. -->
+      <div class="load-state">
+        <LoadState
+          what="this session’s activity"
+          variant="compact"
+          error={loadError}
+          empty={tasks.length === 0 && trail.length === 0}
+          onretry={() => session && wsId && void activity.load(wsId, session.id, true)}
+        />
       </div>
     {/if}
     <!-- Task tracker ------------------------------------------------------- -->
@@ -273,10 +271,10 @@
               <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
               <span class="task-title">{t.title}</span>
               {#if t.source === 'user'}
-                <span class="badge board" title="Added from the board / Activity panel">From board</span>
+                <Badge tone="accent" label="From board" title="Added from the board / Activity panel" />
               {/if}
               {#if t.nudge_pending}
-                <span class="badge queued" title="Waiting to be handed to the agent">Queued</span>
+                <Badge tone="warn" label="Queued" title="Waiting to be handed to the agent" />
               {/if}
             </li>
           {/each}
@@ -313,7 +311,7 @@
       <div class="note-add">
         <input
           class="note-input"
-          placeholder="Add a note to this session…"
+          placeholder="Waiting on the staging deploy"
           aria-label="Note"
           bind:value={note}
           onkeydown={onNoteKeydown}
@@ -338,28 +336,30 @@
         <ul class="trail">
           {#each filtered as e (e.id)}
             <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
-              <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events, a11y_no_noninteractive_tabindex -->
-              <div
-                class="row-main"
-                class:clickable={e.detail != null}
-                role={e.detail != null ? 'button' : undefined}
-                tabindex={e.detail != null ? 0 : undefined}
-                aria-expanded={e.detail != null ? !!expanded[e.id] : undefined}
-                onclick={() => e.detail != null && toggle(e.id)}
-                onkeydown={(ev) => e.detail != null && onRowKeydown(ev, e.id)}
-              >
+              {#snippet rowMain()}
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
-                <div class="row-body">
-                  <div class="row-summary">{e.summary}</div>
-                  <div class="row-meta">
+                <span class="row-body">
+                  <span class="row-summary">{e.summary}</span>
+                  <span class="row-meta">
                     <span class="row-src">{sourceLabel(e.source)}</span>
                     <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
                       <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
                     {/if}
-                  </div>
-                </div>
-              </div>
+                  </span>
+                </span>
+              {/snippet}
+              <!-- Only a row with detail is a control (it expands); the rest is plain text. -->
+              {#if e.detail != null}
+                <button
+                  type="button"
+                  class="row-main clickable"
+                  aria-expanded={!!expanded[e.id]}
+                  onclick={() => toggle(e.id)}
+                >{@render rowMain()}</button>
+              {:else}
+                <div class="row-main">{@render rowMain()}</div>
+              {/if}
               {#if e.detail != null && expanded[e.id]}
                 <pre class="row-detail mono">{pretty(e.detail)}</pre>
               {/if}
@@ -397,7 +397,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .count {
@@ -406,7 +406,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .empty-line {
     font-size: var(--fs-xs);
@@ -427,7 +427,7 @@
   .add-task-btn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     height: 18px;
     padding: 0 6px;
     border: 1px solid var(--border);
@@ -448,7 +448,7 @@
   .task-add {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 2px 0 4px;
   }
   .task-input {
@@ -466,7 +466,7 @@
   }
   .task-input:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .task-input.desc {
     min-height: 34px;
@@ -496,25 +496,6 @@
     opacity: 0.5;
     cursor: default;
   }
-  .badge {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    border-radius: 999px;
-    padding: 0 5px;
-    line-height: 14px;
-    align-self: center;
-  }
-  .badge.board {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .badge.queued {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
-  }
   .task.nudge-pending .task-glyph {
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
@@ -532,7 +513,7 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width 200ms ease-out;
+    /* Data-driven width: no transition (foundations §8). */
   }
   .tasks {
     list-style: none;
@@ -544,12 +525,12 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .task {
     display: flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-s);
     line-height: 1.35;
   }
@@ -599,7 +580,7 @@
   }
   .tab {
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -608,7 +589,7 @@
     cursor: pointer;
   }
   .tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tab.on {
     background: var(--surface-2);
@@ -624,12 +605,12 @@
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     outline: none;
   }
   .search:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* Note input */
@@ -650,7 +631,7 @@
   }
   .note-input:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .note-btn {
     flex-shrink: 0;
@@ -693,13 +674,20 @@
   }
   .row-main.clickable {
     cursor: pointer;
+    /* A real <button>: reset it to the row's look. */
+    inline-size: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
   }
   .row-main.clickable:focus-visible {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .row-main:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row-icon {
     flex-shrink: 0;
@@ -719,10 +707,12 @@
     color: var(--danger);
   }
   .row-body {
+    display: block;
     min-width: 0;
     flex: 1;
   }
   .row-summary {
+    display: block;
     font-size: var(--fs-s);
     line-height: 1.35;
     color: var(--text);
@@ -748,7 +738,7 @@
   .row-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .src-user .row-src {
@@ -771,23 +761,7 @@
     max-height: 220px;
     overflow: auto;
   }
-  .load-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-block-end: 10px;
-    padding: 8px 10px;
-    border-radius: var(--radius-m);
-    background: var(--danger-soft);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .load-error > :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
-  }
-  .load-error .grow {
-    flex: 1;
-    min-width: 0;
+  .load-state {
+    margin-block-end: 8px;
   }
 </style>

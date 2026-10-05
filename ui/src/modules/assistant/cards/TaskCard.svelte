@@ -2,7 +2,7 @@
   // A longer job the assistant took on, with its LIVE state (queued → running
   // → needs you → done / failed), what it is doing now, and Stop while it runs.
   import ActionCard from './ActionCard.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { assistant, describeError } from '../../../lib/stores/assistant.svelte';
   import { rel } from '../../../lib/stores/now.svelte';
@@ -33,9 +33,9 @@
   }
 </script>
 
-<ActionCard icon="check" kind={TASK_KIND[task.kind] ?? 'Task'} summary={task.title} attention={task.state === 'needs_you'} testid="card-task">
+<ActionCard icon="check" heading={TASK_KIND[task.kind] ?? 'Task'} summary={task.title} attention={task.state === 'needs_you'} testid="card-task">
   {#snippet pill()}
-    <StatePill tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
+    <Badge tone={taskTone(task)} label={taskStateLabel(task)} live={task.state === 'running'} />
   {/snippet}
   {#if task.detail}<p class="detail">{task.detail}</p>{/if}
   {#if summary && task.state !== 'running'}<p class="detail">{summary}</p>{/if}

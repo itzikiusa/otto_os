@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluralNoun } from '../../lib/plural';
   // Create / edit one policy-as-code rule. `match` is the matcher object
   // (all fields optional, AND-combined): server_id, server_name, tool, tool_glob,
   // risk_label, min_injection_risk, mutating, direction, caller_kind,
@@ -46,11 +47,13 @@
   ] as const;
   const matchKeysText = matchKeys.join(', ');
   let matchError = $state<string | null>(null);
+  /** Inline validation, next to the field (never a toast). */
+  let nameError = $state<string | null>(null);
   let saving = $state(false);
 
   async function save(): Promise<void> {
     if (!name.trim()) {
-      toasts.error('A policy name is required');
+      nameError = 'Give the policy a name.';
       return;
     }
     let match: unknown = {};
@@ -71,7 +74,7 @@
       (key) => !matchKeys.includes(key as (typeof matchKeys)[number]),
     );
     if (unknownKeys.length) {
-      matchError = `Unknown match key${unknownKeys.length === 1 ? '' : 's'}: ${unknownKeys.join(', ')}. Allowed keys: ${matchKeysText}.`;
+      matchError = `Unknown ${pluralNoun(unknownKeys.length, 'match key')}: ${unknownKeys.join(', ')}. Allowed keys: ${matchKeysText}.`;
       return;
     }
     saving = true;
@@ -111,17 +114,23 @@
   <div class="form">
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="e.g. Approve all dangerous writes" />
+      <input
+        bind:value={name}
+        placeholder="Approve all dangerous writes"
+        aria-invalid={nameError != null}
+        oninput={() => (nameError = null)}
+      />
+      {#if nameError}<span class="field-error" role="alert">{nameError}</span>{/if}
     </label>
 
     <div class="row3">
       <label class="field">
         <span>Effect</span>
         <select bind:value={effect}>
-          <option value="allow">allow</option>
-          <option value="deny">deny</option>
-          <option value="require_approval">require_approval</option>
-          <option value="require_dry_run">require_dry_run</option>
+          <option value="allow">Allow</option>
+          <option value="deny">Deny</option>
+          <option value="require_approval">Require approval</option>
+          <option value="require_dry_run">Require dry run</option>
         </select>
       </label>
       <label class="field">
@@ -200,7 +209,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 7px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
   }
   textarea {

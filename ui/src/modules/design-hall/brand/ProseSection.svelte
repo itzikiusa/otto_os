@@ -212,7 +212,7 @@
     outline: none;
   }
   .line:focus-visible {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow: 0 0 0 2px var(--accent-line-strong);
     border-radius: var(--radius-s);
   }
   .add {

@@ -97,7 +97,7 @@ use `rgba(0,0,0,…)`), but each one needs a reason.
 - [ ] Font sizes come from `--fs-*`. Nothing a user must read is under 11 px.
       Weights are 400, 500 or 600.
 - [ ] Spacing is on the 4 px grid. Radius uses `--radius-s/m/l` or pill.
-      `--shadow` only on floating layers.
+      `--glass-shadow` only on floating layers.
 - [ ] Icons: `Icon` with a typed name, sizes 12/14/16 (24–26 only in empty
       states), no glyph characters as icons, `ProviderIcon` for providers.
 - [ ] Any animation has a `prefers-reduced-motion` override. Continuous

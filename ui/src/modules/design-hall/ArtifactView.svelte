@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from './tabKeys';
   // One design, open (canvas/studio archetype):
   //
@@ -353,7 +355,7 @@
       if (!res.created) toasts.info('No changes to save', 'The content matches the current version.');
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) await resolveConflict(named ? message : undefined);
-      else toasts.error('Couldn’t save the design', e instanceof Error ? e.message : String(e));
+      else toastError('Couldn’t save the design', e);
     } finally {
       saving = false;
     }
@@ -368,8 +370,8 @@
     const r = res.links;
     if (r.broken.length || r.cycles.length) {
       const parts: string[] = [];
-      if (r.broken.length) parts.push(`${r.broken.length} broken otto://design reference${r.broken.length === 1 ? '' : 's'}`);
-      if (r.cycles.length) parts.push(`${r.cycles.length} embed${r.cycles.length === 1 ? '' : 's'} skipped (would loop)`);
+      if (r.broken.length) parts.push(plural(r.broken.length, 'broken otto://design reference'));
+      if (r.cycles.length) parts.push(`${plural(r.cycles.length, 'embed')} skipped (would loop)`);
       toasts.warn('Saved with link problems', parts.join(' · '));
     }
     void loadLinks();
@@ -420,7 +422,7 @@
         }
         void loadVersions();
       } catch (e) {
-        toasts.error('Couldn’t save the design', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t save the design', e);
       }
     }
   }
@@ -464,7 +466,7 @@
       toasts.success(`Restored v${seq} as v${res.version.seq}`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) toasts.error('Couldn’t restore', 'The design changed meanwhile. Reload and try again.');
-      else toasts.error('Couldn’t restore', e instanceof Error ? e.message : String(e));
+      else toastError('Couldn’t restore', e);
     }
   }
 
@@ -492,7 +494,7 @@
       const a = await api.updateArtifact(id, { status: s });
       if (detail) detail = { ...detail, artifact: a };
     } catch (e) {
-      toasts.error(`Couldn’t move to ${statusLabel(s)}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t move to ${statusLabel(s)}`, e);
     }
   }
 
@@ -501,7 +503,7 @@
     const followers = split.usedIn.filter((r) => r.link.policy === 'follow_approved').length;
     const ok = await confirmer.ask(
       `Approve v${head.seq} of “${artifact.title}”?` +
-        (followers ? ` ${followers} design${followers === 1 ? '' : 's'} that follow its approved version will update to v${head.seq}.` : ''),
+        (followers ? ` ${plural(followers, 'design')} that follow its approved version will update to v${head.seq}.` : ''),
       { title: 'Approve design', confirmLabel: `Approve v${head.seq}`, danger: false },
     );
     if (!ok) return;
@@ -511,12 +513,12 @@
       const follow = split.usedIn.filter((r) => r.link.policy === 'follow_approved').map((r) => r.label);
       const pinned = split.usedIn.filter((r) => r.link.policy === 'pinned').map((r) => r.label);
       const parts = [
-        follow.length ? `${follow.join(', ')} follow${follow.length === 1 ? 's' : ''} Approved → now shows v${head.seq}` : '',
-        pinned.length ? `${pinned.join(', ')} pin${pinned.length === 1 ? 's' : ''} an older version (update available)` : '',
+        follow.length ? `${follow.join(', ')} ${follow.length === 1 ? 'follows' : 'follow'} Approved → now shows v${head.seq}` : '',
+        pinned.length ? `${pinned.join(', ')} ${pinned.length === 1 ? 'pins' : 'pin'} an older version (update available)` : '',
       ].filter(Boolean);
       toasts.success(`Approved v${head.seq}`, parts.join(' · ') || undefined);
     } catch (e) {
-      toasts.error('Couldn’t approve', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t approve', e);
     }
   }
 
@@ -529,7 +531,7 @@
       const a = await api.updateArtifact(id, { title: t });
       if (detail) detail = { ...detail, artifact: a };
     } catch (e) {
-      toasts.error('Couldn’t rename', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -546,7 +548,7 @@
       if (detail) detail = { ...detail, artifact: a };
       void library.load();
     } catch (e) {
-      toasts.error('Couldn’t move the design', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move the design', e);
     }
   }
 
@@ -570,7 +572,7 @@
       });
       router.go(`design/a/${encodeURIComponent(res.artifact.id)}`);
     } catch (e) {
-      toasts.error('Couldn’t make a copy', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t make a copy', e);
     }
   }
 
@@ -586,7 +588,7 @@
       toasts.success('Design archived');
       router.go('design');
     } catch (e) {
-      toasts.error('Couldn’t archive', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t archive', e);
     }
   }
 

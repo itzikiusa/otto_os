@@ -2,6 +2,7 @@
 // Module-local types — not added to ui/src/lib/api/types.ts per task boundary.
 
 import { api } from '../../lib/api/client';
+import { sentenceCase } from '../../lib/labels';
 
 // ---------------------------------------------------------------------------
 // DTO types (mirror crates/otto-server/src/routes/capabilities.rs)
@@ -77,19 +78,35 @@ export function statusClass(s: CapabilityStatus): string {
   }
 }
 
-/** Feature slug → human-readable label. */
+/** Feature slug → human-readable label (sentence case). */
 export function featureLabel(slug: string): string {
   const map: Record<string, string> = {
-    sessions: 'Agent Sessions',
-    lsp: 'Language Servers (LSP)',
-    mcp: 'MCP Servers',
+    sessions: 'Agent sessions',
+    lsp: 'Language servers (LSP)',
+    mcp: 'MCP servers',
     channels: 'Channels (Slack / Telegram)',
-    git: 'Git Accounts',
-    issues: 'Issue Trackers (Jira)',
-    db: 'Database Connections',
-    brokers: 'Message Brokers (Kafka)',
+    git: 'Git accounts',
+    issues: 'Issue trackers (Jira)',
+    db: 'Database connections',
+    brokers: 'Message brokers (Kafka)',
   };
-  return map[slug] ?? slug;
+  return map[slug] ?? sentenceCase(slug);
+}
+
+/** Dependency kind (`CapabilityDep.kind`) → the word a person reads. */
+export function depKindLabel(kind: string): string {
+  const map: Record<string, string> = {
+    provider: 'Provider',
+    cli: 'CLI',
+    lsp: 'Language server',
+    mcp: 'MCP server',
+    channel: 'Channel',
+    git: 'Git account',
+    issue: 'Issue tracker',
+    db: 'Database',
+    broker: 'Broker',
+  };
+  return map[kind] ?? sentenceCase(kind);
 }
 
 /** Settings route the UI should navigate to for a feature slug. */

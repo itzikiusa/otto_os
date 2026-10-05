@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // DLQ/Replay panel. Lets an operator re-publish selected messages from a
   // source topic to a target topic, with optional key/header transforms.
   // Evidence is recorded server-side (broker_replays table).
@@ -69,7 +70,7 @@
 
   async function runReplay() {
     if (running || blockReason) {
-      if (blockReason) toasts.error('Replay', blockReason);
+      if (blockReason) toasts.error('Can’t replay yet', blockReason);
       return;
     }
     const ok = await confirmProd({
@@ -102,7 +103,7 @@
       result = await api.post<ReplayResp>(`/brokers/clusters/${cluster.id}/replay`, body);
       toasts.success(
         `Replay complete`,
-        `${result.count} message${result.count === 1 ? '' : 's'} replayed to "${result.target_topic}"`,
+        `${plural(result.count, 'message')} replayed to "${result.target_topic}"`,
       );
     } catch (e) {
       toastError('Couldn’t replay messages', e);
@@ -209,7 +210,7 @@
     <div class="evidence">
       <h5>Evidence — replay {result.replay_id.slice(0, 8)}…</h5>
       <p class="muted small">
-        {result.count} message{result.count === 1 ? '' : 's'} replayed
+        {plural(result.count, 'message')} replayed
         from <code>{result.source_topic}</code> → <code>{result.target_topic}</code>
       </p>
       <table>
@@ -245,7 +246,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .form {
@@ -267,7 +268,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
   }
@@ -310,7 +311,7 @@
     border-bottom: 1px solid var(--border);
   }
   td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-top: 1px solid var(--border);
   }
   .mono {

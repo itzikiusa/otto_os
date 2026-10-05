@@ -61,10 +61,11 @@
 
 <script lang="ts">
   // Collapsible right panel (⌘J): Git / Files / Notes / Activity / Outputs / Canvas / Info / Browser / API tabs ⇄ 36px icon strip.
-  import Icon, { type IconName } from '../lib/components/Icon.svelte';
+  import Icon from '../lib/components/Icon.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
+  import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
   import { getToken } from '../lib/api/client';
@@ -174,20 +175,8 @@
     ctxMenu.show(e, items);
   }
 
-  const tabs: { id: RightTab; icon: IconName; label: string }[] = [
-    { id: 'git', icon: 'branch', label: 'Git' },
-    { id: 'files', icon: 'file', label: 'Files' },
-    { id: 'notes', icon: 'note', label: 'Notes' },
-    { id: 'activity', icon: 'zap', label: 'Activity' },
-    // Outputs — artifacts the focused agent produced, with sandboxed previews
-    // (docs/design/conversation-view.md §5.6). Gated like the rest on an
-    // active agent session by the shell.
-    { id: 'outputs', icon: 'layers', label: 'Outputs' },
-    { id: 'canvas', icon: 'shapes', label: 'Canvas' },
-    { id: 'info', icon: 'info', label: 'Info' },
-    { id: 'browser', icon: 'globe', label: 'Browser' },
-    { id: 'api', icon: 'send', label: 'API' },
-  ];
+  // One list with the ⌘K "Open <tab> panel" commands (lib/rightTabs.ts).
+  const tabs = RIGHT_TABS;
 
   let notes = $state('');
   let notesLoadedFor: string | null = $state(null);
@@ -303,7 +292,7 @@
     <Panel {...props} />
   {:else if failedPanels.has(key)}
     <div class="rp-fail" role="alert">
-      <span>Couldn't load this panel.</span>
+      <span>Couldn’t load this panel.</span>
       <button class="btn small" onclick={() => void loadPanel(key)}>Retry</button>
     </div>
   {:else}
@@ -320,20 +309,17 @@
     style={forceOpen ? undefined : `width:${ui.rightWidth}px`}
   >
     {#if !forceOpen}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+      <!-- The window splitter (paneResizer: focus, keys, drag, double-click reset). -->
       <div
         class="resize-handle"
         role="separator"
-        tabindex="0"
-        aria-label="Resize the session panel"
-        onmousedown={startResize}
-        ondblclick={() => ui.setRightWidth(300)}
+        aria-label="Resize the {SESSION_PANEL}"
         title={RESIZE_TITLE}
-        use:paneResizer={{ value: ui.rightWidth, min: RIGHT_MIN, max: Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, (typeof window === 'undefined' ? RIGHT_MAX : window.innerWidth) - 360)), invert: true, onChange: (w) => ui.setRightWidth(w), onReset: () => ui.setRightWidth(300), text: pxWide }}
+        use:paneResizer={{ value: ui.rightWidth, min: RIGHT_MIN, max: Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, (typeof window === 'undefined' ? RIGHT_MAX : window.innerWidth) - 360)), invert: true, onChange: (w) => ui.setRightWidth(w), onReset: () => ui.setRightWidth(300), onDragStart: startResize, text: pxWide }}
       ></div>
     {/if}
     <header class="rpanel-head">
-      <div class="rpanel-tabs" role="tablist" tabindex="-1" aria-label="Session panel" bind:this={tabsEl} onkeydown={onTabsKey}>
+      <div class="rpanel-tabs" role="tablist" tabindex="-1" aria-label={SESSION_PANEL} bind:this={tabsEl} onkeydown={onTabsKey}>
         {#each tabs as t (t.id)}
           <button
             class="rtab"
@@ -372,7 +358,7 @@
       <button
         class="icon-btn"
         onclick={() => ui.toggleRight()}
-        title="Collapse panel (⌘J)"
+        title="Collapse panel" aria-keyshortcuts="Meta+J"
         aria-label="Collapse panel"
       >
         <Icon name="panel" size={13} />
@@ -384,28 +370,10 @@
         {@render lazyPanel(ui.rightTab as PanelKey)}
       {/if}
       {#if browserShown || (browserKept && ui.browserPanelVersion === 'v1')}
-        <!-- Transitional v1/v2 switch: v1 is the original per-session panel,
-             v2 embeds the Browser module (persisted tabs/marks + ask bar).
-             Only here, in agent mode — the Browser page itself is always v2.
-             v1 stays mounted while hidden (see `browserKept`). -->
+        <!-- v2 embeds the Browser module (persisted tabs/marks + ask bar); v1 is
+             the classic per-session panel, chosen in Settings → Browser and
+             kept mounted while hidden (see `browserKept`). -->
         <div class="browser-host" hidden={!browserShown}>
-          <div class="browser-ver" role="group" aria-label="Browser version">
-            <span class="dim">Browser</span>
-            <button
-              class="ver"
-              class:active={ui.browserPanelVersion === 'v1'}
-              aria-pressed={ui.browserPanelVersion === 'v1'}
-              onclick={() => ui.setBrowserPanelVersion('v1')}
-              title="v1 — per-session browser: native tabs + take-over picker"
-            >v1</button>
-            <button
-              class="ver"
-              class:active={ui.browserPanelVersion === 'v2'}
-              aria-pressed={ui.browserPanelVersion === 'v2'}
-              onclick={() => ui.setBrowserPanelVersion('v2')}
-              title="v2 — the Browser module: reader/live tabs, saved marks, ask the agent"
-            >v2</button>
-          </div>
           {#if ui.browserPanelVersion === 'v2'}
             {@render lazyPanel('browserV2')}
           {:else}
@@ -440,7 +408,7 @@
   </aside>
 {/if}
 {#if !open}
-  <aside class="rstrip" aria-label="Session panel">
+  <aside class="rstrip" aria-label={SESSION_PANEL}>
     {#each tabs as t (t.id)}
       <button
         class="icon-btn strip-btn"
@@ -513,8 +481,8 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      color-mix(in srgb, var(--accent) 40%, transparent) 45%,
-      color-mix(in srgb, var(--accent) 40%, transparent) 55%,
+      var(--accent-line) 45%,
+      var(--accent-line) 55%,
       transparent 100%
     );
   }
@@ -522,7 +490,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 7px 8px 6px;
+    padding: 6px 8px 6px;
     border-bottom: 1px solid var(--border);
   }
   .rpanel-tabs {
@@ -555,10 +523,10 @@
     font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rtab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rtab.active {
     background: var(--surface-2);
@@ -575,37 +543,9 @@
     display: flex;
     flex-direction: column;
   }
-  .browser-host > :global(:not(.browser-ver)) {
+  .browser-host > :global(*) {
     flex: 1;
     min-height: 0;
-  }
-  .browser-ver {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    padding: 0.25rem 0.6rem;
-    border-bottom: 1px solid var(--border);
-    font-size: var(--fs-xs);
-  }
-  .browser-ver .dim {
-    color: var(--text-dim);
-    margin-inline-end: auto;
-  }
-  .ver {
-    height: 20px;
-    padding: 0 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .ver.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
-    border-color: var(--accent);
   }
   .rstrip {
     width: 36px;

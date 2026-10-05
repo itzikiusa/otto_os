@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { CLUSTER_VIEWS, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -26,6 +28,8 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { onTabKey } from '../../lib/tabKeys';
+  import { router } from '../../lib/router.svelte';
+  import { untrack } from 'svelte';
 
   type Tab = ClusterView;
   let tab = $state<Tab>('overview');
@@ -51,15 +55,10 @@
   // (On phones the list is a full-width stacked band — the width var is ignored
   // by the media query there and the divider is hidden.)
   let sideW = $state(loadPaneWidth('brokers.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
-
-  // "3 clusters · 2 prod · 1 staging" — the empty detail pane's summary.
-  const clusterSummary = $derived.by(() => {
-    const n = brokers.clusters.length;
-    const byEnv = new Map<string, number>();
-    for (const c of brokers.clusters) byEnv.set(c.environment, (byEnv.get(c.environment) ?? 0) + 1);
-    const envs = [...byEnv].map(([e, k]) => `${k} ${e}`).join(' · ');
-    return `${n} ${n === 1 ? 'cluster' : 'clusters'}${envs ? ` · ${envs}` : ''}.`;
-  });
+  // Tablet/desktop: the header `sidebar` icon hides the list pane (the one
+  // collapse affordance, as on Database / Canvas / Skills Lab). Phone keeps its
+  // stacked accordions.
+  let listHidden = $state(false);
 
   $effect(() => {
     const id = ws.currentId;
@@ -76,22 +75,43 @@
 
   const selected = $derived(brokers.selected);
 
-  // Never open onto an empty "pick a cluster" pane when clusters exist: restore
-  // the last-selected cluster (or the first) once per workspace load. Not on a
-  // phone — selecting collapses the cluster list there, which is the first
-  // screen.
+  // The URL carries the open cluster (`#/brokers/<id>`) so a reload / share /
+  // link lands on it. Route → page: a link (or Back/Forward) opens that cluster
+  // once the list knows it; page → route: picking a cluster rewrites the URL in
+  // place.
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'brokers' || !id || !brokers.clusters.some((c) => c.id === id)) return;
+    untrack(() => {
+      if (id !== brokers.selectedId) brokers.select(id);
+    });
+  });
+  let routedId: string | null = null;
+  $effect(() => {
+    const id = brokers.selectedId;
+    const was = routedId;
+    routedId = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'brokers' && (router.parts[1] ?? null) !== id) router.replace(id ? `brokers/${id}` : 'brokers');
+    });
+  });
+
+  // Never show an empty "pick a cluster" pane when clusters exist: open the
+  // last-selected cluster (or the first) on load, and again whenever the last
+  // open tab is closed. Not on a phone — selecting collapses the cluster list
+  // there, which is the first screen.
   let autoPickedFor = $state<string | null>(null);
   $effect(() => {
     const wsId = ws.currentId;
-    if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
-    if (brokers.selectedId) {
-      autoPickedFor = wsId;
-      return;
-    }
+    if (!wsId || viewport.isPhone || brokers.selectedId) return;
     if (brokers.loading || brokers.clusters.length === 0) return;
+    const first = autoPickedFor !== wsId;
     autoPickedFor = wsId;
-    const id = initialSelection('brokers', brokers.clusters, (c) => c.id);
-    if (id) brokers.select(id);
+    const id = first
+      ? initialSelection('brokers', brokers.clusters, (c) => c.id)
+      : [...brokers.clusters].sort(byName)[0]?.id;
+    if (id) untrack(() => brokers.select(id));
   });
   $effect(() => {
     if (brokers.selectedId) rememberSelection('brokers', brokers.selectedId);
@@ -106,9 +126,9 @@
     try {
       const r = await api.post<TestClusterResp>(`/brokers/clusters/${c.id}/test`, {});
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
-      else toasts.error('Connection failed', r.message);
+      else toasts.error('Couldn’t connect', r.message);
     } catch (e) {
-      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the test', e);
     } finally {
       testing = false;
     }
@@ -124,7 +144,7 @@
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove', e);
     }
   }
 
@@ -202,7 +222,7 @@
       ctxMenu.show(e, [
         { label: 'New sub-section', action: () => void newSection(s.id) },
         { label: 'Rename…', action: () => void renameSec(s) },
-        { label: 'Delete', danger: true, action: () => void delSec(s) },
+        { label: 'Delete…', danger: true, action: () => void delSec(s) },
       ]);
     }
   }
@@ -217,7 +237,7 @@
     try {
       await brokers.createSection(parentId, name);
     } catch (e) {
-      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the section', e);
     }
   }
 
@@ -231,7 +251,7 @@
     try {
       await brokers.renameSection(sec.id, name);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -246,7 +266,7 @@
     try {
       await brokers.deleteSection(sec.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -263,7 +283,7 @@
     try {
       await brokers.moveCluster(id, sectionId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -277,7 +297,7 @@
     try {
       await brokers.reparentSection(id, parentId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -312,6 +332,18 @@
   subtitle={selected?.bootstrap_servers}
 >
   {#snippet leading()}
+    {#if !viewport.isPhone && !isEmpty}
+      <button
+        class="icon-btn"
+        onclick={() => (listHidden = !listHidden)}
+        aria-label={listHidden ? 'Show cluster list' : 'Hide cluster list'}
+        title={listHidden ? 'Show cluster list' : 'Hide cluster list'}
+        aria-expanded={!listHidden}
+        aria-controls="brokers-cluster-list"
+      >
+        <Icon name="sidebar" size={16} />
+      </button>
+    {/if}
     {#if selected}
       <button
         class="content-toggle"
@@ -325,17 +357,12 @@
       <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
     {/if}
   {/snippet}
-  {#snippet titleContent()}
-    {#if selected}<span class="name">{selected.name}</span>{:else}Message Brokers{/if}
-  {/snippet}
   {#snippet badge()}
     {#if selected}
       <EnvBadge env={selected.environment} />
-      {#if selected.read_only}<span class="ro">read-only</span>{/if}
+      {#if selected.read_only}<Badge variant="outline" label="Read-only" />{/if}
       {#if selected.ssh}
-        <span class="tunnel-pill" class:ready={tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}>
-          <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
-        </span>
+        <Badge tone={tunnelReady ? 'ok' : 'neutral'} dot live={!tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'} label={tunnelReady ? 'Tunnel' : 'Connecting…'} />
       {/if}
     {/if}
   {/snippet}
@@ -351,8 +378,8 @@
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="brokers-page">
-  {#if !isEmpty}
-  <aside class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
+  {#if !isEmpty && (viewport.isPhone || !listHidden)}
+  <aside id="brokers-cluster-list" class="clusters" class:collapsed={!clustersOpen} style="--clusters-w:{sideW}px">
     <div class="aside-head">
       <button
         class="sec-toggle"
@@ -391,8 +418,9 @@
              sections at all it is just noise, so it only shows once a section
              exists (or while something is being dragged). -->
         {#if brokers.sections.length > 0 || draggedClusterId || draggedSectionId}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
+          role="group"
+          aria-label="Ungrouped"
           class="sec-head plain"
           class:drop={draggedClusterId || draggedSectionId}
           ondragover={(e) => {
@@ -456,7 +484,7 @@
       </div>
     {/if}
     {#if selected}
-      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
         {#each CLUSTER_VIEWS as v (v.id)}
           <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
         {/each}
@@ -490,17 +518,9 @@
           actionIcon="plus"
           onaction={openAdd}
         />
-      {:else if !brokers.loading && !brokers.loadError && !viewport.isPhone}
-        <!-- (Phone: the list above IS the page — no second "pick one" pane.)
-             Clusters exist: the list pane (with its own "+") is right there, so
-             no duplicate "Add a cluster" CTA. -->
-        <EmptyState
-          variant="page"
-          icon="box"
-          title="Pick a cluster"
-          body={`${clusterSummary} Open one from the list to browse its topics, consumer groups and schemas.`}
-        />
       {/if}
+      <!-- No "pick a cluster" pane: with clusters present one is always open
+           (see the auto-pick above); on a phone the list above IS the page. -->
     {/if}
   </main>
 </div>
@@ -511,8 +531,9 @@
   {@const isOpen = !collapsed[node.sec.id]}
   <!-- The whole header toggles (the caret button stays the keyboard/AT
        control); clicks on its own buttons don't. -->
-  <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+  <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
   <div
+    role="presentation"
     class="sec-head"
     onclick={(e) => {
       if (!(e.target as Element).closest('button')) collapsed[node.sec.id] = !collapsed[node.sec.id];
@@ -562,8 +583,9 @@
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
   <!-- The row drags; its name button opens the cluster and ⋯ holds the same
        menu as right-click (no button nested inside a button). -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
+    role="group"
+    aria-label={c.name}
     class="cluster"
     class:sel={brokers.selectedId === c.id}
     style="padding-inline-start: {depth * 14 + 6}px"
@@ -622,7 +644,7 @@
   .aside-head .title {
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .head-btns {
@@ -650,14 +672,14 @@
     background: var(--hover);
   }
   .sec-head.drop {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   .sec-head.plain {
     cursor: default;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     opacity: 0.8;
     margin-top: 4px;
   }
@@ -690,7 +712,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 0 6px;
     flex: none;
   }
@@ -769,7 +791,7 @@
   .ctab {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 0 10px;
     border-inline-end: 1px solid var(--border);
     font-size: var(--fs-m);
@@ -788,7 +810,7 @@
   .ctab-main {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     align-self: stretch;
     padding: 0;
     border: none;
@@ -818,31 +840,6 @@
     opacity: 1;
     background: var(--hover);
   }
-  .name {
-    font-weight: 600;
-  }
-  /* Read-only is a property, not a failure: neutral, matching ClusterViewer. */
-  .ro {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 0 5px;
-  }
-  .tunnel-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
-  .tunnel-pill.ready {
-    background: var(--success-soft);
-    color: var(--success);
-  }
   .tabs {
     display: flex;
     gap: 2px;
@@ -871,10 +868,15 @@
     color: var(--text);
     border-bottom-color: var(--accent);
   }
+  /* The panels size themselves to the tab body (height: 100%) and scroll
+     inside; the body itself scrolls only when a panel's guaranteed minimum (the
+     topics grid, the message panes) doesn't fit — e.g. a phone in landscape —
+     so those rows stay reachable instead of being clipped. No height query. */
   .tab-body {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   .small {
     font-size: var(--fs-xs);
@@ -909,18 +911,6 @@
     flex: none;
   }
 
-  /* Short viewports (phones in landscape, ~430px tall) keep the desktop
-     two-column layout (they're >640px wide) but the cluster header + tab strips
-     leave the tab body very little room. Let the tab body scroll so panels with
-     a guaranteed min-height (e.g. the topics grid) stay fully reachable instead
-     of being clipped behind the sticky chrome. */
-  @media (max-height: 600px) {
-    .tab-body {
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-  }
-
   @media (max-width: 640px) {
     /* Stack the cluster list above the content; each is its own collapsible,
        independently-scrollable section, and text gets bumped for readability.
@@ -949,7 +939,7 @@
       flex: none;
     }
     .sec-toggle .title {
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
     .sec-toggle .hcount {
       display: inline-block;
@@ -974,13 +964,13 @@
     }
     /* Bigger sidebar text + roomier tap targets. */
     .cluster {
-      padding-block: 7px;
+      padding-block: 6px;
     }
     .cn {
       font-size: var(--fs-l);
     }
     .sec-name {
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
     .sec-head {
       padding-block: 8px; padding-inline: 8px 10px;
@@ -1001,7 +991,7 @@
       min-height: 42px;
     }
     .ctab {
-      font-size: 14px;
+      font-size: var(--fs-l);
       padding: 0 12px;
     }
     /* The page header carries the phone-only content toggle. */
@@ -1023,7 +1013,7 @@
       -webkit-overflow-scrolling: touch;
     }
     .tabs button {
-      font-size: 14px;
+      font-size: var(--fs-l);
       padding: 10px 12px;
       white-space: nowrap;
       flex: none;

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../plural';
+  import { NO_WORKSPACE } from '../labels';
   // Dedicated broadcast composer. Relays a literal message to the selected live
   // agent sessions via POST /workspaces/{id}/broadcast — NO AI, no parsing, no
   // fallback. Separate from the ⌘K orchestrator on purpose.
@@ -58,7 +60,7 @@
       return;
     }
     if (!ws.currentId) {
-      toasts.error('No workspace selected', 'Pick a workspace first.');
+      toasts.error(NO_WORKSPACE, 'Broadcast sends to the sessions of one workspace.');
       return;
     }
     const ids = selected.map((s) => s.id);
@@ -74,7 +76,7 @@
       });
       const n = resp.session_ids.length;
       if (n === 0) toasts.warn('Broadcast sent to nobody', 'No selected session was live.');
-      else toasts.success('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}`);
+      else toasts.success('Broadcast sent', `Delivered to ${plural(n, 'session')}`);
       close();
     } catch (e) {
       toastError('Couldn’t send the broadcast', e);
@@ -162,7 +164,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    padding: 9px 11px;
+    padding: 8px 10px;
     font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
@@ -170,7 +172,7 @@
   }
   textarea:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .bc-list-head {
     display: flex;
@@ -180,7 +182,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .grow {
@@ -214,10 +216,10 @@
     cursor: pointer;
   }
   .bc-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .bc-row.on {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .bc-row input {
     accent-color: var(--accent);

@@ -102,7 +102,7 @@ export function summaryText(s: DbMultiRunSummary): string {
   if (s.running) parts.push(`${s.running} running`);
   if (s.pending) parts.push(`${s.pending} pending`);
   if (s.skipped) parts.push(`${s.skipped} skipped`);
-  if (s.cancelled) parts.push(`${s.cancelled} cancelled`);
+  if (s.cancelled) parts.push(`${s.cancelled} canceled`);
   return parts.length ? parts.join(' · ') : `${s.total} runs`;
 }
 

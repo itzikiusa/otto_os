@@ -4,14 +4,15 @@
   import { layout as layoutStore, type Preset as PresetOp } from '../../lib/stores/splitLayout.svelte';
   import type { MenuItem as PresetMenuItem } from '../../lib/contextmenu.svelte';
 
-  /** The five layout presets as flat ctxMenu rows (the menu has no submenus). */
+  /** The five layout presets as flat ctxMenu rows (the menu has no submenus);
+   *  worded like their ⌘K commands in Splits.svelte ("Use grid layout"). */
   export function presetItems(): PresetMenuItem[] {
     const rows: [PresetOp, string][] = [
-      ['cols', 'Layout: equal columns'],
-      ['rows', 'Layout: equal rows'],
-      ['one-two-below', 'Layout: one above two'],
-      ['one-two-beside', 'Layout: one beside two'],
-      ['grid', 'Layout: grid'],
+      ['cols', 'Use equal-columns layout'],
+      ['rows', 'Use equal-rows layout'],
+      ['one-two-below', 'Use one-above-two layout'],
+      ['one-two-beside', 'Use one-beside-two layout'],
+      ['grid', 'Use grid layout'],
     ];
     return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
   }
@@ -40,6 +41,7 @@
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { splitter } from '../../lib/paneResizer';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import {
     layout,
@@ -165,27 +167,23 @@
       : `grid-template-rows: minmax(0, ${node.frac}fr) 8px minmax(0, ${1 - node.frac}fr); grid-template-columns: minmax(0, 1fr);`}
   >
     <Self node={node.a} depth={depth + 1} />
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <!-- The window splitter (`splitter`: focus, keys, drag, double-click reset). -->
     <div
       class="gutter"
       role="separator"
-      tabindex="0"
       aria-orientation={node.axis === 'col' ? 'vertical' : 'horizontal'}
       aria-label="Resize split (arrow keys; double-click resets)"
       title="Drag to resize · double-click to split evenly"
       aria-valuenow={Math.round(node.frac * 100)}
       aria-valuemin={10}
       aria-valuemax={90}
-      onpointerdown={startDrag}
-      ondblclick={() => node.kind === 'split' && layout.setFrac(node.key, 0.5)}
-      onkeydown={gutterKeydown}
+      use:splitter={{ onkeydown: gutterKeydown, onpointerdown: startDrag, ondblclick: () => node.kind === 'split' && layout.setFrac(node.key, 0.5) }}
     ></div>
     <Self node={node.b} depth={depth + 1} />
   </div>
 {:else}
   <div class="leaf" data-pane-key={node.key} data-session={node.session}>
     {#if node.session === DB_PANE_ID}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="db-pane"
         role="group"
@@ -210,7 +208,7 @@
             <div class="db-pane-loading" role="status" aria-label="Loading Database"><Skeleton rows={3} /></div>
           {:catch err}
             <div class="db-pane-loading" role="alert">
-              <span>Couldn't load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
+              <span>Couldn’t load the Database pane: {err instanceof Error ? err.message : String(err)}</span>
             </div>
           {/await}
         {/if}
@@ -230,8 +228,8 @@
     {/if}
     <!-- Drop veil: hit-testable only while a pane drag is in flight, so the
          terminal below never sees the drag. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
+      role="presentation"
       class="drop-veil"
       class:armed={zone !== null}
       data-zone={zone ?? ''}
@@ -283,13 +281,13 @@
     overflow: hidden;
   }
   .db-pane.focused {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .db-pane-close {
     position: absolute;
     top: 6px;
     inset-inline-end: 8px;
-    z-index: 25;
+    z-index: 9;
     width: 20px;
     height: 20px;
     border: 1px solid var(--border);
@@ -309,10 +307,13 @@
      its HIT AREA does: `::before` reaches 6px into each neighbour's edge, so
      the frame between two panes grabs like a window border (a 20px target),
      while the drawn line stays thin. Pseudo-element areas hit-test as the
-     gutter itself, and z-index 10 keeps it above both pane frames. */
+     gutter itself, and z-index 8 keeps it above both pane frames (pane chrome
+     stays ≤ 5; the terminal is its own stacking context via `contain`). The
+     panes are NOT `isolation: isolate`: they host non-portalled Modals and the
+     image Lightbox, which must still rise above the app chrome. */
   .gutter {
     position: relative;
-    z-index: 10;
+    z-index: 8;
   }
   .gutter::before {
     content: '';
@@ -343,14 +344,14 @@
     margin: auto;
     background: var(--border);
     border-radius: 2px;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .gutter:hover::after,
   .gutter:focus-visible::after {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   .gutter:focus-visible::after {
-    background: color-mix(in srgb, var(--accent) 65%, transparent);
+    background: var(--accent-line-strong);
   }
   .split-node[data-axis='col'] > .gutter::after {
     width: 2px;
@@ -364,7 +365,7 @@
   .drop-veil {
     position: absolute;
     inset: 0;
-    z-index: 30;
+    z-index: 10; /* top of the in-pane range: over the pane and its close button */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -374,14 +375,14 @@
     display: none;
   }
   .drop-veil.armed {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
     outline-offset: -2px;
   }
   .drop-ind {
     position: absolute;
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    background: var(--accent-soft-strong);
+    border: 1px solid var(--accent-line-strong);
     border-radius: var(--radius-s);
     pointer-events: none;
   }
@@ -408,7 +409,7 @@
     font-weight: 600;
     color: var(--accent-contrast);
     background: var(--accent-solid);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     pointer-events: none;
   }
 </style>

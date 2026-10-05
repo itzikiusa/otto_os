@@ -64,6 +64,7 @@ import { estimateResultBytes, isReleased, releasedStub, resultBudget } from './d
 import { clipHistory } from './clipHistory.svelte';
 import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
+import { toastError } from '../toastError';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -1111,7 +1112,7 @@ class DatabaseStore {
       if (resp.sql) this.assistProposedSql = resp.sql;
       if (resp.note) this.assistNote = resp.note;
     } catch (e) {
-      if (!ac.signal.aborted) toasts.error('DB assistant failed', errMsg(e));
+      if (!ac.signal.aborted) toasts.error('Couldn’t dB assistant', errMsg(e));
     } finally {
       if (this.assistAbort === ac) this.assistAbort = null;
       this.assistBusy = false;
@@ -1200,7 +1201,7 @@ class DatabaseStore {
       downloadText(resp.markdown, `db-assist-${this.assistId}.md`, 'text/markdown');
       toasts.success('Summary downloaded');
     } catch (e) {
-      toasts.error('Summarize failed', errMsg(e));
+      toasts.error('Couldn’t summarize', errMsg(e));
     } finally {
       this.assistBusy = false;
     }
@@ -1644,7 +1645,7 @@ class DatabaseStore {
       const formatted = formatSql(masked, { language: dialect, keywordCase: 'upper' });
       this.setStatement(unmaskQueryPlaceholders(formatted, tokens));
     } catch (e) {
-      toasts.error('Format failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t format', e);
     }
   }
 
@@ -2635,7 +2636,7 @@ class DatabaseStore {
       if (this.mainTab === 'builder' && !this.supportsBuilder) this.mainTab = 'query';
     } catch (e) {
       if (!this.connLive(id, epoch)) return; // no toast for a closed tab
-      toasts.error('Could not load DB capabilities', errMsg(e));
+      toasts.error('Couldn’t load DB capabilities', errMsg(e));
     }
   }
 
@@ -2687,7 +2688,7 @@ class DatabaseStore {
     } catch (e) {
       if (!this.connLive(id, epoch)) return; // closed tab: no status, no toast
       // A hard failure drops any stale health data (replace, not merge).
-      // SchemaTree renders this phase inline ("Couldn't connect" + Retry) — no
+      // SchemaTree renders this phase inline ("Couldn’t connect" + Retry) — no
       // toast on top of it.
       this.setConnStatus(id, { phase: 'error', error: errMsg(e) });
     } finally {
@@ -2760,10 +2761,10 @@ class DatabaseStore {
       if (this.testResult.ok) {
         toasts.success('Connection OK', this.testResult.message || `${this.testResult.latency_ms ?? '?'} ms`);
       } else {
-        toasts.error('Connection failed', this.testResult.message);
+        toasts.error('Couldn’t connect', this.testResult.message);
       }
     } catch (e) {
-      toasts.error('Test failed', errMsg(e));
+      toasts.error('Couldn’t run the test', errMsg(e));
     } finally {
       this.testing = false;
     }
@@ -2880,7 +2881,7 @@ class DatabaseStore {
     } catch (e) {
       if (seq === this.objectSearchSeq && !isAbortError(e)) {
         this.objectSearchHits = [];
-        toasts.error('Object search failed', errMsg(e));
+        toasts.error('Couldn’t object search', errMsg(e));
       }
     } finally {
       if (seq === this.objectSearchSeq) {
@@ -2924,7 +2925,7 @@ class DatabaseStore {
       this.childrenCache = new Map(this.childrenCache);
     } catch (e) {
       if (stale()) return; // no toast / collapse for a dead view
-      toasts.error('Could not load children', errMsg(e));
+      toasts.error('Couldn’t load children', errMsg(e));
       this.expanded.delete(nodeId);
       this.expanded = new Set(this.expanded);
     } finally {
@@ -2963,7 +2964,7 @@ class DatabaseStore {
       // Keep the failure visible in the Structure view (the toast fades and the
       // neutral "no object" empty state would misreport a load error).
       this.objectError = errMsg(e);
-      toasts.error('Could not load object', errMsg(e));
+      toasts.error('Couldn’t load object', errMsg(e));
     } finally {
       // A NEWER openObject owns the loading flag; anything else (including a
       // stale completion) must release it so no spinner runs forever.
@@ -2981,7 +2982,7 @@ class DatabaseStore {
     try {
       return await api.post<ObjectDetail>(`${this.connBase(id)}/object`, { path });
     } catch (e) {
-      toasts.error('Could not load object', errMsg(e));
+      toasts.error('Couldn’t load object', errMsg(e));
       return null;
     }
   }
@@ -3001,7 +3002,7 @@ class DatabaseStore {
           `MySQL returned no body for ${node.label} — the connected account likely lacks privilege to view routine definitions (needs SHOW_ROUTINE, or SELECT on the routine).`,
         );
       } else {
-        toasts.error('No create statement', `Could not derive the DDL for ${node.label}.`);
+        toasts.error('Couldn’t build the create statement', `Otto couldn’t derive the DDL for ${node.label}.`);
       }
       return;
     }
@@ -3009,7 +3010,7 @@ class DatabaseStore {
       await copyTextOrThrow(ddl);
       toasts.success('Create statement copied', node.label);
     } catch {
-      toasts.error('Clipboard unavailable', 'Could not copy the create statement.');
+      toasts.error('Couldn’t copy the create statement', 'The clipboard isn’t available here.');
     }
   }
 
@@ -3036,7 +3037,7 @@ class DatabaseStore {
         max_tables: maxTables,
       });
     } catch (e) {
-      toasts.error('Could not load diagram', errMsg(e));
+      toasts.error('Couldn’t load diagram', errMsg(e));
       return null;
     }
   }
@@ -3093,7 +3094,7 @@ class DatabaseStore {
       this.builderTablesCache = new Map(this.builderTablesCache);
       return out;
     } catch (e) {
-      toasts.error('Could not load tables', errMsg(e));
+      toasts.error('Couldn’t load tables', errMsg(e));
       return [];
     }
   }
@@ -3242,7 +3243,7 @@ class DatabaseStore {
             ? await this.confirmGuardedWrite(origin, e, opts?.agentLabel)
             : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3256,7 +3257,7 @@ class DatabaseStore {
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
           const ok = await this.confirmGuardedWrite(origin, e, opts?.agentLabel);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3300,7 +3301,7 @@ class DatabaseStore {
         // Headline only (the normalised title) — the full error, cause and
         // hint wait in the tab's ErrorPanel.
         if (!this.isVisibleTab(id, t)) {
-          toasts.error('Query failed', normalizeDbError(runEngine, errMsg(e), sql).title);
+          toasts.error('Couldn’t query', normalizeDbError(runEngine, errMsg(e), sql).title);
         }
         return null;
       }
@@ -3469,7 +3470,7 @@ class DatabaseStore {
     } catch (e) {
       t.error = errMsg(e);
       t.err_statement = stmt;
-      toasts.error('Explain failed', errMsg(e));
+      toasts.error('Couldn’t explain', errMsg(e));
       return null;
     } finally {
       t.running = false;
@@ -3573,7 +3574,7 @@ class DatabaseStore {
         }
       })
       .catch((e) => {
-        if (report) toasts.error('Could not stop the query', errMsg(e));
+        if (report) toasts.error('Couldn’t stop the query', errMsg(e));
       });
   }
 
@@ -4070,7 +4071,7 @@ class DatabaseStore {
       toasts.success('Query saved', saved.name);
       return saved;
     } catch (e) {
-      toasts.error('Save query failed', errMsg(e));
+      toasts.error('Couldn’t save query', errMsg(e));
       return null;
     }
   }
@@ -4086,7 +4087,7 @@ class DatabaseStore {
       this.savedQueries = this.savedQueries.map((q) => (q.id === updated.id ? updated : q));
       return updated;
     } catch (e) {
-      toasts.error('Update query failed', errMsg(e));
+      toasts.error('Couldn’t update the query', errMsg(e));
       return null;
     }
   }
@@ -4138,7 +4139,7 @@ class DatabaseStore {
       // Detach any open tab that pointed at it (its "Save" reverts to create).
       for (const t of this.tabs) if (t.savedQueryId === id) t.savedQueryId = undefined;
     } catch (e) {
-      toasts.error('Delete query failed', errMsg(e));
+      toasts.error('Couldn’t delete query', errMsg(e));
     }
   }
 
@@ -4216,7 +4217,7 @@ class DatabaseStore {
       if (this.selectedConnId !== id) return; // switched connection meanwhile
       this.newTab(full.statement);
     } catch (e) {
-      toasts.error('Could not open this history entry', errMsg(e));
+      toasts.error('Couldn’t open this history entry', errMsg(e));
     }
   }
 
@@ -4272,7 +4273,7 @@ class DatabaseStore {
       this.selectedDashboardId = d.id;
       return d;
     } catch (e) {
-      toasts.error('Create dashboard failed', errMsg(e));
+      toasts.error('Couldn’t create dashboard', errMsg(e));
       return null;
     }
   }
@@ -4282,7 +4283,7 @@ class DatabaseStore {
       const d = await api.patch<DbDashboard>(`/db/dashboards/${id}`, { name });
       this.dashboards = this.dashboards.map((x) => (x.id === id ? d : x));
     } catch (e) {
-      toasts.error('Rename dashboard failed', errMsg(e));
+      toasts.error('Couldn’t rename dashboard', errMsg(e));
     }
   }
 
@@ -4291,7 +4292,7 @@ class DatabaseStore {
       const d = await api.patch<DbDashboard>(`/db/dashboards/${id}`, { refresh_secs });
       this.dashboards = this.dashboards.map((x) => (x.id === id ? d : x));
     } catch (e) {
-      toasts.error('Update dashboard failed', errMsg(e));
+      toasts.error('Couldn’t update the dashboard', errMsg(e));
     }
   }
 
@@ -4304,7 +4305,7 @@ class DatabaseStore {
         this.selectedDashboardId = this.dashboards[0]?.id ?? null;
       }
     } catch (e) {
-      toasts.error('Delete dashboard failed', errMsg(e));
+      toasts.error('Couldn’t delete dashboard', errMsg(e));
     }
   }
 
@@ -4339,7 +4340,7 @@ class DatabaseStore {
       toasts.success('Widget added', w.title);
       return w;
     } catch (e) {
-      toasts.error('Create widget failed', errMsg(e));
+      toasts.error('Couldn’t create widget', errMsg(e));
       return null;
     }
   }
@@ -4349,7 +4350,7 @@ class DatabaseStore {
       const w = await api.patch<DbWidget>(`/db/widgets/${id}`, patch);
       this.widgets = this.widgets.map((x) => (x.id === id ? w : x));
     } catch (e) {
-      toasts.error('Update widget failed', errMsg(e));
+      toasts.error('Couldn’t update the widget', errMsg(e));
     }
   }
 
@@ -4358,7 +4359,7 @@ class DatabaseStore {
       await api.del(`/db/widgets/${id}`);
       this.widgets = this.widgets.filter((w) => w.id !== id);
     } catch (e) {
-      toasts.error('Delete widget failed', errMsg(e));
+      toasts.error('Couldn’t delete widget', errMsg(e));
     }
   }
 
@@ -4366,7 +4367,7 @@ class DatabaseStore {
     try {
       return await api.post<QueryResult>(`/db/widgets/${id}/run`, {});
     } catch (e) {
-      toasts.error('Widget query failed', errMsg(e));
+      toasts.error('Couldn’t run the widget query', errMsg(e));
       return null;
     }
   }
@@ -4396,7 +4397,7 @@ class DatabaseStore {
       ws.addSession(session);
       toasts.success('Sent to agent', session.title);
     } catch (e) {
-      toasts.error('Explain with agent failed', errMsg(e));
+      toasts.error('Couldn’t explain with agent', errMsg(e));
     }
   }
 }

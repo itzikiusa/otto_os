@@ -57,7 +57,7 @@ test('bell sits in the Navigator and module pages keep no right gutter', async (
   await expect(page.locator('.bell-anchor')).toHaveCount(0);
   const bell = page.locator('.navigator .nav-head').getByRole('button', { name: 'Notifications' });
   await expect(bell).toBeVisible();
-  await expect(bell.locator('.badge')).toHaveText('60');
+  await expect(bell.locator('.count-bubble')).toHaveText('60');
 
   // The content pane is not padded on the right for a bell anymore.
   const padEnd = await page
@@ -161,7 +161,7 @@ test('panel is anchored to the bell with a caret, and unread survives opening', 
   await openPage(page, 'git');
 
   const bell = navBell(page);
-  await expect(bell.locator('.badge')).toHaveText('1');
+  await expect(bell.locator('.count-bubble')).toHaveText('1');
   await bell.click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
   await expectFullyInViewport(page, panel, 'notification panel');
@@ -185,7 +185,7 @@ test('panel is anchored to the bell with a caret, and unread survives opening', 
   // Opening does NOT mark read: the unread row keeps its dot, the badge stays
   // and "Mark all read" is live. Focus lands on the first row.
   await expect(panel.locator('.nb-item.unread')).toHaveCount(1);
-  await expect(bell.locator('.badge')).toHaveText('1');
+  await expect(bell.locator('.count-bubble')).toHaveText('1');
   await expect(panel.getByRole('button', { name: 'Mark all read' })).toBeEnabled();
   await expect(panel.locator('.nb-row').first()).toBeFocused();
   expect(hits.readAll).toBe(0);
@@ -195,7 +195,7 @@ test('panel is anchored to the bell with a caret, and unread survives opening', 
   // read-all), and focus returns to the bell.
   await page.keyboard.press('Escape');
   await expect(panel).toHaveCount(0);
-  await expect(bell.locator('.badge')).toHaveCount(0);
+  await expect(bell.locator('.count-bubble')).toHaveCount(0);
   await expect(bell).toBeFocused();
   await expect.poll(() => hits.readIds).toEqual(['a']);
   expect(hits.readAll).toBe(0);
@@ -216,8 +216,8 @@ test('session notices group per session; long failures clamp; Clear asks first',
 
   const bell = navBell(page);
   // Two unread ROWS (one session group + one alert), coloured by the error.
-  await expect(bell.locator('.badge')).toHaveText('2');
-  await expect(bell.locator('.badge')).toHaveClass(/sev-error/);
+  await expect(bell.locator('.count-bubble')).toHaveText('2');
+  await expect(bell.locator('.count-bubble')).toHaveClass(/sev-error/);
   await bell.click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
 
@@ -258,7 +258,7 @@ test('a failed load shows an error with Retry, not "all caught up"', async ({ pa
   await openPage(page, 'git');
   await navBell(page).click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
-  await expect(panel.getByText("Couldn't load notifications")).toBeVisible();
+  await expect(panel.getByText("Couldn’t load notifications")).toBeVisible();
   await expect(panel.getByRole('button', { name: /Retry/ })).toBeVisible();
-  await expect(panel.getByText("You're all caught up")).toHaveCount(0);
+  await expect(panel.getByText("You’re all caught up")).toHaveCount(0);
 });

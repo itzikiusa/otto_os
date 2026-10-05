@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural, pluralNoun } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // File → table import dialog (0002): the mirror of the export-to-path
   // ("Export all rows…") dialog. Picks a local file on the daemon host, a
   // format, a target table, and a batch size, then streams batched INSERTs
@@ -113,7 +115,7 @@
         if (!current() || importAbort?.signal.aborted) return;
         const ok = await confirmGuardedWrite(origin);
         if (!ok || !current() || importAbort?.signal.aborted) {
-          toasts.info('Import cancelled');
+          toasts.info('Import canceled');
           progress = null;
           return;
         }
@@ -128,7 +130,7 @@
       }
 
       if (typeof res.error === 'string') {
-        toasts.error('Import failed', res.error);
+        toasts.error('Couldn’t import', res.error);
         return;
       }
       if (res.done) {
@@ -141,7 +143,7 @@
         const batches = res.batches ?? 0;
         toasts.success(
           'Imported',
-          `${rows.toLocaleString()} row${rows === 1 ? '' : 's'} in ${batches} batch${batches === 1 ? '' : 'es'} → ${tbl}`,
+          `${rows.toLocaleString()} ${pluralNoun(rows, 'row')} in ${plural(batches, 'batch', 'batches')} → ${tbl}`,
         );
         if (current()) database.importDialogOpen = false;
         // Import never authorizes executing the editor's unsubmitted draft.
@@ -154,11 +156,11 @@
       // A user-initiated cancel isn't a failure. The server-side stream stops
       // when the connection drops; batches already committed stay in the table.
       if (e instanceof DOMException && e.name === 'AbortError') {
-        toasts.info('Import cancelled', 'Batches already written stay in the table.');
+        toasts.info('Import canceled', 'Batches already written stay in the table.');
         progress = null;
         return;
       }
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = false;
       importAbort = null;
@@ -242,13 +244,13 @@
     {#if importing || progress}
       <div class="imp-progress" role="status" aria-live="polite">
         {#if importing && !progress}
-          <div class="imp-bar"><div class="imp-bar-fill"></div></div>
+          <div class="indeterminate" role="progressbar" aria-label="Importing"></div>
           <div class="imp-prog-text mono">Importing…</div>
         {:else if progress?.error}
           <div class="imp-prog-text err mono">{progress.error}</div>
         {:else if progress?.done}
           <div class="imp-prog-text ok mono">
-            Imported {(progress.rows ?? 0).toLocaleString()} rows in {progress.batches ?? 0} batches
+            Imported {(progress.rows ?? 0).toLocaleString()} {pluralNoun(progress.rows ?? 0, 'row')} in {plural(progress.batches ?? 0, 'batch', 'batches')}
           </div>
         {/if}
       </div>
@@ -337,27 +339,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-  .imp-bar {
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .imp-bar-fill {
-    height: 100%;
-    width: 40%;
-    border-radius: 999px;
-    background: var(--accent);
-    animation: imp-indet 1.1s ease-in-out infinite;
-  }
-  @keyframes imp-indet {
-    0% {
-      margin-inline-start: -40%;
-    }
-    100% {
-      margin-inline-start: 100%;
-    }
   }
   .imp-prog-text {
     font-size: var(--fs-s);

@@ -190,24 +190,24 @@ function networkRule(engine: string | null, message: string): Partial<Normalized
     };
   }
   if (/connection refused/i.test(message)) {
-    return { kind: 'network', title: `Can't reach ${name}${where} (connection refused).`, hint: NET_HINT };
+    return { kind: 'network', title: `Can’t reach ${name}${where} (connection refused).`, hint: NET_HINT };
   }
   if (/failed to lookup address|dns error|nodename nor servname|name or service not known|no such host/i.test(message)) {
-    return { kind: 'network', title: `Can't resolve the ${name} host${where}.`, hint: 'Check the host name in the profile, or your network/VPN.' };
+    return { kind: 'network', title: `Can’t resolve the ${name} host${where}.`, hint: 'Check the host name in the profile, or your network/VPN.' };
   }
   if (/certificate|tls handshake|InvalidCertificate|establish a TLS connection/i.test(message)) {
     return {
       kind: 'network',
       title: `The TLS handshake with ${name}${where} failed.`,
       cause: oneLine(message),
-      hint: 'Check the profile\'s TLS mode and CA — a tunnelled host needs the real host name for the certificate.',
+      hint: 'Check the profile’s TLS mode and CA — a tunnelled host needs the real host name for the certificate.',
     };
   }
   if (/connection reset|broken pipe|unexpected eof|connection closed|lost connection/i.test(message)) {
     return { kind: 'network', title: `The connection to ${name}${where} dropped.`, hint: 'Retry; if it keeps happening, check the server and the tunnel.' };
   }
   if (/operation timed out|connect timed out|deadline has elapsed|timed out/i.test(message)) {
-    return { kind: 'timeout', title: `${capital(name)}${where} didn't answer in time.`, hint: NET_HINT };
+    return { kind: 'timeout', title: `${capital(name)}${where} didn’t answer in time.`, hint: NET_HINT };
   }
   return null;
 }
@@ -250,11 +250,11 @@ function clickhouseRule(message: string): Partial<NormalizedDbError> | null {
     case 60: {
       const t = text.match(/Table ([\w.`]+) does(?:n't| not) exist/)?.[1]?.replace(/`/g, '')
         ?? text.match(/identifier '([^']+)'/)?.[1];
-      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn't exist.` : 'That table doesn\'t exist.' };
+      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn’t exist.` : 'That table doesn’t exist.' };
     }
     case 81: {
       const db = text.match(/Database ([\w`]+) does(?:n't| not) exist/)?.[1]?.replace(/`/g, '');
-      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn't exist.` : 'That database doesn\'t exist.' };
+      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn’t exist.` : 'That database doesn’t exist.' };
     }
     case 47: {
       const c = text.match(/identifier `([^`]+)`/)?.[1] ?? text.match(/Missing columns: '([^']+)'/)?.[1];
@@ -300,13 +300,13 @@ function clickhouseRule(message: string): Partial<NormalizedDbError> | null {
         ...out,
         kind: 'auth',
         title: `Sign-in to ClickHouse failed${user ? ` for \`${user}\`` : ''}.`,
-        hint: 'Check the profile\'s user and password.',
+        hint: 'Check the profile’s user and password.',
       };
     }
     case 164:
       return { ...out, kind: 'readonly', title: 'This user is read-only on the server.', hint: 'Writes need a different user.' };
     case 497:
-      return { ...out, kind: 'permission', title: 'This user isn\'t allowed to do that.', cause: oneLine(text) };
+      return { ...out, kind: 'permission', title: 'This user isn’t allowed to do that.', cause: oneLine(text) };
     default:
       return { ...out, kind: 'other', title: capital(oneLine(text.replace(/:\s*While executing.*$/, ''))) };
   }
@@ -333,12 +333,12 @@ function mysqlRule(message: string, tags: Partial<Record<Tag, string>>): Partial
       return { ...out, kind: 'unknown_column', token: c, title: c ? `Unknown column \`${c}\`.` : 'Unknown column.' };
     }
     case '1146': {
-      const t = text.match(/Table '([^']+)' doesn't exist/)?.[1];
-      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn't exist.` : 'That table doesn\'t exist.' };
+      const t = text.match(/Table '([^']+)' doesn't exist/)?.[1]; // ui-guards: allow (MySQL's own wording)
+      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn’t exist.` : 'That table doesn’t exist.' };
     }
     case '1049': {
       const db = text.match(/Unknown database '([^']+)'/)?.[1];
-      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn't exist.` : 'That database doesn\'t exist.' };
+      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn’t exist.` : 'That database doesn’t exist.' };
     }
     case '1064': {
       const near = text.match(/near '([\s\S]*?)' at line \d+/)?.[1];
@@ -352,13 +352,13 @@ function mysqlRule(message: string, tags: Partial<Record<Tag, string>>): Partial
         ...out,
         kind: 'auth',
         title: who ? `MySQL rejected user \`${who[1]}\` from ${who[2]}.` : 'MySQL rejected the sign-in.',
-        hint: 'Check the password, or the user\'s host grant.',
+        hint: 'Check the password, or the user’s host grant.',
       };
     }
     case '1044':
     case '1142':
     case '1143':
-      return { ...out, kind: 'permission', title: 'This user isn\'t allowed to do that.', cause: text };
+      return { ...out, kind: 'permission', title: 'This user isn’t allowed to do that.', cause: text };
     case '1062': {
       const dup = text.match(/Duplicate entry '([\s\S]*)' for key '([^']+)'/);
       return { ...out, kind: 'duplicate', title: dup ? `Duplicate value \`${dup[1]}\` for key \`${dup[2]}\`.` : 'Duplicate value.' };
@@ -400,11 +400,11 @@ function postgresRule(message: string, tags: Partial<Record<Tag, string>>): Part
     }
     case '42P01': {
       const t = quoted(/relation "([^"]+)" does not exist/);
-      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn't exist.` : 'That table doesn\'t exist.' };
+      return { ...out, kind: 'unknown_table', token: t, title: t ? `Table \`${t}\` doesn’t exist.` : 'That table doesn’t exist.' };
     }
     case '3D000': {
       const db = quoted(/database "([^"]+)" does not exist/);
-      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn't exist.` : 'That database doesn\'t exist.' };
+      return { ...out, kind: 'unknown_table', title: db ? `Database \`${db}\` doesn’t exist.` : 'That database doesn’t exist.' };
     }
     case '42883': {
       const f = quoted(/function ([\w.]+)\(/);
@@ -424,7 +424,7 @@ function postgresRule(message: string, tags: Partial<Record<Tag, string>>): Part
     }
     case '23502': {
       const c = quoted(/column "([^"]+)"/);
-      return { ...out, kind: 'other', title: c ? `Column \`${c}\` can't be null.` : capital(oneLine(message)) };
+      return { ...out, kind: 'other', title: c ? `Column \`${c}\` can’t be null.` : capital(oneLine(message)) };
     }
     case '28P01':
     case '28000': {
@@ -433,7 +433,7 @@ function postgresRule(message: string, tags: Partial<Record<Tag, string>>): Part
         ...out,
         kind: 'auth',
         title: `Sign-in to Postgres failed${u ? ` for \`${u}\`` : ''}.`,
-        hint: out.hint ?? 'Check the profile\'s user and password (and pg_hba rules for this host).',
+        hint: out.hint ?? 'Check the profile’s user and password (and pg_hba rules for this host).',
       };
     }
     case '42501':
@@ -489,22 +489,22 @@ function mongoRule(message: string, tags: Partial<Record<Tag, string>>): Partial
       cause: `${dup[3].trim()} already exists in ${dup[1]}.`,
     };
   }
-  const reach = text.match(/^Can't reach MongoDB(?: at (\S+?))?: ([\s\S]*)$/);
+  const reach = text.match(/^Can't reach MongoDB(?: at (\S+?))?: ([\s\S]*)$/); // ui-guards: allow (the daemon's wording)
   if (reach) {
     const why = /connection refused/i.test(reach[2]) ? ' (connection refused)' : '';
-    return { ...out, kind: 'network', title: `Can't reach MongoDB${reach[1] ? ` at ${reach[1]}` : ''}${why}.`, cause: why ? undefined : reach[2], hint: NET_HINT };
+    return { ...out, kind: 'network', title: `Can’t reach MongoDB${reach[1] ? ` at ${reach[1]}` : ''}${why}.`, cause: why ? undefined : reach[2], hint: NET_HINT };
   }
   if (/Server selection timeout/i.test(text)) {
-    return { ...out, kind: 'network', title: 'Can\'t reach MongoDB.', hint: NET_HINT };
+    return { ...out, kind: 'network', title: 'Can’t reach MongoDB.', hint: NET_HINT };
   }
   if (/auth(entication)? failed|AuthenticationFailed|SCRAM failure/i.test(text)) {
-    return { ...out, kind: 'auth', title: 'Sign-in to MongoDB failed.', cause: oneLine(text), hint: 'Check the profile\'s user, password and auth database.' };
+    return { ...out, kind: 'auth', title: 'Sign-in to MongoDB failed.', cause: oneLine(text), hint: 'Check the profile’s user, password and auth database.' };
   }
   if (/not authorized on/i.test(text)) {
-    return { ...out, kind: 'permission', title: 'This user isn\'t allowed to do that.', cause: oneLine(text) };
+    return { ...out, kind: 'permission', title: 'This user isn’t allowed to do that.', cause: oneLine(text) };
   }
   if (/\bns (does )?not (found|exist)/i.test(text)) {
-    return { ...out, kind: 'unknown_table', title: 'That collection doesn\'t exist.' };
+    return { ...out, kind: 'unknown_table', title: 'That collection doesn’t exist.' };
   }
   if (/operation exceeded time limit|MaxTimeMSExpired/i.test(text)) {
     return { ...out, kind: 'timeout', title: 'Stopped by the time limit.', hint: TIMEOUT_HINT };
@@ -516,23 +516,23 @@ function mongoRule(message: string, tags: Partial<Record<Tag, string>>): Partial
 function redisRule(message: string): Partial<NormalizedDbError> | null {
   const text = message.replace(/^An error was signalled by the server - /, '').replace(/^ResponseError: /, '');
   if (/^WRONGTYPE\b/.test(text)) {
-    return { kind: 'other', code: 'WRONGTYPE', title: 'Key holds a different type.', hint: 'Run TYPE <key> first, then use that type\'s commands.' };
+    return { kind: 'other', code: 'WRONGTYPE', title: 'Key holds a different type.', hint: 'Run TYPE <key> first, then use that type’s commands.' };
   }
   const cmd = text.match(/unknown command [`']([^`']+)[`']/i)?.[1];
   if (cmd) {
     return { kind: 'unknown_name', token: cmd, suggestions: nearest(cmd.toUpperCase(), REDIS_COMMANDS), title: `Unknown command \`${cmd}\`.` };
   }
   if (/^(NOAUTH|WRONGPASS)\b|invalid username-password|AuthenticationFailed/i.test(text)) {
-    return { kind: 'auth', code: text.match(/^(NOAUTH|WRONGPASS)/)?.[1], title: 'Redis sign-in failed.', hint: 'Check the profile\'s password (and ACL user).' };
+    return { kind: 'auth', code: text.match(/^(NOAUTH|WRONGPASS)/)?.[1], title: 'Redis sign-in failed.', hint: 'Check the profile’s password (and ACL user).' };
   }
   if (/^NOPERM\b/.test(text)) {
-    return { kind: 'permission', code: 'NOPERM', title: 'This user isn\'t allowed to run that command.', cause: oneLine(text) };
+    return { kind: 'permission', code: 'NOPERM', title: 'This user isn’t allowed to run that command.', cause: oneLine(text) };
   }
   if (/^READONLY\b/.test(text)) {
     return { kind: 'readonly', code: 'READONLY', title: 'This is a read-only replica.', hint: 'Writes need the primary.' };
   }
   if (/wrong number of arguments/i.test(text)) {
-    return { kind: 'syntax', title: capital(oneLine(text)), hint: 'Check the command\'s arguments.' };
+    return { kind: 'syntax', title: capital(oneLine(text)), hint: 'Check the command’s arguments.' };
   }
   return null;
 }

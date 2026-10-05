@@ -245,7 +245,7 @@ export class RoomMediaClient {
         this.stopPresentation(); this.error('The room did not accept the presentation. Ask for permission and try again.');
       } }, 10_000);
       this.emit(); this.schedule();
-    } catch { if (!this.disposed) this.error('Screen sharing was cancelled or is unavailable. Choose a supported window or display and check macOS screen-recording permission.'); }
+    } catch { if (!this.disposed) this.error('Screen sharing was canceled or is unavailable. Choose a supported window or display and check macOS screen-recording permission.'); }
   }
   stopPresentation(): void {
     if (this.captureDeadline) { clearTimeout(this.captureDeadline); this.captureDeadline = null; }

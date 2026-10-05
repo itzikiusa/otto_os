@@ -7,16 +7,14 @@
 
   import Icon from '../../lib/components/Icon.svelte';
   import { browser } from '../../lib/stores/browser.svelte';
-  import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
 
   // inbar: rendered inside the PageHeader bar (no own border row / padding).
   let { onnew, inbar = false }: { onnew: () => void; inbar?: boolean } = $props();
 
   function close(e: MouseEvent, id: string): void {
     e.stopPropagation();
-    browser.closeTab(id).catch((err: unknown) => {
-      toasts.error('Couldn’t close the tab', err instanceof Error ? err.message : String(err));
-    });
+    browser.closeTab(id).catch((err: unknown) => toastError('Couldn’t close the tab', err));
   }
 </script>
 
@@ -24,7 +22,7 @@
      child of the scroller (inside PageHeader's width-capped tab slot) it was
      scrolled/clipped off the edge once a few tabs were open. -->
 <div class="strip" class:inbar>
-  <div class="tabs-scroll">
+  <div class="tabs-scroll scroll-thin">
   {#each browser.tabs as tab (tab.id)}
     <!-- The tab is a wrapper holding TWO real buttons (select + close): a
          close control nested inside the select button was a clickable span
@@ -44,7 +42,7 @@
         class="close"
         onclick={(e) => close(e, tab.id)}
         aria-label="Close tab {tab.title || tab.url}"
-        title="Close tab"
+        title="Close tab {tab.title || tab.url}"
       >
         <Icon name="x" size={11} />
       </button>
@@ -77,7 +75,6 @@
     flex: 0 1 auto;
     min-width: 0;
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .tab {
     display: flex;
@@ -155,5 +152,19 @@
   .new:hover {
     background: var(--surface);
     color: var(--text);
+  }
+  /* Touch: the glyphs stay small, the hit areas grow to 36 px. */
+  @media (pointer: coarse) {
+    .tab-main {
+      min-block-size: 36px;
+    }
+    .close,
+    .new {
+      inline-size: 36px;
+      block-size: 36px;
+    }
+    .close {
+      opacity: 1;
+    }
   }
 </style>

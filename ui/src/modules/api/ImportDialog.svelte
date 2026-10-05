@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // One "Import" sheet for every way in: paste a curl command (opens it as a
   // request tab), a Postman / OpenAPI / HAR file (becomes a collection), or a
   // whole Postman account (every collection + environment via the Postman API).
@@ -55,7 +56,7 @@
     try {
       await apiClient.importParsed(detectAndParse(await file.text(), file.name));
     } catch (e) {
-      toasts.error('Couldn’t import the file', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import the file', e);
     }
   }
 

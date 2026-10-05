@@ -1,6 +1,6 @@
 <script lang="ts">
   // The frame every in-thread action card shares (reminder, task, browser,
-  // approval): an icon + bold kind + dim one-line summary header with a state
+  // approval): an icon + bold heading + dim one-line summary header with a state
   // pill at the trailing edge, a body, and an optional footer well for its
   // actions. Hairline border, no shadow (foundations §5).
   import type { Snippet } from 'svelte';
@@ -8,7 +8,9 @@
 
   interface Props {
     icon: IconName;
-    kind: string;
+    /** The card's bold heading — already human words ("Reminder", "Approval
+     *  needed"; map wire kinds through `TASK_KIND`), never a raw enum. */
+    heading: string;
     summary?: string;
     /** Attention ring for a card that is waiting on you. */
     attention?: boolean;
@@ -17,13 +19,13 @@
     footer?: Snippet;
     testid?: string;
   }
-  let { icon, kind, summary, attention = false, pill, children, footer, testid }: Props = $props();
+  let { icon, heading, summary, attention = false, pill, children, footer, testid }: Props = $props();
 </script>
 
-<section class="card" class:attention data-testid={testid} aria-label={summary ? `${kind}: ${summary}` : kind}>
+<section class="card" class:attention data-testid={testid} aria-label={summary ? `${heading}: ${summary}` : heading}>
   <header class="head">
     <span class="ic" aria-hidden="true"><Icon name={icon} size={14} /></span>
-    <strong class="kind">{kind}</strong>
+    <strong class="heading">{heading}</strong>
     {#if summary}<span class="summary" title={summary}>{summary}</span>{/if}
     {#if pill}<span class="pill-slot">{@render pill()}</span>{/if}
   </header>
@@ -59,7 +61,7 @@
   .card.attention .ic {
     color: var(--warning);
   }
-  .kind {
+  .heading {
     font-size: var(--fs-m);
     font-weight: 600;
     white-space: nowrap;

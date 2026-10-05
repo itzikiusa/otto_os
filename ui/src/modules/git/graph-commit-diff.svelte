@@ -57,6 +57,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The commit-detail diff pane of the Git graph (the right-hand panel a branch
   // or commit click opens). Built to stay flat no matter how big the commit is:
   //
@@ -461,7 +462,7 @@
         <div class="dim dd-empty">No file changes.</div>
       {:else}
         <div class="diff-summary-bar">
-          <span class="dim">{summary.files.length} file{summary.files.length === 1 ? '' : 's'}</span>
+          <span class="dim">{plural(summary.files.length, 'file')}</span>
           <span class="ds-add">+{totals.add}</span>
           <span class="ds-del">−{totals.del}</span>
           {#if collapseAll}
@@ -626,7 +627,7 @@
     display: inline-flex;
     align-items: center;
     flex-shrink: 0;
-    padding: 0 9px;
+    padding: 0 8px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -641,18 +642,18 @@
   .df-head {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex: 1;
     min-width: 0;
     width: 100%;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border: none;
     background: var(--surface-2);
     cursor: pointer;
     font-size: var(--fs-xs);
     color: var(--text);
     text-align: start;
-    transition: background 80ms;
+    transition: background var(--dur-fast);
   }
   .df-head:hover {
     background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
@@ -723,7 +724,7 @@
     width: 34px;
     min-width: 34px;
     text-align: end;
-    padding-block: 0; padding-inline: 3px 5px;
+    padding-block: 0; padding-inline: 2px 4px;
     color: var(--text-dim);
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
@@ -742,7 +743,7 @@
     padding: 0 1px;
   }
   .dl-code {
-    padding-block: 0; padding-inline: 3px 8px;
+    padding-block: 0; padding-inline: 2px 8px;
     white-space: pre;
     word-break: normal;
     user-select: text;
@@ -781,10 +782,10 @@
   /* Phone / tablet (the graph's stacked accordion, see GraphView `.mobile`). */
   @media (max-width: 1024px) {
     :global(.mobile) .detail-diff { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-    :global(.mobile) .diff-summary-bar { font-size: var(--fs-m); padding: 9px 12px; }
+    :global(.mobile) .diff-summary-bar { font-size: var(--fs-m); padding: 8px 12px; }
     :global(.mobile) .ds-add,
     :global(.mobile) .ds-del { font-size: var(--fs-m); }
-    :global(.mobile) .df-head { font-size: var(--fs-m); padding: 9px 12px; }
+    :global(.mobile) .df-head { font-size: var(--fs-m); padding: 8px 12px; }
     :global(.mobile) .df-path { font-size: var(--fs-m); }
     :global(.mobile) .hunk-header { font-size: var(--fs-s); padding: 4px 10px; }
     /* table-layout:fixed pins the gutter/sign columns to their declared widths

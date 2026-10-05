@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Custom agent providers (root): add any CLI (opencode, kilo, …) as a
@@ -160,7 +161,7 @@
 
   async function updateAllCLIs(): Promise<void> {
     const wsId = ws.currentId;
-    if (!wsId) { toasts.error('No workspace selected'); return; }
+    if (!wsId) { toasts.error(NO_WORKSPACE); return; }
     updating = true;
     try {
       const session = await api.post<Session>(`/workspaces/${wsId}/providers/update`, {});
@@ -411,8 +412,8 @@
   async function remove(n: string): Promise<void> {
     if (
       !(await confirmer.ask(
-        `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You'd have to re-enter its command to add it back.`,
-        { title: 'Remove provider', confirmLabel: 'Remove' },
+        `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
+        { title: 'Remove provider?', confirmLabel: 'Remove' },
       ))
     )
       return;
@@ -425,8 +426,10 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('providers')} subtitle="Agent CLIs Otto can spawn as sessions">
     {#snippet actions()}
+      <!-- Not .primary: a maintenance command that opens a session, not this
+           page's main job (and the header allows at most one primary). -->
       <button
-        class="btn small primary"
+        class="btn small"
         data-icon="download"
         onclick={updateAllCLIs}
         disabled={updating || loading}
@@ -775,7 +778,7 @@
   /* Hints and sub-controls under a toggle line up with its label text
      (SettingToggle: 15px box + 10px gap). */
   .indent {
-    padding-inline-start: 25px;
+    padding-inline-start: 24px;
   }
   .field-err {
     margin: 0;

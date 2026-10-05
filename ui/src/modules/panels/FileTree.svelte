@@ -1,6 +1,8 @@
 <script lang="ts">
   // FileTree: lazy browsable file tree + read-only syntax-highlighted viewer
   // for the right-panel Files tab.
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { onDestroy } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -328,20 +330,18 @@
         actionIcon="folder"
         onaction={() => (showPicker = true)}
       />
-    {:else if rootLoading}
-      <div class="loading dim">Loading files…</div>
-    {:else if rootError}
-      <div class="load-error" role="alert">
-        <div class="error-head">
-          <Icon name="warning" size={13} />
-          <span>Couldn't list {basename(effectiveRoot)}</span>
-        </div>
-        <div class="error-detail">{rootError}</div>
-        <button class="btn small" onclick={() => void loadRoot(effectiveRoot)}>
-          <Icon name="refresh" size={12} /> Retry
-        </button>
+    {:else if (rootLoading || rootError) && rootNodes.length === 0}
+      {@const root = effectiveRoot}
+      <!-- First load: skeleton; a failed load with nothing listed: inline error.
+           A refresh keeps the tree on screen (a failed one shows the stale bar). -->
+      <div class="load-pad">
+        <LoadState what="the files in {basename(root)}" loading={rootLoading} error={rootError || null} empty onretry={() => void loadRoot(root)} />
       </div>
     {:else}
+      {#if rootError}
+        {@const root = effectiveRoot}
+        <LoadState what="the files in {basename(root)}" error={rootError} empty={false} onretry={() => void loadRoot(root)} />
+      {/if}
       <!-- Tree pane -->
       <div class="tree-pane" class:has-viewer={!!viewerFile}>
         <div class="tree-list">
@@ -360,7 +360,7 @@
                   <Icon name={node.open ? 'chevronDown' : 'chevronRight'} size={10} />
                 </span>
                 {#if node.loading}
-                  <span class="spin"><Icon name="refresh" size={12} /></span>
+                  <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
                 {:else}
                   <Icon name="folder" size={12} />
                 {/if}
@@ -404,7 +404,7 @@
             </button>
           </div>
           {#if viewerLoading}
-            <div class="loading dim">Loading {viewerName}…</div>
+            <div class="loading"><Skeleton rows={8} height={14} label={viewerName} /></div>
           {:else if viewerError}
             <div class="error-msg" role="alert">{viewerError}</div>
           {:else if viewerFile}
@@ -441,7 +441,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
-    padding-block: 3px; padding-inline: 8px 4px;
+    padding-block: 2px; padding-inline: 8px 4px;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
     flex-shrink: 0;
@@ -520,10 +520,10 @@
     white-space: nowrap;
     overflow: hidden;
     padding-inline-end: 6px;
-    transition: background 80ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .tree-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tree-row.is-dir {
     color: var(--text);
@@ -559,11 +559,6 @@
     align-items: center;
   }
 
-  .spin {
-    display: flex;
-    align-items: center;
-    animation: otto-spin 0.8s linear infinite;
-  }
 
   .empty-dir {
     padding: 8px 12px;
@@ -609,9 +604,9 @@
   }
   .truncated-badge {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     flex-shrink: 0;
   }
@@ -640,7 +635,7 @@
     border-radius: var(--radius-s);
   }
   .pv.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .preview-frame {
@@ -657,28 +652,8 @@
     padding: 12px;
     font-size: var(--fs-s);
   }
-  .load-error {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
+  .load-pad {
     padding: 12px;
-    font-size: var(--fs-s);
-  }
-  .error-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text);
-  }
-  .error-head :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
-  }
-  .error-detail {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    word-break: break-all;
   }
   .error-msg {
     padding: 12px;

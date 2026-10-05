@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../plural';
   // Shared "Send to agent" dialog — B2a.
   //
   // Workflow:
@@ -17,7 +18,11 @@
   import { api } from '../api/client';
   import { ws } from '../stores/workspace.svelte';
   import { toasts } from '../toast.svelte';
+  import { toastError } from '../toastError';
   import Modal from './Modal.svelte';
+  import Badge from './Badge.svelte';
+  import LoadState from './LoadState.svelte';
+  import { loadErrorText } from '../loadError';
   import type {
     ContextPacketKind,
     ContextPacketPreviewResp,
@@ -62,7 +67,7 @@
       );
       preview = resp;
     } catch (e) {
-      previewErr = e instanceof Error ? e.message : String(e);
+      previewErr = loadErrorText(e);
       preview = null;
     }
   }
@@ -87,12 +92,12 @@
       const label = kindLabel(kind);
       toasts.success(
         total > 0
-          ? `${label} sent — ${total} secret${total === 1 ? '' : 's'} redacted`
+          ? `${label} sent — ${plural(total, 'secret')} redacted`
           : `${label} sent to agent`,
       );
       onclose();
     } catch (e) {
-      toasts.error(e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t send the context to the agent', e);
     } finally {
       sending = false;
     }
@@ -141,12 +146,12 @@
       {#if preview === 'loading'}
         <div class="preview-loading">Previewing redactions…</div>
       {:else if previewErr}
-        <div class="preview-err">Preview failed: {previewErr}</div>
+        <LoadState variant="compact" what="the preview" error={previewErr} empty onretry={() => pickedSessionId && void loadPreview(pickedSessionId)} />
       {:else if preview}
         <!-- Redaction badge -->
         {@const total = (preview as ContextPacketPreviewResp).redactions.reduce((s, h) => s + h.count, 0)}
-        <div class="badge {total > 0 ? 'badge-warn' : 'badge-ok'}">
-          {redactionSummary((preview as ContextPacketPreviewResp).redactions)}
+        <div class="redactions">
+          <Badge tone={total > 0 ? 'warn' : 'ok'} label={redactionSummary((preview as ContextPacketPreviewResp).redactions)} />
         </div>
         <!-- Redacted payload preview (read-only) -->
         <div class="preview-wrap">
@@ -194,23 +199,14 @@
     color: var(--text-dim);
     margin-bottom: 12px;
   }
-  .preview-loading,
-  .preview-err {
+  .preview-loading {
     font-size: var(--fs-m);
     color: var(--text-dim);
     margin-bottom: 8px;
   }
-  .preview-err { color: var(--danger); }
-  .badge {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 3px 8px;
-    border-radius: 999px;
+  .redactions {
     margin-bottom: 8px;
   }
-  .badge-ok  { background: var(--success-soft); color: var(--success); }
-  .badge-warn { background: var(--warning-soft); color: var(--warning); }
   .preview-wrap {
     max-height: 260px;
     overflow-y: auto;

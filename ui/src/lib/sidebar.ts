@@ -428,10 +428,11 @@ export interface GoToEntry {
 
 /** Routes the user can reach but that have no sidebar entry of their own. They
  *  sit here, beside the registry, so ⌘K, the ⌥Space bar and the sidebar are all
- *  derived from ONE file and cannot drift. */
+ *  derived from ONE file and cannot drift. Canvas is NOT here: it is Design
+ *  Hall's Whiteboard studio, so "Go to Design Hall" (whose keywords carry
+ *  canvas / whiteboard / excalidraw) is its one ⌘K door. */
 export const EXTRA_GOTO: readonly { id: string; label: string; route: string; detail: string; keywords: string }[] = [
   { id: 'brokers', label: 'Message Brokers', route: 'brokers', detail: 'Infrastructure', keywords: 'message broker kafka redpanda topic consumer producer partition schema registry avro protobuf' },
-  { id: 'canvas', label: 'Canvas', route: 'canvas', detail: 'Build · Design Hall whiteboard', keywords: 'canvas whiteboard diagram sketch uml sequence flowchart excalidraw mermaid d2' },
   { id: 'walkthroughs', label: 'Help', route: 'walkthroughs', detail: 'Guides, shortcuts and walkthroughs', keywords: 'help guide guides readme docs shortcuts keys intro tour film video walkthroughs onboarding' },
 ];
 
@@ -452,7 +453,7 @@ export function goToEntries(mods: SidebarModule[]): GoToEntry[] {
   const taken = new Set(mods.map((m) => m.id));
   const extras = EXTRA_GOTO.filter((e) => !taken.has(e.id)).map((e): GoToEntry => ({
     id: `core.go-${e.id}`,
-    title: e.id === 'walkthroughs' ? 'Open Help' : `Go to ${e.label}`,
+    title: `Go to ${e.label}`,
     detail: e.detail,
     keywords: e.keywords,
     route: e.route,

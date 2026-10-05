@@ -10,6 +10,10 @@
   // link that navigates to the Product section. When no link exists (project
   // was not seeded from a story) the card renders nothing.
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
+  import { badgeTone, storyStage } from '../../lib/status';
   import { api } from '../../lib/api/client';
   import { product } from '../../lib/stores/product.svelte';
   import { router } from '../../lib/router.svelte';
@@ -44,8 +48,8 @@
       const detail = await api.get<{ story: ProductStory }>(`/product/stories/${sid}`);
       story = detail.story ?? null;
     } catch (e) {
-      // Silently swallow — the card is supplementary.
-      error = e instanceof Error ? e.message : String(e);
+      // Supplementary: one compact line + Retry, never a page-level error.
+      error = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -58,25 +62,20 @@
     router.go('product');
   }
 
-  const STAGE_CLASS: Record<string, string> = {
-    draft: 'dim',
-    analysis: 'accent',
-    planning: 'accent',
-    ready: 'good',
-    done: 'done',
-  };
+  const stage = $derived(story?.stage ? storyStage(story.stage) : null);
 </script>
 
-{#if loading}
-  <!-- tiny inline spinner — don't block toolbar -->
-  <span class="slc-loading dim">Loading story…</span>
+{#if !story && (loading || error) && project.story_id}
+  <div class="slc-state">
+    <LoadState what="the linked story" variant="compact" {loading} {error} empty rows={1} onretry={() => void load(project.story_id!)} />
+  </div>
 {:else if story}
   <div class="story-link-card">
     <Icon name="note" size={12} />
     <span class="slc-label dim">From story</span>
     <span class="slc-title" title={story.title}>{story.title}</span>
-    {#if story.stage}
-      <span class="chip {STAGE_CLASS[story.stage] ?? 'dim'}">{story.stage}</span>
+    {#if stage}
+      <Badge tone={badgeTone(stage.tone)} label={stage.label} />
     {/if}
     <button class="btn small ghost slc-view" onclick={viewStory} title="Open this story in Product">
       View story
@@ -99,7 +98,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
   }
   .slc-title {
     font-weight: 500;
@@ -113,20 +112,7 @@
     margin-inline-start: auto;
     flex: none;
   }
-  .slc-loading {
-    font-size: var(--fs-xs);
+  .slc-state {
     padding: 4px 10px;
-  }
-  .chip.good {
-    background: color-mix(in srgb, var(--success) 15%, transparent);
-    color: var(--success);
-  }
-  .chip.accent {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .chip.done {
-    background: color-mix(in srgb, var(--success) 10%, transparent);
-    color: var(--text-dim);
   }
 </style>

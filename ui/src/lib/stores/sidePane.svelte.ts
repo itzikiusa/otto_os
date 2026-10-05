@@ -48,7 +48,7 @@ import {
 
 type Payload<T> = T extends unknown ? Omit<T, 'ns'> : never;
 
-/** How long a fresh pane may take to boot before it shows "Couldn't load". */
+/** How long a fresh pane may take to boot before it shows "Couldn’t load". */
 const READY_TIMEOUT_MS = 20_000;
 
 /** What the host window does for its pane (App.svelte supplies these). */
@@ -271,18 +271,18 @@ class SidePaneStore {
 
   /** Subscribe before creating the child: ready may arrive during pane_open. */
   attachNative(bounds: PaneBounds): () => void {
-    let cancelled = false;
+    let canceled = false;
     let opened = false;
     this.status = 'loading';
     this.clearTimer();
-    this.readyTimer = setTimeout(() => { if (!cancelled && this.status === 'loading') this.status = 'error'; }, READY_TIMEOUT_MS);
+    this.readyTimer = setTimeout(() => { if (!canceled && this.status === 'loading') this.status = 'error'; }, READY_TIMEOUT_MS);
     void this.transportReady.then(async () => {
-      if (cancelled) return;
+      if (canceled) return;
       opened = true;
       await nativePane.open(this.route ?? 'agents', bounds);
-    }).catch(() => { if (!cancelled) { this.status = 'error'; this.clearTimer(); } });
+    }).catch(() => { if (!canceled) { this.status = 'error'; this.clearTimer(); } });
     return () => {
-      cancelled = true;
+      canceled = true;
       this.clearTimer();
       if (opened) void nativePane.close().catch(() => {});
     };

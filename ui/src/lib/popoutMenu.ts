@@ -5,6 +5,7 @@
 import type { MenuItem } from './contextmenu.svelte';
 import { isTauri, openPopout } from './desktop';
 import { toasts } from './toast.svelte';
+import { toastError } from './toastError';
 
 /** `route` without the leading `#/` (e.g. `agents/<id>`, `database/<id>`). */
 export function popoutItems(route: string, title?: string): MenuItem[] {
@@ -15,7 +16,7 @@ export function popoutItems(route: string, title?: string): MenuItem[] {
       icon: 'external',
       action: () =>
         void openPopout(route, title).catch((e: unknown) =>
-          toasts.error('Could not open window', e instanceof Error ? e.message : String(e)),
+          toastError('Couldn’t open window', e),
         ),
     },
   ];

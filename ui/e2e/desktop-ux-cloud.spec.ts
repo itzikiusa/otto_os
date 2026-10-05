@@ -113,7 +113,8 @@ for (const variant of [
     await page.getByRole('cell', { name: 'checkout-api', exact: true }).click();
     await expect(page.getByTestId('aws-drawer')).toBeVisible();
     await expectNoHorizontalOverflow(page);
-    await expectFullyInViewport(page, page.getByTestId('aws-drawer').getByRole('button', { name: 'Close details' }));
+    // The ✕ sits in the drawer chrome (DockedDrawer), outside the testid'd body on a phone sheet.
+    await expectFullyInViewport(page, page.getByRole('button', { name: 'Close instance details' }));
     await page.screenshot({ path: `/tmp/otto-ux-cloud-${variant.name}-aws-loaded.png` });
     await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
     const drawer = page.getByTestId('k8s-drawer');
@@ -122,7 +123,7 @@ for (const variant of [
     await drawer.getByRole('textbox', { name: 'Search logs' }).fill('complete');
     await expect(drawer.getByText('checkout started', { exact: true })).toBeHidden();
     await expectNoHorizontalOverflow(page);
-    await expectFullyInViewport(page, drawer.getByRole('button', { name: 'Close details' }));
+    await expectFullyInViewport(page, page.getByRole('button', { name: 'Close Pod details' }));
     await page.screenshot({ path: `/tmp/otto-ux-cloud-${variant.name}-kubernetes-loaded.png` });
   });
 }
@@ -179,12 +180,13 @@ test('Kubernetes setup source selection works with arrow keys', async ({ page })
 test('phone Kubernetes details cover navigation and contain keyboard focus', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
-  const drawer = page.getByTestId('k8s-drawer');
-  await expect(drawer).toHaveAttribute('role', 'dialog');
+  // Phone: DockedDrawer presents the shell Drawer sheet (the dialog wraps the testid'd body).
+  const drawer = page.getByRole('dialog', { name: 'Pod details' });
+  await expect(page.getByTestId('k8s-drawer')).toBeVisible();
   await expect(drawer).toHaveAttribute('aria-modal', 'true');
   const overDrawer = await drawer.evaluate(el => el.contains(document.elementFromPoint(180, 790)));
   expect(overDrawer, 'phone navigation must not cover the detail sheet').toBe(true);
-  const close = drawer.getByRole('button', { name: 'Close details' });
+  const close = drawer.getByRole('button', { name: 'Close Pod details' });
   await close.focus();
   await page.keyboard.press('Shift+Tab');
   expect(await drawer.evaluate(el => el.contains(document.activeElement))).toBe(true);

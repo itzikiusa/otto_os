@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { badgeTone, runStatus } from '../../lib/status';
+  import Badge from '../../lib/components/Badge.svelte';
   import { onMount, untrack } from 'svelte';
   import { sentenceCase, runStateLabel } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -7,6 +9,8 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
   let {connectionId,node=null}:{connectionId:string;node?:string|null}=$props();
   let changes:DatabaseChange[]=$state([]);
@@ -21,6 +25,17 @@
   let pending=$state('');
   let generation=0;
   const selected:DatabaseChange|null=$derived.by(()=>detail?.change ?? null);
+  // The unselected main pane summarises the collection instead of a bare "pick one":
+  // "5 changes · 2 awaiting review · 1 approved".
+  const changesSummary=$derived.by(()=>{
+    const count=(status:string)=>changes.filter(c=>c.status===status).length;
+    const parts=[plural(changes.length,'change')];
+    const review=count('awaiting_review'), approved=count('approved'), unknown=count('outcome_unknown');
+    if(review)parts.push(`${review} awaiting review`);
+    if(approved)parts.push(`${approved} approved`);
+    if(unknown)parts.push(`${unknown} outcome unknown`);
+    return parts.join(' · ');
+  });
   const child=$derived((node ?? '').replace(/^db:/,'').split('/')[0] || undefined);
   const owner=$derived(selected?.author_id===auth.me?.id);
   const independent=$derived(selected !== null && ![selected.author_id,selected.real_author_id].includes(auth.me?.id ?? '') && ![selected.author_id,selected.real_author_id].includes(auth.realUser?.id ?? ''));
@@ -168,7 +183,7 @@
           <button class="btn" onclick={()=>editing=false} disabled={busy}>Close editor</button>
         </div>
       {:else if selected && detail}
-        <div class="title"><h3>{selected.title}</h3><span class="badge">{sentenceCase(selected.status)}</span></div>
+        <div class="title"><h3>{selected.title}</h3><Badge tone={badgeTone(runStatus(selected.status).tone)} label={sentenceCase(selected.status)} /></div>
         <p>{selected.description}</p>
         <p class="hint">Revision {selected.revision} · Author {selected.author_id}</p>
         <div class="targets">
@@ -222,7 +237,7 @@
           <h4>Target attempts</h4>
           {#each detail.attempts as attempt}
             <article>
-              <strong>{attempt.node?.replace(/^db:/,'')}</strong><span class="badge">{runStateLabel(attempt.state)}</span>
+              <strong>{attempt.node?.replace(/^db:/,'')}</strong><Badge tone={badgeTone(runStatus(attempt.state).tone)} label={runStateLabel(attempt.state)} />
               <p>{attempt.summary}</p>
               {#if attempt.state==='outcome_unknown' && selected.status==='outcome_unknown' && can('change_execute')}
                 <p class="hint">Inspect the target database before recording an outcome. This does not replay SQL.</p>
@@ -242,7 +257,13 @@
             <p>{new Date(event.created_at).toLocaleString()} · {sentenceCase(event.action)} · {event.actor_id}{event.real_actor_id!==event.actor_id ? ` (via ${event.real_actor_id})` : ''}</p>
           {/each}
         </details>
-      {:else}<div class="empty">Choose a change to review its script, approvals, and execution history.</div>{/if}
+      {:else if !loading && !loadError}
+        <EmptyState
+          icon="db"
+          title={changes.length ? changesSummary : 'No database changes yet'}
+          body={changes.length ? 'Select one to review its script, approvals and execution history.' : 'A change carries a reviewed SQL script from draft to approved run.'}
+        />
+      {/if}
     </main>
   </div>
 </div>
@@ -293,7 +314,7 @@
     text-align: start;
     margin-bottom: 6px;
     overflow-wrap: anywhere;
-    padding: 7px 10px;
+    padding: 6px 10px;
     cursor: pointer;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -324,7 +345,7 @@
   label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 10px 0;
     font-size: var(--fs-s);
   }
@@ -359,13 +380,6 @@
   }
   .actions {
     margin: 12px 0;
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 3px 7px;
-    background: var(--hover);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
   }
   .targets {
     display: flex;
@@ -405,7 +419,7 @@
     padding: 12px;
     margin: 8px 0;
   }
-  article .badge {
+  article :global(.badge) {
     margin-inline-start: 8px;
   }
   article p {
@@ -418,10 +432,6 @@
   details code {
     display: block;
     overflow-wrap: anywhere;
-  }
-  .empty {
-    padding: 35px 10px;
-    color: var(--text-dim);
   }
   @media (max-width: 640px) {
     .layout {

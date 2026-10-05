@@ -104,7 +104,9 @@ test('the right activity panel loads each tab on demand (perf G1)', () => {
 
   // Every tab but Notes (inline) has a loader.
   const src = read('shell/RightPanel.svelte');
-  const tabs = [...src.slice(src.indexOf('const tabs:')).matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
+  // The tab list lives in lib/rightTabs.ts (shared with the ⌘K "Open … panel" commands).
+  const tabsSrc = read('lib/rightTabs.ts');
+  const tabs = [...tabsSrc.slice(tabsSrc.indexOf('RIGHT_TABS')).matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
   const loaders = src.slice(src.indexOf('PANEL_LOADERS'), src.indexOf('};', src.indexOf('PANEL_LOADERS')));
   const keys = new Set([...loaders.matchAll(/^\s*([a-zA-Z0-9]+):\s*\(\)/gm)].map((m) => m[1]));
   assert.ok(tabs.length >= 9, `parsed the tab list (${tabs.join()})`);

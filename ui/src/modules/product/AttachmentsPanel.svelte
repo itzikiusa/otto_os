@@ -7,6 +7,7 @@
   // OverviewTab (which also splices a markdown ref into draftBody).
 
   import { product } from '../../lib/stores/product.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
   import { toasts } from '../../lib/toast.svelte';
   import { kindLabel } from '../../lib/labels';
@@ -234,7 +235,7 @@
 
   /** Delete an attachment with confirm. */
   async function deleteAtt(att: ProductAttachment): Promise<void> {
-    const ok = await confirmer.ask(`Delete "${att.filename}"?`, {
+    const ok = await confirmer.ask(`Delete “${att.filename}”?`, {
       title: 'Delete attachment',
       confirmLabel: 'Delete',
       danger: true,
@@ -250,12 +251,11 @@
       localAttUrls = rest;
       toasts.info('Attachment deleted');
     } catch (e) {
-      toasts.error('Delete failed', loadErrorText(e));
+      toasts.error('Couldn’t delete', loadErrorText(e));
     }
   }
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="att-panel"
   class:drag-over={dragOver}
@@ -323,7 +323,7 @@
                   alt={att.filename}
                 />
               {:else if localAttUrlLoading[att.id]}
-                <span class="att-loading-hint">Loading preview…</span>
+                <Skeleton rows={1} height={64} label="the preview" />
               {:else}
                 <button
                   class="att-load-btn"
@@ -406,11 +406,11 @@
     padding: 10px 12px;
     margin-top: 12px;
     background: var(--surface);
-    transition: border-color 120ms, background 120ms;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .att-panel.drag-over {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
 
   .att-header-row {
@@ -478,11 +478,11 @@
   }
   .att-kind-badge {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     flex-shrink: 0;
   }
   .mockup-badge {
@@ -511,11 +511,6 @@
     height: 100%;
     border: none;
     border-radius: var(--radius-s);
-  }
-  .att-loading-hint {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    font-style: italic;
   }
   .att-load-btn {
     font-size: var(--fs-xs);
@@ -570,13 +565,13 @@
   }
   .att-action-btn {
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    transition: border-color 100ms, color 100ms;
+    transition: border-color var(--dur-fast), color var(--dur-fast);
   }
   .att-action-btn:hover {
     border-color: var(--accent);

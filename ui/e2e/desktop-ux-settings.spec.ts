@@ -105,7 +105,7 @@ test('Skills Lab search opens a library skill and its Files tab', async ({ page 
   }});
   expect(created.ok()).toBeTruthy();
   await page.goto('/#/skills-eval');
-  await page.getByRole('searchbox', { name: 'Search skills' }).fill(name);
+  await page.getByRole('searchbox', { name: 'Filter skills' }).fill(name);
   const row = page.getByTestId('skill-row');
   await expect(row).toHaveCount(1);
   await row.click();

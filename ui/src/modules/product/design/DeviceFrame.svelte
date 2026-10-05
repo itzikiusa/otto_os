@@ -67,13 +67,13 @@
     gap: 8px;
     padding: 18px 12px;
     background:
-      radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 55%),
+      radial-gradient(circle at 30% 20%, var(--accent-soft), transparent 55%),
       color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .frame-stage.dark {
     background:
-      radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%),
-      #0b1220;
+      radial-gradient(circle at 30% 20%, var(--accent-soft), transparent 55%),
+      #0b1220; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
   }
   .device {
     position: relative;
@@ -81,20 +81,20 @@
     width: var(--dev-w);
     height: var(--dev-h);
     max-width: 100%;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
     box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.08);
     overflow: hidden;
   }
   .device.iphone {
-    border: 12px solid #111;
+    border: 12px solid #111; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
     border-radius: 48px;
   }
   .device.ipad {
-    border: 16px solid #1a1a1a;
-    border-radius: 26px;
+    border: 16px solid #1a1a1a; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
+    border-radius: 26px; /* ui-guards: allow — physical iPad bezel */
   }
   .device.desktop {
-    border: 1px solid #333;
+    border: 1px solid #333; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
     border-top-width: 28px;
     border-radius: var(--radius-m);
   }
@@ -107,8 +107,8 @@
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #ff5f57;
-    box-shadow: 20px 0 0 #febc2e, 40px 0 0 #28c840;
+    background: #ff5f57; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
+    box-shadow: 20px 0 0 #febc2e, 40px 0 0 #28c840; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
   }
   .notch {
     position: absolute;
@@ -118,7 +118,7 @@
     width: 120px;
     height: 30px;
     border-radius: 999px;
-    background: #111;
+    background: #111; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
     z-index: 2;
   }
   .device-screen {
@@ -126,12 +126,12 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
   }
   /* The bezel is decoration, so keep the preview below its camera island. */
   .iphone .device-screen {
     box-sizing: border-box;
-    padding-block-start: 46px;
+    padding-block-start: 44px;
   }
   .device-screen > :global(*) {
     flex: 1;
@@ -140,9 +140,9 @@
   .frame-label {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    font-family: var(--font-mono, monospace);
+    font-family: var(--font-mono);
   }
   .frame-stage.dark .frame-label {
-    color: #94a3b8;
+    color: #94a3b8; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
   }
 </style>

@@ -11,6 +11,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import Icon from '../../lib/components/Icon.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import { router } from '../../lib/router.svelte';
@@ -97,8 +99,8 @@
   $effect(() => {
     return registry.register('assistant', [
       { id: 'assistant.new', title: 'New assistant thread', group: 'Assistant', keywords: 'otto chat ask conversation', run: () => void newThread() },
-      { id: 'assistant.tasks', title: 'Open assistant tasks', group: 'Assistant', keywords: 'reminders running needs you approvals', run: () => go('tasks') },
-      { id: 'assistant.memory', title: 'Open assistant memory', group: 'Assistant', keywords: 'profile remember forget', run: () => go('memory') },
+      { id: 'assistant.tasks', title: 'Go to Assistant tasks', group: 'Assistant', keywords: 'reminders running needs you approvals', run: () => go('tasks') },
+      { id: 'assistant.memory', title: 'Go to Assistant memory', group: 'Assistant', keywords: 'profile remember forget', run: () => go('memory') },
       { id: 'assistant.routing', title: 'Assistant routing settings', group: 'Assistant', keywords: 'claude codex model limit failover subscription', run: () => router.go('settings/assistant') },
       ...(thread?.session_id
         ? [{ id: 'assistant.work', title: 'Show work (terminal)', group: 'Assistant', keywords: 'terminal session pty', run: showWork }]
@@ -119,7 +121,9 @@
       : 'Chats, remembers, reminds — and asks before anything leaves your Mac',
   );
   const needsCount = $derived(assistant.needsYouCount);
-  const showList = $derived(!viewport.isPhone || (tab === 'chat' && !selectedId));
+  // Threads belong to Chat: Tasks / Memory / Permissions get the full width.
+  const showList = $derived(tab === 'chat' && (!viewport.isPhone || !selectedId));
+  let listW = $state(loadPaneWidth('assistant.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   const showMain = $derived(!viewport.isPhone || tab !== 'chat' || !!selectedId);
 </script>
 
@@ -185,13 +189,16 @@
     {:else}
       <div class="split-wrap"><div class="split" class:phone={viewport.isPhone}>
         {#if showList}
-          <div class="list-pane">
+          <div class="list-pane" style="--list-pane-w:{listW}px">
             {#if listState === 'loading' && !threads.length}
               <div class="pad" aria-busy="true" aria-label="Loading threads"><Skeleton rows={6} height={28} /></div>
             {:else}
-              <ThreadList {threads} selected={tab === 'chat' ? selectedId : null} onopen={open} onnew={() => void newThread()} onnewspace={(s) => void newSpace(s)} {creating} />
+              <ThreadList {threads} selected={selectedId} onopen={open} onnew={() => void newThread()} onnewspace={(s) => void newSpace(s)} {creating} />
             {/if}
           </div>
+          {#if !viewport.isPhone}
+            <PaneDivider bind:width={listW} storageKey="assistant.listW" label="Resize the threads list" />
+          {/if}
         {/if}
         {#if showMain}
           <section class="main" aria-label={tab === 'chat' ? 'Conversation' : TABS.find((t) => t.id === tab)?.label}>
@@ -238,7 +245,7 @@
   .prov {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 20px;
     padding: 0 8px;
     border-radius: 999px;
@@ -264,17 +271,21 @@
   .split {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) 260px;
+    display: flex;
   }
+  /* Width is the user's (PaneDivider, which also draws the hairline); it never
+     crowds the conversation out of a narrow window. */
   .list-pane {
+    flex: none;
+    inline-size: var(--list-pane-w, 280px);
+    max-inline-size: 45%;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--border);
     background: var(--surface);
   }
   .main {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -287,6 +298,8 @@
     overflow-y: auto;
   }
   .rail-pane {
+    flex: none;
+    inline-size: 260px;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -300,22 +313,13 @@
   /* The rail needs room: drop it when the split is narrower than list +
      a readable conversation + rail (≈ a 1100 px window with the sidebar). */
   @container (max-width: 1060px) {
-    .split {
-      grid-template-columns: 240px minmax(0, 1fr);
-    }
     .rail-pane {
       display: none;
     }
   }
-  @container (max-width: 700px) {
-    .split {
-      grid-template-columns: 200px minmax(0, 1fr);
-    }
-  }
-  .split.phone {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .split.phone .list-pane {
-    border-inline-end: 0;
+    flex: 1;
+    inline-size: auto;
+    max-inline-size: none;
   }
 </style>

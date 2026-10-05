@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Snipping: the system-wide capture shortcut (desktop app only —
@@ -18,6 +19,9 @@
   let loading = $state(true);
   let recording = $state(false);
   let saveError = $state('');
+  /** The chord being saved ('' = turning it off); null when idle. Every
+   *  control disables meanwhile and the one that fired reads "…ing". */
+  let saving = $state<string | null>(null);
   // The shell couldn't report the chord (an older app build): '' would read
   // as "disabled" and offer Reset/Disable against a value we never saw.
   let unavailable = $state(false);
@@ -41,7 +45,9 @@
   });
 
   async function save(next: string): Promise<void> {
+    if (saving !== null) return;
     saveError = '';
+    saving = next;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('snip_set_shortcut', { accel: next });
@@ -49,6 +55,8 @@
       toasts.success(next ? `Snip shortcut set to ${pretty(next)}` : 'Snip shortcut disabled');
     } catch (e) {
       saveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      saving = null;
     }
   }
 
@@ -99,7 +107,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('snipping')} subtitle="One-gesture screenshots: capture, annotate, paste" />
   <PageBody width="readable">
-  <SectionIntro>Capture a screen region, annotate it (text, boxes, arrows, colours), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</SectionIntro>
+  <SectionIntro>Capture a screen region, annotate it (text, boxes, arrows, colors), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</SectionIntro>
 
   {#if isTauri}
     <div class="card snip-card">
@@ -114,10 +122,9 @@
         </div>
         <div class="row-controls">
           {#if recording}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="input recorder"
-              autofocus
+              use:focusOnMount
               readonly
               aria-label="Press the new shortcut"
               placeholder="Press keys… (Esc cancels)"
@@ -125,21 +132,25 @@
               onblur={() => (recording = false)}
             />
           {:else if unavailable}
-            <span class="row-desc">This version of the app can't change the shortcut — update Otto.</span>
+            <span class="row-desc">This version of the app can’t change the shortcut — update Otto.</span>
           {:else}
             <kbd class="chord" data-accel={accel} title={accel || 'No shortcut'}>{loading ? '…' : accel ? pretty(accel) : 'Off'}</kbd>
-            <button class="btn small" onclick={() => (recording = true)}>{accel ? 'Change…' : 'Set…'}</button>
+            <button class="btn small" disabled={saving !== null} onclick={() => (recording = true)}>
+              {saving !== null && saving !== '' && saving !== DEFAULT_ACCEL ? 'Saving…' : accel ? 'Change…' : 'Set…'}
+            </button>
             {#if accel !== DEFAULT_ACCEL}
-              <button class="btn small ghost" onclick={() => void save(DEFAULT_ACCEL)}>Reset to {pretty(DEFAULT_ACCEL)}</button>
+              <button class="btn small ghost" disabled={saving !== null} onclick={() => void save(DEFAULT_ACCEL)}>
+                {saving === DEFAULT_ACCEL ? 'Resetting…' : `Reset to ${pretty(DEFAULT_ACCEL)}`}
+              </button>
             {/if}
             {#if accel}
-              <button class="btn small ghost" onclick={() => void save('')}>Turn off</button>
+              <button class="btn small ghost" disabled={saving !== null} onclick={() => void save('')}>{saving === '' ? 'Turning off…' : 'Turn off'}</button>
             {/if}
           {/if}
         </div>
       </div>
       {#if saveError}
-        <div class="error" role="alert">Couldn't set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
+        <div class="error" role="alert">Couldn’t set the shortcut: {saveError}. It may already belong to another app — try a different chord.</div>
       {/if}
     </div>
   {:else}

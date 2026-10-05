@@ -314,7 +314,7 @@
       <div class="td-section">
         <div class="td-section-title">Indexes &amp; foreign keys</div>
         <div class="dim small">
-          ClickHouse has no plain indexes or foreign keys — use the Structure tab's
+          ClickHouse has no plain indexes or foreign keys — use the Structure tab’s
           index builder to add a data-skipping index.
         </div>
       </div>
@@ -387,7 +387,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .td-row.dropped input {
@@ -419,7 +419,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .td-ix-row {
@@ -460,11 +460,11 @@
   .td-add {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     align-self: flex-start;
     margin-top: 4px;
     height: 26px;
-    padding: 0 9px;
+    padding: 0 8px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -474,7 +474,7 @@
   }
   .td-add:hover {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .td-preview {
     background: var(--bg);

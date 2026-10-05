@@ -211,7 +211,7 @@ test('proof waiver: reason is required, denied approval preserves it, retry reco
   await expect(dialog.getByRole('button', { name: 'Waive', exact: true })).toBeDisabled();
   await dialog.getByLabel('Reason', { exact: true }).fill('Verified manually with the release evidence.');
   await dialog.getByRole('button', { name: 'Waive', exact: true }).click();
-  await expect(page.getByText("Couldn't waive the proof gate", { exact: true })).toBeVisible();
+  await expect(page.getByText("Couldn’t waive the proof gate", { exact: true })).toBeVisible();
   await expect(dialog.getByLabel('Reason', { exact: true })).toHaveValue('Verified manually with the release evidence.');
   fail = false;
   await dialog.getByRole('button', { name: 'Waive', exact: true }).click();

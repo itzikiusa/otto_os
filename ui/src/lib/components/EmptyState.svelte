@@ -26,14 +26,28 @@
     variant?: 'page' | 'panel';
     /** 'error' marks a failed state: danger icon tile + role="alert". */
     tone?: 'neutral' | 'error';
+    /** Heading level of the title, so it nests under the surrounding outline:
+     *  2 for a page-level empty state under the page's h1, 4 inside a card
+     *  under an h3. Default 3. Looks the same at every level. */
+    headingLevel?: 2 | 3 | 4 | 5;
     children?: Snippet;
   }
-  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', tone = 'neutral', children }: Props = $props();
+  let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', tone = 'neutral', headingLevel = 3, children }: Props = $props();
+
+  // A label without a handler would render a dead button, so the CTA needs
+  // both — and a caller that passes only the label is told, not silently
+  // left without its action.
+  $effect(() => {
+    if (import.meta.env.DEV && actionLabel && !onaction) {
+      console.warn(`EmptyState “${title}”: actionLabel “${actionLabel}” has no onaction — the CTA is not rendered.`);
+    }
+  });
 </script>
 
 <div class="empty" class:page={variant === 'page'} role={tone === 'error' ? 'alert' : undefined} data-testid={variant === 'page' ? 'page-empty' : undefined}>
-  <div class="empty-icon" class:error={tone === 'error'}><Icon name={icon} size={variant === 'page' ? 26 : 24} /></div>
-  <h3>{title}</h3>
+  <!-- Decorative: the title says what is (not) here. -->
+  <div class="empty-icon" class:error={tone === 'error'} aria-hidden="true"><Icon name={icon} size={variant === 'page' ? 26 : 24} /></div>
+  <svelte:element this={`h${headingLevel}`} class="empty-title">{title}</svelte:element>
   {#if body}<p>{body}</p>{/if}
   {#if actionLabel && onaction}
     <button class="btn" class:primary={actionKind === 'primary'} onclick={onaction}>
@@ -77,14 +91,14 @@
     background: var(--danger-soft);
     color: var(--danger);
   }
-  h3 {
+  .empty-title {
     margin: 0;
     font-size: var(--fs-m);
     font-weight: 600;
     color: var(--text);
     overflow-wrap: anywhere;
   }
-  .page h3 {
+  .page .empty-title {
     font-size: var(--fs-l);
   }
   p {

@@ -214,7 +214,6 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
   class="present"
   role="dialog"
@@ -363,7 +362,6 @@
   .progress .bar {
     height: 100%;
     background: var(--accent);
-    transition: width 200ms ease-out;
   }
   .stage {
     max-width: 92vw;
@@ -407,8 +405,8 @@
     border-radius: var(--radius-s);
     padding: 10px;
     box-sizing: border-box;
-    color: #222;
-    box-shadow: var(--shadow);
+    color: #222; /* ui-guards: allow — sticky-note ink on its fixed paper color */
+    box-shadow: var(--glass-shadow);
     overflow: auto;
     white-space: pre-wrap;
   }
@@ -466,8 +464,8 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 6px 12px;
-    box-shadow: var(--shadow);
-    transition: opacity 200ms;
+    box-shadow: var(--glass-shadow);
+    transition: opacity var(--dur-enter);
   }
   .controls.hidden {
     opacity: 0;
@@ -484,7 +482,7 @@
   }
   .ctl:hover,
   .ctl.on {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--accent-text);
   }
   .counter {

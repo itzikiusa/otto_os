@@ -57,7 +57,7 @@ registerUiCommands('vault', {
     const path = normPath(args.path);
     await vault.open(path, { edit: args.edit });
     if (vault.notePath !== path || !vault.note) {
-      throw new UiCommandError('not_found', `Couldn't open “${path}” in ${v.name}.`);
+      throw new UiCommandError('not_found', `Couldn’t open “${path}” in ${v.name}.`);
     }
     void highlightWhenReady(ctx, '.note-view');
     const t = tailText(vault.draft, 60_000);
@@ -104,7 +104,7 @@ registerUiCommands('vault', {
     if (!exists) {
       const ok = await ctx.confirmWrite({ what: `Create note (${args.content.length} chars)`, where, connId: `vault:${v.id}`, verb: 'Create' });
       if (!ok) throw new UiCommandError('cancelled_by_user', 'The user declined creating the note.');
-      if (!(await vault.createNote(path, args.content))) throw new UiCommandError('failed', `Couldn't create ${path}.`);
+      if (!(await vault.createNote(path, args.content))) throw new UiCommandError('failed', `Couldn’t create ${path}.`);
       toasts.success(`Created ${path}`, who);
       void highlightWhenReady(ctx, '.note-view');
       return { vault: v.name, path, created: true };
@@ -113,7 +113,7 @@ registerUiCommands('vault', {
     // Existing note: stage the new text in the editor so the user reviews it
     // in place, then save on confirm (or restore on decline).
     await vault.open(path, { edit: true });
-    if (vault.notePath !== path || !vault.note) throw new UiCommandError('failed', `Couldn't open ${path}.`);
+    if (vault.notePath !== path || !vault.note) throw new UiCommandError('failed', `Couldn’t open ${path}.`);
     if (vault.dirty) {
       throw new UiCommandError('failed', `${path} has unsaved edits by the user — not overwriting them.`);
     }
@@ -126,7 +126,7 @@ registerUiCommands('vault', {
       vault.onDraftChange(args.content);
       void highlightWhenReady(ctx, '.note-view');
       ok = await ctx.confirmWrite({
-        what: `Replace the note's text (${original.length} → ${args.content.length} chars; shown in the editor)`,
+        what: `Replace the note’s text (${original.length} → ${args.content.length} chars; shown in the editor)`,
         where,
         connId: `vault:${v.id}`,
         verb: 'Save',
@@ -139,7 +139,7 @@ registerUiCommands('vault', {
     } finally {
       vault.holdAutosave = false;
     }
-    if (!(await vault.saveNow())) throw new UiCommandError('failed', `Couldn't save ${path} (see the page).`);
+    if (!(await vault.saveNow())) throw new UiCommandError('failed', `Couldn’t save ${path} (see the page).`);
     toasts.success(`Saved ${path}`, who);
     return { vault: v.name, path, changed: true };
   },

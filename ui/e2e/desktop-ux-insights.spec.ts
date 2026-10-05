@@ -66,7 +66,7 @@ test('Assistant long memory metadata fits phone and RTL tablet', async ({ page }
   await page.goto('/#/assistant/memory');
   await expect(page.locator('[data-testid="assistant-memory"]')).toBeVisible();
   await expectNoHorizontalOverflow(page);
-  const tag = page.locator('.memory .tag').first();
+  const tag = page.locator('.memory .badge').first();
   const box = await tag.boundingBox();
   expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   await page.setViewportSize({ width: 1024, height: 768 });

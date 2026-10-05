@@ -14,6 +14,7 @@
 // (the driver's `split_args` rules: `\"` and `\\` escapes inside quotes) so an
 // edit reads unmistakably in the review; keys / fields are quoted only when
 // they need it.
+import { plural } from '../../lib/plural';
 import { cellStr, SET_EMPTY, SET_NULL } from './results-format';
 import type { DiffLine, EditAdapter, EditCtx, RowPatch } from './edit-types';
 
@@ -302,7 +303,6 @@ export const redisAdapter: EditAdapter = {
     const { t, layout } = r;
     const key = redisQuote(t.key);
     const rows = ctx.liveRows;
-    const n = (k: number, noun: string) => `${k} ${noun}${k === 1 ? '' : 's'}`;
     switch (layout) {
       case 'single':
         return t.cmd === 'GET'
@@ -312,21 +312,21 @@ export const redisAdapter: EditAdapter = {
       case 'pairs': {
         const names = namesOf(layout, rows, idxs).map(redisQuote).join(' ');
         return t.cmd === 'HGETALL'
-          ? { title: `Review HDEL (${n(idxs.length, 'field')})`, sql: `HDEL ${key} ${names}` }
-          : { title: `Review ZREM (${n(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
+          ? { title: `Review HDEL (${plural(idxs.length, 'field')})`, sql: `HDEL ${key} ${names}` }
+          : { title: `Review ZREM (${plural(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
       }
       case 'members': {
         const names = namesOf(layout, rows, idxs).map(redisQuote).join(' ');
         return t.cmd === 'SMEMBERS'
-          ? { title: `Review SREM (${n(idxs.length, 'member')})`, sql: `SREM ${key} ${names}` }
-          : { title: `Review ZREM (${n(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
+          ? { title: `Review SREM (${plural(idxs.length, 'member')})`, sql: `SREM ${key} ${names}` }
+          : { title: `Review ZREM (${plural(idxs.length, 'member')})`, sql: `ZREM ${key} ${names}` };
       }
       case 'list': {
         // No delete-by-index: overwrite each element with a tombstone (every
         // index is still valid at that point), then remove them all at once.
         const sets = idxs.map((i) => `LSET ${key} ${(t.start ?? 0) + i} ${redisString(LIST_TOMBSTONE)}`);
         return {
-          title: `Review LSET + LREM (${n(idxs.length, 'element')})`,
+          title: `Review LSET + LREM (${plural(idxs.length, 'element')})`,
           sql: [...sets, `LREM ${key} 0 ${redisString(LIST_TOMBSTONE)}`].join('\n'),
         };
       }

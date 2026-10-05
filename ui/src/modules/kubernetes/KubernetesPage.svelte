@@ -24,6 +24,7 @@
   import { lazyComponent } from '../../lib/lazy-component.svelte';
   import { isKind } from './k8s-util';
   import { monitorPath, parseK8sRoute } from './viewState';
+  import { registry } from '../../lib/commands.svelte';
 
   // perf K8s R5: the Monitor views (and MonitorInsights → `marked`) load on
   // first use, so the console chunk stays small; LazyMount designs the
@@ -90,6 +91,24 @@
     });
   });
 
+  // ⌘K: the module's verbs, plus one "Open cluster …" per known cluster.
+  $effect(() =>
+    registry.register('kubernetes', [
+      { id: 'k8s.clusters', title: 'Show Kubernetes clusters', group: 'Kubernetes', keywords: 'k8s overview contexts', run: () => router.go('kubernetes') },
+      { id: 'k8s.monitor', title: 'Open Kubernetes monitoring', group: 'Kubernetes', keywords: 'k8s metrics restarts health pods', run: () => router.go('kubernetes/monitor') },
+      { id: 'k8s.fleet', title: 'Open the Kubernetes fleet dashboard', group: 'Kubernetes', keywords: 'k8s every cluster memory latency req/s', run: () => router.go('kubernetes/monitor/fleet') },
+      { id: 'k8s.refresh', title: 'Refresh Kubernetes clusters', group: 'Kubernetes', keywords: 'k8s reload reachability', run: () => void k8s.loadClusters() },
+      ...k8s.clusters.map((c) => ({
+        id: `k8s.open.${c.id}`,
+        title: `Open cluster ${c.name}`,
+        group: 'Kubernetes',
+        detail: c.environment,
+        keywords: 'k8s cluster workloads pods',
+        run: () => router.go(`kubernetes/${encodeURIComponent(c.id)}`),
+      })),
+    ]),
+  );
+
   const needsInstall = $derived(!!k8s.status && !k8s.status.kubectl.installed && !skipInstall);
   const cluster = $derived(
     routeClusterId ? (k8s.clusters.find((c) => c.id === routeClusterId) ?? null) : null,
@@ -105,12 +124,12 @@
     <EmptyState
       variant="page"
       icon="helm"
-      title="Kubernetes console isn't available"
-      body="This daemon doesn't serve /k8s/* yet. Update Otto (or restart the daemon after upgrading) and reopen this page."
+      title="Kubernetes console isn’t available"
+      body="This daemon doesn’t serve /k8s/* yet. Update Otto (or restart the daemon after upgrading) and reopen this page."
     />
   {:else if !k8s.status && k8s.statusError}
     <PageHeader title="Kubernetes" />
-    <EmptyState actionKind="secondary" variant="page" icon="warning" title="Couldn't reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
+    <EmptyState actionKind="secondary" variant="page" icon="warning" title="Couldn’t reach the daemon" body={k8s.statusError} actionLabel="Retry" onaction={() => void k8s.loadStatus()} />
   {:else if !k8s.status}
     <PageHeader title="Kubernetes" />
     <div class="k8s-boot"><Skeleton rows={4} height={48} /></div>

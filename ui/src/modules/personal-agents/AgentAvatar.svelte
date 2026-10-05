@@ -1,7 +1,8 @@
 <script lang="ts">
   // One avatar tile for a personal agent, used by the cards, the agent page
-  // header and room messages. The avatar is user data (the sheet's "Avatar"
-  // field, usually an emoji); with none set it falls back to a monogram. The
+  // header and room messages. The avatar is user data (the sheet's optional
+  // "Avatar" field — a short glyph or initials); with none set it falls back
+  // to the name's monogram. The
   // tile is neutral on purpose: accent means *selected*, never agent identity.
   interface Props {
     /** The agent's saved avatar ('' = none). */

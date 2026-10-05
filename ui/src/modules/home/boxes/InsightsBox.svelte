@@ -85,7 +85,7 @@
   {#if loading && reports.length === 0}
     <Skeleton rows={3} />
   {:else if error && reports.length === 0}
-    <EmptyState icon="warning" title="Couldn't load Insights" body={error}>
+    <EmptyState icon="warning" title="Couldn’t load Insights" body={error}>
       <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
     </EmptyState>
   {:else if reports.length === 0}

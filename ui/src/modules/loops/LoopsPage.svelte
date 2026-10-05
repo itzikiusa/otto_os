@@ -13,6 +13,10 @@
   import { loopStatus } from './loopStatus';
   import Icon from '../../lib/components/Icon.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
+  import { untrack } from 'svelte';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import { rememberSelection } from '../../lib/lastSelection';
 
   const PHASE_LABEL: Record<string, string> = {
     planning: 'Planning',
@@ -46,6 +50,37 @@
   }
   // Agent UI control (lib/uiCommands/loops.ts) opens a loop's detail here.
   $effect(() => loopsPagePort.bind({ open, selectedId: () => selectedId }));
+
+  // The URL carries the open loop (`#/loops/<id>`) so a
+  // reload / share / notification lands on it. Route → page: a link (or
+  // Back/Forward) opens / closes the detail; page → route: opening or closing
+  // a loop rewrites the URL in place.
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'loops') return;
+    untrack(() => {
+      if (id && id !== selectedId) open(id);
+      else if (!id && selectedId) back();
+    });
+  });
+  let routedId: string | null = null;
+  $effect(() => {
+    const id = selectedId;
+    if (id) rememberSelection('loops', id);
+    const was = routedId;
+    routedId = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'loops' && (router.parts[1] ?? null) !== id) router.replace(id ? `loops/${id}` : 'loops');
+    });
+  });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('loops', [
+      { id: 'loops.new', title: 'New goal loop…', group: 'Goal Loops', keywords: 'create goal iterate objective', run: () => { if (selectedId) back(); creating = true; } },
+    ]),
+  );
 </script>
 
 <div class="loops">
@@ -86,7 +121,7 @@
           variant="page"
           icon="refresh"
           title="No goal loops yet"
-          body="Define a goal and a budget — agents iterate on an isolated branch until it's met."
+          body="Define a goal and a budget — agents iterate on an isolated branch until it’s met."
           actionLabel="New goal loop"
           actionIcon="plus"
           onaction={() => (creating = true)}

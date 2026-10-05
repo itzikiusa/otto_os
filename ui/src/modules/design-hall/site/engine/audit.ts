@@ -7,6 +7,7 @@ import { sectionLabel } from './catalog';
 import { lines, links, str } from './render';
 import { resolveBackground, sectionContrast, type Theme } from './theme';
 import type { SiteDoc, SitePage } from './types';
+import { plural } from '../../../../lib/plural';
 
 export type AuditLevel = 'error' | 'warn' | 'info';
 
@@ -43,7 +44,7 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
       add('error', 'contrast-button', s.id, null, `${name}: button label contrast is ${c.button}:1 (needs ${MIN_TEXT}:1).`);
     }
     const bg = resolveBackground(s.style?.background, t);
-    if (bg.offBrand) add('warn', 'off-brand', s.id, null, `${name}: background ${s.style?.background} is not a brand colour.`);
+    if (bg.offBrand) add('warn', 'off-brand', s.id, null, `${name}: background ${s.style?.background} is not a brand color.`);
     if (bg.unknownToken) add('warn', 'unknown-token', s.id, null, `${name}: the brand kit has no token “${bg.unknownToken}”.`);
     if (s.block.startsWith('hero/') && !str(s.props, 'headline').trim()) add('error', 'empty-headline', s.id, null, `${name}: the headline is empty.`);
     for (const b of s.blocks ?? []) {
@@ -63,7 +64,7 @@ export function auditPage(doc: SiteDoc, page: SitePage, t: Theme): AuditFinding[
     }
     placeholders += links(s.props, 'links').filter((l) => l.href.trim() === '#').length;
   }
-  if (placeholders) add('info', 'placeholder-links', null, null, `${placeholders} link${placeholders === 1 ? '' : 's'} still point to “#”.`);
+  if (placeholders) add('info', 'placeholder-links', null, null, `${plural(placeholders, 'link')} still point to “#”.`);
   void doc;
   return out;
 }

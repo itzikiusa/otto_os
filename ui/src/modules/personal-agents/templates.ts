@@ -1,5 +1,6 @@
 // Personal-agent templates offered by the "New agent" sheet. A template
 // pre-fills name / avatar / persona and, on create, adds its first schedule.
+// Templates ship no avatar: an empty one renders as the name's monogram.
 // The persona carries a marker comment so other modules (the Kubernetes
 // Monitor's Insights tab) can find agents created from it.
 
@@ -22,7 +23,7 @@ export function agentTemplates(): AgentTemplate[] {
       id: 'k8s-watchdog',
       title: 'Kubernetes watchdog',
       description: 'Every 15 minutes: classified restarts, memory vs limits, error-rate and latency spikes, version drift — one Markdown report with a verdict.',
-      avatar: '🛡️',
+      avatar: '',
       name: 'Kubernetes watchdog',
       schedule: { cadence: 'interval', every_min: 15 },
       directive: 'Run the Kubernetes health check for every monitored cluster and report.',

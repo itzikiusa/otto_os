@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Agent rooms — the only agent-to-agent transport, always user-visible.
   // Room list + create on the left; the selected room's membership editor,
   // live message feed (WS agent_room_message + `after` paging) and the user
@@ -15,6 +16,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import { toasts } from '../../lib/toast.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import AgentAvatar from './AgentAvatar.svelte';
@@ -22,6 +25,8 @@
   import type { AgentRoomMessage, AgentRoomWithMembers } from '../../lib/api/types';
 
   let selectedId = $state<string | null>(null);
+  /** Rooms list width — the shared list-pane default/range, remembered. */
+  let listW = $state(loadPaneWidth('personalAgents.rooms.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let showingList = $state(false);
   let newRoomName = $state('');
   // Drafts and send results belong to a room, even while a request is pending.
@@ -194,7 +199,7 @@
 
 <div class="rooms">
   {#if !viewport.isPhone || !selectedId}
-  <aside class="list" aria-label="Rooms" bind:this={roomListEl}>
+  <aside class="list" aria-label="Rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
       <input
         bind:this={createEl}
@@ -219,7 +224,7 @@
           >
             <span class="room-name" title={r.room.name}>{r.room.name}</span>
             <span class="meta">
-              {r.members.length} agent{r.members.length === 1 ? '' : 's'}
+              {plural(r.members.length, 'agent')}
               · {#if r.last_message_at}<RelTime iso={r.last_message_at} />{:else}no messages yet{/if}
             </span>
           </button>
@@ -227,6 +232,9 @@
       {/each}
     </ul>
   </aside>
+  {#if !viewport.isPhone}
+    <PaneDivider bind:width={listW} storageKey="personalAgents.rooms.listW" label="Resize the rooms list" />
+  {/if}
   {/if}
 
   {#if !viewport.isPhone || selectedId || rooms.length === 0}
@@ -357,11 +365,11 @@
 
 <style>
   .rooms { display: flex; gap: 12px; min-height: 0; flex: 1; align-items: stretch; }
-  .list { width: 220px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .list { width: var(--list-pane-w, 280px); flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
   .create { display: flex; gap: 6px; }
   .create input {
     flex: 1; min-width: 0; background: var(--bg); color: var(--text);
-    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 5px 8px; font: inherit; font-size: var(--fs-m);
+    border: 1px solid var(--border); border-radius: var(--radius-s); padding: 4px 8px; font: inherit; font-size: var(--fs-m);
   }
   .list ul { list-style: none; margin: 0; padding: 2px; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
   .room {
@@ -378,8 +386,8 @@
   .detail-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-l); }
   .members { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .member {
-    display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-s); color: var(--text);
-    border: 1px solid var(--border); border-radius: 999px; padding-block: 2px; padding-inline: 3px 4px;
+    display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-s); color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px; padding-block: 2px; padding-inline: 2px 4px;
     background: var(--surface); max-width: 220px; min-width: 0;
   }
   .member-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

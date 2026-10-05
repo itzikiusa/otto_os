@@ -59,14 +59,14 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sc-row {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 3px 0;
+    padding: 2px 0;
     font-size: var(--fs-m);
     color: var(--text);
   }
@@ -79,7 +79,7 @@
     flex-shrink: 0;
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
   }
   .sc-sep {
     font-size: var(--fs-xs);
@@ -92,7 +92,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
     white-space: nowrap;
   }
 </style>

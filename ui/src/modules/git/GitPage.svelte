@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Git module page. Workspace-INDEPENDENT: shows GitKraken-style top-level repo
   // tabs (one per open repo) above the active repo's RepoView. With no tab open
   // it shows a full-width landing — the repo browser/list + "Add Repository"
@@ -18,6 +19,7 @@
   import RepoView from './RepoView.svelte';
   import GitToolbar from './GitToolbar.svelte';
   import { gitBridge } from './gitBridge.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { graphCache } from './graph-cache';
   import FocusView from './FocusView.svelte';
   import LazyMount from '../../lib/components/LazyMount.svelte';
@@ -52,6 +54,16 @@
   // add repo sheet
   let addOpen = $state(false);
   let addMode: 'register' | 'clone' | 'browse' = $state('register');
+
+  // ⌘K: adding a repository (the header no longer carries its own button —
+  // the + tab and the empty state do). The open repo's verbs come from
+  // GitToolbar.
+  $effect(() =>
+    registry.register('git', [
+      { id: 'git.add-local', title: 'Add a local repository…', group: 'Git', keywords: 'register folder repo', run: () => { addMode = 'register'; addOpen = true; } },
+      { id: 'git.clone', title: 'Clone a repository…', group: 'Git', keywords: 'remote url github bitbucket gitlab', run: () => { addMode = 'clone'; addOpen = true; } },
+    ]),
+  );
   let addPath = $state('');
   let addUrl = $state('');
   let addName = $state('');
@@ -216,7 +228,7 @@
       addOpen = false;
       await git.loadAllRepos(true);
     } catch (e) {
-      toasts.error('Clone failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t clone', e);
     } finally {
       busy = false;
     }
@@ -253,7 +265,7 @@
         r.name,
       );
     } catch (e) {
-      toasts.error('Could not link account', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t link account', e);
       // Snap the <select> back to the stored binding — the change never landed.
       await git.loadAllRepos(true);
     }
@@ -281,7 +293,7 @@
       // Newly registered (not async-cloning) repos open straight into a tab.
       if (addMode === 'register') openRepo(repo.id);
     } catch (e) {
-      toasts.error('Add failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t add it', e);
     } finally {
       busy = false;
     }
@@ -296,7 +308,7 @@
       await git.loadAllRepos(true);
       toasts.info('Repository removed', r.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the repository', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the repository', e);
     }
   }
 </script>
@@ -344,11 +356,10 @@
             onclick={(e) => repoView?.openMoreMenu(e)}
           ><Icon name="more" size={16} /></button>
         {:else if !landingFocus && git.allRepos.length > 0}
-          <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
+          <!-- Adding a repository lives in the + tab (and the empty state) —
+               no second "Add repository" primary here. -->
+          <button class="btn small ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
             <Icon name="zap" size={14} /> Focus
-          </button>
-          <button class="btn primary" onclick={() => (addOpen = true)}>
-            <Icon name="plus" size={14} /> Add repository
           </button>
         {/if}
       {/snippet}
@@ -412,7 +423,8 @@
                 class="repo-search-input"
                 type="search"
                 bind:value={repoFilter}
-                placeholder="Search repositories by name, path or remote…"
+                placeholder="Filter repositories by name, path or remote…"
+                aria-label="Filter repositories"
                 spellcheck="false"
                 onkeydown={(e) => {
                   if (e.key === 'Escape' && repoFilter !== '') {
@@ -752,11 +764,11 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text-dim);
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .repo-search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .repo-search-input {
     flex: 1;
@@ -786,7 +798,7 @@
   .repo-card {
     display: flex;
     flex-direction: column;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .repo-card:hover {
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
@@ -805,7 +817,7 @@
   .repo-name {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
     min-width: 0;

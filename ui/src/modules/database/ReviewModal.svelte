@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
+  import { plural } from '../../lib/plural';
   // Review-SQL modal (shared by cell edits, row duplication, deletes and the
   // doc editor). The textarea is the source of truth for what runs — it is
   // controlled: every keystroke goes back to the owner through `onsql`.
@@ -47,8 +49,8 @@
 </script>
 
 <Modal {title} width={640} onclose={close} dismissable={!running}>
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="review-modal" onkeydown={onReviewKeydown}>
+  <!-- A keydown catcher (⌘↩ runs) around the dialog's own controls. -->
+  <div class="review-modal" role="presentation" onkeydown={onReviewKeydown}>
     <div class="review-body">
       {#if lines.length > 0}
         <div class="review-diff-wrap">
@@ -56,7 +58,7 @@
             <thead>
               <tr>
                 {#if multiRow}<th class="rd-row">row</th>{/if}
-                <th class="rd-op"><span class="rd-badge">{lines.length} change{lines.length === 1 ? '' : 's'}</span></th>
+                <th class="rd-op"><Badge tone="accent" label={plural(lines.length, 'change')} /></th>
                 <th>path</th>
                 <th>before</th>
                 <th class="rd-arrow" aria-hidden="true"></th>
@@ -82,14 +84,13 @@
         </div>
       {/if}
       <p class="review-hint">Review and edit the statement before running. This will run against the connection.</p>
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
         class="review-sql mono"
         value={sql}
         oninput={(e) => onsql(e.currentTarget.value)}
         disabled={running}
         spellcheck="false"
-        autofocus
+        data-autofocus
         rows="5"
       ></textarea>
     </div>
@@ -145,21 +146,13 @@
     white-space: nowrap;
   }
   .review-diff td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     vertical-align: top;
     word-break: break-word;
   }
   .review-diff tbody tr:last-child td {
     border-bottom: none;
-  }
-  .rd-badge {
-    display: inline-block;
-    padding: 0 6px;
-    border-radius: var(--radius-m);
-    font-size: var(--fs-xs);
-    color: var(--accent-contrast);
-    background: var(--accent-solid);
   }
   .rd-row,
   .rd-op {
@@ -182,7 +175,7 @@
   .rd-arrow {
     width: 1ch;
     color: var(--text-dim);
-    padding: 3px 2px;
+    padding: 2px 2px;
   }
   .rd-more {
     color: var(--text-dim);
@@ -203,7 +196,7 @@
     width: 100%;
     resize: vertical;
     min-height: 92px;
-    padding: 9px 11px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -215,7 +208,7 @@
     overflow: auto;
   }
   .review-sql:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .review-sql:disabled {
     opacity: 0.6;

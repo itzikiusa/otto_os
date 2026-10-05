@@ -13,6 +13,7 @@ import { confirmProd, isProdEnv } from '../../lib/confirmProd';
 import { toasts } from '../../lib/toast.svelte';
 import { k8s } from '../../lib/stores/k8s.svelte';
 import { clusterLabel, kindDef } from './k8s-util';
+import { toastError } from '../../lib/toastError';
 
 export interface ActionDef {
   id: K8sAction;
@@ -34,11 +35,11 @@ const WORKLOAD: ActionDef[] = [
   { id: 'restart', label: 'Restart (rollout restart)', icon: 'refresh' },
   { id: 'scale', label: 'Scale…', icon: 'layers', needs: 'scale' },
   { id: 'rollout_status', label: 'Rollout status', icon: 'info' },
-  { id: 'rollout_undo', label: 'Rollout undo', icon: 'arrowUp', danger: true, confirm: true },
+  { id: 'rollout_undo', label: 'Rollout undo…', icon: 'arrowUp', danger: true, confirm: true },
 ];
 
 export const ACTIONS: Partial<Record<K8sResourceKind, ActionDef[]>> = {
-  pods: [{ id: 'delete_pod', label: 'Delete pod', icon: 'trash', danger: true, confirm: true }],
+  pods: [{ id: 'delete_pod', label: 'Delete pod…', icon: 'trash', danger: true, confirm: true }],
   deployments: [
     ...WORKLOAD,
     { id: 'rollout_pause', label: 'Pause rollout', icon: 'square' },
@@ -50,7 +51,7 @@ export const ACTIONS: Partial<Record<K8sResourceKind, ActionDef[]>> = {
     { id: 'restart', label: 'Restart', icon: 'refresh' },
     { id: 'rollout_promote', label: 'Promote', icon: 'arrowUp' },
     { id: 'rollout_promote', label: 'Promote (full)', icon: 'zap', params: { full: true } },
-    { id: 'rollout_abort', label: 'Abort', icon: 'x', danger: true },
+    { id: 'rollout_abort', label: 'Abort…', icon: 'x', danger: true },
     { id: 'rollout_retry', label: 'Retry', icon: 'refresh' },
     { id: 'rollout_pause', label: 'Pause', icon: 'square', when: (r) => r.extra?.paused !== 'true' },
     { id: 'rollout_resume', label: 'Resume', icon: 'play', when: (r) => r.extra?.paused === 'true' },
@@ -61,7 +62,7 @@ export const ACTIONS: Partial<Record<K8sResourceKind, ActionDef[]>> = {
     { id: 'argocd_refresh', label: 'Refresh', icon: 'refresh' },
     { id: 'argocd_refresh', label: 'Hard refresh', icon: 'zap', params: { hard: true } },
     { id: 'argocd_app_restart', label: 'Restart workloads (redeploy)', icon: 'play' },
-    { id: 'argocd_terminate_op', label: 'Terminate operation', icon: 'x', danger: true },
+    { id: 'argocd_terminate_op', label: 'Terminate operation…', icon: 'x', danger: true },
   ],
   cronjobs: [
     { id: 'cronjob_trigger', label: 'Trigger now', icon: 'play' },
@@ -156,7 +157,7 @@ export async function runAction(
     else toasts.warn(`${def.label.replace(/…$/, '')} · ${row.name}`, resp.message);
     return resp;
   } catch (e) {
-    toasts.error(`${def.label.replace(/…$/, '')} failed`, e instanceof Error ? e.message : String(e));
+    toastError(`Couldn’t ${verb.charAt(0).toLowerCase()}${verb.slice(1)} ${row.name}`, e);
     return null;
   }
 }

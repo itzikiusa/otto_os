@@ -14,6 +14,7 @@
 </script>
 
 <script lang="ts">
+  import { toastError } from '../../../lib/toastError';
   // The agent session as a Claude/Codex-app-style conversation, rebuilt from
   // the provider's transcript on disk (docs/design/conversation-view.md §5.2).
   // Newest page first + "Load earlier" (scroll-anchored), auto-follow at the
@@ -26,6 +27,7 @@
   // width.
   import { setContext, tick, untrack } from 'svelte';
   import Icon from '../../../lib/components/Icon.svelte';
+  import { splitter } from '../../../lib/paneResizer';
   import ProviderIcon, { hasProviderIcon } from '../../../lib/components/ProviderIcon.svelte';
   import TurnItem from './TurnItem.svelte';
   import Composer from './Composer.svelte';
@@ -42,6 +44,8 @@
   import { openExternal } from '../../../lib/external';
   import { browser } from '../../../lib/stores/browser.svelte';
   import { router } from '../../../lib/router.svelte';
+  import { events } from '../../../lib/events.svelte';
+  import { sessionState } from '../../../lib/status';
   import { groupTurns, stableGroupTurns, activeQueued, changedDiff, changedFiles, countUnread, dayKey, fmtCost, fmtDay, fmtDuration, fmtTokens, pendingTool, providerName } from './format';
   import { registerFindProvider } from '../../../lib/findProviders';
   import type { SessionStatus, TranscriptUnavailableReason, Turn } from '../../../lib/api/types';
@@ -252,7 +256,7 @@
         router.go('browser');
         await browser.openTab(url);
       } catch (e) {
-        toasts.error('Couldn’t open it in Otto’s browser', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t open it in Otto’s browser', e);
       }
     })();
   }
@@ -305,6 +309,13 @@
   // ---- live state at the foot of the chat -------------------------------------
   const agentName = $derived(providerName(t?.provider ?? 'claude'));
   const working = $derived(!!sessionId && status === 'working');
+  /** The shared session vocabulary (lib/status): while the events socket is
+   *  down a "working" claim may be minutes old, so the foot of the chat says
+   *  "Reconnecting…" — no spinner, no elapsed clock, no live pulse. */
+  const sessionInfo = $derived(
+    sessionState(sessionId ? ws.getSession(sessionId) : null, status, false, { stale: events.state !== 'connected' }),
+  );
+  const stale = $derived(working && sessionInfo.key === 'stale');
   const lastItem = $derived(hasLater ? undefined : items[items.length - 1]);
   /** The newest call still without a result — the current step while working,
    *  or (session alive but quiet) what the agent is blocked on: a permission
@@ -410,12 +421,18 @@
     turnTextCache.set(turn, text);
     return text;
   }
+  /** Earlier pages are not loaded, so search covers only what is (the
+   *  conversation's loaded turns) — the UI says so instead of a bare "No
+   *  matches" that reads as "not in this conversation". */
+  const partialSearch = $derived(!!t?.has_earlier);
+  const searchLabel = $derived(partialSearch ? 'Search loaded messages' : 'Search this conversation');
   const hits = $derived.by(() => {
     const q = searchQ.trim().toLowerCase();
     if (!q) return [] as string[];
     return conv.turns.filter((turn) => turnText(turn).includes(q)).map((turn) => turn.id);
   });
   const hitSet = $derived(new Set(hits));
+  const noMatches = $derived(!!query && searchQ === query && hits.length === 0);
   $effect(() => {
     void hits.length;
     hitIdx = 0;
@@ -643,7 +660,7 @@
     try {
       await ws.restartSession(sessionId);
     } catch (e) {
-      toasts.error('Resume failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t resume', e);
     }
   }
 
@@ -700,7 +717,7 @@
       { label: 'Next message of yours', icon: 'chevronDown', hint: '⌥↓', action: () => jumpPrompt(1) },
       { label: 'Jump to latest', icon: 'arrowDown', hint: '⌘↓', action: () => scrollToBottomAll() },
       { separator: true },
-      { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
+      { label: 'Refresh transcript', icon: 'refresh', action: () => void conv.load() },
     ]);
   }
   // ── All changes: every file the loaded conversation edited or wrote ────────
@@ -735,7 +752,7 @@
 <div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
   <header class="conv-head" class:folded={narrowHead && searchOpen}>
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
-    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
+    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}</span>
     {#if statsText}
       <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
     {/if}
@@ -750,20 +767,31 @@
           bind:this={searchEl}
           bind:value={query}
           class="search-in"
-          placeholder="Search this conversation"
-          aria-label="Search this conversation"
+          placeholder={searchLabel}
+          aria-label={searchLabel}
+          aria-describedby={partialSearch ? 'conv-search-scope' : undefined}
           onkeydown={onSearchKey}
         />
-        <span class="search-n" data-search-hits={hits.length} aria-live="polite">{hits.length ? `${hitIdx + 1}/${hits.length}` : query && searchQ === query ? 'No matches' : ''}</span>
-        <button class="icon-btn" title="Previous match (⇧⏎)" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
-        <button class="icon-btn" title="Next match (⏎)" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
-        <button class="icon-btn" title="Close (Esc)" aria-label="Close search" onclick={closeSearch}><Icon name="x" size={11} /></button>
+        <span class="search-n" data-search-hits={hits.length} aria-live="polite">{hits.length ? `${hitIdx + 1}/${hits.length}` : noMatches && !partialSearch ? 'No matches' : ''}</span>
+        <button class="icon-btn" title="Previous match" aria-keyshortcuts="Shift+Enter" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
+        <button class="icon-btn" title="Next match" aria-keyshortcuts="Enter" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
+        <button class="icon-btn" title="Close search" aria-label="Close search" aria-keyshortcuts="Escape" onclick={closeSearch}><Icon name="x" size={11} /></button>
       </div>
     {:else if !narrowHead}
-      <button class="icon-btn" title="Search this conversation (⌘F)" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
+      <button class="icon-btn" title="Search this conversation" aria-keyshortcuts="Meta+F" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
     {/if}
     <button class="icon-btn" aria-label="Conversation options" title="Conversation options" aria-haspopup="menu" data-conv-menu onclick={openHeadMenu}><Icon name="more" size={12} /></button>
   </header>
+  {#if searchOpen && partialSearch}
+    <!-- Search runs over the loaded turns only; say so, and offer the page
+         that might hold the match. -->
+    <div class="search-scope" data-testid="conv-search-scope">
+      <span id="conv-search-scope" aria-live="polite">{noMatches ? 'No matches in the loaded messages.' : 'Only the loaded messages are searched.'}</span>
+      <button class="btn small ghost" disabled={conv.loadingEarlier} onclick={() => void loadEarlier()}>
+        {conv.loadingEarlier ? 'Loading earlier messages…' : 'Load earlier messages'}
+      </button>
+    </div>
+  {/if}
 
   <div class="conv-main" class:with-panel={!!preview} class:beside={panelBeside}>
   <div class="conv-chat">
@@ -791,10 +819,10 @@
   >
     <div class="conv-col" bind:this={colEl}>
     {#if conv.error && !t}
-      <EmptyState icon="warning" title="Couldn't load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
+      <EmptyState icon="warning" title="Couldn’t load the conversation" body={conv.error} actionLabel="Retry" actionIcon="refresh" actionKind="secondary" onaction={() => void conv.load()} />
     {:else if conv.loading && !t}
       <div class="skeleton" aria-busy="true" aria-label="Loading the conversation">
-        <div class="sk sk-user"></div>
+        <div class="sk sk-user chat-bubble-end"></div>
         <div class="sk sk-agent"></div>
         <div class="sk sk-line"></div>
         <div class="sk sk-line short"></div>
@@ -830,7 +858,7 @@
         {/if}
         <TurnItem
           {item}
-          live={working && !hasLater && i === items.length - 1 && item.role === 'assistant'}
+          live={working && !stale && !hasLater && i === items.length - 1 && item.role === 'assistant'}
           active={alive && !hasLater && i === items.length - 1 && item.role === 'assistant'}
           waiting={waiting && i === items.length - 1}
           hit={!!searchQ && hitSet.has(item.id)}
@@ -841,7 +869,7 @@
         <LiveDraft text={draft} lastText={lastAssistantText} />
       {/if}
       {#if !hasLater && working}
-        <LiveStatus mode="working" {agentName} pending={pendingCall} writing={!!draft} since={lastPromptTs} />
+        <LiveStatus mode="working" {agentName} pending={pendingCall} writing={!!draft} since={lastPromptTs} {stale} staleHint={sessionInfo.hint} />
       {:else if !hasLater && waiting}
         <LiveStatus mode="waiting" {agentName} pending={pendingCall} onterminal={canCompose ? openTerminal : null} />
       {/if}
@@ -893,16 +921,13 @@
   </div>
   {#if preview}
     {#if panelBeside}
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
       <div
         class="pv-resize"
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize the preview panel"
         aria-valuenow={panelPx}
-        tabindex="0"
-        onpointerdown={startResize}
-        onkeydown={resizeKey}
+        use:splitter={{ onkeydown: resizeKey, onpointerdown: startResize }}
       ></div>
     {/if}
     <div class="pv-slot" style:inline-size={panelBeside ? `${panelPx}px` : null}>
@@ -992,6 +1017,25 @@
     color: var(--text-dim);
     min-width: 0;
   }
+  /* The field is borderless inside the pill: the pill carries the app ring. */
+  .search:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
+  }
+  /* Under the header while searching a partly loaded transcript. */
+  .search-scope {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-block: 4px;
+    padding-inline: 12px;
+    border-block-end: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+  }
   .search-in {
     border: 0;
     outline: 0;
@@ -1059,14 +1103,14 @@
   .pv-resize {
     flex-shrink: 0;
     width: 6px;
-    margin-inline: -3px;
+    margin-inline: -2px;
     cursor: col-resize;
     position: relative;
     z-index: 2;
   }
   .pv-resize:hover,
   .pv-resize:focus-visible {
-    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-line);
     outline: none;
   }
   .conv-frame {
@@ -1082,10 +1126,11 @@
     overflow-y: auto;
     overflow-x: hidden;
     overflow-anchor: none;
-    outline: none;
   }
+  /* The app focus ring, drawn inside the scroller so the pane edge can't clip it. */
   .conv-list:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--accent);
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   /* The message column: the pane's width with gutters that grow with it
      (12 px in a tile → 40 px full-screen); centred only past --chat-measure. */
@@ -1114,7 +1159,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .day::before,
   .day::after {
@@ -1197,14 +1242,16 @@
   }
   .sk {
     height: 14px;
-    border-radius: var(--radius-s);
     background: var(--surface-2);
+  }
+  /* The user skeleton takes the shared bubble shape (.chat-bubble-end). */
+  .sk:not(.chat-bubble-end) {
+    border-radius: var(--radius-s);
   }
   .sk-user {
     align-self: flex-end;
     width: 42%;
     height: 38px;
-    border-radius: 18px 18px 5px 18px;
     background: color-mix(in srgb, var(--you) 14%, var(--surface-2));
   }
   .sk-agent {
@@ -1236,7 +1283,7 @@
     padding: 6px 0;
   }
   .live-artifacts .chip {
-    gap: 5px;
+    gap: 4px;
     color: var(--text);
     font: inherit;
     font-size: var(--fs-xs);
@@ -1266,14 +1313,14 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     white-space: nowrap;
   }
   :global([dir='rtl']) .jump-pill {
     transform: translateX(50%);
   }
   .jump-pill:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .jump-pill:focus-visible {
     outline: 2px solid var(--accent-text);

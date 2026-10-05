@@ -263,7 +263,7 @@
   .st {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 500;
     color: var(--text-dim);
@@ -350,7 +350,7 @@
   }
   .findings li > :global(svg) {
     flex: none;
-    margin-block-start: 3px;
+    margin-block-start: 2px;
     color: var(--warning);
   }
   .findings.fixed li > :global(svg) {
@@ -415,17 +415,5 @@
   .rules a {
     color: var(--accent-text);
     font-style: italic;
-  }
-  .as-btn {
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .as-btn:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
-  .as-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 </style>

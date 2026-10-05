@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // Cross-link card: shows the swarm project created from this product story
   // (via Plan → Swarm), including task counts, run count, and accumulated cost.
   // Calls GET /product/stories/{sid}/swarm on mount and whenever the story id
@@ -60,7 +62,7 @@
 </script>
 
 {#if loading}
-  <div class="swarm-link-card dim">Loading swarm link…</div>
+  <div class="swarm-link-card"><Skeleton rows={1} height={20} label="the swarm link" /></div>
 {:else if error}
   <!-- silently swallow errors — the card is supplementary, not load-blocking -->
 {:else if hasData && link}
@@ -86,19 +88,19 @@
       {#if runCount > 0}
         <span class="stat">
           <Icon name="clock" size={11} />
-          {runCount} run{runCount === 1 ? '' : 's'}
+          {plural(runCount, 'run')}
         </span>
       {/if}
       {#if link.prs.length > 0}
         <span class="stat">
           <Icon name="pr" size={11} />
-          {link.prs.length} PR{link.prs.length === 1 ? '' : 's'}
+          {plural(link.prs.length, 'PR')}
         </span>
       {/if}
       {#if link.artifacts.length > 0}
         <span class="stat">
           <Icon name="note" size={11} />
-          {link.artifacts.length} artifact{link.artifacts.length === 1 ? '' : 's'}
+          {plural(link.artifacts.length, 'artifact')}
         </span>
       {/if}
     </div>
@@ -145,7 +147,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .slc-name {

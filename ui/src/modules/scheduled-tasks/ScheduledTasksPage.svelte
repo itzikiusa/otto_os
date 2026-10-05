@@ -1,9 +1,11 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import { plural } from '../../lib/plural';
+  import Badge from '../../lib/components/Badge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -17,6 +19,8 @@
   import { authedText } from '../../lib/api/client';
   import { scheduledTasksApi, type ScheduledTaskInput } from '../../lib/api/scheduledTasks';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
+  import { rememberSelection } from '../../lib/lastSelection';
   import { toasts } from '../../lib/toast.svelte';
   import type { ScheduledTask, ScheduledTaskRun } from '../../lib/api/types';
   import { allProviders, defaultAgentProvider } from '../../lib/providers';
@@ -34,6 +38,42 @@
   let expandedId = $state<string | null>(null);
   // Agent UI control (lib/uiCommands/scheduled.ts) expands a task's runs.
   $effect(() => scheduledTasksPort.bind({ expand: (id) => (expandedId = id) }));
+
+  // The URL carries the task whose runs are open (`#/scheduled-tasks/<id>`), so
+  // a reload / share / notification lands on it. Route → page: a link (or
+  // Back/Forward) expands that task's runs and scrolls it into view; page →
+  // route: expanding / collapsing rewrites the URL in place.
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'scheduled-tasks' || !id) return;
+    untrack(() => {
+      if (id !== expandedId) void expandLinked(id);
+    });
+  });
+  async function expandLinked(id: string): Promise<void> {
+    expandedId = id;
+    void scheduledTasks.loadRuns(id);
+    await tick();
+    document.querySelector(`[data-task-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
+  }
+  let routedId: string | null = null;
+  $effect(() => {
+    const id = expandedId;
+    if (id) rememberSelection('scheduled-tasks', id);
+    const was = routedId;
+    routedId = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'scheduled-tasks' && (router.parts[1] ?? null) !== id) router.replace(id ? `scheduled-tasks/${id}` : 'scheduled-tasks');
+    });
+  });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('scheduled-tasks', [
+      { id: 'scheduled-tasks.new', title: 'New scheduled task…', group: 'Scheduled Tasks', keywords: 'create cron cadence report', run: () => { if (!creating && !editId) startCreate(); } },
+    ]),
+  );
   let busy = $state(false);
   /** Inline form error (validation / failed save). Row actions report via toasts. */
   let error = $state('');
@@ -143,7 +183,7 @@
   // Keyed on the workspace ONLY: the loaders read store state synchronously
   // (`loadPresets` checks `presets.length`), which would otherwise subscribe
   // this effect — the presets landing then re-ran it and fired a second list
-  // load that silently replaced a failed load's "Couldn't load" + Retry.
+  // load that silently replaced a failed load's "Couldn’t load" + Retry.
   $effect(() => {
     const id = ws.currentId;
     if (!id) return;
@@ -454,7 +494,7 @@
       creating = false;
       editId = formState() === submitted ? null : savedId;
     } catch (e) {
-      if (ownsForm()) error = `Couldn't save the task. ${errText(e)}`;
+      if (ownsForm()) error = `Couldn’t save the task. ${errText(e)}`;
     } finally {
       if (ownsForm()) busy = false;
     }
@@ -468,7 +508,7 @@
     try {
       await scheduledTasks.setEnabled(t.id, !t.enabled);
     } catch (e) {
-      toasts.error(t.enabled ? `Couldn't pause “${t.name}”` : `Couldn't resume “${t.name}”`, errText(e));
+      toasts.error(t.enabled ? `Couldn’t pause “${t.name}”` : `Couldn’t resume “${t.name}”`, errText(e));
     }
   }
 
@@ -525,7 +565,7 @@
       await scheduledTasks.runNow(t.id);
       expandedId = t.id;
     } catch (e) {
-      toasts.error(`Couldn't start “${t.name}”`, errText(e));
+      toasts.error(`Couldn’t start “${t.name}”`, errText(e));
     } finally {
       const { [t.id]: _done, ...rest } = runningIds;
       runningIds = rest;
@@ -562,14 +602,14 @@
         disableTask ? `Created a workflow from “${t.name}” and paused the task.` : `Created a workflow from “${t.name}”.`,
       );
     } catch (e) {
-      toasts.error(`Couldn't convert “${t.name}” to a workflow`, errText(e));
+      toasts.error(`Couldn’t convert “${t.name}” to a workflow`, errText(e));
     } finally {
       busy = false;
     }
   }
 
   async function remove(t: ScheduledTask): Promise<void> {
-    const ok = await confirmer.ask(`Delete “${t.name}”? It stops running and can't be restored.`, {
+    const ok = await confirmer.ask(`Delete “${t.name}”? It stops running and can’t be restored.`, {
       title: 'Delete scheduled task',
     });
     if (!ok) return;
@@ -578,7 +618,7 @@
       if (expandedId === t.id) expandedId = null;
       toasts.success('Scheduled task deleted', t.name);
     } catch (e) {
-      toasts.error(`Couldn't delete “${t.name}”`, errText(e));
+      toasts.error(`Couldn’t delete “${t.name}”`, errText(e));
     }
   }
 
@@ -608,7 +648,7 @@
   async function stopRun(r: ScheduledTaskRun, t: ScheduledTask): Promise<void> {
     const ok = await confirmer.ask(
       `Stop this run of “${t.name}”? Its agent session (or shell command / workflow run) is stopped and nothing is delivered. The next scheduled run is unaffected.`,
-      { title: 'Stop run', confirmLabel: 'Stop run' },
+      { title: 'Stop run', confirmLabel: 'Stop run', cancelLabel: 'Keep running', danger: true },
     );
     if (!ok) return;
     try {
@@ -715,7 +755,7 @@
       {#if error}<div class="err" role="alert"><Icon name="warning" size={12} /> {error}</div>{/if}
 
       {#if !editId && presets.length}
-        <label class="fld">
+        <label class="field">
           <span>Start from a preset</span>
           <select class="input" onchange={(e) => applyPreset((e.currentTarget as HTMLSelectElement).value)}>
             <option value="">Blank task</option>
@@ -724,13 +764,13 @@
         </label>
       {/if}
 
-      <label class="fld">
+      <label class="field">
         <span>Name</span>
         <input class="input" bind:value={fName} placeholder="Nightly ticket review" required />
       </label>
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Type</span>
           <select class="input" bind:value={fKind}>
             <option value="agent_prompt">Run an agent</option>
@@ -738,7 +778,7 @@
           </select>
         </label>
         {#if fKind === 'agent_prompt'}
-          <label class="fld">
+          <label class="field">
             <span>Provider</span>
             <select
               class="input"
@@ -750,7 +790,7 @@
             </select>
           </label>
         {:else}
-          <label class="fld">
+          <label class="field">
             <span>Workflow</span>
             <select class="input" bind:value={fWorkflowId} disabled={wfLoading}>
               <option value="">{wfLoading ? 'Loading workflows…' : wfOptions.length ? 'Choose a workflow…' : 'No workflows in this workspace'}</option>
@@ -760,7 +800,7 @@
               {/if}
             </select>
             {#if wfError}
-              <small class="fld-hint bad">Couldn't load workflows. {wfError}
+              <small class="field-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
             {/if}
           </label>
@@ -768,7 +808,7 @@
       </div>
 
       {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
-        <label class="fld">
+        <label class="field">
           <span>Custom provider slug</span>
           <input class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
@@ -782,19 +822,19 @@
       {#if fKind === 'workflow'}
         <p class="hint">The task launches this workflow on its cadence and reports the run outcome.</p>
       {:else if fProvider === 'shell'}
-        <label class="fld">
+        <label class="field">
           <span>Shell command</span>
           <textarea class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
         </label>
       {:else}
-        <label class="fld">
-          <span>Prompt (the agent's instructions)</span>
+        <label class="field">
+          <span>Prompt (the agent’s instructions)</span>
           <textarea class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
         </label>
       {/if}
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Cadence</span>
           <select class="input" bind:value={fCadence}>
             <option value="interval">Interval</option>
@@ -805,32 +845,32 @@
           </select>
         </label>
         {#if fCadence === 'interval'}
-          <label class="fld">
+          <label class="field">
             <span>Every (minutes, min 5)</span>
             <input class="input" type="number" min="5" bind:value={fEveryMin} />
           </label>
         {:else if fCadence === 'once'}
-          <label class="fld">
+          <label class="field">
             <span>Runs once at (in the timezone)</span>
             <input class="input" type="datetime-local" bind:value={fRunAt} aria-invalid={!fRunAt} />
           </label>
         {:else if fCadence === 'cron'}
-          <label class="fld">
+          <label class="field">
             <span>Cron expression (5 fields)</span>
             <input class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
-            <small class="fld-hint" class:bad={cronFieldCount !== 5}>
+            <small class="field-hint" class:bad={cronFieldCount !== 5}>
               {cronFieldCount === 5
                 ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
                 : `Needs 5 fields (minute hour day month weekday) — has ${cronFieldCount}`}
             </small>
           </label>
         {:else}
-          <label class="fld">
+          <label class="field">
             <span>At (24h, in the timezone)</span>
             <input class="input" type="time" bind:value={fAt} />
           </label>
           {#if fCadence === 'weekly'}
-            <label class="fld">
+            <label class="field">
               <span>Weekday</span>
               <select class="input" bind:value={fWeekday}>
                 {#each ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as d, i}
@@ -841,10 +881,10 @@
           {/if}
         {/if}
         {#if fCadence !== 'interval'}
-          <label class="fld">
+          <label class="field">
             <span>Timezone</span>
             <input class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
-            {#if !tzOk}<small class="fld-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
+            {#if !tzOk}<small class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
             {#if tzNames.length}
               <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
             {/if}
@@ -853,7 +893,7 @@
       </div>
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Destination</span>
           <select class="input" bind:value={fDestType}>
             <option value="none">None (store only)</option>
@@ -864,17 +904,17 @@
           </select>
         </label>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
-          <label class="fld">
+          <label class="field">
             <span>Chat / channel id (optional)</span>
             <input class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
           </label>
         {:else if fDestType === 'email'}
-          <label class="fld">
+          <label class="field">
             <span>Send to (email)</span>
             <input class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
           </label>
         {:else if fDestType === 'webhook'}
-          <label class="fld">
+          <label class="field">
             <span>Webhook URL</span>
             <input class="input" type="url" bind:value={fUrl} placeholder="https://…" />
           </label>
@@ -882,7 +922,7 @@
       </div>
 
       {#if fProvider === 'shell' && fKind === 'agent_prompt'}
-        <label class="fld">
+        <label class="field">
           <span>Working dir (optional)</span>
           <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
         </label>
@@ -899,25 +939,25 @@
       <div class="adv-body" id="sched-advanced">
       {#if fKind === 'agent_prompt' && fProvider !== 'shell'}
         <div class="frow">
-          <label class="fld">
+          <label class="field">
             <span>Skill (optional, inlined)</span>
             <input class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
           </label>
-          <label class="fld">
+          <label class="field">
             <span>Working dir (optional)</span>
             <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
           </label>
         </div>
 
         <div class="frow">
-          <label class="fld">
+          <label class="field">
             <span>Sandbox</span>
             <select class="input" bind:value={fSandbox}>
               <option value="none">Run in working dir</option>
               <option value="worktree">Isolated git worktree</option>
             </select>
           </label>
-          <label class="fld">
+          <label class="field">
             <span>Retries on failure (0–5)</span>
             <input class="input" type="number" min="0" max="5" bind:value={fMaxRetries} />
           </label>
@@ -1029,12 +1069,12 @@
                     {#if r.status === 'running'}
                       <button class="btn small danger" title="Stop this run (its agent session, shell command or workflow run is stopped)" onclick={() => void stopRun(r, t)}>Stop…</button>
                     {/if}
-                    {#if (r.attempts ?? 1) > 1}<span class="pill warn">{r.attempts} attempts</span>{/if}
-                    {#if r.delivered}<span class="pill ok">Delivered</span>{/if}
-                    {#if r.skipped_delivery}<span class="pill" title="Not delivered: the report is unchanged since the last run">No change</span>{/if}
-                    {#if r.delivery_error}<span class="pill warn" title={r.delivery_error}>Delivery failed</span>{/if}
-                    {#if r.proof_pack_id}<span class="pill ok" title="A proof pack is attached to this run">Proof</span>{/if}
-                    {#if r.workflow_run_id}<span class="pill" title="Workflow run {r.workflow_run_id}">Workflow run</span>{/if}
+                    {#if (r.attempts ?? 1) > 1}<Badge tone="warn" label={plural(r.attempts ?? 1, 'attempt')} />{/if}
+                    {#if r.delivered}<Badge tone="ok" label="Delivered" />{/if}
+                    {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
+                    {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
+                    {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
+                    {#if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
@@ -1056,13 +1096,14 @@
 
   {#if reportOpen}
     <Modal title={reportTaskName ? `Report — ${reportTaskName}` : 'Report'} width={760} onclose={() => (reportOpen = false)}>
-      {#if reportLoading}
-        <div class="muted" role="status">Loading the report…</div>
-      {:else if reportError}
-        <div class="err" role="alert">
-          <Icon name="warning" size={12} /> Couldn't load the report. {reportError}
-          <button class="btn small" onclick={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}>Retry</button>
-        </div>
+      {#if reportLoading || reportError}
+        <LoadState
+          what="the report"
+          loading={reportLoading}
+          error={reportError}
+          empty
+          onretry={() => reportRun && viewReport(reportRun, reportTaskName, reportRaw)}
+        />
       {:else if !reportText.trim()}
         <div class="muted">This run wrote an empty report.</div>
       {:else if reportRaw}
@@ -1077,7 +1118,7 @@
             <button type="button" class:active={!reportRaw} aria-pressed={!reportRaw} onclick={() => (reportRaw = false)}>Formatted</button>
             <button type="button" class:active={reportRaw} aria-pressed={reportRaw} onclick={() => (reportRaw = true)}>Plain text</button>
           </div>
-          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn't copy the report")}>
+          <button class="btn" onclick={async () => (await copyText(reportText)) ? toasts.success('Report copied') : toasts.error("Couldn’t copy the report")}>
             <Icon name="copy" size={12} /> Copy
           </button>
           <span class="grow"></span>
@@ -1118,7 +1159,7 @@
   .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text-dim); font-size: var(--fs-s); min-width: 0; }
   .dest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
-  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 5px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
+  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 4px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
   .task-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .runs { margin-block-start: 10px; border-block-start: 1px solid var(--border); padding-block-start: 8px; display: flex; flex-direction: column; gap: 6px; }
   .run { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); flex-wrap: wrap; color: var(--text); min-height: 26px; }
@@ -1127,18 +1168,16 @@
   .run-sum.none { color: var(--text-dim); font-style: italic; }
   .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
   .run-err.warn { color: var(--warning); }
-  .pill { font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
-  .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
   .frow { display: flex; gap: 12px; flex-wrap: wrap; }
-  .frow .fld { flex: 1; min-width: 180px; }
-  .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-s); color: var(--text); min-width: 0; }
-  .fld > span { color: var(--text-dim); font-weight: 500; }
-  .fld :global(.input) { width: 100%; }
-  .fld :global(.mono) { font-family: var(--font-mono); }
-  .fld .fld-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .fld .fld-hint.bad { color: var(--danger); }
+  /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
+  .frow .field { flex: 1; min-width: 180px; }
+  .field { margin-bottom: 0; font-size: var(--fs-s); color: var(--text); min-width: 0; }
+  .field > span { color: var(--text-dim); font-weight: 500; }
+  .field :global(.input) { width: 100%; }
+  .field :global(.mono) { font-family: var(--font-mono); }
+  .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .field .field-hint.bad { color: var(--danger); }
   .toggles { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
   .adv { border-block-start: 1px solid var(--border); padding-block-start: 10px; }
   .adv-toggle {

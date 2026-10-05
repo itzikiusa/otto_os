@@ -5,6 +5,7 @@
 //
 // Contract: docs/contracts/api.md § Design Hall; docs/features/design-hall.md.
 
+import { badgeTone, designStatus } from '../../lib/status.ts';
 import type {
   DesignArtifact,
   DesignLink,
@@ -18,6 +19,7 @@ import type {
   DesignStudio,
   DesignVersion,
 } from '../../lib/api/types';
+import { plural } from '../../lib/plural.ts';
 
 // ── Studios ─────────────────────────────────────────────────────────────────
 
@@ -82,7 +84,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     blurb: 'Models, scenes and text-to-3D',
     icon: 'box',
     phase: 'ready',
-    note: '3D Studio 1.5: physical material presets, brand colours, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
+    note: '3D Studio 1.5: physical material presets, brand colors, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
     roadmap: null,
     formats: ['scene3d'],
   },
@@ -99,7 +101,7 @@ export const STUDIOS: readonly StudioInfo[] = [
   {
     id: 'brand',
     name: 'Brand Kit',
-    blurb: 'Colours, type and logos every studio uses',
+    blurb: 'Colors, type and logos every studio uses',
     icon: 'palette',
     phase: 'ready',
     note: 'A brand kit is a versioned token document every studio reads by name. Edit it with live contrast and see which designs a change reaches before you save.',
@@ -263,29 +265,15 @@ export type Tone = 'neutral' | 'info' | 'warn' | 'ok' | 'bad';
 
 export const STATUS_ORDER: DesignStatus[] = ['draft', 'review', 'approved', 'shipped'];
 
+// The status vocabulary lives in lib/status.ts (`designStatus`) so the pill,
+// the status menu and the activity log read the same words and tones.
 export function statusLabel(s: DesignStatus | string): string {
-  const m: Record<string, string> = {
-    draft: 'Draft',
-    review: 'In review',
-    approved: 'Approved',
-    shipped: 'Shipped',
-    archived: 'Archived',
-  };
-  return m[s] ?? s;
+  return designStatus(s).label;
 }
 
-/** One place maps a status to a tone (the McpPill pattern). */
+/** One place maps a status to a tone (lib/status `designStatus`). */
 export function statusTone(s: DesignStatus | string): Tone {
-  switch (s) {
-    case 'review':
-      return 'warn';
-    case 'approved':
-      return 'ok';
-    case 'shipped':
-      return 'info';
-    default:
-      return 'neutral';
-  }
+  return badgeTone(designStatus(s).tone) as Tone;
 }
 
 // ── Links ───────────────────────────────────────────────────────────────────
@@ -545,7 +533,7 @@ export function projectSummary(s: ProjectStats): { text: string; tone: Tone } {
   if (s.artifacts === 0) return { text: 'No artifacts yet', tone: 'neutral' };
   const parts: string[] = [];
   if (s.review) parts.push(`${s.review} in review`);
-  if (s.draft) parts.push(`${s.draft} draft${s.draft === 1 ? '' : 's'}`);
+  if (s.draft) parts.push(`${plural(s.draft, 'draft')}`);
   if (parts.length) return { text: parts.join(' · '), tone: s.review ? 'warn' : 'neutral' };
   if (s.shipped === s.artifacts) return { text: 'All shipped', tone: 'info' };
   return { text: 'All approved', tone: 'ok' };
@@ -705,7 +693,7 @@ export function signalSummary(s: DesignSignal): string {
       const total = typeof sum.changed_total === 'number' ? sum.changed_total : null;
       const added = typeof sum.lines_added === 'number' ? sum.lines_added : 0;
       const removed = typeof sum.lines_removed === 'number' ? sum.lines_removed : 0;
-      if (total) return `Edited ${total} field${total === 1 ? '' : 's'} after an agent draft`;
+      if (total) return `Edited ${plural(total, 'field')} after an agent draft`;
       if (added || removed) return `Changed +${added} −${removed} lines after an agent draft`;
       return 'Edited after an agent draft';
     }

@@ -184,7 +184,7 @@
         },
       })),
       { separator: true },
-      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) },
+      { label: 'Remove widget', icon: 'trash', danger: true, action: () => home.removeBox(viewId, box.id) }, // ui-guards: allow — instant, no confirm (the widget re-adds from Add widget)
     ]);
   }
 </script>
@@ -228,7 +228,6 @@
     {/if}
   </div>
   {#if !zoomed && !viewport.isPhone}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="resize"
       role="slider"
@@ -257,11 +256,11 @@
     border-radius: var(--radius-l);
     box-shadow: var(--shadow-card);
     overflow: hidden;
-    transition: box-shadow 130ms ease-out, border-color 130ms ease-out;
+    transition: box-shadow var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
   }
   .hbox.resizing {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+    box-shadow: 0 0 0 2px var(--accent-line);
     user-select: none;
   }
   .hbox.drag-over {
@@ -296,7 +295,7 @@
     .hb-head .icon-btn,
     .grip {
       opacity: 0;
-      transition: opacity 130ms ease-out;
+      transition: opacity var(--dur-fast) ease-out;
     }
     .hbox:hover .hb-head .icon-btn,
     .hbox:hover .grip,
@@ -361,7 +360,7 @@
     /* Revealed on hover/focus only: a permanent corner mark on every box was
        visual noise. */
     opacity: 0;
-    transition: opacity 130ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .hbox:hover .resize::after,
   .resize:focus-visible::after {

@@ -42,7 +42,7 @@
     const n = name.trim();
     if (!n) return touched ? 'Give the skill a name.' : null;
     if (!NAME_RE.test(n)) return 'Use lowercase letters, digits and dashes (kebab-case), up to 64 characters.';
-    if (taken.has(n)) return `A skill named "${n}" already exists in the library.`;
+    if (taken.has(n)) return `A skill named “${n}” already exists in the library.`;
     return null;
   });
   // Tooltip for the disabled Create button (the inline name error only shows
@@ -150,7 +150,7 @@
     <div class="field">
       <label for="ns-file">Skill package</label>
       <input id="ns-file" class="input file" type="file" accept=".zip" onchange={(e) => (file = (e.currentTarget as HTMLInputElement).files?.[0] ?? null)} />
-      <span class="hint">The skill's name comes from the package. Existing skills are never overwritten.</span>
+      <span class="hint">The skill’s name comes from the package. Existing skills are never overwritten.</span>
     </div>
   {:else}
     {#if template === 'bundled'}
@@ -193,7 +193,7 @@
       <span class="hint">Agents read this to decide when to use the skill — say what it does and when.</span>
     </div>
   {/if}
-  {#if error}<p class="err" role="alert">Couldn't create the skill. {error}</p>{/if}
+  {#if error}<p class="err" role="alert">Couldn’t create the skill. {error}</p>{/if}
 
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>
@@ -229,7 +229,7 @@
   }
   .tpl.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .tpl-icon {
     display: inline-flex;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Spatial Hall (beta) — a showcase view, not the way to browse: one gallery
   // wall with a bay per project (framed thumbnails, 3D work on plinths). Pure
   // CSS in Phase 0 (the three.js room is v3). Click-to-open only; the bay chips
@@ -46,7 +47,7 @@
       out.push({
         id: p.id,
         name: p.name,
-        sub: `${mine.length} artifact${mine.length === 1 ? '' : 's'}`,
+        sub: `${plural(mine.length, 'artifact')}`,
         flat: mine.filter((a) => a !== plinth).slice(0, 4),
         plinth,
       });
@@ -152,7 +153,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-s);
   }
   .banner > :global(svg) {
@@ -208,9 +209,9 @@
     border: 0;
     border-radius: var(--radius-s);
     background: var(--border-strong);
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--glass-shadow);
     cursor: pointer;
-    transition: transform 140ms ease-out;
+    transition: transform var(--dur-fast) ease-out;
   }
   .frame:hover {
     transform: translateY(-2px);
@@ -238,7 +239,7 @@
     height: 72px;
     border-radius: var(--radius-s);
     overflow: hidden;
-    box-shadow: 0 8px 18px rgba(0, 0, 0, 0.2);
+    box-shadow: var(--glass-shadow);
     transform: perspective(300px) rotateY(-14deg);
   }
   .base {
@@ -286,7 +287,7 @@
     border-radius: var(--radius-l);
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sr {
     position: absolute;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Snip annotation editor — chrome-less full-screen view at `#/snip/{id}`.
   //
   // Single canvas at the image's natural pixel size, CSS-scaled to fit; all
@@ -11,6 +12,7 @@
   import { snipApi } from '../../lib/snip';
   import { ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import { isTauri, ui } from '../../lib/stores/ui.svelte';
@@ -278,7 +280,7 @@
         return true;
       } catch (e) {
         copyState = 'failed';
-        toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t copy', e);
         return hash === null;
       }
     })();
@@ -331,11 +333,11 @@
           if (!allowed || disposed) return;
           allowClose = true;
           try { await win.close(); }
-          catch (e) { allowClose = false; toasts.error('Couldn’t close the editor', String(e)); }
+          catch (e) { allowClose = false; toastError('Couldn’t close the editor', e); }
         });
       });
       if (disposed) stop(); else unlisten = stop;
-    }).catch((e) => toasts.error('Couldn’t register the close guard', String(e)));
+    }).catch((e) => toasts.warn('Closing this window won’t ask about unsaved annotations', loadErrorText(e)));
     return () => { disposed = true; unlisten?.(); };
   });
 
@@ -684,7 +686,7 @@
       toasts.info('Snip deleted');
       await close();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -773,10 +775,10 @@
       {/each}
     </div>
     <div class="group history">
-      <button class="tb" data-act="undo" title="Undo (⌘Z)" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
+      <button class="tb" data-act="undo" title="Undo" aria-keyshortcuts="Meta+Z" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
         <Icon name="undo" size={13} />
       </button>
-      <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
+      <button class="tb" data-act="redo" title="Redo" aria-keyshortcuts="Shift+Meta+Z" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
         <span class="mirror"><Icon name="undo" size={13} /></span>
       </button>
     </div>
@@ -799,7 +801,7 @@
 
   <div class="snip-body" bind:this={wrapEl}>
     {#if loading}
-      <div class="snip-empty" role="status">Loading the snip…</div>
+      <div class="snip-empty" role="status" aria-label="Loading the snip"><span class="spinner" style:--spinner-size="24px" aria-hidden="true"></span></div>
     {:else if loadError}
       <div class="snip-empty" role="alert">
         <p class="snip-missing-title">Could not load the snip</p>
@@ -830,7 +832,6 @@
       <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
       <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
-        <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="snip-textentry"
           aria-label="Annotation text"
@@ -917,7 +918,7 @@
   .tb.active {
     color: var(--text);
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   /* The icon set has no redo glyph: redo is undo, mirrored. (Not an RTL
      override: in RTL the Icon flips undo and this mirrors it back, so redo
@@ -976,7 +977,7 @@
   .snip-canvas {
     max-width: 100%;
     max-height: 100%;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     border-radius: var(--radius-s);
     touch-action: none;
     cursor: crosshair;
@@ -994,6 +995,11 @@
     line-height: 1.25;
     resize: both;
     outline: none;
+  }
+  .snip-textentry:focus {
+    border-style: solid;
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .snip-empty {
     display: flex;

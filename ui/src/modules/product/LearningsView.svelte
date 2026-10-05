@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // LearningsView — workspace-scoped knowledge base.
   // Patterns to follow (kind='pattern') vs Cases to avoid (kind='avoid').
   // Inactive (AI-suggested) learnings surface with an Accept button.
@@ -144,7 +146,7 @@
       addRefs = '';
       addKind = 'pattern';
     } catch (e) {
-      toasts.error('Could not add learning', product.errMsg(e));
+      toastError('Couldn’t add learning', e);
     } finally {
       adding = false;
     }
@@ -188,7 +190,7 @@
       toasts.success('Learning updated');
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save learning', product.errMsg(e));
+      toastError('Couldn’t save learning', e);
     } finally {
       editSaving = false;
     }
@@ -200,7 +202,7 @@
     try {
       await product.updateLearning(l.id, { active: !l.active });
     } catch (e) {
-      toasts.error('Could not toggle active', product.errMsg(e));
+      toastError('Couldn’t toggle active', e);
     } finally {
       togglingId = null;
     }
@@ -213,7 +215,7 @@
       await product.acceptLearning(id);
       toasts.success('Learning accepted — now active');
     } catch (e) {
-      toasts.error('Could not accept learning', product.errMsg(e));
+      toastError('Couldn’t accept learning', e);
     } finally {
       acceptingId = null;
     }
@@ -225,7 +227,7 @@
     if (deletingId) return;
     const l = product.learnings.find((x) => x.id === id);
     const ok = await confirmer.ask(
-      `Delete the learning “${l?.title ?? 'untitled'}”? Future analyses stop using it. This can't be undone.`,
+      `Delete the learning “${l?.title ?? 'untitled'}”? Future analyses stop using it. This can’t be undone.`,
       { title: 'Delete learning', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -234,7 +236,7 @@
       await product.deleteLearning(deletingId);
       toasts.info('Learning deleted');
     } catch (e) {
-      toasts.error('Could not delete learning', product.errMsg(e));
+      toastError('Couldn’t delete learning', e);
     } finally {
       deletingId = null;
     }
@@ -250,7 +252,7 @@
           <button class:active={filter === f.value} aria-pressed={filter === f.value} onclick={() => (filter = f.value)}>{f.label}</button>
         {/each}
       </div>
-      <span class="lv-count">{product.learnings.length} learning{product.learnings.length !== 1 ? 's' : ''}</span>
+      <span class="lv-count">{plural(product.learnings.length, 'learning')}</span>
       <span class="spacer"></span>
       <button
         class="btn small"
@@ -622,7 +624,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .form-row {
@@ -638,7 +640,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -650,10 +652,10 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 5px 9px;
+    padding: 4px 8px;
     box-sizing: border-box;
   }
-  .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .field-input:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong); }
   .field-textarea {
     width: 100%;
     min-height: 70px;
@@ -662,13 +664,13 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 6px 9px;
+    padding: 6px 8px;
     resize: vertical;
     box-sizing: border-box;
     font-family: inherit;
     line-height: 1.5;
   }
-  .field-textarea:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+  .field-textarea:focus { outline: none; border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong); }
   .field-textarea.mono { font-family: var(--font-mono); font-size: var(--fs-xs); }
   .mini-select {
     background: var(--surface);
@@ -676,7 +678,7 @@
     border-radius: var(--radius-s);
     color: var(--text);
     font-size: var(--fs-s);
-    padding: 3px 7px;
+    padding: 2px 6px;
   }
   .form-actions {
     display: flex;
@@ -706,14 +708,14 @@
   .col-header {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     padding: 8px 12px;
     border-radius: var(--radius-s);
     margin-bottom: 2px;
   }
   .pattern-header {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .avoid-header {
@@ -725,13 +727,13 @@
     font-size: var(--fs-s);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
   }
   .col-count {
     font-size: var(--fs-xs);
     opacity: 0.7;
     background: color-mix(in srgb, currentColor 15%, transparent);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .empty-col {
@@ -752,8 +754,8 @@
     background: var(--surface);
     display: flex;
     flex-direction: column;
-    gap: 7px;
-    transition: opacity 150ms;
+    gap: 6px;
+    transition: opacity var(--dur-enter);
   }
   .learning-card.inactive {
     opacity: 0.72;
@@ -768,16 +770,16 @@
   .suggested-banner {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--warning);
     background: color-mix(in srgb, var(--warning) 14%, transparent);
     border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
     border-radius: var(--radius-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
 
   /* Card header */
@@ -796,7 +798,7 @@
   .card-actions {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-shrink: 0;
   }
 
@@ -829,7 +831,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
   .icon-act.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
@@ -853,7 +855,7 @@
     align-items: center;
     gap: 4px;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     color: var(--text-dim);
@@ -875,7 +877,7 @@
     font-weight: 500;
     text-decoration: none;
     border: 1px solid transparent;
-    transition: opacity 100ms;
+    transition: opacity var(--dur-fast);
   }
   .ref-badge:hover { opacity: 0.8; }
   /* Sources are kinds, not states: neutral chips (components.md §4 — no
@@ -914,7 +916,7 @@
   .md-body :global(li) { margin-bottom: 0.15em; }
   .md-body :global(code) {
     font-family: var(--font-mono);
-    font-size: 0.88em;
+    font-size: var(--fs-s);
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
     padding: 1px 4px;
     border-radius: var(--radius-s);

@@ -48,7 +48,7 @@
   });
   const summary = $derived.by(() => {
     const parts: string[] = [];
-    if (today.needs.length) parts.push(`${today.needs.length} need${today.needs.length === 1 ? 's' : ''} you`);
+    if (today.needs.length) parts.push(`${today.needs.length} ${today.needs.length === 1 ? 'needs' : 'need'} you`);
     if (today.running.length) parts.push(`${today.running.length} working`);
     return parts.length ? parts.join(' · ') : 'All quiet';
   });
@@ -95,7 +95,7 @@
       {#if today.failed}
         <!-- A source failed: say so instead of letting an empty card read as
              "nothing here". Retry re-polls every source at once. -->
-        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn't load</span>
+        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn’t load</span>
         <button class="retry" onclick={() => today.refresh()}>Retry</button>
       {/if}
     </p>
@@ -301,7 +301,7 @@
     align-items: flex-start;
     gap: 8px;
     width: 100%;
-    padding: 5px 6px;
+    padding: 4px 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -309,7 +309,7 @@
     font: inherit;
     text-align: start;
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .gc-row:hover {
     background: var(--hover);

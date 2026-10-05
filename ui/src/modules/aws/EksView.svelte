@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EKS: clusters table (region switcher) + detail sheet with nodegroups and the
   // raw describe-cluster JSON. "Open in Kubernetes" [aws_eks Edit + kubernetes
@@ -97,7 +100,7 @@
       toasts.success('Cluster imported', k.name);
       router.go(`kubernetes/${k.id}`);
     } catch (e) {
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = null;
     }
@@ -108,7 +111,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -140,9 +143,9 @@
 <div class="tbl-wrap">
   <RegionErrors errors={regionErrors} />
   {#if loading && !clusters}
-    <div class="pad" role="status"><p class="load-note">Loading EKS clusters…</p><Skeleton rows={5} /></div>
+    <div class="pad"><Skeleton rows={5} label="EKS clusters" /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list clusters" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="helm" title={filter ? 'No matching clusters' : allRegions ? 'No EKS clusters in any enabled region' : `No EKS clusters in ${region}`} />
   {:else}
@@ -153,7 +156,7 @@
           <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
-            <td><span class="pill" class:ok={c.status === 'ACTIVE'} class:warn={c.status !== 'ACTIVE'}>{c.status}</span></td>
+            <td><Badge tone={c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(c.status)} /></td>
             <td class="mono">{c.version ?? '—'}</td>
             <td class="mono dim hide-sm" title={c.endpoint ?? ''}>{c.endpoint ?? '—'}</td>
             <td class="dim hide-sm" title={fmtDate(c.created_at)}>{fmtAgo(c.created_at)}</td>
@@ -176,7 +179,7 @@
   <Modal title={d.c.name} width={820} onclose={() => (detail = null)}>
     <div class="dt">
       <div class="dt-top">
-        <span class="pill" class:ok={d.c.status === 'ACTIVE'} class:warn={d.c.status !== 'ACTIVE'}>{d.c.status}</span>
+        <Badge tone={d.c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(d.c.status)} />
         <span class="mono">v{d.c.version ?? '?'}</span>
         <span class="mono dim ell" title={d.c.arn ?? ''}>{d.c.arn ?? ''}</span>
         <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/eks/${d.c.name}/cluster`)}/${encodeURIComponent(rowRegion(d.c))}`)} title="Open the control-plane log group in CloudWatch Logs (needs control-plane logging enabled on the cluster)"><Icon name="text" size={12} /> Control-plane logs</button>
@@ -199,7 +202,7 @@
             {#each d.d.nodegroups as ng (ng.name)}
               <tr>
                 <td class="strong">{ng.name}</td>
-                <td><span class="pill" class:ok={ng.status === 'ACTIVE'} class:warn={ng.status !== 'ACTIVE'}>{ng.status}</span></td>
+                <td><Badge tone={ng.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(ng.status)} /></td>
                 <td class="num mono">{ng.desired ?? '—'}</td>
                 <td class="num mono">{ng.min ?? '—'}</td>
                 <td class="num mono">{ng.max ?? '—'}</td>
@@ -219,11 +222,6 @@
 {/if}
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .pad {
     padding: 12px;
   }
@@ -246,7 +244,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -274,7 +272,7 @@
     cursor: pointer;
   }
   .trow:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .trow:focus-visible {
     background: var(--surface-2);
@@ -289,23 +287,6 @@
   }
   .err {
     color: var(--danger);
-  }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .pill.ok {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
   }
   .dt {
     display: flex;
@@ -332,7 +313,7 @@
     margin: 6px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .raw {

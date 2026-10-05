@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -118,9 +119,9 @@
     try {
       const photo = await processWallpaper(file);
       if (ui.setAmbientPhoto(photo)) toasts.success('Wallpaper set', 'Stored on this device only.');
-      else toasts.error('Could not store the photo', 'This browser refused the storage — try a smaller image.');
+      else toasts.error('Couldn’t store the photo', 'This browser refused the storage — try a smaller image.');
     } catch (err) {
-      toasts.error('Could not use that image', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t use that image', err);
     } finally {
       photoBusy = false;
     }
@@ -526,14 +527,14 @@
     background: var(--surface);
     padding: 10px;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .theme-card:hover:not(.selected) {
     border-color: var(--border-strong);
   }
   .theme-card.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .theme-preview {
     height: 72px;
@@ -755,7 +756,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sidebar-group-label .grow {
@@ -773,7 +774,7 @@
   .sidebar-group-label .sb-btn:last-child {
     /* align with the rows' down arrow: skip the Show checkbox column
        (row gap 8px + the 19px checkbox label) */
-    margin-inline-end: 27px;
+    margin-inline-end: 28px;
   }
   .sb-group-star {
     display: grid;
@@ -814,7 +815,7 @@
     cursor: pointer;
   }
   .sb-btn:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .sb-btn:disabled {

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   // The "new evaluation" form: pick a skill (library / provider / a path or
   // archive), describe the task, choose the implementation CLI + iterations,
   // add validation dimensions (each fanned across one or more agent CLIs), and
@@ -12,6 +14,7 @@
     SkillSourceInfo,
     StartSkillEvalReq,
   } from '../../lib/api/types';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -213,27 +216,31 @@
   </p>
 
   {#if loadError}
-    <div class="load-err" role="alert">
-      <Icon name="warning" size={14} />
-      <div class="grow">
-        <strong>Couldn’t load the evaluator defaults.</strong>
-        <span class="dim">The skill list and saved validations are missing until they load. {loadError}</span>
-      </div>
-      <button class="btn small" type="button" onclick={() => void load()}>Retry</button>
-    </div>
+    <!-- The form stays usable (custom path), so the failure is one compact
+         line + Retry above it, not a page-level error. -->
+    <LoadState
+      what="the evaluator defaults"
+      variant="compact"
+      error={`${loadError} The skill list and saved validations stay missing until they load.`}
+      empty
+      onretry={() => void load()}
+    />
   {/if}
 
   <!-- What to test: the skill and the task (the fields every run needs). -->
   <section class="card block">
-    <div class="fld">
+    <div class="field">
       <label class="field-label" for="se-source">Skill under test</label>
-      <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
-        {#if !loaded}<option value="custom">Loading skills…</option>{/if}
-        {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
-          <option value={i}>{sourceLabel(s)}</option>
-        {/each}
-        <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
-      </select>
+      {#if !loaded && !loadError}
+        <Skeleton rows={1} height={27} label="skills" />
+      {:else}
+        <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
+          {#each sources as s, i (s.kind + s.name + (s.provider ?? ''))}
+            <option value={i}>{sourceLabel(s)}</option>
+          {/each}
+          <option value="custom">Custom path or archive (.zip / .gz / .tgz)…</option>
+        </select>
+      {/if}
 
       {#if sourceSel === 'custom'}
         <div class="row">
@@ -252,7 +259,7 @@
       {/if}
     </div>
 
-    <div class="fld">
+    <div class="field">
       <label class="field-label" for="se-task">Task to implement</label>
       <textarea
         id="se-task"
@@ -264,13 +271,13 @@
     </div>
 
     <div class="grid2">
-      <div class="fld">
+      <div class="field">
         <label class="field-label" for="se-cli">Implementation agent</label>
         <select id="se-cli" class="input" bind:value={implCli}>
           {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </div>
-      <div class="fld">
+      <div class="field">
         <label class="field-label" for="se-iter">Iterations</label>
         <input id="se-iter" class="input" type="number" min="1" max="10" bind:value={iterations} />
       </div>
@@ -330,26 +337,26 @@
     {#if advancedOpen}
       <div class="block adv-body" id="se-advanced">
         <div class="grid2">
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-test">Test command <span class="hint-inline">scored and added to the proof pack</span></label>
             <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-lint">Lint command <span class="hint-inline">optional</span></label>
             <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-passes">Validation passes</label>
             <input id="se-passes" class="input" type="number" min="1" max="3" bind:value={validatorPasses} />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-imp">Improver agent</label>
             <select id="se-imp" class="input" bind:value={improverProvider}>
               {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
             </select>
           </div>
         </div>
-        <div class="fld">
+        <div class="field">
           <label class="field-label" for="se-base">Base git ref</label>
           <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
           <p class="hint">
@@ -364,7 +371,7 @@
 
   <div class="actions">
     <span class="cost" title="Approximate — improver runs are skipped on a perfect score">
-      ≈ {estAgents} agent session{estAgents === 1 ? '' : 's'}
+      ≈ {plural(estAgents, 'agent session')}
     </span>
     <span class="grow"></span>
     <button class="btn primary" disabled={!canStart} onclick={submit} title={canStart ? undefined : blockReason}>
@@ -422,10 +429,9 @@
     flex-direction: column;
     gap: 12px;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  /* Shared .field (app.css); the block's gap spaces the rows. */
+  .field {
+    margin-bottom: 0;
     min-width: 0;
   }
   .grid2 {
@@ -527,8 +533,8 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 4px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -537,7 +543,7 @@
   }
   .chip-toggle.on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   /* Visually hidden but still focusable (display:none dropped the chips out
@@ -573,22 +579,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .load-err {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
-  }
-  .load-err > :global(svg) {
-    color: var(--danger);
-    flex: none;
-    margin-top: 2px;
   }
   .dim {
     color: var(--text-dim);

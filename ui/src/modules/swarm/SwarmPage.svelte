@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { tick, untrack } from 'svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import { paneResizer, RESIZE_TITLE, LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
@@ -29,6 +31,8 @@
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { swarmPagePort } from '../../lib/uiCommands/swarm';
+  import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -142,14 +146,18 @@
   // an unhandled rejection that leaves the pane blank.
   let openError = $state<string | null>(null);
   let openErrorId = $state<string | null>(null);
+  let openingId: string | null = null;
   async function openSwarm(id: string): Promise<void> {
     openError = null;
     openErrorId = null;
+    openingId = id;
     try {
       await swarm.openSwarm(id);
     } catch (e) {
       openError = swarm.detailError ?? loadErrorText(e);
       openErrorId = id;
+    } finally {
+      if (openingId === id) openingId = null;
     }
   }
 
@@ -179,7 +187,8 @@
   $effect(() => {
     const wsId = ws.currentId;
     if (!wsId || autoPickedFor === wsId || viewport.isPhone) return;
-    if (swarm.detail || swarm.loading) {
+    // A deep link (`#/swarm/<id>`) opens on its own (below).
+    if (swarm.detail || swarm.loading || untrack(() => routeSwarmId())) {
       autoPickedFor = wsId;
       return;
     }
@@ -188,8 +197,47 @@
     const id = initialSelection('swarm', swarm.swarms, (s) => s.id);
     if (id) void openSwarm(id);
   });
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('swarm', [
+      { id: 'swarm.new', title: 'New swarm…', group: 'Swarm', keywords: 'create agents team org', run: () => (showNew = true) },
+    ]),
+  );
+
+  /** The swarm the URL names (`#/swarm/<id>`), or null. */
+  function routeSwarmId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'swarm' && id ? id : null;
+  }
+  // The URL carries the open swarm so a reload / share / notification lands on
+  // it; the last pick is remembered as the fallback. Only a CLOSE clears the
+  // URL, and on arrival a link naming a DIFFERENT swarm than the one the store
+  // kept wins (the effect below opens it).
+  let routedId: string | null = null;
+  let arrived = false;
   $effect(() => {
-    if (detail?.id) rememberSelection('swarm', detail.id);
+    const id = detail?.id ?? null;
+    if (id) rememberSelection('swarm', id);
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    const linked = untrack(() => routeSwarmId());
+    if (first && linked && linked !== id) return;
+    untrack(() => {
+      if (router.module === 'swarm' && linked !== id) router.replace(id ? `swarm/${id}` : 'swarm');
+    });
+  });
+  // A route change while the page is up (a notification, Back/Forward, a
+  // pasted link) opens that swarm.
+  $effect(() => {
+    const linked = routeSwarmId();
+    if (!linked) return;
+    untrack(() => {
+      if (linked !== swarm.detail?.id && linked !== openingId) void openSwarm(linked);
+    });
   });
   // The rail is pointless while there is nothing to list (and no load error to
   // retry): the page-level empty state owns the page then.
@@ -208,10 +256,10 @@
   ];
 
   const LIFECYCLE_FAILED: Record<'start' | 'pause' | 'abort' | 'resume', string> = {
-    start: "Couldn't start the swarm",
-    pause: "Couldn't pause the swarm",
-    abort: "Couldn't abort the swarm",
-    resume: "Couldn't resume the swarm",
+    start: "Couldn’t start the swarm",
+    pause: "Couldn’t pause the swarm",
+    abort: "Couldn’t abort the swarm",
+    resume: "Couldn’t resume the swarm",
   };
 
   async function lifecycle(action: 'start' | 'pause' | 'abort' | 'resume') {
@@ -222,7 +270,7 @@
       const agents = running === 1 ? '1 running agent is' : `${running} running agents are`;
       const q = queued === 1 ? '1 queued run is' : `${queued} queued runs are`;
       const ok = await confirmer.ask(
-        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} cancelled. Work in progress is lost.`,
+        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} canceled. Work in progress is lost.`,
         { title: 'Abort swarm', confirmLabel: 'Abort all', danger: true },
       );
       if (!ok) return;
@@ -230,7 +278,7 @@
     try {
       await swarm.lifecycle(action, detail.id);
     } catch (e) {
-      toasts.error(LIFECYCLE_FAILED[action], e instanceof Error ? e.message : String(e));
+      toastError(LIFECYCLE_FAILED[action], e);
     }
   }
 
@@ -248,7 +296,7 @@
       await swarm.setParallelCap(detail.id, v);
     } catch (e) {
       input.value = String(cap);
-      toasts.error("Couldn't change parallel sessions", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t change parallel sessions", e);
     }
   }
 
@@ -267,13 +315,13 @@
     const t = v.trim();
     const next = t === '' || Number(t) <= 0 ? null : Math.floor(Number(t));
     if (next !== null && !Number.isFinite(next)) {
-      toasts.warn('Run budget not changed', `“${t}” isn't a number — enter a whole number, or leave it blank for unlimited.`);
+      toasts.warn('Run budget not changed', `“${t}” isn’t a number — enter a whole number, or leave it blank for unlimited.`);
       return;
     }
     try {
       await swarm.updateSwarm(detail.id, { max_total_runs: next } as Partial<Swarm>);
     } catch (e) {
-      toasts.error("Couldn't change the run budget", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t change the run budget", e);
     }
   }
 
@@ -324,7 +372,7 @@
       }
       projModal = false;
     } catch (e) {
-      toasts.error("Couldn't save the project", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t save the project", e);
     } finally {
       projSaving = false;
     }
@@ -335,7 +383,7 @@
     const p = detail?.projects.find((x) => x.id === projEditId);
     if (
       await confirmer.ask(
-        `Delete project "${p?.name ?? projName}"? All its tasks and feed are removed and in-flight runs are stopped. This cannot be undone.`,
+        `Delete project “${p?.name ?? projName}”? All its tasks and feed are removed and in-flight runs are stopped. This cannot be undone.`,
         { title: 'Delete project', confirmLabel: 'Delete', danger: true },
       )
     ) {
@@ -344,7 +392,7 @@
         projModal = false;
         toasts.success('Project deleted');
       } catch (e) {
-        toasts.error("Couldn't delete the project", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t delete the project", e);
       }
     }
   }
@@ -354,7 +402,7 @@
     const d = detail;
     if (
       await confirmer.ask(
-        `Delete swarm "${d.name}" and all its agents, projects and tasks? This cannot be undone.`,
+        `Delete swarm “${d.name}” and all its agents, projects and tasks? This cannot be undone.`,
         { title: 'Delete swarm', confirmLabel: 'Delete', danger: true },
       )
     ) {
@@ -365,7 +413,7 @@
         const next = swarm.swarms[0];
         if (next && !viewport.isPhone) void openSwarm(next.id);
       } catch (e) {
-        toasts.error("Couldn't delete the swarm", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t delete the swarm", e);
       }
     }
   }
@@ -383,7 +431,7 @@
       await swarm.runTask(created);
       view = 'kanban';
     } catch (e) {
-      toasts.error("Couldn't run the task", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t run the task", e);
     }
   }
 
@@ -439,7 +487,7 @@
     try {
       await swarm.updateSwarm(detail.id, patch);
     } catch (e) {
-      toasts.error("Couldn't raise the budget", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t raise the budget", e);
       return;
     }
     await lifecycle('resume');
@@ -451,13 +499,12 @@
     if (!detail) return;
     ctxMenu.show(e, [
       ...(detail.status !== 'aborted'
-        ? [{ label: 'Abort all…', icon: 'square', danger: true, title: 'Stop every agent and cancel queued runs', action: () => void lifecycle('abort') }]
+        ? [{ label: 'Abort all…', icon: 'stop', danger: true, title: 'Stop every agent and cancel queued runs', action: () => void lifecycle('abort') }]
         : []),
       { label: 'Delete swarm…', icon: 'trash', danger: true, action: () => void deleteSwarm() },
     ]);
   }
 
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 </script>
 
 <div class="swarm-page" class:phone={viewport.isPhone} class:compact={viewport.isMobile}>
@@ -468,7 +515,7 @@
   >
     {#snippet badge()}
       {#if detail}
-        <span class="status-pill" data-status={detail.status}>
+        <span class="swarm-status" data-status={detail.status}>
           <StatusBadge tone={SWARM_TONE[detail.status] ?? 'neutral'} label={sentenceCase(detail.status)} />
         </span>
         {#if detail.pause_reason}
@@ -596,7 +643,7 @@
               <div class="ws-hits">
                 {#each swarm.elsewhere as w (w.id)}
                   <button class="btn small" onclick={() => ws.select(w.id)}>
-                    {w.name} · {w.count} swarm{w.count === 1 ? '' : 's'}
+                    {w.name} · {plural(w.count, 'swarm')}
                   </button>
                 {/each}
               </div>
@@ -642,7 +689,7 @@
             class="budget-label cap-edit"
             onclick={setRunsCap}
             title={runsCap != null
-              ? `Run budget: ${runsUsed.toLocaleString()} of ${runsCap.toLocaleString()} runs used. The swarm pauses when it's spent. Click to change.`
+              ? `Run budget: ${runsUsed.toLocaleString()} of ${runsCap.toLocaleString()} runs used. The swarm pauses when it’s spent. Click to change.`
               : `${runsUsed.toLocaleString()} runs so far, no run budget. Click to set one.`}
           >
             {#if runsCap != null}
@@ -660,7 +707,7 @@
           {/if}
           {#if detail.max_cost_usd != null}
             {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
-            <span class="budget-label" title="Estimated cost so far of the cost budget (USD). The swarm pauses when it's spent.">Cost ${detail.counts.cost_usd.toFixed(2)} / ${detail.max_cost_usd.toFixed(2)}</span>
+            <span class="budget-label" title="Estimated cost so far of the cost budget (USD). The swarm pauses when it’s spent.">Cost ${detail.counts.cost_usd.toFixed(2)} / ${detail.max_cost_usd.toFixed(2)}</span>
             <div class="budget-bar" role="img" aria-label="Cost budget {Math.round(pct)}% used" title="Cost budget {Math.round(pct)}% used">
               <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
             </div>
@@ -695,17 +742,12 @@
 
         {#if swarm.selectedSessionId}
           {#if !viewport.isPhone}
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
             <div
               class="resizer"
               role="separator"
-              tabindex="0"
-              aria-orientation="vertical"
               aria-label="Resize the session panel"
               title={RESIZE_TITLE}
-              ondblclick={() => { viewPct = 55; persistViewPct(); }}
-              onmousedown={startResize}
-              use:paneResizer={{ value: viewPct, min: 20, max: 80, step: 3, bigStep: 10, onChange: (v) => { viewPct = v; persistViewPct(); }, onReset: () => { viewPct = 55; persistViewPct(); }, text: (v) => `${Math.round(v)} percent` }}
+              use:paneResizer={{ value: viewPct, min: 20, max: 80, step: 3, bigStep: 10, onChange: (v) => { viewPct = v; persistViewPct(); }, onReset: () => { viewPct = 55; persistViewPct(); }, onDragStart: startResize, text: (v) => `${Math.round(v)} percent` }}
             ></div>
           {/if}
           <div class="session-panel">
@@ -750,7 +792,7 @@
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
     <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
+    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
@@ -954,18 +996,13 @@
     height: 100%;
     border-radius: 999px;
     background: var(--accent);
-    transition: width 0.3s;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .budget-fill {
-      transition: none;
-    }
+    /* Data-driven width: no transition (motion is for user actions). */
   }
   /* >80% of the budget: warn (amber), don't alarm — the run isn't failing. */
   .budget-fill.budget-warn {
     background: var(--warning);
   }
-  .status-pill {
+  .swarm-status {
     display: inline-flex;
     align-items: center;
   }
@@ -999,7 +1036,7 @@
   .seg-tabs > .seg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .seg-tabs > .seg:hover:not(.active) {
     color: var(--text);
@@ -1028,7 +1065,7 @@
     width: 5px;
     cursor: col-resize;
     background: var(--border);
-    transition: background 0.12s;
+    transition: background var(--dur-fast);
   }
   .resizer:hover {
     background: color-mix(in srgb, var(--accent) 60%, var(--border));
@@ -1113,7 +1150,7 @@
     }
     .swarm-page.compact .swarm-item {
       font-size: var(--fs-l);
-      padding: 11px 12px;
+      padding: 10px 12px;
     }
 
   }

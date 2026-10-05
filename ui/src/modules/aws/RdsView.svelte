@@ -1,4 +1,8 @@
 <script lang="ts">
+  import type { BadgeTone } from '../../lib/status';
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { toastError } from '../../lib/toastError';
   // RDS (read-only): DB instances table (status pill, identifier, engine,
   // class, AZ / Multi-AZ, storage, endpoint, created) with a region switcher
   // and a right-side drawer (AwsDrawer) — Overview (key fields + tags),
@@ -89,10 +93,10 @@
     return instances?.find((i) => i.identifier === d.inst.identifier) ?? d.inst;
   });
 
-  function pillClass(status: string): string {
+  function statusTone(status: string): BadgeTone {
     if (status === 'available') return 'ok';
     if (status === 'failed' || status === 'inaccessible-encryption-credentials' || status === 'storage-full') return 'bad';
-    if (status === 'stopped' || status === 'deleting') return '';
+    if (status === 'stopped' || status === 'deleting') return 'neutral';
     return 'warn';
   }
 
@@ -113,7 +117,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -156,9 +160,9 @@
 <div class="tbl-wrap">
   <RegionErrors errors={regionErrors} />
   {#if loading && !instances}
-    <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
+    <div class="pad"><Skeleton rows={8} label="RDS instances" /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="db" title={filter ? 'No matching instances' : allRegions ? 'No DB instances in any enabled region' : `No DB instances in ${region}`} />
   {:else}
@@ -179,12 +183,12 @@
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}
             oncontextmenu={(e) => menu(e, i)}
           >
-            <td><span class="pill {pillClass(i.status)}">{i.status}</span></td>
+            <td><Badge tone={statusTone(i.status)} label={sentenceCase(i.status)} /></td>
             <td class="strong mono" title={i.identifier}>{i.identifier}</td>
             {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
             <td class="hide-sm">{i.engine ?? '—'}{#if i.engine_version}<span class="dim"> {i.engine_version}</span>{/if}</td>
             <td class="mono hide-sm">{i.class ?? '—'}</td>
-            <td class="mono hide-md">{i.az ?? '—'}{#if i.multi_az}<span class="tag" title="Multi-AZ">MAZ</span>{/if}</td>
+            <td class="mono hide-md">{i.az ?? '—'}{#if i.multi_az}{' '}<Badge tone="accent" label="Multi-AZ" />{/if}</td>
             <td class="mono hide-md num">{i.storage_gb != null ? `${i.storage_gb} GB` : '—'}</td>
             <td class="mono hide-md" title={endpointOf(i)}>{endpointOf(i) || '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.created)}>{fmtAgo(i.created)}</td>
@@ -206,7 +210,7 @@
     name={inst.identifier}
     id={endpointOf(inst)}
     status={inst.status}
-    statusClass={pillClass(inst.status)}
+    statusTone={statusTone(inst.status)}
     tabs={DRAWER_TABS}
     tab={drawerTab}
     ontab={(t) => (drawerTab = t as DrawerTab)}
@@ -215,12 +219,12 @@
     {#if drawerTab === 'overview'}
       <div class="dt">
         <div class="logs-link">
-          <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance's exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
+          <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance’s exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
         </div>
         <dl class="kv">
           <dt>Engine</dt><dd>{inst.engine ?? '—'} {inst.engine_version ?? ''}</dd>
           <dt>Class</dt><dd class="mono">{inst.class ?? '—'}</dd>
-          <dt>AZ</dt><dd class="mono">{inst.az ?? '—'}{#if inst.multi_az} <span class="tag" title="Multi-AZ">Multi-AZ</span>{/if}</dd>
+          <dt>AZ</dt><dd class="mono">{inst.az ?? '—'}{#if inst.multi_az} <Badge tone="accent" label="Multi-AZ" />{/if}</dd>
           <dt>Storage</dt><dd>{inst.storage_gb != null ? `${inst.storage_gb} GB` : '—'}{#if inst.storage_type} <span class="dim">({inst.storage_type})</span>{/if}</dd>
           <dt>Endpoint</dt><dd class="mono">{endpointOf(inst) || '—'}</dd>
           <dt>DB name</dt><dd class="mono">{inst.db_name ?? '—'}</dd>
@@ -234,7 +238,7 @@
         {:else}
           <div class="tags">
             {#each Object.entries(inst.tags).sort(([a], [b]) => a.localeCompare(b)) as [k, v] (k)}
-              <span class="tag pl" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
+              <span class="kv" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
             {/each}
           </div>
         {/if}
@@ -262,11 +266,6 @@
   .logs-link {
     display: flex;
     justify-content: flex-end;
-  }
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
   }
   .pad {
     padding: 12px;
@@ -300,7 +299,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -326,11 +325,11 @@
   }
   .trow:hover,
   .trow:focus-visible {
-    background: var(--surface-2);
+    background: var(--hover);
     outline: none;
   }
   .trow.sel {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .strong {
     font-weight: 500;
@@ -341,47 +340,15 @@
   .err {
     color: var(--danger);
   }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: lowercase;
-  }
-  .pill.ok {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-  }
-  .pill.bad {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
-  }
-  .tag {
-    margin-inline-start: 6px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
-    letter-spacing: 0.04em;
-  }
-  .tag.pl {
-    margin: 0;
+  /* key=value metadata, not a status Badge: it must truncate a long value
+     inside the drawer, which a Badge chip never does. */
+  .kv {
     font-size: var(--fs-s);
-    font-weight: 400;
     padding: 2px 8px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    letter-spacing: 0;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -411,7 +378,7 @@
     margin: 6px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .tags {

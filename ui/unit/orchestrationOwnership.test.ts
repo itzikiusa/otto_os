@@ -74,7 +74,7 @@ test('replacement import fetches global scope, confirms empty visible workspace,
     ${methods('modules/mcp/PoliciesTab.svelte', ['doImport'])} return {doImport};`, {
     mcpCpApi: { cpPolicies: async (...args: unknown[]) => { assert.equal(args.length, 0); if (reject) throw Error('offline'); return [{workspace_id:'B'}, {workspace_id:null}]; },
       cpImportPolicies: async (req: unknown) => { imports.push(req); return { imported: 0 }; } },
-    confirmer: { ask: async (text: string) => { prompts.push(text); return approve; } }, toasts: toast, load: async () => {},
+    confirmer: { ask: async (text: string) => { prompts.push(text); return approve; } }, toasts: toast, toastError: (title: string) => (toast.error as (t: string) => void)(title), load: async () => {},
   });
   await state.doImport(); assert.match(prompts[0], /2 existing rules across every workspace/); assert.equal(imports.length, 0);
   reject = true; approve = true; await state.doImport(); assert.equal(imports.length, 0);
@@ -141,7 +141,7 @@ function missionDetail() {
       type(goal='draft', result='draft result', risk='high'){editGoal=goal;editResult=result;editRisk=risk;},
       switchTo(next){id=next;return load();},
       read(){return {detail,editing,editGoal,editResult,editRisk,dirty:isDirty(),loading,busy,err};}};
-  `, { initial, toasts: toast, onChange() {}, ApiError: Error,
+  `, { initial, toasts: toast, toastError: (title: string) => (toast.error as (t: string) => void)(title), onChange() {}, ApiError: Error,
     missionControlApi: {
       item(_ws: string, id: string) { const result = deferred<any>(); reads.push({id,result}); return result.promise; },
       patch(_ws: string, _id: string, body: any) { const result = deferred<any>(); writes.push({body,result}); return result.promise; },

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../lib/labels';
   // Info tab: shows active session metadata + attached Jira issue.
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
@@ -102,7 +103,7 @@
       await ws.restartSession(id, { quiet: true });
       toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'The session restarted with the new folders.');
     } catch (e) {
-      toasts.error(verb === 'added' ? 'Could not add folder' : 'Could not remove folder', e instanceof Error ? e.message : String(e));
+      toastError(verb === 'added' ? 'Couldn’t add the folder' : 'Couldn’t remove the folder', e);
     }
   }
 
@@ -121,7 +122,7 @@
 </script>
 
 {#if !session && !workspace}
-  <EmptyState icon="info" title="No workspace" body="Select a workspace to see its details here." />
+  <EmptyState icon="info" title={NO_WORKSPACE} body="Its details show here." />
 {:else}
   <div class="info">
     {#if workspace}
@@ -264,7 +265,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -302,11 +303,11 @@
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .ws-select:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .hint {
     margin: 4px 0 0;
@@ -376,7 +377,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .dir-row {
     display: flex;

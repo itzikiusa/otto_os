@@ -124,7 +124,7 @@ test('monitor failed trends show an inline retry and recover', async ({ page }) 
   await page.route('**/monitor/series?*', r => failed ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic collector unavailable' } }) : r.fulfill({ json: { metric: 'recovered-metric', kind: 'gauge', step_secs: 60, points: [] } }));
   await openPage(page, 'kubernetes/monitor/ux-cluster/workloads');
   await page.locator('.wl-row').filter({ hasText: 'checkout-api' }).click();
-  await expect(page.getByText("Couldn't load trends")).toBeVisible();
+  await expect(page.getByText("Couldn’t load trends")).toBeVisible();
   failed = false;
   await page.getByRole('button', { name: 'Retry trends' }).click();
   await expect(page.locator('.detail')).toContainText('recovered-metric');

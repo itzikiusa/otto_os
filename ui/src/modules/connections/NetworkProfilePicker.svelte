@@ -35,8 +35,8 @@
   {#if managing}{#key workspaceId}<NetworkProfiles {workspaceId} {profiles} onsaved={saved} />{/key}{/if}
 </div>
 <style>
-  .network-picker { display: grid; gap: 7px; min-width: 0; margin-block: 10px; }
-  label { display: grid; gap: 5px; font-size: var(--fs-s); }
+  .network-picker { display: grid; gap: 6px; min-width: 0; margin-block: 10px; }
+  label { display: grid; gap: 4px; font-size: var(--fs-s); }
   select, button { min-width: 0; max-width: 100%; padding: 6px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s); }
   p { font-size: var(--fs-s); color: var(--danger); overflow-wrap: anywhere; }
 </style>

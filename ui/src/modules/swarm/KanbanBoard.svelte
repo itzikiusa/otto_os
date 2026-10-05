@@ -3,13 +3,15 @@
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
   // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import StoryLinkCard from './StoryLinkCard.svelte';
   import GoalsPanel from './GoalsPanel.svelte';
-  import { swarm } from '../../lib/stores/swarm.svelte';
+  import { swarm, type BulkTaskResult } from '../../lib/stores/swarm.svelte';
   import { isAbortError } from '../../lib/api/client';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -176,28 +178,49 @@
       await fn();
       return true;
     } catch (e) {
-      toasts.error(failed, e instanceof Error ? e.message : String(e));
+      toastError(failed, e);
       return false;
     }
   }
+  /** A bulk action tries every selected task: on a partial failure say how
+   *  many didn't go through ("Couldn’t move 2 of 5 tasks") and keep just those
+   *  selected so the action can be retried on them. */
+  async function bulk(verb: string, fn: () => Promise<BulkTaskResult>): Promise<void> {
+    const n = selectedTasks.length;
+    let res: BulkTaskResult;
+    try {
+      res = await fn();
+    } catch (e) {
+      toastError(`Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}`, e);
+      return;
+    }
+    if (res.failed.length === 0) {
+      clearSelection();
+      return;
+    }
+    toasts.error(
+      res.failed.length === n ? `Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}` : `Couldn’t ${verb} ${res.failed.length} of ${n} tasks`,
+      res.error ?? '',
+    );
+    selected = new Set(res.failed.map((t) => t.id));
+  }
   async function bulkMove(status: TaskStatus) {
-    if (await attempt("Couldn't move the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { status }))) clearSelection();
+    await bulk('move', () => swarm.bulkUpdateTasks(selectedTasks, { status }));
   }
   async function bulkAssign(agentId: string | null) {
-    if (await attempt("Couldn't reassign the tasks", () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId })))
-      clearSelection();
+    await bulk('reassign', () => swarm.bulkUpdateTasks(selectedTasks, { assignee_agent_id: agentId }));
   }
   async function bulkDelete() {
     const n = selectedTasks.length;
     if (!n) return;
     if (
-      await confirmer.ask(`Delete ${n} selected task${n === 1 ? '' : 's'}? This cannot be undone.`, {
+      await confirmer.ask(`Delete ${plural(n, 'selected task')}? This cannot be undone.`, {
         title: 'Delete tasks',
         confirmLabel: 'Delete',
         danger: true,
       })
     ) {
-      if (await attempt(`Couldn't delete the task${n === 1 ? '' : 's'}`, () => swarm.bulkDeleteTasks(selectedTasks))) clearSelection();
+      await bulk('delete', () => swarm.bulkDeleteTasks(selectedTasks));
     }
   }
   async function clearBoard() {
@@ -205,11 +228,11 @@
     const board = pid;
     if (
       await confirmer.ask(
-        `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project's feed is cleared too. This cannot be undone.`,
+        `Delete ALL ${tasks.length} tasks on this board? In-flight agent runs are stopped and the project’s feed is cleared too. This cannot be undone.`,
         { title: 'Clear board', confirmLabel: 'Clear board', danger: true },
       )
     ) {
-      if (await attempt("Couldn't clear the board", () => swarm.clearProject(board))) clearSelection();
+      if (await attempt("Couldn’t clear the board", () => swarm.clearProject(board))) clearSelection();
     }
   }
 
@@ -222,7 +245,7 @@
     const submitted = newTitle;
     addingTask = true;
     try {
-      if (await attempt("Couldn't add the task", () => swarm.createTask(project, { title: submitted.trim(), priority: 'medium' }))) {
+      if (await attempt("Couldn’t add the task", () => swarm.createTask(project, { title: submitted.trim(), priority: 'medium' }))) {
         if (pid === project && newTitle === submitted) {
           newTitle = '';
           adding = false;
@@ -292,7 +315,16 @@
     }
   }
 
-  function stopPlan() {
+  // Stop ends live agent sessions, so it asks first (patterns: a Stop that
+  // ends agent work is red, ends with "…", and confirms).
+  async function stopPlan() {
+    const ok = await confirmer.ask('Stop planning? The planner agents are stopped; tasks they already created stay on the board.', {
+      title: 'Stop planning',
+      confirmLabel: 'Stop planning',
+      cancelLabel: 'Keep planning',
+      danger: true,
+    });
+    if (!ok || !planning) return;
     // Kill the live planner session(s) server-side, then abandon the UI wait.
     if (swarm.detail) void swarm.stopAgentRun(swarm.detail.id);
     planCtl?.abort();
@@ -301,11 +333,11 @@
   function cardMenu(e: MouseEvent, t: SwarmTask) {
     const moves = TASK_COLUMNS.filter((s) => s !== t.status).map((s) => ({
       label: `Move to ${COLUMN_LABEL[s]}`,
-      action: () => void attempt("Couldn't move the task", () => swarm.updateTask(t, { status: s })),
+      action: () => void attempt("Couldn’t move the task", () => swarm.updateTask(t, { status: s })),
     }));
     const assigns = agents.map((a) => ({
       label: `Assign to ${a.name}`,
-      action: () => void attempt("Couldn't reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
+      action: () => void attempt("Couldn’t reassign the task", () => swarm.updateTask(t, { assignee_agent_id: a.id })),
     }));
     ctxMenu.show(e, [
       { label: 'Run now', icon: 'play', action: () => runNow(t) },
@@ -327,7 +359,7 @@
               danger: true,
             })
           )
-            await attempt("Couldn't delete the task", () => swarm.deleteTask(t));
+            await attempt("Couldn’t delete the task", () => swarm.deleteTask(t));
         },
       },
     ]);
@@ -360,12 +392,11 @@
 
   // Keyboard: Enter/Space on a focused card opens its menu (the same actions a
   // right-click or the ⋯ button gives); x toggles its selection.
+  /** The title button: Enter / Space open the actions (its click does);
+   *  x toggles the card's selection. */
   function onCardKey(e: KeyboardEvent, t: SwarmTask) {
-    if (e.target !== e.currentTarget) return;
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.key === 'x' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
-      cardMenu(e as unknown as MouseEvent, t);
-    } else if (e.key === 'x') {
       toggleSelect(t.id);
     }
   }
@@ -436,9 +467,9 @@
     <span class="grow"></span>
     {#if pid}
       {#if planning}
-        <span class="planning" role="status"><span class="spinner-xs" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
-        <button class="btn small" onclick={stopPlan} title="Stop the planner agents">
-          <Icon name="square" size={12} /> Stop
+        <span class="planning" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
+        <button class="btn small danger" onclick={() => void stopPlan()} title="Stop the planner agents">
+          <Icon name="stop" size={12} /> Stop…
         </button>
       {:else}
         <button class="btn small" onclick={planFromGoal} title="Break the project goal into tasks with several planner agents and a summarizer">
@@ -478,12 +509,11 @@
 
   {#if adding}
     <div class="add-row">
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
         aria-label="New task title"
         placeholder="Task title…"
-        autofocus
+        use:focusOnMount
         bind:value={newTitle}
         onkeydown={(e) => {
           if (e.key === 'Enter') addTask();
@@ -499,7 +529,7 @@
     <EmptyState
       icon="note"
       title="No projects yet"
-      body="A project holds the board's tasks and its goal. Create one, then add tasks or plan them from the goal."
+      body="A project holds the board’s tasks and its goal. Create one, then add tasks or plan them from the goal."
       actionLabel={onnewproject ? 'New project' : undefined}
       actionIcon="plus"
       onaction={onnewproject}
@@ -524,33 +554,40 @@
             <span>{COLUMN_LABEL[col]}</span>
             <span class="count" aria-label={plural(colTasks.length, 'task')}>{colTasks.length}</span>
           </div>
-          <div class="col-body">
+          <div class="col-body" role="list">
             {#each visibleIn(col) as t (t.id)}
               {@const agent = swarm.agentById(t.assignee_agent_id)}
               {@const gs = goalSummary(t.id)}
+              <!-- The card is a plain (draggable) box; its controls are siblings:
+                   the select checkbox, the title button (Enter / click → the
+                   task's actions; x toggles selection) and the meta buttons.
+                   Never a control nested inside a role="button" card. -->
               <div
                 class="card kb-card"
+                role="listitem"
                 class:dragging={draggingId === t.id}
                 class:selected={selected.has(t.id)}
                 draggable="true"
                 ondragstart={(e) => onDragStart(e, t)}
                 ondragend={onDragEnd}
                 oncontextmenu={(e) => cardMenu(e, t)}
-                onkeydown={(e) => onCardKey(e, t)}
-                role="button"
-                tabindex="0"
-                aria-label="{t.title} — {agent ? agent.name : 'unassigned'}, {t.priority} priority. Enter for actions."
               >
                 <div class="card-title">
                   <input
                     type="checkbox"
                     class="card-sel"
                     checked={selected.has(t.id)}
-                    onclick={(e) => e.stopPropagation()}
                     onchange={() => toggleSelect(t.id)}
                     aria-label="Select “{t.title}”"
                   />
-                  <span class="card-title-text">{t.title}</span>
+                  <button
+                    type="button"
+                    class="card-main"
+                    aria-haspopup="menu"
+                    aria-label="{t.title} — {agent ? agent.name : 'unassigned'}, {t.priority} priority. Actions…"
+                    onclick={(e) => cardMenu(e, t)}
+                    onkeydown={(e) => onCardKey(e, t)}
+                  >{t.title}</button>
                 </div>
                 <div class="card-meta">
                   {#if agent}
@@ -560,7 +597,7 @@
                   {/if}
                   <span class="grow"></span>
                   {#if t.status === 'verifying'}
-                    <span class="vchip" title="The Coordinator is checking this task's goals">Verifying</span>
+                    <span class="vchip" title="The Coordinator is checking this task’s goals">Verifying</span>
                   {/if}
                   {#if gs}
                     <button
@@ -582,7 +619,7 @@
                     <Icon name="more" size={14} />
                   </button>
                 </div>
-                {#if t.delegated}<span class="tag" title="Handed to this agent by another agent">Delegated</span>{/if}
+                {#if t.delegated}<span class="deleg"><Badge label="Delegated" title="Handed to this agent by another agent" /></span>{/if}
                 {#if t.status === 'todo' && waiting[t.id]}
                   {@const w = waiting[t.id]}
                   <span class="waiting" title="Ready, but not started: {w.detail} (since {rel(w.since)})">
@@ -692,14 +729,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .spinner-xs {
-    width: 11px;
-    height: 11px;
-    border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-  }
   
   .field {
     display: flex;
@@ -762,9 +791,21 @@
   .kb-card:hover {
     border-color: var(--border-strong);
   }
-  .kb-card:focus-visible {
+  /* The title button's focus rings the whole card. */
+  .kb-card:has(.card-main:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: 1px;
+  }
+  .card-main {
+    all: unset;
+    cursor: pointer;
+    overflow-wrap: anywhere;
+  }
+  .card-main:hover {
+    text-decoration: underline;
+  }
+  .card-main:focus-visible {
+    outline: none;
   }
   .kb-card.dragging {
     opacity: 0.4;
@@ -800,10 +841,6 @@
     font-size: var(--fs-m);
     margin-bottom: 6px;
   }
-  /* A long unbroken title (a path, a URL) used to overflow the 240px column. */
-  .card-title-text {
-    overflow-wrap: anywhere;
-  }
   .waiting {
     display: flex;
     align-items: center;
@@ -826,34 +863,28 @@
     text-overflow: ellipsis;
     max-width: 120px;
   }
-  .tag {
-    display: inline-block;
+  .deleg {
+    display: inline-flex;
     margin-block-start: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0 6px;
   }
   .vchip {
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     padding: 0 6px;
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
   
   @media (prefers-reduced-motion: reduce) {
-    .vchip,
-    .spinner-xs {
+    .vchip {
       animation: none;
     }
   }
   .gchip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: transparent;

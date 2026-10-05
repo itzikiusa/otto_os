@@ -28,6 +28,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // LIVE CONTEXT for a typed vault note: matches the note's entity hints
   // (service / workload names, repo paths, DB names, collections, dashboards)
   // against the rest of Otto through the modules' existing read APIs — K8s
@@ -36,6 +37,8 @@
   // only: nothing here changes another module's state beyond navigating.
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import { router } from '../../lib/router.svelte';
@@ -287,7 +290,7 @@
       {#each ctx.workloads as h (h.cluster.id + h.row.namespace + h.row.workload)}
         {@const st = health(h.row)}
         <div class="lc-card">
-          <div class="head"><Icon name="helm" size={13} /><span class="t">{h.row.workload}</span><span class="pill {st}">{st === 'ok' ? 'Healthy' : st === 'warn' ? 'Degraded' : 'Down'}</span></div>
+          <div class="head"><Icon name="helm" size={13} /><span class="t">{h.row.workload}</span><Badge tone={st === 'ok' ? 'ok' : st === 'warn' ? 'warn' : 'bad'} label={st === 'ok' ? 'Healthy' : st === 'warn' ? 'Degraded' : 'Down'} /></div>
           <div class="sub">{h.cluster.name} · {h.row.namespace} · {h.row.kind}</div>
           <div class="stats">
             <span>{h.row.ready}/{h.row.pods} ready</span>
@@ -302,7 +305,7 @@
       {/each}
       {#each ctx.repos as h (h.repo.id)}
         <div class="lc-card">
-          <div class="head"><Icon name="branch" size={13} /><span class="t">{h.repo.name}</span>{#if h.repo.workspace_name}<span class="pill">{h.repo.workspace_name}</span>{/if}</div>
+          <div class="head"><Icon name="branch" size={13} /><span class="t">{h.repo.name}</span>{#if h.repo.workspace_name}<Badge label={h.repo.workspace_name} />{/if}</div>
           <div class="sub" title={h.repo.path}>{h.repo.path}</div>
           <div class="stats">
             {#if h.status}
@@ -313,7 +316,7 @@
               <span class="dim">Status unavailable</span>
             {/if}
             {#if h.prs !== null}
-              <span>{h.prs} open PR{h.prs === 1 ? '' : 's'}</span>
+              <span>{plural(h.prs, 'open PR')}</span>
             {:else if h.repo.remote_url}
               <button
                 class="link prs"
@@ -332,21 +335,21 @@
       {/each}
       {#each ctx.connections as c (c.id)}
         <div class="lc-card">
-          <div class="head"><Icon name="db" size={13} /><span class="t">{c.name}</span><span class="pill" class:prodPill={c.environment === 'prod'}>{c.environment}</span></div>
+          <div class="head"><Icon name="db" size={13} /><span class="t">{c.name}</span><EnvBadge env={c.environment} /></div>
           <div class="sub">{c.kind}{c.read_only ? ' · read-only' : ''}</div>
           <div class="acts"><button class="btn small" onclick={() => router.go(`database/${encodeURIComponent(c.id)}`)}>Open in Database</button></div>
         </div>
       {/each}
       {#each ctx.collections as c (c.id)}
         <div class="lc-card">
-          <div class="head"><Icon name="send" size={13} /><span class="t">{c.name}</span><span class="pill">API collection</span></div>
+          <div class="head"><Icon name="send" size={13} /><span class="t">{c.name}</span><Badge label="API collection" /></div>
           <div class="acts"><button class="btn small" onclick={() => router.go('api')}>Open API client</button></div>
         </div>
       {/each}
       {#each ctx.dashboards as d (d.id)}
         <div class="lc-card">
-          <div class="head"><Icon name="chart" size={13} /><span class="t">{d.name}</span><span class="pill">Dashboard</span></div>
-          <div class="sub">{d.layout.length} panel{d.layout.length === 1 ? '' : 's'}</div>
+          <div class="head"><Icon name="chart" size={13} /><span class="t">{d.name}</span><Badge label="Dashboard" /></div>
+          <div class="sub">{plural(d.layout.length, 'panel')}</div>
           <div class="acts"><button class="btn small" onclick={() => openDashboard(d)}>Open dashboard</button></div>
         </div>
       {/each}
@@ -363,7 +366,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .refresh {
@@ -398,8 +401,4 @@
   .stats { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: var(--fs-xs); color: var(--text-dim); }
   .warnText { color: var(--warning); }
   .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-block-start: 2px; }
-  .pill { font-size: var(--fs-xs); padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
-  .pill.ok { color: var(--success); border-color: var(--success); background: var(--success-soft); }
-  .pill.warn { color: var(--warning); border-color: var(--warning); background: var(--warning-soft); }
-  .pill.bad, .pill.prodPill { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
 </style>

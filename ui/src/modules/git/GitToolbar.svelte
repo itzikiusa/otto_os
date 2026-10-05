@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
+  // In the page header Fetch folds into the Pull split menu (≤5 header
+  // controls) and the verbs are also ⌘K commands (group "Git").
   import { git } from '../../lib/stores/git.svelte';
   import { api } from '../../lib/api/client';
   import type { PullMode, PullModeResp, RepoStatusResp } from '../../lib/api/types';
@@ -10,6 +14,7 @@
   import { runPull } from './pullFlow';
   import { runPush } from './pushFlow';
   import { gitBridge } from './gitBridge.svelte';
+  import { registry } from '../../lib/commands.svelte';
 
   interface Props {
     repoId: string;
@@ -50,13 +55,13 @@
       toasts.success(
         'Fetched',
         s.behind > 0
-          ? `${s.behind} new commit${s.behind === 1 ? '' : 's'} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
+          ? `${plural(s.behind, 'new commit')} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
           : s.upstream
             ? `${s.branch} is up to date with ${s.upstream}`
             : 'Remote branches and tags refreshed',
       );
     } catch (e) {
-      toasts.error('Fetch failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t fetch', e);
     } finally {
       busy = '';
     }
@@ -98,11 +103,37 @@
 
   function pullMenu(e: MouseEvent): void {
     ctxMenu.show(e, [
-      { label: 'Pull (merge)', icon: 'arrowDown', action: () => void doPull('merge') },
-      { label: 'Pull (rebase)', icon: 'arrowDown', action: () => void doPull('rebase') },
-      { label: 'Pull (fast-forward only)', icon: 'arrowDown', action: () => void doPull('ff_only') },
+      ...(inHeader
+        ? [
+            { label: busy === 'fetch' ? 'Fetching…' : 'Fetch', icon: 'fetch' as const, title: 'Fetch from remote', action: () => void doFetch() },
+            { separator: true as const },
+          ]
+        : []),
+      { label: 'Pull (merge)', icon: 'arrowDown', disabled: detached, action: () => void doPull('merge') },
+      { label: 'Pull (rebase)', icon: 'arrowDown', disabled: detached, action: () => void doPull('rebase') },
+      { label: 'Pull (fast-forward only)', icon: 'arrowDown', disabled: detached, action: () => void doPull('ff_only') },
     ]);
   }
+
+  // ⌘K: the open repo's everyday verbs (the header copy only — the side-panel
+  // toolbar would register a second, identical set).
+  $effect(() => {
+    if (!inHeader) return;
+    const branch = status.branch;
+    const upstream = status.upstream;
+    const isDetached = detached;
+    const canPush = !nothingToPush && !isDetached;
+    return registry.register('git-repo', [
+      { id: 'git.fetch', title: 'Fetch', group: 'Git', keywords: 'remote refresh update', run: () => void doFetch() },
+      ...(isDetached
+        ? []
+        : [{ id: 'git.pull', title: `Pull (${MODE_LABEL[pullMode]})`, group: 'Git', keywords: 'upstream merge rebase', run: () => void doPull() }]),
+      ...(canPush
+        ? [{ id: 'git.push', title: upstream ? 'Push' : 'Publish branch', group: 'Git', keywords: `upload ${branch}`, run: () => void doPush() }]
+        : []),
+      { id: 'git.branch', title: 'New branch…', group: 'Git', keywords: `create checkout from ${branch}`, run: () => void doCreateBranch() },
+    ]);
+  });
 
   async function doPush(): Promise<void> {
     // No confirm: push is the most routine git action (the user asked for
@@ -137,7 +168,7 @@
       onrefresh?.();
       toasts.success('Branch created', name);
     } catch (e) {
-      toasts.error('Branch failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the branch', e);
     } finally {
       busy = '';
     }
@@ -173,7 +204,7 @@
       onrefresh?.();
       toasts.success('Stashed');
     } catch (e) {
-      toasts.error('Stash failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stash', e);
     } finally {
       busy = '';
     }
@@ -191,13 +222,13 @@
       if (conflicts > 0) {
         toasts.warn(
           'Stash popped with conflicts',
-          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts". The stash entry was kept.`,
+          `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts". The stash entry was kept.`,
         );
       } else {
         toasts.success('Stash popped');
       }
     } catch (e) {
-      toasts.error('Pop failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t pop', e);
     } finally {
       busy = '';
     }
@@ -218,11 +249,13 @@
 
 {#if !inHeader}<span class="divider"></span>{/if}
 
-<!-- Fetch -->
+<!-- Fetch (the header folds it into the Pull ▾ menu) -->
+{#if !inHeader}
 <button class="btn small ghost tbtn" data-overflow="3" data-icon="fetch" data-label="Fetch" disabled={busy !== ''} onclick={doFetch} title="Fetch from remote">
   <Icon name="fetch" size={12} />
   {busy === 'fetch' ? 'Fetching…' : 'Fetch'}
 </button>
+{/if}
 
 <!-- Pull (split button: the repo's configured mode, ▾ overrides it once) -->
 <span class="split">
@@ -234,7 +267,7 @@
     onclick={() => void doPull()}
     title={detached
       ? 'HEAD is detached — check out a branch to pull'
-      : "Pull from upstream using the repo's configured mode"}
+      : "Pull from upstream using the repo’s configured mode"}
   >
     <Icon name="arrowDown" size={12} />
     {busy === 'pull' ? 'Pulling…' : `Pull (${MODE_LABEL[pullMode]})`}
@@ -242,11 +275,12 @@
   <button
     class="btn small ghost tbtn caret"
     data-icon="chevronDown"
-    data-label="Pull options…"
-    disabled={busy !== '' || detached}
+    data-label={inHeader ? 'Fetch and pull options…' : 'Pull options…'}
+    disabled={busy !== '' || (detached && !inHeader)}
+    aria-haspopup="menu"
     onclick={pullMenu}
-    title="Pull with a different mode"
-    aria-label="Pull options"
+    title={inHeader ? 'Fetch, or pull with a different mode' : 'Pull with a different mode'}
+    aria-label={inHeader ? 'Fetch and pull options' : 'Pull options'}
   ><Icon name="chevronDown" size={11} /></button>
 </span>
 
@@ -264,7 +298,7 @@
     ? 'HEAD is detached — check out a branch to push'
     : status.upstream
     ? status.ahead > 0
-      ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
+      ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
       : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
     : `Publish ${status.branch} to origin`}
 >
@@ -273,8 +307,8 @@
 </button>
 
 {#if inHeader}
-  <!-- Header: Fetch / Pull / Push stay; Branch / Stash / Pop fold into one menu
-       so the repo's header carries three verbs, not six. -->
+  <!-- Header: Pull (▾ holds Fetch) / Push stay; Branch / Stash / Pop fold into
+       one menu so the repo's header carries three verbs, not six. -->
   <button
     class="btn small ghost tbtn"
     data-keep
@@ -347,7 +381,7 @@
   .branch-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
     max-width: 200px;
     background: var(--accent-soft);
@@ -387,7 +421,7 @@
   /* Toolbar buttons are global .btn.ghost; only the quieter label tone and
      the tighter toolbar padding are local. */
   .tbtn {
-    padding: 0 9px;
+    padding: 0 8px;
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
@@ -405,12 +439,12 @@
     align-items: center;
   }
   .split .tbtn:first-child {
-    padding-inline-end: 7px;
+    padding-inline-end: 6px;
     border-start-end-radius: 0;
     border-end-end-radius: 0;
   }
   .split .caret {
-    padding: 0 5px;
+    padding: 0 4px;
     border-start-start-radius: 0;
     border-end-start-radius: 0;
     border-inline-start-color: color-mix(in srgb, var(--border) 70%, transparent);
@@ -431,7 +465,7 @@
     }
     .tbtn {
       height: 36px;
-      padding: 0 11px;
+      padding: 0 10px;
       font-size: var(--fs-m);
     }
   }

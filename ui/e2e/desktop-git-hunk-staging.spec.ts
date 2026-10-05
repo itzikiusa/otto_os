@@ -98,7 +98,7 @@ test('stage one of two hunks → commit → the other hunk stays in WIP', async 
 
   // The file is now in BOTH trees — that is what "partial" means (so the badge
   // renders on the row in each tree).
-  await expect(panel.locator('.chip.partial').first()).toBeVisible({ timeout: 10_000 });
+  await expect(panel.getByTestId('wip-partial').first()).toBeVisible({ timeout: 10_000 });
   await expect(panel.locator('.wp-diff')).toBeVisible();
 
   const commitBtn = panel.locator('.btn.primary');
@@ -162,7 +162,7 @@ test('a CRLF file staged by hunk leaves no follow-up worktree diff', async ({ pa
   const panel = await openWipFile(page, name, 'crlf.txt');
 
   await panel.locator('.hunk-header').first().getByRole('button', { name: 'Stage hunk' }).click();
-  await expect(panel.locator('.chip.partial')).toHaveCount(0, { timeout: 10_000 });
+  await expect(panel.getByTestId('wip-partial')).toHaveCount(0, { timeout: 10_000 });
 
   // A patch rebuilt from the `\r`-stripping parser would stage LF content and
   // leave the whole file dirty again. Nothing may remain.

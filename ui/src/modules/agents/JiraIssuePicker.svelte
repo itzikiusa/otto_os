@@ -170,7 +170,7 @@
   <div class="picker-field">
     <label class="picker-label" for="jp-project">Project</label>
     {#if projectsLoading}
-      <div class="picker-loading">Loading projects…</div>
+      <div class="picker-loading"><Skeleton rows={3} height={28} label="projects" /></div>
     {:else}
       <select id="jp-project" class="picker-select" bind:value={selectedProjectKey}>
         <option value="">All projects</option>
@@ -242,7 +242,7 @@
   .picker-field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     margin-bottom: 10px;
   }
   .picker-label {
@@ -279,18 +279,18 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 9px 10px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out, border-color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
     width: 100%;
   }
   .issue-row:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
   }
   .issue-left {
     display: flex;
@@ -316,7 +316,7 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .no-results {
     padding: 16px;

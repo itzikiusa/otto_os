@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../../lib/toastError';
   // Brand Kit → Logos: one tile per logo (full / mark / mono). A logo's asset is
   // an image artifact in the graph (`otto://design/<id>` — the kit `embeds`
   // it); uploading a file imports it as a Graphics artifact in the kit's
@@ -73,7 +74,7 @@
       doc.logos[i].asset = `otto://design/${id}`;
       toasts.success('Logo added', `${file.name} is now a design in this workspace. Save the kit to keep it.`);
     } catch (err) {
-      toasts.error('Couldn’t add the logo', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t add the logo', err);
     } finally {
       uploading = false;
     }

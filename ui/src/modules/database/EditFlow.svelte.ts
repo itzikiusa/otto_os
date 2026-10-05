@@ -37,6 +37,8 @@ import {
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
 import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
 import { applyPatchAtPath, flattenPaths, valueKind } from './expansion-plan';
+import { toastError } from '../../lib/toastError';
+import { plural } from '../../lib/plural';
 
 export type { TypedKind, TypedValue, RowPatch, DiffLine } from './edit-types';
 export { SET_NULL, SET_EMPTY } from './results-format';
@@ -236,13 +238,13 @@ export class EditFlow {
     // Need a primary key (one or more columns), all present in the result so
     // we can target the exact row. Composite keys are supported.
     if (detail.primary_key.length === 0) {
-      this.editReason = `“${table}” has no primary key, so rows can't be safely targeted for edits.`;
+      this.editReason = `“${table}” has no primary key, so rows can’t be safely targeted for edits.`;
       return;
     }
     const missing = detail.primary_key.filter((pk) => !cols.some((c) => c.name === pk));
     if (missing.length > 0) {
-      const plural = detail.primary_key.length > 1 ? 's' : '';
-      this.editReason = `Include the primary key column${plural} (${detail.primary_key.join(', ')}) in your SELECT to enable editing.`;
+      const pkWord = detail.primary_key.length > 1 ? 'columns' : 'column';
+      this.editReason = `Include the primary key ${pkWord} (${detail.primary_key.join(', ')}) in your SELECT to enable editing.`;
       return;
     }
     this.editDb = dbName;
@@ -536,7 +538,7 @@ export class EditFlow {
     const col = this.columnPath(colIdx);
     if (this.engine !== 'mongodb' && col !== null) {
       if (path === col) {
-        toasts.warn("Columns can't be removed from a row", 'Set the value to NULL instead');
+        toasts.warn('Columns can’t be removed from a row', 'Set the value to NULL instead');
         return;
       }
       const rest = path.slice(col.length + 1);
@@ -561,7 +563,7 @@ export class EditFlow {
     const col = this.columnPath(colIdx);
     if (this.engine !== 'mongodb' && col !== null) {
       if (oldPath === col) {
-        toasts.warn("Columns can't be renamed from a row", 'Use the table designer');
+        toasts.warn('Columns can’t be renamed from a row', 'Use the table designer');
         return;
       }
       const rest = oldPath.slice(col.length + 1);
@@ -574,7 +576,7 @@ export class EditFlow {
       return;
     }
     if (/(^|\.)\d+(\.|$)/.test(oldPath) || /(^|\.)\d+(\.|$)/.test(newPath)) {
-      toasts.warn("Can't rename inside an array", '$rename does not traverse array elements');
+      toasts.warn('Can’t rename inside an array', '$rename does not traverse array elements');
       return;
     }
     this.withRow(rowIdx, (p) => {
@@ -708,7 +710,7 @@ export class EditFlow {
       const res = await database.runManagedStatement(sql, scope);
       if (res === null) {
         // Write was cancelled at the confirmation prompt — keep the modal open.
-        toasts.info('Write cancelled');
+        toasts.info('Write canceled');
         return;
       }
       toasts.success('Applied', 'Statement ran successfully');
@@ -721,7 +723,7 @@ export class EditFlow {
         keepOffset: true,
       });
     } catch (e) {
-      toasts.error('Statement failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the statement', e);
       // keep the modal open so the user can fix the SQL and retry
     } finally {
       this.runningReview = false;
@@ -835,7 +837,7 @@ export class EditFlow {
     toasts.success(
       'Generated',
       this.engine === 'mongodb'
-        ? `insertMany with ${n} document${n === 1 ? '' : 's'}`
+        ? `insertMany with ${plural(n, 'document')}`
         : `${n} INSERT statement${n === 1 ? '' : 's'}`,
     );
   }
@@ -863,7 +865,7 @@ export class EditFlow {
       where = idxs.map((i) => `(${whereByPk(ctx, i)})`).join(' OR ');
     }
     void copyText(where);
-    toasts.success('Copied', `WHERE for ${idxs.length} row${idxs.length === 1 ? '' : 's'}`);
+    toasts.success('Copied', `WHERE for ${plural(idxs.length, 'row')}`);
   }
 
   // ── Cell viewer ────────────────────────────────────────────────────────────

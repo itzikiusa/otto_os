@@ -15,7 +15,8 @@
     onclick={() => router.back()}
     disabled={!router.canBack}
     aria-label="Go back"
-    title="Back (⌘⇧←)"
+    title="Go back"
+    aria-keyshortcuts="Meta+Shift+ArrowLeft"
   >
     <Icon name="chevronLeft" size={16} />
   </button>
@@ -24,7 +25,8 @@
     onclick={() => router.forward()}
     disabled={!router.canForward}
     aria-label="Go forward"
-    title="Forward (⌘⇧→)"
+    title="Go forward"
+    aria-keyshortcuts="Meta+Shift+ArrowRight"
   >
     <Icon name="chevronRight" size={16} />
   </button>
@@ -47,7 +49,7 @@
     color: var(--text-dim);
     border-radius: var(--radius-s);
     cursor: pointer;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .nav-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);

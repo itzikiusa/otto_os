@@ -8,11 +8,14 @@
   // something needs you. Rows open the full Otto window at the right route.
   // The assistant's own threads/reminders arrive with the assistant API.
   import { onMount } from 'svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   // StatusDot + sessionState directly, not LiveWorkingDot: the tray is in the
   // entry bundle and LiveWorkingDot's default reads the main window's events
   // client, which would drag the whole events/store graph into every window.
   import StatusDot from '../../lib/components/StatusDot.svelte';
+  // Badge is a leaf (type-only import of lib/status): safe in the tray bundle.
+  import Badge from '../../lib/components/Badge.svelte';
   import { sessionState } from '../../lib/status';
   import { api, isAbortError } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
@@ -256,7 +259,7 @@
   <header class="head">
     <span class="brand"><Icon name="sparkle" size={14} /> Otto</span>
     {#if running.length > 0}
-      <span class="pill"><StatusDot state={workingDot} size={6} /> {running.length} running</span>
+      <Badge><StatusDot state={workingDot} size={6} /> {running.length} running</Badge>
     {/if}
   </header>
 
@@ -269,16 +272,16 @@
   <div class="body">
     {#if loadError}
       <div class="state" role="alert">
-        <p>Couldn't refresh your work: {loadError}</p>
+        <p>Couldn’t refresh your work: {loadError}</p>
         {#if loaded}<p>Showing the last loaded activity.</p>{/if}
         <button class="btn small" onclick={refreshAll}>Retry</button>
       </div>
     {/if}
     {#if auth.phase === 'loading' || (auth.phase === 'ready' && !loaded && !loadError)}
-      <p class="state">Loading your work…</p>
+      <Skeleton rows={3} height={32} label="your work" />
     {:else if auth.phase === 'offline'}
       <div class="state">
-        <p>The Otto daemon isn't running yet.</p>
+        <p>The Otto daemon isn’t running yet.</p>
         <button class="btn small" onclick={() => void auth.boot()}>Retry</button>
       </div>
     {:else if auth.phase !== 'ready'}
@@ -373,13 +376,6 @@
     font-weight: 600;
     color: var(--accent-text);
   }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-  }
   .ask {
     display: flex;
     align-items: center;
@@ -424,7 +420,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .row {

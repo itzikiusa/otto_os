@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../../lib/labels';
   // Insights tab: the latest report of the workspace's "Kubernetes watchdog"
   // personal agent (found by the template marker in its persona), rendered
   // from Markdown through the shared allowlist sanitizer, plus run history
@@ -141,7 +142,7 @@
   {:else if error}
     <LoadState what="the watchdog" variant="compact" {error} empty={true} onretry={() => void load()} />
   {:else if !ws.currentId}
-    <EmptyState icon="shield" title="Pick a workspace" body="Personal agents belong to a workspace; select one to see the watchdog's reports." />
+    <EmptyState icon="shield" title={NO_WORKSPACE} body="Personal agents belong to a workspace — its watchdog reports show here." />
   {:else if !agent}
     <EmptyState
       icon="shield"
@@ -184,7 +185,7 @@
         {#if reportLoading}
           <Skeleton rows={6} height={16} />
         {:else if reportError}
-          <div class="error" role="alert">Couldn't load the report: {reportError} <button class="btn small" onclick={() => void openRun(selected)}>Retry</button></div>
+          <div class="error" role="alert">Couldn’t load the report: {reportError} <button class="btn small" onclick={() => void openRun(selected)}>Retry</button></div>
         {:else if html}
           <div class="md">{@html html}</div>
         {:else if selected}
@@ -239,7 +240,7 @@
   .verdict {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -280,7 +281,7 @@
     background: none;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding: 5px 6px;
+    padding: 4px 6px;
     font-size: var(--fs-s);
     cursor: pointer;
     color: inherit;
@@ -336,7 +337,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     background: var(--surface-2);
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: var(--radius-s);
   }
   .md :global(pre) {
@@ -354,7 +355,7 @@
   .md :global(td),
   .md :global(th) {
     border: 1px solid var(--border);
-    padding: 3px 8px;
+    padding: 2px 8px;
   }
   .dim {
     color: var(--text-dim);

@@ -1,13 +1,14 @@
 <script lang="ts" module>
+  import { plural } from '../../lib/plural';
   /** When the previous drawer instance mounted. The workspace re-keys the
    *  drawer per target, so a mount right after another one is j/k navigation. */
   let lastMountAt = 0;
 </script>
 
 <script lang="ts">
-  import { dialogFocus } from '../../lib/dialogFocus';
+  import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { onTabKey } from '../../lib/tabKeys';
-  import { ui } from '../../lib/stores/ui.svelte';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
   // Detail drawer for the selected row: Overview (normalized fields + action
@@ -29,7 +30,7 @@
   import type { K8sContainer, K8sResourceDetail, K8sResourceKind, K8sRow } from '../../lib/api/types';
   import type { ActionDef } from './actions';
   import { actionsFor } from './actions';
-  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthClass, kindDef, podContainers, rowAge } from './k8s-util';
+  import { clipLongScalars, formatAge, formatBytes, formatMillicores, healthTone, kindDef, podContainers, rowAge } from './k8s-util';
   import LogsView from './LogsView.svelte';
   import ExecView from './ExecView.svelte';
   import MetricsView from './MetricsView.svelte';
@@ -39,6 +40,8 @@
 
   interface Props {
     modal?: boolean;
+    /** Desktop column width (the workspace's splitter owns it). */
+    width?: string;
     clusterId: string;
     kind: K8sResourceKind;
     ns: string;
@@ -61,7 +64,7 @@
     /** Open this workload’s row in the Monitor view (K-2). */
     onmonitor?: (ns: string, workload: string) => void;
   }
-  let { modal = false, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
+  let { modal = false, width, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -255,33 +258,24 @@
     return out;
   });
 
-  let drawerEl = $state<HTMLElement | null>(null);
-
-  // Compact detail sheets share the same nested-dialog ownership and focus
-  // restoration as other app sheets, including Safari pointer activation.
-  $effect(() => {
-    if (!modal || !drawerEl) return;
-    untrack(() => ui.pushModal());
-    const focus = dialogFocus(drawerEl, onclose);
-    return () => {
-      focus.destroy();
-      untrack(() => ui.popModal());
-    };
-  });
+  const statusTone = $derived(row ? healthTone(row.health, row.status) : 'neutral');
 
 </script>
 
-<aside bind:this={drawerEl} class="drawer" role={modal ? 'dialog' : undefined} aria-modal={modal ? 'true' : undefined} aria-label="{def.singular} details" data-testid="k8s-drawer">
-  <header class="dr-head">
-    <div class="dr-title">
-      <span class="dr-kind">{def.singular}</span>
-      <span class="dr-name mono" title={name}>{name}</span>
-      {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
-      {#if row}<span class="status-pill {healthClass(row.health, row.status)}"><span class="hdot"></span>{row.status}</span>{/if}
+<!-- The chrome (desktop column / phone sheet, ✕, Esc, modal registration,
+     focus) is the shared DockedDrawer; the host workspace owns the width. -->
+<DockedDrawer open title="{def.singular} details" {onclose} {modal} {width} testid="k8s-drawer">
+  {#snippet head()}
+    <div class="dr-headrow">
+      <div class="dr-title">
+        <span class="dr-kind">{def.singular}</span>
+        <span class="dr-name mono" title={name}>{name}</span>
+        {#if ns}<span class="dr-ns mono">{ns}</span>{/if}
+        {#if row}<Badge tone={statusTone} label={row.status} dot live={statusTone === 'info'} />{/if}
+      </div>
+      <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
     </div>
-    <button class="icon-btn" onclick={() => void refresh()} disabled={refreshing} aria-label="Refresh details" title="Refresh details" data-testid="k8s-drawer-refresh"><Icon name="refresh" size={14} /></button>
-    <button class="icon-btn dr-close" onclick={onclose} aria-label="Close details" title="Close (Esc)"><Icon name="x" size={14} /></button>
-  </header>
+  {/snippet}
 
   <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
     {#each TABS as t (t.id)}
@@ -364,7 +358,7 @@
       {:else if detailError}<div class="pad"><LoadState what="this object" variant="compact" error={detailError} empty={true} onretry={retry} /></div>
       {:else}
         <div class="code-tools">
-          <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}{clippedManifest.clipped ? ` ${clippedManifest.clipped} long value${clippedManifest.clipped === 1 ? '' : 's'} shortened — Copy has the full manifest.` : ''}</span>
+          <span class="dim">{kind === 'secrets' ? 'Secret values are redacted by the daemon.' : 'managedFields stripped.'}{clippedManifest.clipped ? ` ${plural(clippedManifest.clipped, 'long value')} shortened — Copy has the full manifest.` : ''}</span>
           <button class="btn small" onclick={copyManifest}><Icon name="copy" size={12} /> Copy</button>
         </div>
         <div class="code">
@@ -420,23 +414,13 @@
       {/if}
     {/if}
   </div>
-</aside>
+</DockedDrawer>
 
 <style>
-  .drawer {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    min-height: 0;
-    min-width: 0;
-    background: var(--surface);
-  }
-  .dr-head {
+  .dr-headrow {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding-block: 8px 6px; padding-inline: 14px 10px;
-    border-bottom: 1px solid var(--border);
   }
   .dr-title {
     flex: 1;
@@ -450,7 +434,7 @@
   .dr-kind {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .dr-name {
@@ -463,36 +447,6 @@
   .dr-ns {
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: var(--fs-s);
-  }
-  .hdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
-  .health-ok {
-    color: var(--success);
-  }
-  .health-ok .hdot {
-    background: var(--status-working);
-  }
-  .health-bad {
-    color: var(--danger);
-  }
-  .health-bad .hdot {
-    background: var(--status-exited);
-  }
-  .health-progressing {
-    color: var(--accent-text);
-  }
-  .health-progressing .hdot {
-    background: var(--accent);
   }
   .dr-tabs {
     display: flex;
@@ -554,7 +508,7 @@
   .sec-title {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 4px;
   }
@@ -607,13 +561,13 @@
     text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);
   }
   .events td {
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
     vertical-align: top;
   }

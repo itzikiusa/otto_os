@@ -48,7 +48,7 @@
 <details class="network" bind:open data-testid="network-status">
   <summary aria-expanded={open}>
     <span class="chev" class:open aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
-    <span class="sum-text">Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Loading…'}{#if network?.restart_required}{' · '}<span class="warn">Restart required</span>{/if}</span>
+    <span class="sum-text">Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Checking…'}{#if network?.restart_required}{' · '}<span class="warn">Restart required</span>{/if}</span>
   </summary>
   <div class="contents">
     {#if network?.status === 'connected'}<p>SSH forwards ready. Service health is not checked.</p>{/if}
@@ -71,10 +71,10 @@
 </details>
 <style>
   .network { flex-shrink: 0; min-width: 0; border-block-end: 1px solid var(--border); font-size: var(--fs-xs); }
-  summary { cursor: pointer; padding: 5px 9px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
+  summary { cursor: pointer; padding: 4px 8px; display: flex; align-items: center; gap: 4px; color: var(--text-dim); list-style: none; }
   summary::-webkit-details-marker { display: none; }
   summary:hover { color: var(--text); }
-  .chev { display: inline-flex; flex-shrink: 0; transition: transform 120ms ease-out; }
+  .chev { display: inline-flex; flex-shrink: 0; transition: transform var(--dur-fast) ease-out; }
   .chev.open { transform: rotate(90deg); }
   /* Icon already mirrors chevronRight in RTL (points start-ward when closed);
      open must turn the mirrored glyph the other way to point down. */
@@ -82,6 +82,6 @@
   .sum-text { min-width: 0; overflow-wrap: anywhere; }
   .warn { color: var(--warning); }
   @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }
-  .contents { max-height: 40vh; overflow: auto; padding: 5px 9px; } .endpoint { display: grid; gap: 3px; margin-block: 8px; }
+  .contents { max-height: 40vh; overflow: auto; padding: 4px 8px; } .endpoint { display: grid; gap: 2px; margin-block: 8px; }
   code { white-space: normal; overflow-wrap: anywhere; } p { margin: 6px 0; } .error { color: var(--danger); }
 </style>

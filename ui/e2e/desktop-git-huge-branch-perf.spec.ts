@@ -240,7 +240,7 @@ test('a Fetch that moves nothing does not re-read history (old branch tip beyond
   const refsReq = page.waitForRequest((r) => /\/repos\/[^/]+\/refs(\?|$)/.test(r.url()) && r.method() === 'GET', {
     timeout: 20_000,
   });
-  await page.getByRole('button', { name: 'Fetch', exact: true }).click();
+  await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click(); await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
   await refsReq; // the post-fetch re-sync ran its cheap refs check…
   await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForTimeout(500);
@@ -262,7 +262,7 @@ test('repeated refreshes do not grow the history request', async ({ page }) => {
     // moved and re-reads the log.
     git(repoDir, 'commit', '-q', '--allow-empty', '-m', `external ${i}`);
     const logReq = page.waitForRequest((r) => /\/log\?/.test(r.url()) && r.method() === 'GET', { timeout: 20_000 });
-    await page.getByRole('button', { name: 'Fetch', exact: true }).click();
+    await page.getByRole('button', { name: 'Fetch and pull options', exact: true }).click(); await page.getByRole('menuitem', { name: 'Fetch', exact: true }).click();
     await logReq;
     await page.waitForLoadState('networkidle').catch(() => {});
   }

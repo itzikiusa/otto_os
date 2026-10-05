@@ -59,7 +59,7 @@ Rules:
 | `--separator` | The quieter hairline between chrome and content: the `PageHeader` bottom edge, the sidebar's inline-end edge, the status bar's top edge, a Modal footer, stat dividers in Home widgets |
 | `--border-strong` | Emphasised borders: focused/selected cards, drag targets, the agent-content rule (see patterns.md) |
 | `--hover` | Hover wash on rows and ghost controls (7% of `--text`, works on any surface) |
-| `--scrim` | The dimmed backdrop behind a `Modal`, `Drawer` or the phone "More" sheet (per scheme) |
+| `--scrim` | The dimmed backdrop behind a `Modal` or `Drawer` (incl. the phone "More" drawer) (per scheme) |
 | `--scrim-soft` | A lighter backdrop for the command palette, which should keep the page legible |
 | `--scrim-media` | The veil behind a caption or control sitting on an image, video or 3D viewport (same in both schemes; text on it is white) |
 
@@ -98,6 +98,12 @@ graphics. They are what `StatusDot` renders:
 | `--status-idle` | idle |
 | `--status-exited` | exited or failed |
 | `--status-warn` / `--status-warn-soft` | attention: needs you, ahead/behind, waiting (a suspended session is a hollow idle ring, not amber) |
+
+`--status-warn` is an alias of `--warning` and `--status-idle` an alias of
+`--text-dim` in every theme and scheme, so a dot and the text beside it are
+always the same amber or grey. `--status-working` and `--status-exited` alias
+`--success` / `--danger` in the light scheme; in dark they stay brighter for
+the 3:1 graphic contrast on glass.
 
 Use a tone token for text and a status token for dots. Don't write a status
 label in `--status-working`; use `--success`.
@@ -142,10 +148,10 @@ label in `--status-working`; use `--success`.
   graphics only: bars, segments, legend swatches — never text or status).
   Always pair a series with its legend label. Other kinds (sources, features)
   are told apart by icon and label on a neutral chip.
-- **Proposed:** an `--agent` identity colour for agent-authored accents (the
-  Design Hall mockup uses violet). It isn't defined, so don't use it. See
-  [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content)
-  for the interim rule.
+- **Agent identity has no colour token.** An agent is told apart by its
+  provider icon and name (`AgentChip`, `AgentByline`) on neutral chrome — never
+  by the accent or an extra hue — so there is no `--agent` token. See
+  [patterns.md → Agent-authored content](./patterns.md#2-agent-authored-content).
 
 ### 1.4 Contrast: measured values
 
@@ -232,8 +238,8 @@ Two families only:
 | `--fs-m` | 13 | **Body default** (`body`), buttons, inputs, list rows |
 | `--fs-l` | 15 | The page title (`PageHeader` h1), page-level empty-state title |
 | `--fs-xl` | 18 | Hero numbers in KPI tiles, rare in-content headings |
-| `--fs-2xl` | 22 | Dashboard hero figures only |
-| `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens only — never body or page titles |
+| `--fs-2xl` | 22 | Dashboard hero figures; the top heading of long-form **content** (a walkthrough step, an article in the browser's reader view); a number card's empty dash — never chrome |
+| `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens; the single big number of a data-viz number card (`database/Chart`) — never body or page titles |
 
 Rules:
 
@@ -249,8 +255,25 @@ Rules:
   | 11.5 px | `--fs-xs` or `--fs-s` |
   | 12.5 px | `--fs-s` or `--fs-m` |
   | 14 px | `--fs-m` or `--fs-l` |
+  | 16–18 px | `--fs-l` or `--fs-xl` |
+  | `0.85–0.95em` (inline code in prose) | `--fs-s` |
+
+  `npm run check` ratchets every px/em/rem font-size of 11 px or more that
+  isn't a `--fs-*` step (`font-size-literal`). The one exception: a text
+  input set to `16px` so iOS Safari doesn't zoom on focus, marked with
+  `ui-guards: allow` on the line.
 - **One title size.** Every page title is `--fs-l`/600 in `PageHeader`. Don't
   give a page a bigger h1. (Legacy `.page-header h1` is aligned to `--fs-l`.)
+- **Content exception.** Rendered long-form content — a walkthrough step
+  (`help/Walkthroughs`), an article in the reader view (`browser/ReaderView`),
+  markdown bodies — is a document, not chrome: its own top heading may use
+  `--fs-2xl`/600 (and `--fs-xl` below it). The page title above it in
+  `PageHeader` still stays `--fs-l`.
+- **Tracking.** Two letter-spacing values exist: `.06em` on uppercase
+  micro-labels, and `-0.01em` on titles at `--fs-l` and above (page titles,
+  hero figures, content headings) — large sans text reads loose at 0. Body,
+  controls and mono stay at the default (0). `npm run check` ratchets any
+  other value (`letter-spacing-literal`).
 - **Weights:** 400 (body), 500 (buttons, labels, chips), 600 (titles, active
   nav item, table headers). No 700/800 in chrome.
 - **Uppercase micro-labels** exist in one form only: `.section-title`
@@ -269,9 +292,19 @@ Sidebar section labels, the Workspaces label and palette group text all use
 
 ## 3. Spacing and sizing
 
-There are no spacing tokens yet (**Proposed:** `--sp-1…8`). Until there are,
-use the **4 px grid**: 2, 4, 6, 8, 12, 16, 20, 24, 32. Values off the grid
-(5, 7, 9, 11, 13 px) are legacy.
+The scale is **2 px steps up to 24 px, 4 px steps above** (28, 32, 40, 48…).
+The named rungs are tokens in `tokens.css`:
+
+| Token | `--sp-1` | `--sp-2` | `--sp-3` | `--sp-4` | `--sp-5` | `--sp-6` | `--sp-7` | `--sp-8` | `--sp-9` |
+|---|---|---|---|---|---|---|---|---|---|
+| px | 2 | 4 | 6 | 8 | 12 | 16 | 20 | 24 | 32 |
+
+Prefer the tokens in new shared primitives; a literal px value on the scale is
+fine in module styles. The half-steps 10, 14, 18 and 22 px are allowed for
+control internals (button side padding, row padding) and must not be used for
+layout gaps between groups. Odd values (3, 5, 7, 9, 11, 13 px) are off the
+scale: `ui-guards` ratchets them (`off-grid-spacing`), and the remaining
+baseline is virtualized rows whose JS assumes a pixel height.
 
 Fixed dimensions to match, as used by the shared primitives:
 
@@ -280,7 +313,7 @@ Fixed dimensions to match, as used by the shared primitives:
 | `PageHeader` row | 46 px (`--ph-h`); horizontal padding 20/16 px (14/10 px on phone) |
 | `PageBody` padding | 18 px top, 20 px sides, 40 px bottom (12/14/32 px on phone) |
 | Readable column | `--page-readable: 1200px` (`PageBody width="readable"`) |
-| `.btn` | 26 px high, 11 px side padding, 6 px icon gap |
+| `.btn` | 26 px high, 10 px side padding, 6 px icon gap |
 | `.btn.small` | 22 px high, 8 px side padding |
 | `.icon-btn` | 24 × 24 px (`PageHeader`'s ⋯ is 28 px) |
 | `.input` | 27 px high |
@@ -325,8 +358,8 @@ There are three levels, each with one token:
   and above the ambient backdrop on Home. Don't add a stronger shadow to "lift"
   a card; change its surface step or its border (`--border-strong`) instead.
 - Floating layers share one family: `--glass-border` + `--glass-shadow`, whether
-  the surface is glass (menus, palette) or opaque (Modal). `--shadow` remains
-  for older floating UI (toasts, legacy popovers) until they move over.
+  the surface is glass (menus, palette) or opaque (Modal). The legacy
+  `--shadow` alias is retired; toasts and popovers use `--glass-shadow` too.
 - A selected segment in `.segmented` has a 1 px micro-shadow. That is the only
   other in-flow shadow.
 
@@ -342,9 +375,9 @@ z-index literals outside the in-pane range (−1…10).
 
 | Layer | Token (value) | Who |
 |---|---|---|
-| In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5) |
+| In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5); in the agents grid: pane chrome ≤ 5, split/tile dividers 8, corner grip and pane close 9, the drag-drop veil 10 |
 | Floating bar | `--z-floating-bar` (40) | `FloatingBar` over the content column (below every sheet and menu) |
-| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1…+3) | `BottomNav` (sheet at drawer +2/+3), `Drawer` (90–91) |
+| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1) | `BottomNav`, `Drawer` (90–91; also the phone "More" overflow and `DockedDrawer` sheets) |
 | Command surfaces | `--z-command` (150) | `Palette`, `ShortcutsOverlay` |
 | Sheets | `--z-modal` (200) | `Modal` (and so `ConfirmDialog`) |
 | Toasts | `--z-toast` (300) | `Toasts` |
@@ -360,6 +393,11 @@ Rules:
 - A menu opened from inside a Modal still goes through `ctxMenu`, which sits
   above sheets.
 - Nothing goes above `--z-overlay-max` (9999).
+- **Contain a component's own stack** with `isolation: isolate` (or `contain:
+  paint`, as the terminal does) when its internals use the in-pane range and
+  it hosts no fixed overlay. Don't isolate a container that renders a
+  non-portalled `Modal` or lightbox — the overlay would be trapped under its
+  later siblings and the app chrome.
 
 ---
 
@@ -484,7 +522,11 @@ Rules:
 - Continuous animation is **only for live state**: something is working right
   now, or loading. A finished or failed item stops animating.
 - Don't animate data changes: rows arriving, numbers ticking. Update them in
-  place.
+  place. **Data bars and meters** (usage bars, progress fills, the done-contract
+  ring) show their value — no `transition` on `width`, `inline-size`,
+  `flex-basis` or `stroke-dasharray` (`data-bar-transition` ratchet). Chrome
+  that changes size because the user dragged it, or a bar morphing between
+  its own states (the floating command bar), is marked `ui-guards: allow`.
 - **Reduced motion.** `app.css` has one global
   `@media (prefers-reduced-motion: reduce)` override that collapses every
   animation and transition to an instant change. A component that needs a
@@ -500,7 +542,8 @@ Rules:
   Examples in the tree: `shell/Drawer.svelte`,
   `run-with-otto/RunStageRail.svelte`.
 - **Shared primitives.** `app.css` owns `@keyframes otto-spin` and
-  `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`). Use them
+  `otto-pulse` plus a `.spinner` utility (size via `--spinner-size`); a
+  component never spins its own ring (`local-spinner` ratchet). Use them
   instead of a new `@keyframes`. `otto-pulse` ends on its fully-lit frame, so
   the global reduced-motion override leaves a live dot "on". Under reduced
   motion `.spinner` becomes a static dotted ring, so "busy" is still shown

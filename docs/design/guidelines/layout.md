@@ -44,7 +44,7 @@ The parts of the shell:
   [foundations.md §7](./foundations.md#7-translucency-vibrancy-and-the-ambient-backdrop).
 - **Page chrome.** `PageHeader` plus `PageBody` on every module page. The one
   exception is **Agents**, whose session `TabBar` is its top row; it has a
-  right panel (⌘J) for Browser, Outputs and similar.
+  **Session panel** (⌘J; Git, Files, Notes, Activity, Outputs, Browser and similar).
 - **Overlays.** The floating bar (§7, ⌘K on desktop), the `Palette` sheet
   (phone/tablet, ⌘I), the `?` `ShortcutsOverlay`, `Modal` sheets, the
   global `ContextMenu` and `Toasts` are all mounted once in `shell/App.svelte`.
@@ -54,6 +54,26 @@ The parts of the shell:
   floating command bar (§7), which docks out of the way.
 - **Phone.** A mobile top bar (44 px, title from `moduleLabel()`), the content,
   and `BottomNav` (56 px). The `Drawer` holds the Navigator.
+
+### 1.1 What lives where
+
+Several modules hold notes, drawings or "rooms". Put a feature, a link or a
+help sentence in the one place that owns the thing, and name that place:
+
+| The user wants to… | It lives in | Not in |
+|---|---|---|
+| Keep durable docs: markdown, wikilinks, an Obsidian vault, OKF bundles | **Vault** | Workbench |
+| Draft a script, snippet or scratch note and run it somewhere | **Workbench** (per user, full edit history; *Save as note* moves a file into the Vault) | Vault |
+| Jot workspace notes beside a running session | the **Session panel → Notes** tab (⌘J) | Vault |
+| Annotate a design (frame, site, 3D scene, brand kit) | the artifact's notes in **Design Hall** | Vault |
+| Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — reached from Design Hall (⌘K "Go to Design Hall" matches "canvas") | a separate "whiteboard" module or ⌘K entry |
+| Invite people into a running session | **Rooms** (session rooms: up to three guests, the host moderates) | Personal agents |
+| Watch personal agents message each other | **Personal agents → Rooms** (agent rooms, always visible to you) | the Rooms module |
+| Browse, edit, review or evaluate skills | **Skills Lab** (Skills · Review · Evaluator); bundled skills install from **Settings → Skills**; the files live in each provider's skill folder (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`) | Settings |
+
+Copy follows the table: "Agent rooms" for the personal-agents view and
+"Session rooms" (or just "Rooms") for the module, never both called "Rooms" on
+one screen.
 
 ## 2. Sidebar
 
@@ -87,7 +107,9 @@ anywhere else.
   | `plugins` | Plugins (runtime plugins only) |
 
   Put a new module in the group whose verb fits it. **A new group needs design
-  review.** Five sections is the budget.
+  review.** Five built-in sections (the table above, minus Plugins) is the
+  budget; Plugins appears only when a runtime plugin is installed, and
+  Favorites (below) only when the user has favorited something.
 - **Favorites** is a user-made section, always rendered **first** (star
   icon, label "Favorites"), and only while it holds at least one module the
   user can see. A module is favorited from its row's context menu ("Add to
@@ -112,13 +134,13 @@ anywhere else.
   with ⌘K. "Reset to default" clears order, hiding, folds, favorites and
   section order.
 - **Active item:**
-  - an `--accent` tint at 16%
+  - the `--accent-soft` tint (accent at 14%)
   - `--text` at weight 600
   - a 3 px `--accent` bar on the inline-start edge
-  - an `--accent` icon
+  - an `--accent-text` icon
 
-  A nested active row (a focused session under Agents) is quieter: an 11%
-  tint and no bar. Never use a solid fill or a non-accent colour for
+  A nested active row (a focused session under Agents) is quieter: the same
+  `--accent-soft` tint at weight 500, and no bar. Never use a solid fill or a non-accent colour for
   selection.
 - **The active row stays visible.** The Navigator scrolls it into view on
   every route change.
@@ -310,6 +332,16 @@ PageHeader: title = selected item (or module), item actions, primary
   empty state while items exist.
 - **Phone:** push navigation. The list is full height. Opening an item replaces
   it, and `PageHeader`'s `leading` slot shows a back button.
+- **List-pane width is the user's.** A list pane sits behind a
+  `PaneDivider` with `lib/paneResizer`'s `LIST_PANE` bounds and a
+  `storageKey`, so drag / ←→ / double-click-reset work and the width is
+  remembered. The few fixed panes below are deliberate:
+
+  | Pane | Width | Why it is fixed |
+  |---|---|---|
+  | Settings nav (`settings/Settings.svelte`) | 200 px | A short, static list of section names (sentence case, ≤ 3 words) — nothing to widen for; the form beside it is capped by `PageBody`. On phone the nav becomes the page. |
+  | Access groups list (`settings/AccessGroups.svelte`) | `minmax(180px, 240px)` grid column | A group-name column inside a settings form, not a page-level list pane; it flexes inside that range with the form and stacks on phone. |
+  | Database connections sidebar (`database/DatabasePage.svelte`) | 300 px **default** (`SIDE_DEFAULT`) | Not fixed: resizable with `PaneDivider` (`db.sideW`, up to 640 px). 300 px is the starting width because connection names carry host + database. |
 
 ### 4.2 Workbench/editor
 
@@ -433,7 +465,7 @@ PageHeader: crumbs / title · status pill · version   [device ▢▢▢] [Fit] 
 - **The stage is full-bleed** on a neutral pasteboard (`--bg` or `--term-bg`
   with a subtle dot grid). Chrome never covers the artboard except for the
   **floating contextual toolbar** anchored to the selection. That toolbar is a
-  small `--surface` pill with `--shadow`, and it is clamped into the stage.
+  small `--surface` pill with `--glass-shadow`, and it is clamped into the stage.
 - Side panels are 240–320 px, can be collapsed, and use segmented tabs at the
   top.
 - **Versions are the undo model.** Every applied change (the user's or an
@@ -455,10 +487,12 @@ Breakpoints live in `lib/stores/viewport.svelte.ts` (`PHONE_MAX = 640`,
 | tablet | 641–1024 px | `viewport.isTablet`, `@media (max-width: 1024px)` |
 | desktop | ≥ 1025 px | `viewport.isDesktop` |
 
-- Use **only these two media-query breakpoints**. The tree still has about 17
-  stray ones (760, 900, 1500…); don't add more. For anything whose width
-  depends on a split pane (Agents splits, right panel, database panes), use a
-  **container query**.
+- Use **only these two media-query breakpoints** (`max-width: 640px` /
+  `min-width: 641px`, `max-width: 1024px` / `min-width: 1025px`); `npm run
+  check` fails any other `@media` width (`media-width` ratchet; the tree is at
+  zero). For anything whose width depends on a split pane (Agents splits, right
+  panel, database panes), use a **container query**. Script that mirrors a
+  breakpoint reads `PHONE_MAX` / `TABLET_MAX`, never a literal.
 - **No horizontal page scroll** at any width. Wide content (tables, graphs,
   code) scrolls inside its own container. `expectNoHorizontalOverflow` in
   `ui/e2e/helpers.ts` asserts this.
@@ -531,7 +565,7 @@ Otto's front door, inspired by cnvs.dev: **one** shared component,
 ```
 
 **Anatomy.** One glass surface (`--bg-sidebar` at 78% + blur, `--border`,
-`--shadow`; a pill at rest, `--radius-l` + 6 px once it opens). The panel above
+`--glass-shadow`; a pill at rest, `--radius-l` + 6 px once it opens). The panel above
 the pill is drawn in the SAME surface — never a second glass layer.
 
 1. **Input** "Type or speak…" — a `combobox` driving a `listbox` with

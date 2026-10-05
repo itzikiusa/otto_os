@@ -14,6 +14,7 @@
   // via "Ask Otto", (2) directly in the Code panel, (3) — nothing is converted to
   // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -260,7 +261,7 @@
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
     if (ok) toasts.success('Copied', 'D2 source copied to clipboard.');
-    else toasts.error('Copy failed', 'Could not copy to the clipboard.');
+    else toasts.error('Couldn’t copy', 'Could not copy to the clipboard.');
   }
 
   /** Ask the agent to edit this scene's .d2 source. */
@@ -288,7 +289,7 @@
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch }, sceneId);
       canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
-      toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
+      toastAgentEdit(sceneId, 'Otto edited the diagram', res.note || 'Diagram updated.');
       void canvas.refreshSession();
       return true;
     } catch (e) {
@@ -388,7 +389,7 @@
           <div class="empty">
             <Icon name="shapes" size={28} />
             <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It's labelled D2 but contains an Excalidraw scene. Create a new
+            <p class="hint">It’s labeled D2 but contains an Excalidraw scene. Create a new
               <strong>Excalidraw</strong> canvas to edit those shapes.</p>
           </div>
         {:else if !renderError}
@@ -577,8 +578,8 @@
     align-items: center;
     gap: 6px;
     max-width: 80%;
-    padding: 7px 12px;
-    border-radius: 8px;
+    padding: 6px 12px;
+    border-radius: var(--radius-m);
     background: color-mix(in srgb, var(--danger) 16%, var(--surface));
     border: 1px solid var(--danger);
     color: var(--text);
@@ -587,7 +588,7 @@
   .mode-bar {
     position: absolute;
     top: 12px;
-    left: 12px;
+    inset-inline-start: 12px;
     z-index: 5;
     display: inline-flex;
     align-items: center;
@@ -596,21 +597,21 @@
   .mode-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 4px 9px;
+    gap: 4px;
+    padding: 4px 8px;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sketch-toggle,
   .code-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 10px;
     border-radius: 999px;
     background: var(--surface);
@@ -619,7 +620,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .sketch-toggle:hover,
   .sketch-toggle.on,
@@ -640,7 +641,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zoombar button {
     display: inline-flex;

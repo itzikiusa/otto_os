@@ -55,7 +55,7 @@
       await copyTextOrThrow(text);
       toasts.success(`${what} copied`);
     } catch {
-      toasts.error('Copy failed', 'Select and copy manually.');
+      toasts.error('Couldn’t copy', 'Select and copy manually.');
     }
   }
 
@@ -82,7 +82,7 @@
     if (!netEnabled && portConflict) {
       toasts.error(
         'Pick a different port',
-        `The network port must differ from the daemon's loopback port (${loopbackPort}).`,
+        `The network port must differ from the daemon’s loopback port (${loopbackPort}).`,
       );
       return;
     }
@@ -126,7 +126,7 @@
 <div class="expose" data-testid="mcp-expose-panel">
   <h4 class="sec">Install snippet</h4>
   <p class="muted small">
-    Add this to the external agent's <code>.mcp.json</code> and replace the token placeholder.
+    Add this to the external agent’s <code>.mcp.json</code> and replace the token placeholder.
   </p>
   <div class="snippet">
     <button class="btn small copy" onclick={() => void copy(snippet, '.mcp.json')}>
@@ -190,7 +190,7 @@
             </span>
             {#if portConflict}
               <span class="t-warn">
-                Choose a port other than the daemon's loopback port ({loopbackPort}) — they would collide.
+                Choose a port other than the daemon’s loopback port ({loopbackPort}) — they would collide.
               </span>
             {/if}
           </div>
@@ -219,7 +219,7 @@
     margin: 4px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .snippet {
@@ -262,7 +262,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 9px 10px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -272,7 +272,7 @@
   }
   .subdisclose span {
     display: inline-flex;
-    transition: transform 120ms ease;
+    transition: transform var(--dur-fast) ease;
   }
   .subdisclose span.open {
     transform: rotate(90deg);

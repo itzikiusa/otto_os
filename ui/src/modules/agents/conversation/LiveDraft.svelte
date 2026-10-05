@@ -57,7 +57,7 @@
     background: color-mix(in srgb, var(--agent, transparent) 4%, transparent);
     padding-block: 8px;
     padding-inline: 18px 16px;
-    margin-inline-start: 11px;
+    margin-inline-start: 10px;
     border-start-end-radius: var(--radius-l);
     border-end-end-radius: var(--radius-l);
   }
@@ -83,12 +83,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .caret {
-      animation: blink 1s steps(2, start) infinite;
-    }
-  }
-  @keyframes blink {
-    to {
-      visibility: hidden;
+      animation: otto-blink 1s steps(2, start) infinite;
     }
   }
   .draft-note {

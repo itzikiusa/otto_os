@@ -148,7 +148,6 @@
     height: 100%;
     border: 0;
     background: var(--surface);
-    transition: width 200ms ease-out;
   }
   @media (prefers-reduced-motion: reduce) {
     iframe {

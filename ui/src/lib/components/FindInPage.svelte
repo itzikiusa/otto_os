@@ -450,7 +450,7 @@
     >
       <Icon name="chevronDown" size={12} />
     </button>
-    <button class="find-close-btn" onclick={close} title="Close (Esc)" aria-label="Close find bar">
+    <button class="find-close-btn" onclick={close} title="Close find bar" aria-label="Close find bar" aria-keyshortcuts="Escape">
       <Icon name="x" size={11} />
     </button>
   </div>
@@ -485,11 +485,11 @@
     font-size: var(--fs-s);
     font-family: var(--font-ui);
     outline: none;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .find-input:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .find-input::placeholder {
     color: color-mix(in srgb, var(--text-dim) 70%, transparent);
@@ -515,7 +515,7 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     cursor: pointer;
-    transition: background 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
     padding: 0;
     line-height: 1;
   }
@@ -540,7 +540,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
     padding: 0;
     margin-inline-start: 2px;
   }

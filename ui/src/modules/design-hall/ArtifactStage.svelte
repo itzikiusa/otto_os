@@ -160,7 +160,7 @@
 
   function svgDoc(svg: string): string {
     return (
-      '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff}' +
+      '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#fff}' + // ui-guards: allow — rendered page canvas (the artifact’s own white page)
       'body{padding:24px;display:flex;justify-content:center}svg{max-width:100%;height:auto}</style></head>' +
       `<body>${svg}</body></html>`
     );
@@ -305,7 +305,7 @@
     {:else if kind === 'brand'}
       {#if brandDoc}
         <div class="brand">
-          <h3>Colours</h3>
+          <h3>Colors</h3>
           {#if swatches.length}
             <div class="swatches">
               {#each swatches as c (c.name)}
@@ -321,9 +321,9 @@
               {/each}
             </div>
           {:else}
-            <p class="msg">No colour tokens yet — add them under <span class="mono">color</span> in the source.</p>
+            <p class="msg">No color tokens yet — add them under <span class="mono">color</span> in the source.</p>
           {/if}
-          <p class="note"><Icon name="info" size={12} /> Edit colours, type, spacing, logos and voice — with live contrast and an impact preview — in the <a href="#/design/brand/{encodeURIComponent(artifact.id)}" data-testid="design-open-brand-kit">Brand Kit editor</a>.</p>
+          <p class="note"><Icon name="info" size={12} /> Edit colors, type, spacing, logos and voice — with live contrast and an impact preview — in the <a href="#/design/brand/{encodeURIComponent(artifact.id)}" data-testid="design-open-brand-kit">Brand Kit editor</a>.</p>
         </div>
       {:else}
         <p class="msg err">The brand kit document isn’t valid JSON.</p>
@@ -385,7 +385,7 @@
     width: 100%;
     min-height: 360px;
     border: 0;
-    background: white;
+    background: white; /* ui-guards: allow — rendered page canvas (the artifact’s own white page) */
   }
   .compact .doc {
     min-height: 0;
@@ -429,7 +429,7 @@
   }
   .paper .svg,
   .paper .img {
-    background: white;
+    background: white; /* ui-guards: allow — rendered page canvas (the artifact’s own white page) */
     border-radius: var(--radius-s);
     box-shadow: var(--shadow-card);
   }

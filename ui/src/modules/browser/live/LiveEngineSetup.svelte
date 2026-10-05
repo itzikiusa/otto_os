@@ -9,10 +9,12 @@
   //                 with a "lighter engine" option underneath
   //   installing  → progress (role=progressbar): downloading → verifying →
   //                 extracting
-  //   failed      → inline error + Retry
+  //   failed      → error EmptyState + Retry
   //   unsupported → honest note (this Mac can't run it) + Reader
   //   no admin    → says who can enable it
   import EmptyState from '../../../lib/components/EmptyState.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import Icon from '../../../lib/components/Icon.svelte';
   import { formatBytes } from '../../../lib/metric-format';
   import { auth } from '../../../lib/stores/auth.svelte';
@@ -40,7 +42,7 @@
     try {
       await browserLive.install(build);
     } catch (e) {
-      startError = e instanceof Error ? e.message : String(e);
+      startError = loadErrorText(e);
     }
   }
 
@@ -56,22 +58,20 @@
   const body = $derived(
     `Live tabs run in a Chromium browser on the Mac running Otto and stream here, so they work from any device, including your phone. ` +
       `Otto downloads ${lighter ? 'the lighter Chromium engine' : 'Chrome for Testing'} once (about ${formatBytes(browserLive.downloadBytes(build))}) and checks it against a pinned checksum. ` +
-      `Every request the pages make goes through Otto's network guard.`,
+      `Every request the pages make goes through Otto’s network guard.`,
   );
 </script>
 
 <div class="setup" data-testid="live-engine-setup">
-  {#if browserLive.loadError && !st}
-    <div class="inline-error" role="alert">
-      <Icon name="warning" size={16} />
-      <div>
-        <p class="title">Couldn't check the live browser engine</p>
-        <p class="detail">{browserLive.loadError}</p>
-      </div>
-      <button class="btn" onclick={() => void browserLive.load()}>Retry</button>
-    </div>
-  {:else if engine === 'unknown'}
-    <p class="loading" role="status">Checking the live browser engine…</p>
+  {#if (browserLive.loadError && !st) || engine === 'unknown'}
+    <LoadState
+      variant="page"
+      what="the live browser engine’s status"
+      loading={!browserLive.loadError}
+      error={browserLive.loadError && !st ? browserLive.loadError : null}
+      empty
+      onretry={() => void browserLive.load()}
+    />
   {:else if engine === 'installing'}
     <div class="progress-card" role="status" aria-live="polite">
       <div class="icon-tile"><Icon name="download" size={24} /></div>
@@ -92,21 +92,21 @@
       <p class="hint">It downloads once and stays on this Mac. You can keep using Otto meanwhile.</p>
     </div>
   {:else if engine === 'failed'}
-    <div class="inline-error" role="alert">
-      <Icon name="warning" size={16} />
-      <div>
-        <p class="title">The live browser engine didn't install</p>
-        <p class="detail">{job?.error || 'The download stopped before it finished.'}</p>
-      </div>
-      {#if canInstall}
-        <button class="btn" disabled={browserLive.starting} onclick={() => void browserLive.install(job?.build ?? 'chrome')}>Retry</button>
-      {/if}
-    </div>
+    <EmptyState
+      variant="page"
+      tone="error"
+      icon="warning"
+      title="Couldn’t install the live browser engine"
+      body={job?.error || 'The download stopped before it finished.'}
+      actionLabel={canInstall && !browserLive.starting ? 'Retry' : undefined}
+      actionIcon="refresh"
+      onaction={() => void browserLive.install(job?.build ?? 'chrome')}
+    />
   {:else if engine === 'unsupported'}
     <EmptyState
       variant="page"
       icon="globe"
-      title="Live browsing isn't available on this Mac"
+      title="Live browsing isn’t available on this Mac"
       body="The live browser engine runs on Apple silicon Macs only for now. Reader view still works for every page."
       actionLabel={onreader ? 'Switch to Reader' : undefined}
       onaction={onreader}
@@ -115,7 +115,7 @@
     <EmptyState
       variant="page"
       icon="globe"
-      title="Live browsing isn't enabled yet"
+      title="Live browsing isn’t enabled yet"
       body="Live tabs need a one-time Chromium download on the Mac running Otto. Ask an Otto admin to enable it in Settings → Browser. Reader view works meanwhile."
       actionLabel={onreader ? 'Switch to Reader' : undefined}
       onaction={onreader}
@@ -142,10 +142,10 @@
         </label>
       {/if}
       {#if !pinned(build)}
-        <p class="field-error" role="alert">This Otto build has no checksum for that engine, so it can't be downloaded safely.</p>
+        <p class="field-error" role="alert">This Otto build has no checksum for that engine, so it can’t be downloaded safely.</p>
       {/if}
       {#if startError}
-        <p class="field-error" role="alert">Couldn't start the download: {startError}</p>
+        <p class="field-error" role="alert">Couldn’t start the download: {startError}</p>
       {/if}
       {#if onreader}
         <button class="btn ghost" onclick={onreader}>Use Reader view instead</button>
@@ -175,11 +175,6 @@
     color: var(--danger);
     font-size: var(--fs-s);
     margin: 8px 0;
-  }
-  .loading {
-    margin: 15vh auto 0;
-    text-align: center;
-    color: var(--text-dim);
   }
   .progress-card {
     max-width: 420px;
@@ -215,7 +210,7 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width 200ms ease-out;
+    /* Data-driven width: no transition (foundations §8). */
   }
   .meta {
     margin: 0;
@@ -226,36 +221,6 @@
     margin: 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-  }
-  .inline-error {
-    max-width: 560px;
-    margin: 15vh auto 0;
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .inline-error > :global(svg) {
-    color: var(--danger);
-    flex: none;
-    margin-top: 2px;
-  }
-  .inline-error > div {
-    flex: 1;
-    min-width: 0;
-  }
-  .inline-error .title {
-    margin: 0;
-    color: var(--text);
-  }
-  .inline-error .detail {
-    margin: 2px 0 0;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
   }
   @media (prefers-reduced-motion: reduce) {
     .bar span {

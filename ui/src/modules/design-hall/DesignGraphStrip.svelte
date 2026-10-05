@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Product → story → Design tab: the Design Hall view of this story. A small
   // graph — the story, the designs that implement it (an epic also shows its
   // children's), and what each of those designs uses — with "Open in Design
@@ -110,7 +111,7 @@
       <Icon name="designHall" size={14} />
       <span class="h">Design Hall</span>
       <span class="dim">
-        {#if phase === 'loading'}Loading designs…{:else if phase === 'error'}Couldn’t load linked designs{:else}{artifacts.length} design{artifacts.length === 1 ? '' : 's'} linked to this {isEpic ? 'epic and its stories' : 'story'}{/if}
+        {#if phase === 'loading'}Loading designs…{:else if phase === 'error'}Couldn’t load linked designs{:else}{plural(artifacts.length, 'design')} linked to this {isEpic ? 'epic and its stories' : 'story'}{/if}
       </span>
       {#if phase === 'error'}<button class="btn small ghost" onclick={() => void load()}>Retry</button>{/if}
       <span class="grow"></span>

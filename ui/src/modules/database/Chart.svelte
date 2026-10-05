@@ -257,9 +257,9 @@
     gap: 4px;
   }
   .num-value {
-    font-size: 34px;
+    font-size: var(--fs-hero);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     color: var(--text);
     font-variant-numeric: tabular-nums;
     line-height: 1;
@@ -268,10 +268,10 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .num-empty {
-    font-size: 28px;
+    font-size: var(--fs-2xl);
     color: var(--text-dim);
   }
   .chart-empty {

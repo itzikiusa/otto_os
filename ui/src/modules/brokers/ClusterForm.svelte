@@ -303,7 +303,7 @@
   }
   .field input,
   .field select {
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -328,8 +328,8 @@
     margin-top: 2px;
     padding: 12px;
     border-radius: var(--radius-m);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-faint);
   }
   .file-input-row {
     display: flex;
@@ -367,8 +367,8 @@
     .field select {
       width: 100%;
       box-sizing: border-box;
-      font-size: 16px; /* ≥16px prevents iOS Safari zoom-on-focus */
-      padding: 10px 11px;
+      font-size: 16px; /* ui-guards: allow — ≥16px prevents iOS Safari zoom-on-focus */
+      padding: 10px 10px;
     }
     .check {
       font-size: var(--fs-m);

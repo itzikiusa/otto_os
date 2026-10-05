@@ -61,7 +61,7 @@ test('brokers page fits the viewport and is navigable', async ({ page }) => {
 
   // Select the cluster → header + tab bar render.
   await row.click();
-  await expect(page.locator('.cluster-head .name')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.cluster-head .ph-title')).toBeVisible({ timeout: 15_000 });
   // The tab bar and its tabs are present/usable.
   const tabs = page.locator('.tabs');
   await expect(tabs).toBeVisible();
@@ -115,7 +115,7 @@ test('phone: sections collapse independently and scroll', async ({ page }) => {
   const row = page.locator('.cluster .cn', { hasText: 'mobile-test-kafka' }).first();
   await expect(row).toBeVisible({ timeout: 15_000 });
   await row.click();
-  await expect(page.locator('.cluster-head .name')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.cluster-head .ph-title')).toBeVisible({ timeout: 15_000 });
 
   // Cluster-list region must be its own bounded, scrollable section.
   const listScroll = await page.evaluate(() => {
@@ -139,7 +139,7 @@ test('phone: sections collapse independently and scroll', async ({ page }) => {
   // Collapse the content → its tab bar/body hide, header stays.
   await contentToggle.click();
   await expect(page.locator('.tab-body')).toBeHidden();
-  await expect(page.locator('.cluster-head .name')).toBeVisible();
+  await expect(page.locator('.cluster-head .ph-title')).toBeVisible();
   // Expand again → tabs come back.
   await contentToggle.click();
   await expect(page.locator('.tabs')).toBeVisible();

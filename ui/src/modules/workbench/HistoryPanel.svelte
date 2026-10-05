@@ -5,6 +5,7 @@
   // adds a new revision; the current text stays in history).
   import { onDestroy, untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -191,7 +192,7 @@
     restoring = true;
     try {
       const ok = await confirmer.ask(
-        `The file's content becomes revision ${seq}. Your current text is kept in history, so you can come back to it.`,
+        `The file’s content becomes revision ${seq}. Your current text is kept in history, so you can come back to it.`,
         { title: `Restore revision ${seq}?`, confirmLabel: 'Restore', danger: false },
       );
       if (!ok || !owns()) return;
@@ -202,7 +203,7 @@
       selected = null;
       await load();
     } catch (e) {
-      if (owns()) toasts.error("Couldn't restore", loadErrorText(e));
+      if (owns()) toasts.error("Couldn’t restore", loadErrorText(e));
     } finally {
       if (owns()) restoring = false;
     }
@@ -307,17 +308,17 @@
         <p class="wb-err" role="alert">Couldn't compare revision: {compareError}</p>
       {/if}
       {#if detailError}
-        <p class="wb-err" role="alert">Couldn't load revision {selected}: {detailError}
+        <p class="wb-err" role="alert">Couldn’t load revision {selected}: {detailError}
           <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>
         </p>
       {:else if !detail}
-        <p class="wb-hist-note">Loading revision…</p>
+        <Skeleton rows={6} height={14} label="the revision" />
       {:else if view === 'text'}
         <pre class="wb-rev-text" data-testid="wb-rev-text">{detail.content}</pre>
       {:else if diffSides}
         <RevisionDiff {ws} {docId} {...diffSides} />
       {:else}
-        <p class="wb-hist-note">Loading revision…</p>
+        <Skeleton rows={6} height={14} label="the revision" />
       {/if}
     </section>
   {/if}
@@ -431,7 +432,7 @@
   }
   .seg button {
     border: 0;
-    padding: 3px 10px;
+    padding: 2px 10px;
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);

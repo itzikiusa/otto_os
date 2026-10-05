@@ -92,12 +92,12 @@
   .img-ph {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
-    padding: 3px 8px;
+    padding: 2px 8px;
     margin: 4px 0;
   }
   .img-ph.loading {

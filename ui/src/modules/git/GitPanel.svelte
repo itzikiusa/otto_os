@@ -26,7 +26,7 @@
   {:else if !git.primary}
     <div class="gp-empty">
       {#if git.notARepo}
-        <p class="dim">This session's folder isn't a git repository.</p>
+        <p class="dim">This session’s folder isn’t a git repository.</p>
       {:else}
         <p class="dim">No repository for this session yet.</p>
       {/if}

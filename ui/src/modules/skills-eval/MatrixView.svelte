@@ -131,9 +131,10 @@
   async function cancel(): Promise<void> {
     if (!selected) return;
     if (
-      !(await confirmer.ask(`Stop the matrix "${selected.name}"? Cells still running are abandoned; scored cells are kept.`, {
+      !(await confirmer.ask(`Stop the matrix “${selected.name}”? Cells still running are abandoned; scored cells are kept.`, {
         title: 'Stop matrix',
         confirmLabel: 'Stop matrix',
+        danger: true,
       }))
     )
       return;
@@ -330,11 +331,11 @@
         </p>
 
         <section class="card block">
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="mx-name">Name</label>
             <input id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
           </div>
-          <div class="fld">
+          <div class="field">
             <span class="field-label" id="mx-prov-lbl">Agents</span>
             <div class="provider-chips" role="group" aria-labelledby="mx-prov-lbl" data-testid="matrix-providers">
               {#each providerOpts as p (p)}
@@ -345,16 +346,16 @@
               {/each}
             </div>
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
             <input id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
           </div>
           <div class="grid2">
-            <div class="fld">
+            <div class="field">
               <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
               <input id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
             </div>
-            <div class="fld">
+            <div class="field">
               <label class="field-label" for="mx-iter">Iterations</label>
               <input id="mx-iter" class="input" type="number" min="1" max="10" bind:value={fIterations} />
             </div>
@@ -399,15 +400,15 @@
           </button>
         </div>
       </div>
-    {:else if selectedId && detailError}
-      <div class="mx-detail-err" role="alert">
-        <Icon name="warning" size={22} />
-        <strong>Couldn’t load this matrix</strong>
-        <p>{detailError}</p>
-        <button class="btn small" onclick={() => selectedId && selectMatrix(selectedId)} disabled={detailLoading}><Icon name="refresh" size={12} /> {detailLoading ? 'Retrying…' : 'Retry'}</button>
-      </div>
-    {:else if selectedId && !selected}
-      <div class="mx-muted mx-pad" role="status">Loading matrix…</div>
+    {:else if selectedId && (detailError || !selected)}
+      <LoadState
+        what="this matrix"
+        variant="page"
+        loading={detailLoading || !detailError}
+        error={detailError}
+        empty
+        onretry={() => selectedId && selectMatrix(selectedId)}
+      />
     {:else if selected}
       <div class="mx-detail">
         <div class="mx-detail-head">
@@ -418,8 +419,9 @@
           <span class="grow"></span>
           <StatusBadge status={runStatus(selected.status)} />
           {#if selected.status === 'running'}
-            <button class="btn small" type="button" onclick={cancel}>
-              <Icon name="square" size={12} /> Stop
+            <!-- Red + "…" + confirm: stopping abandons agent cells mid-run. -->
+            <button class="btn small danger" type="button" onclick={cancel}>
+              <Icon name="stop" size={12} /> Stop matrix…
             </button>
           {/if}
         </div>
@@ -519,7 +521,7 @@
   .mx-side-title {
     font-size: var(--fs-s);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     flex: 1;
@@ -537,28 +539,6 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
-  .mx-detail-err > :global(svg) {
-    color: var(--danger);
-    vertical-align: -1px;
-  }
-  .mx-pad {
-    padding: 30px;
-    text-align: center;
-  }
-  .mx-detail-err {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 40px 20px;
-    text-align: center;
-    overflow-wrap: anywhere;
-  }
-  .mx-detail-err p {
-    margin: 0 0 6px;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-  }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -575,7 +555,7 @@
     cursor: pointer;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .mx-item:hover {
     background: var(--hover);
@@ -583,7 +563,7 @@
   /* Selection is accent (same as the Runs list), not the success green. */
   .mx-item.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .mx-item-top {
     display: flex;
@@ -602,7 +582,7 @@
   .mx-item-meta {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -686,10 +666,9 @@
     flex-direction: column;
     gap: 12px;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  /* Shared .field (app.css); the block's gap spaces the rows. */
+  .field {
+    margin-bottom: 0;
     min-width: 0;
   }
   .grid2 {
@@ -721,8 +700,8 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 4px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -731,7 +710,7 @@
   }
   .chip-toggle.on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .chip-toggle input {
@@ -862,7 +841,7 @@
   .score {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-weight: 600;
     font-size: var(--fs-m);
   }

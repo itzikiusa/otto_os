@@ -6,6 +6,7 @@
   // shows live output regardless of whether the session is in the workspace store.
   import { onMount } from 'svelte';
   import { toastError } from '../../lib/toastError';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -133,7 +134,7 @@
         {/each}
       </select>
     {/if}
-    {#if working}<span class="working">working…</span>{/if}
+    {#if working}<span class="working" role="status"><LiveWorkingDot label="Working…" /></span>{/if}
     <button
       class="hist-btn history"
       onclick={restorePrevious}
@@ -156,8 +157,8 @@
     {:else}
       <div class="empty">
         <p class="lead">Describe a diagram and the agent draws it here.</p>
-        <p class="hint">It edits this canvas's file and the board updates — keep chatting to
-          refine it. The agent's live shell appears here once it starts.</p>
+        <p class="hint">It edits this canvas’s file and the board updates — keep chatting to
+          refine it. The agent’s live shell appears here once it starts.</p>
       </div>
     {/if}
   </div>
@@ -197,7 +198,7 @@
   .title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
   }
@@ -207,14 +208,16 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     cursor: pointer;
     text-transform: capitalize;
   }
   .working {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font-size: var(--fs-xs);
-    color: var(--accent-text);
-    font-weight: 600;
+    color: var(--text-dim);
   }
   .close {
     margin-inline-start: auto;
@@ -303,7 +306,7 @@
   }
   .composer textarea:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .send {
     display: inline-flex;

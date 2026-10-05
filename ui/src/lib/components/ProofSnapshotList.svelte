@@ -113,7 +113,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin: 0;
   }
@@ -139,7 +139,7 @@
   .snap-list {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .snap-row {
     display: flex;

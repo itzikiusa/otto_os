@@ -1,11 +1,11 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // First-run panel: the daemon can't find the `aws` CLI. Offers "Install now"
   // (Admin on `aws`), shows the installer's progress + a collapsible log tail
   // while `/aws/status` is polled every 1.5 s (the store re-arms the poll on
   // each response), and auto-continues when the binary appears.
   import { aws } from '../../lib/stores/aws.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
 
   const job = $derived(aws.status?.install ?? null);
@@ -18,7 +18,7 @@
     try {
       await aws.startInstall();
     } catch (e) {
-      toasts.error('Install failed to start', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the install', e);
     }
   }
 </script>
@@ -35,13 +35,11 @@
     </p>
 
     {#if running}
-      <div class="progress" role="progressbar" aria-label="Installing the AWS CLI" aria-busy="true">
-        <div class="bar"></div>
-      </div>
+      <div class="indeterminate" role="progressbar" aria-label="Installing the AWS CLI" aria-busy="true"></div>
       <p class="status">Installing… this can take a minute or two.</p>
     {:else if failed}
       <p class="status err">
-        Install failed{job?.error ? `: ${job.error}` : ''}.
+        Couldn’t install the AWS CLI{job?.error ? `: ${job.error}` : ''}.
       </p>
     {/if}
 
@@ -110,27 +108,6 @@
   code {
     font-family: var(--font-mono);
     font-size: var(--fs-s);
-  }
-  .progress {
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .bar {
-    width: 40%;
-    height: 100%;
-    background: var(--accent);
-    border-radius: 999px;
-    animation: slide 1.4s ease-in-out infinite;
-  }
-  @keyframes slide {
-    0% {
-      transform: translateX(-100%);
-    }
-    100% {
-      transform: translateX(260%);
-    }
   }
   .status {
     margin: 0;

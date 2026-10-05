@@ -616,7 +616,7 @@
           placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8123' : kind === 'postgres' ? '5432' : '3306'}
         />
         {#if kind === 'clickhouse'}
-          <span class="hint">Use the HTTP interface — 8123 (plain, the default when empty) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>
+          <span class="hint">Use the HTTP interface — 8123 (plain, the default when empty) or 8443 (TLS). The native ports 9000 / 9440 aren’t supported.</span>
         {/if}
       </div>
       <div class="field grow">
@@ -751,7 +751,7 @@
             <label for="cf-tun-host">Tunnel host</label>
             <input id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
             {#if !tunHost.trim()}
-              <span class="hint">Required — without a host the tunnel isn't saved.</span>
+              <span class="hint">Required — without a host the tunnel isn’t saved.</span>
             {/if}
           </div>
           <div class="field tun-port">
@@ -918,18 +918,18 @@
   }
   .kind-chip {
     height: 24px;
-    padding: 0 11px;
+    padding: 0 10px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
-    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .kind-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
     color: var(--accent-text);
     font-weight: 500;
   }
@@ -939,7 +939,7 @@
   }
   .env-chip {
     height: 24px;
-    padding: 0 13px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -947,11 +947,11 @@
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
-    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .env-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
     color: var(--accent-text);
     font-weight: 500;
   }
@@ -1002,8 +1002,8 @@
     margin-top: 2px;
     padding: 10px 12px 4px;
     border-radius: var(--radius-m);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-faint);
   }
   .file-input-row {
     display: flex;

@@ -16,6 +16,7 @@ import { k8s } from '../stores/k8s.svelte';
 import { k8sApi, followLogs } from '../api/k8s';
 import { confirmer } from '../confirm.svelte';
 import { toasts } from '../toast.svelte';
+import { toastError } from '../toastError';
 import type { K8sAction, K8sCluster, K8sResourceKind, K8sRow } from '../api/types';
 import type { K8sDrawerTab } from '../stores/k8s.svelte';
 import { ACTIONS, typedConfirm } from '../../modules/kubernetes/actions';
@@ -36,7 +37,7 @@ const DRAWER_TABS: K8sDrawerTab[] = ['overview', 'manifest', 'describe', 'events
 
 async function clusterFor(key: string | undefined, signal: AbortSignal): Promise<K8sCluster> {
   if (!k8s.clustersLoaded) await k8s.loadClusters();
-  if (signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   if (!key) {
     if (k8s.cluster) return k8s.cluster;
     throw new UiCommandError('invalid_args', 'Pass `cluster` (id or name — otto.ui_k8s_list_clusters).');
@@ -249,7 +250,7 @@ registerUiCommands('kubernetes', {
     const defs = (ACTIONS[kind] ?? []).filter((a) => a.id === args.action);
     if (defs.length === 0) {
       const offered = [...new Set((ACTIONS[kind] ?? []).map((a) => a.id))].join(', ') || 'none';
-      throw new UiCommandError('invalid_args', `“${args.action}” isn't an action for ${kind} (offered: ${offered}).`);
+      throw new UiCommandError('invalid_args', `“${args.action}” isn’t an action for ${kind} (offered: ${offered}).`);
     }
     const params: Record<string, unknown> = { ...(args.params ?? {}) };
     // Prefer the menu entry whose fixed params match (Promote vs Promote (full)).
@@ -315,7 +316,7 @@ registerUiCommands('kubernetes', {
         params: Object.keys(merged).length ? merged : undefined,
       });
       if (resp.ok) toasts.success(`${verb} · ${args.name}`, `${who}${resp.message ? ` — ${resp.message}` : ''}`);
-      else toasts.error(`${verb} failed · ${args.name}`, resp.message || undefined);
+      else toastError(`Couldn’t ${verb.toLowerCase()} ${args.name}`, resp.message || undefined);
       void k8s.loadResources(true);
       return { ok: resp.ok, message: resp.message ?? null, output: resp.output ?? null };
     } catch (e) {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -160,7 +161,7 @@
     }
     toasts.success(
       role === 'none' ? 'Removed from all workspaces' : `Set to ${role} in all workspaces`,
-      `${targets.length} workspace${targets.length === 1 ? '' : 's'} updated`,
+      `${plural(targets.length, 'workspace')} updated`,
     );
   }
 
@@ -500,7 +501,7 @@
       {#if savedIn === 'roles'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
     </div>
     <p class="sub">
-      A user only reaches the workspaces they're a member of. Switch to <b>By user</b> to grant one
+      A user only reaches the workspaces they’re a member of. Switch to <b>By user</b> to grant one
       account several workspaces at once.
     </p>
     <div class="urow controls">
@@ -541,7 +542,7 @@
       {#if matrixLoading}
         <Skeleton rows={3} height={32} />
       {:else if matrixError}
-        <LoadState what="this workspace's members" error={matrixError} empty onretry={() => void loadMatrix(matrixWs)} />
+        <LoadState what="this workspace’s members" error={matrixError} empty onretry={() => void loadMatrix(matrixWs)} />
       {:else}
         <div class="card matrix">
           <div class="matrix-head">
@@ -575,9 +576,7 @@
     {:else}
       <div class="urow controls">
         <span class="dim">
-          Member of {memberWsCount} of {ws.workspaces.length} workspace{ws.workspaces.length === 1
-            ? ''
-            : 's'}
+          Member of {memberWsCount} of {plural(ws.workspaces.length, 'workspace')}
         </span>
         <span class="grow"></span>
         <span class="dim">Set all to</span>
@@ -642,7 +641,7 @@
     {#if grantLoading}
       <Skeleton rows={5} height={32} />
     {:else if grantError}
-      <LoadState what="this user's feature grants" error={grantError} empty onretry={() => void loadGrants(grantUserId)} />
+      <LoadState what="this user’s feature grants" error={grantError} empty onretry={() => void loadGrants(grantUserId)} />
     {:else}
       <div class="card grant-matrix">
         <div class="grant-head">

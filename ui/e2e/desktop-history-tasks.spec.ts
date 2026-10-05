@@ -182,7 +182,7 @@ test.describe('tasks from the board', () => {
     const row = panel.locator('[data-testid="task-row"]', { hasText: title });
     await expect(row).toBeVisible();
     await expect(row).toHaveAttribute('data-source', 'user');
-    await expect(row.locator('.badge.board')).toHaveText(/from board/i);
+    await expect(row.locator('.badge', { hasText: /from board/i })).toHaveText(/from board/i);
     await expect(panel.getByTestId('task-count')).toHaveText(/0\/1/);
 
     // Server-side truth: the row came back from POST /sessions/{id}/tasks.
@@ -195,7 +195,7 @@ test.describe('tasks from the board', () => {
     await page.getByRole('button', { name: new RegExp(claudeTitle) }).first().click();
     await openRightPanelTab(page, 'Activity');
     await expect(panel.locator('[data-testid="task-row"]', { hasText: title })).toBeVisible();
-    await expect(panel.locator('[data-testid="task-row"]', { hasText: title }).locator('.badge.board')).toBeVisible();
+    await expect(panel.locator('[data-testid="task-row"]', { hasText: title }).locator('.badge', { hasText: /from board/i })).toBeVisible();
   });
 
   test('Mission Control card shows the done/total strip and + Sub-task POSTs a task', async ({ page }) => {

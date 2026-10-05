@@ -6,6 +6,7 @@ import type { DbEngine } from '../../lib/api/types';
 import { escapeSqlString } from './sql-util';
 import { cellStr, compactJson, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import type { DiffLine, EditAdapter, EditCtx, TypedValue } from './edit-types';
+import { plural } from '../../lib/plural';
 
 /** Quote a SQL identifier for the active engine — double-quotes for Postgres
  *  (backticks are invalid there), backticks for MySQL/ClickHouse. */
@@ -200,7 +201,7 @@ export const sqlAdapter: EditAdapter = {
     if (ctx.engine === 'clickhouse') return null; // Sorting keys do not enforce row uniqueness.
     if (idxs.length === 0) return null;
     const n = idxs.length;
-    const noun = `${n} row${n === 1 ? '' : 's'}`;
+    const noun = `${plural(n, 'row')}`;
     let where: string;
     if (ctx.target.pkCols.length === 1) {
       const pk = ctx.target.pkCols[0];

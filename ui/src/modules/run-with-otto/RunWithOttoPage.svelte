@@ -21,6 +21,8 @@
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { runStatusInfo, sourceLabel } from './runStatus';
+  import { router } from '../../lib/router.svelte';
+  import { plural } from '../../lib/plural';
 
   // Load the workspace's runs whenever the active workspace changes. This effect
   // reads ONLY ws.currentId (not the run list it loads), so it never self-loops.
@@ -53,9 +55,46 @@
     if (!id || runWithOtto.loadingList || rows.length === 0 || autoOpenedFor === id) return;
     autoOpenedFor = id;
     untrack(() => {
-      if (runWithOtto.openRun || !viewport.isDesktop) return;
+      // A deep link (`#/run-with-otto/<id>`) opens on its own (below).
+      if (runWithOtto.openRun || !viewport.isDesktop || routeRunId()) return;
       const pick = initialSelection('run-with-otto', rows, (r) => r.id);
       if (pick) void runWithOtto.open(pick);
+    });
+  });
+
+  /** The run the URL names (`#/run-with-otto/<id>`), or null. */
+  function routeRunId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'run-with-otto' && id ? id : null;
+  }
+  // The URL carries the open run so a reload / share / notification lands on
+  // it. Only a CLOSE clears the URL, and on arrival a link naming a DIFFERENT
+  // run than the one the store kept open wins (the effect below opens it).
+  let routedId: string | null = null;
+  let arrived = false;
+  $effect(() => {
+    const id = runWithOtto.openId;
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    const linked = untrack(() => routeRunId());
+    if (first && linked && linked !== id) return;
+    untrack(() => {
+      if (router.module === 'run-with-otto' && linked !== id) router.replace(id ? `run-with-otto/${id}` : 'run-with-otto');
+    });
+  });
+  // A route change while the page is up (a notification, Back/Forward, a
+  // pasted link) opens that run.
+  $effect(() => {
+    const linked = routeRunId();
+    if (!linked) return;
+    untrack(() => {
+      if (linked !== runWithOtto.openId) {
+        rememberSelection('run-with-otto', linked);
+        void runWithOtto.open(linked);
+      }
     });
   });
 
@@ -122,7 +161,7 @@
                     <ProofStatusChip status={r.proof_status} risk={r.risk_score} compact />
                   {/if}
                   <span class="findings">
-                    {r.findings_total} {r.findings_total === 1 ? 'finding' : 'findings'}
+                    {plural(r.findings_total, 'finding')}
                     {#if r.findings_blocking > 0}
                       <span class="blocking">{r.findings_blocking} blocking</span>
                     {/if}
@@ -180,7 +219,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     display: flex;
     align-items: center;

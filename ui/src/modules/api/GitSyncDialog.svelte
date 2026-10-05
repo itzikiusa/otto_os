@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Sync collections with a git repo connected to this workspace, as Postman
   // collection files under collections/. Pull imports them; Commit & push
   // exports every top-level collection. Outward-facing (a commit + push), so
@@ -77,7 +78,7 @@
       <span class="hint">Push to a new branch to open a pull request from the Git page afterwards.</span>
     </div>
     <p class="summary">
-      <strong>Commit &amp; push</strong> writes {roots.length} collection file{roots.length === 1 ? '' : 's'}
+      <strong>Commit &amp; push</strong> writes {plural(roots.length, 'collection file')}
       to <code>collections/</code> in <strong>{repo?.name}</strong>{branch.trim() ? ` on ${branch.trim()}` : ''} and pushes to its remote,
       where everyone with access to the repository can read them. Stored secrets are exported as <code>***</code>.
       <strong>Pull</strong> imports the collection files found there.

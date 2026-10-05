@@ -195,6 +195,9 @@
     return [...starts, ...within].slice(0, 12);
   });
   const cmdOpen = $derived(suggestions.length > 0);
+  // The slash popup is a listbox driven from the textarea (aria-activedescendant):
+  // focus never leaves the composer, ↑/↓ move the active option.
+  const popId = $props.id();
   $effect(() => {
     // Load once per session, the first time a `/` is typed at the start.
     if (cmdPrefix == null || cmdsFor === sessionId) return;
@@ -357,17 +360,18 @@
   {:else}
     <div class="box-wrap" bind:this={wrapEl}>
       {#if cmdOpen}
-        <div class="cmd-pop" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
+        <div class="cmd-pop" id="{popId}-list" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
           {#each suggestions as c, i (c.name)}
-            <!-- svelte-ignore a11y_click_events_have_key_events a11y_interactive_supports_focus -->
+            <!-- Picked on press: mousedown keeps focus (and the caret) in the
+                 textarea; the keyboard path is ↑/↓ + Tab/⏎ there. -->
             <div
+              id="{popId}-opt-{i}"
               class="cmd-row"
               class:active={i === cmdIdx}
               role="option"
               tabindex="-1"
               aria-selected={i === cmdIdx}
-              onmousedown={(e) => e.preventDefault()}
-              onclick={() => acceptCmd(c)}
+              onmousedown={(e) => { e.preventDefault(); acceptCmd(c); }}
               onmouseenter={() => (cmdIdx = i)}
             >
               <span class="cmd-name mono">/{c.name}</span>
@@ -394,6 +398,8 @@
           onkeydown={onKeydown}
           onpaste={onPaste}
           aria-autocomplete="list"
+          aria-controls={cmdOpen ? `${popId}-list` : undefined}
+          aria-activedescendant={cmdOpen ? `${popId}-opt-${cmdIdx}` : undefined}
         ></textarea>
         <div class="tools">
           <input bind:this={fileEl} type="file" accept="image/*" multiple hidden onchange={pickImages} />
@@ -433,7 +439,7 @@
       {#if shortCwd}<span class="sep sep-cwd">·</span><span class="mono cwd" title={cwd}>{shortCwd}</span>{/if}
       {#if branch}<span class="sep sep-branch">·</span><span class="mono branch" title="Git branch">⎇ {branch}</span>{/if}
       {#if model}<span class="sep sep-model">·</span><span class="mono model" title="Model">{model}</span>{/if}
-      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent's own status line">{termStatus}</span>{/if}
+      {#if termStatus}<span class="sep">·</span><span class="term-status" title="The agent’s own status line">{termStatus}</span>{/if}
     </div>
   {/if}
 </div>
@@ -582,14 +588,14 @@
     grid-template-columns: auto 1fr auto;
     align-items: baseline;
     gap: 10px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
     font-size: var(--fs-s);
     min-width: 0;
   }
   .cmd-row.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .cmd-name {
     color: var(--accent-text);
@@ -605,7 +611,7 @@
   .cmd-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .cmd-hint {
     font-size: var(--fs-xs);
@@ -641,8 +647,8 @@
     height: 18px;
     border-radius: 50%;
     border: 0;
-    background: rgba(0, 0, 0, 0.6);
-    color: #fff; /* on the fixed dark scrim over the image, in every theme */
+    background: var(--scrim-media);
+    color: var(--on-scrim);
     display: grid;
     place-items: center;
     padding: 0;
@@ -661,7 +667,7 @@
     gap: 6px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    padding: 5px 6px 0;
+    padding: 4px 6px 0;
     min-width: 0;
     flex-wrap: wrap;
     row-gap: 2px;

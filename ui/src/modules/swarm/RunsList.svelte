@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -60,7 +61,7 @@
     try {
       await swarm.stopRun(r.id);
     } catch (e) {
-      toasts.error("Couldn't stop the run", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t stop the run", e);
     }
   }
 
@@ -103,7 +104,7 @@
 
   <LoadState what="runs" loading={swarm.runsLoading} error={swarm.runsError} empty={swarm.runs.length === 0} onretry={reload}>
     {#snippet emptyView()}
-      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent's menu in Org." />
+      <EmptyState icon="clock" title="No runs yet" body="Runs appear here as agents work tasks. Start one from the Board (Run now) or an agent’s menu in Org." />
     {/snippet}
     {#if filtered.length === 0}
       <EmptyState
@@ -144,7 +145,7 @@
               </span>
               <span class="c-act">
                 {#if r.session_id}
-                  <button class="icon-btn" title="Open this run's session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
+                  <button class="icon-btn" title="Open this run’s session beside the view" aria-label="Open session" onclick={() => (swarm.selectedSessionId = r.session_id!)}>
                     <Icon name="terminal" size={14} />
                   </button>
                 {/if}
@@ -186,11 +187,6 @@
     display: flex;
     gap: 4px;
     flex-wrap: wrap;
-  }
-  .chip {
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
   }
   .table {
     display: flex;

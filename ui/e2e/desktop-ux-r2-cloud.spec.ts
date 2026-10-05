@@ -70,8 +70,10 @@ test('AWS phone detail contains focus and restores its resource row', async ({ p
   const row = page.getByRole('row').filter({ hasText: 'checkout-api' });
   await row.focus();
   await page.keyboard.press('Enter');
-  const drawer = page.getByTestId('aws-drawer');
-  await expect(drawer.getByRole('button', { name: 'Close details' })).toBeFocused();
+  // Phone: the DockedDrawer sheet is the dialog; its ✕ is the first control.
+  const drawer = page.getByRole('dialog', { name: 'instance details' });
+  await expect(page.getByTestId('aws-drawer')).toBeVisible();
+  await expect(drawer.getByRole('button', { name: 'Close instance details' })).toBeFocused();
   await page.keyboard.press('Shift+Tab');
   expect(await drawer.evaluate(el => el.contains(document.activeElement))).toBe(true);
   await page.keyboard.press('Escape');
@@ -87,7 +89,7 @@ test('tablet details keep a useful reading width with a persisted oversized draw
   await expectFullyInViewport(page, drawer);
   const bounds = await drawer.boundingBox();
   expect(bounds!.width).toBeGreaterThanOrEqual(320);
-  await drawer.getByRole('button', { name: 'Close details' }).click();
+  await page.getByRole('button', { name: 'Close Pod details' }).click();
   expect((await page.getByTestId('k8s-row').boundingBox())!.width).toBeGreaterThan(280);
 });
 

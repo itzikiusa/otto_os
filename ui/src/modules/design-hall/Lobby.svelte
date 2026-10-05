@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   import { onTabKey } from './tabKeys';
   // Design Hall lobby (Grid view): the prompt hero, all seven studios, the
   // Continue strip, projects, the Linked-to-Product epic tree, and a rail with
@@ -154,7 +155,7 @@
       if (r.assistError) toasts.warn('Draft created, but Otto couldn’t start', r.assistError);
       router.go(`design/a/${encodeURIComponent(r.artifactId)}/otto`);
     } catch (e) {
-      toasts.error('Couldn’t create the draft', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the draft', e);
     } finally {
       creating = false;
     }
@@ -179,7 +180,7 @@
       prompt = '';
       router.go(`design/a/${encodeURIComponent(id)}`);
     } catch (e) {
-      toasts.error('Couldn’t create the draft', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the draft', e);
     } finally {
       creating = false;
     }
@@ -576,7 +577,7 @@
   .segmented > button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .search {
     display: inline-flex;
@@ -600,7 +601,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search input {
     flex: 1;
@@ -653,7 +654,7 @@
   }
   .composer:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .composer-bar {
     display: flex;
@@ -681,14 +682,6 @@
     flex-wrap: wrap;
     gap: 6px;
     font-size: var(--fs-s);
-  }
-  .as-btn {
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .as-btn:hover {
-    color: var(--text);
-    border-color: var(--border-strong);
   }
   .go {
     display: inline-flex;
@@ -752,7 +745,7 @@
     color: var(--text);
     font: inherit;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .studio:hover {
     border-color: var(--border-strong);

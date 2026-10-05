@@ -4,6 +4,7 @@
   // reorder (persists order_idx), approve a run (triggers skill learning), and
   // publish to Confluence.
   import { rel } from '../../lib/stores/now.svelte';
+  import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
@@ -19,6 +20,8 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../lib/status';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
 
@@ -141,7 +144,7 @@
     try {
       await product.reorderTestcases(activeRun.id, orderedIds);
     } catch (e) {
-      toasts.error('Could not save order', product.errMsg(e));
+      toastError('Couldn’t save the order', e);
     } finally {
       savingOrder = false;
     }
@@ -264,7 +267,7 @@
   const storyIsJira = $derived(story?.source_kind === 'jira');
   const publishBlocked = $derived(
     approvedCount === 0
-      ? 'Approve at least one case — only approved cases are published'
+      ? 'Accept at least one case — only accepted cases are published'
       : storyIsJira && !publishSpaceKey.trim()
         ? 'Enter a space key — a Jira story has no Confluence space to publish into'
         : '',
@@ -401,9 +404,9 @@
     try {
       await product.updateTestcase(tc.id, { status: 'approved' });
       setAction(tc.id, { mode: 'idle', busy: false });
-      toasts.success('Case approved');
+      toasts.success('Case accepted');
     } catch (e) {
-      toasts.error('Could not approve', product.errMsg(e));
+      toastError('Couldn’t accept the case', e);
       setAction(tc.id, { busy: false });
     }
   }
@@ -416,10 +419,10 @@
       const result = await product.bulkApproveTestcases(activeRun.id, [...selected]);
       clearSelection();
       toasts.success(
-        `${result.approved} case${result.approved !== 1 ? 's' : ''} approved`,
+        `${plural(result.approved, 'case')} accepted`,
       );
     } catch (e) {
-      toasts.error('Bulk approve failed', product.errMsg(e));
+      toastError('Couldn’t accept the selected cases', e);
     } finally {
       bulkApproving = false;
     }
@@ -440,7 +443,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.info('Changes requested');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toastError('Couldn’t update the case', e);
       setAction(tc.id, { busy: false });
     }
   }
@@ -470,7 +473,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.success('Test case updated');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toastError('Couldn’t update the case', e);
       setAction(tc.id, { busy: false });
     }
   }
@@ -485,7 +488,7 @@
       toasts.info('Test generation triggered', 'Waiting for a new run to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Generate failed', product.errMsg(e));
+      toastError('Couldn’t generate test cases', e);
     } finally {
       generating = false;
     }
@@ -501,10 +504,10 @@
       const approvedCount = activeCases.filter((c) => c.status === 'approved').length;
       toasts.success(
         'Run approved',
-        `${approvedCount} case${approvedCount !== 1 ? 's' : ''} approved — skill learning kicked off.`,
+        `${plural(approvedCount, 'case')} accepted — skill learning kicked off.`,
       );
     } catch (e) {
-      toasts.error('Could not approve run', product.errMsg(e));
+      toastError('Couldn’t approve the run', e);
     } finally {
       approvingRun = false;
     }
@@ -531,7 +534,7 @@
         toasts.success('Published to Confluence');
       }
     } catch (e) {
-      toasts.error('Publish failed', product.errMsg(e));
+      toastError('Couldn’t publish the test cases', e);
     } finally {
       publishingRun = false;
     }
@@ -539,20 +542,19 @@
 
   // ── Status helpers ────────────────────────────────────────────────────────────
 
-  function statusClass(status: string): string {
+  function statusTone(status: string): BadgeTone {
     switch (status) {
-      case 'approved': return 'pill-approved';
-      case 'changes_requested': return 'pill-changes';
-      case 'rejected': return 'pill-rejected';
-      case 'draft': return 'pill-draft';
-      case 'published': return 'pill-published';
-      default: return 'pill-draft';
+      case 'approved': return 'ok';
+      case 'changes_requested': return 'warn';
+      case 'rejected': return 'bad';
+      case 'published': return 'info';
+      default: return 'neutral';
     }
   }
 
   function statusLabel(status: string): string {
     switch (status) {
-      case 'approved': return 'Approved';
+      case 'approved': return 'Accepted';
       case 'changes_requested': return 'Changes needed';
       case 'rejected': return 'Rejected';
       case 'draft': return 'Draft';
@@ -649,8 +651,8 @@
             <!-- Generated by an agent: attributed; cases stay drafts until
                  a person approves them. -->
             <AgentByline at={activeRun.created_at} testid="testcases-byline" />
-            <span class="pill {statusClass(activeRun.status)}">{statusLabel(activeRun.status)}</span>
-            <span class="rh-count">{activeCases.length} case{activeCases.length !== 1 ? 's' : ''}</span>
+            <Badge tone={statusTone(activeRun.status)} label={statusLabel(activeRun.status)} />
+            <span class="rh-count">{plural(activeCases.length, 'case')}</span>
           </div>
 
           <div class="rh-actions">
@@ -715,7 +717,7 @@
               />
             </div>
             <p class="pf-summary" data-testid="tc-publish-summary">
-              Publishes {approvedCount} approved case{approvedCount !== 1 ? 's' : ''} as the page
+              Publishes {plural(approvedCount, 'accepted case')} as the page
               “Test Cases — {story?.title ?? ''}”{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
               Everyone with access to the space can see it.
             </p>
@@ -760,9 +762,9 @@
               class="btn small primary"
               onclick={bulkApproveSelected}
               disabled={bulkApproving}
-              title="Approve all selected draft cases"
+              title="Accept all selected draft cases"
             >
-              {bulkApproving ? 'Approving…' : `Approve ${selected.size}`}
+              {bulkApproving ? 'Accepting…' : `Accept ${selected.size}`}
             </button>
             <button
               class="btn small ghost"
@@ -822,7 +824,7 @@
                       />
                       <span class="case-title">{tc.title}</span>
                       <span class="priority-badge {priorityClass(tc.priority)}">{tc.priority}</span>
-                      <span class="pill {statusClass(tc.status)}">{statusLabel(tc.status)}</span>
+                      <Badge tone={statusTone(tc.status)} label={statusLabel(tc.status)} />
                     </div>
 
                     <!-- Actions row (shown when idle) -->
@@ -832,9 +834,9 @@
                           class="btn small primary"
                           onclick={() => approveCase(tc)}
                           disabled={action.busy || tc.status === 'approved'}
-                          title="Approve this test case"
+                          title="Accept this test case"
                         >
-                          {tc.status === 'approved' ? 'Approved' : 'Approve'}
+                          {tc.status === 'approved' ? 'Accepted' : 'Accept'}
                         </button>
                         <button
                           class="btn small"
@@ -1047,7 +1049,7 @@
     {:else if !product.loadingTestcases}
       <div class="muted">No test cases yet. Click "Generate test cases" above.</div>
     {:else}
-      <div class="muted">Loading test cases…</div>
+      <LoadState what="test cases" loading empty />
     {/if}
   </div>
 {/if}
@@ -1091,7 +1093,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -1153,16 +1155,16 @@
     padding: 0 12px;
     border: 1px solid var(--accent);
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
     font-weight: 600;
     text-decoration: none;
     cursor: pointer;
-    transition: background 110ms;
+    transition: background var(--dur-fast);
   }
   .confluence-link:hover {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     text-decoration: none;
   }
 
@@ -1202,7 +1204,7 @@
   .text-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .text-area {
     width: 100%;
@@ -1220,7 +1222,7 @@
   .text-area:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* ── Category sections ───────────────────────────────────────── */
@@ -1297,7 +1299,7 @@
   }
   .case-card.drag-over {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+    box-shadow: 0 0 0 2px var(--accent-soft-strong);
   }
 
   /* ── Drag handle + checkbox ──────────────────────────────────────────── */
@@ -1307,11 +1309,11 @@
     line-height: 1;
     color: var(--text-dim);
     opacity: 0.45;
-    letter-spacing: -3px;
+    letter-spacing: -0.01em;
     cursor: grab;
     padding-inline-end: 2px;
     user-select: none;
-    transition: opacity 90ms;
+    transition: opacity var(--dur-fast);
   }
   .case-card:hover .drag-handle {
     opacity: 0.8;
@@ -1352,7 +1354,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
   }
   .pri-high {
@@ -1368,36 +1370,6 @@
     color: var(--text-dim);
   }
 
-  /* ── Status pills ────────────────────────────────────────────── */
-  .pill {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 2px 8px;
-    border-radius: 999px;
-  }
-  .pill-approved {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .pill-changes {
-    background: color-mix(in srgb, var(--warning) 16%, transparent);
-    color: var(--warning);
-  }
-  .pill-rejected {
-    background: color-mix(in srgb, var(--danger) 16%, transparent);
-    color: var(--danger);
-  }
-  .pill-draft {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
-  .pill-published {
-    background: var(--info-soft);
-    color: var(--info);
-  }
 
   /* ── Case action buttons ─────────────────────────────────────── */
   .case-actions {
@@ -1452,7 +1424,7 @@
     padding-inline-start: 20px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .steps-list li {
     font-size: var(--fs-s);
@@ -1481,7 +1453,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .if-actions {

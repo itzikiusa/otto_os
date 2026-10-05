@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { broadcastScope } from './viewFilters';
   import { toastError } from '../../lib/toastError';
   // Split layout host: renders the nested split TREE (`layout.tree`) through the
@@ -68,14 +70,14 @@
     };
     window.addEventListener('keydown', h, { capture: true });
     const unregister = registry.register('pane-layout', [
-      { id: 'layout.move-left', title: 'Move pane left', group: 'Layout', shortcut: '⌘⌥←', keywords: 'split pane arrange tile', run: () => move('left') },
-      { id: 'layout.move-right', title: 'Move pane right', group: 'Layout', shortcut: '⌘⌥→', keywords: 'split pane arrange tile', run: () => move('right') },
-      { id: 'layout.move-up', title: 'Move pane up', group: 'Layout', shortcut: '⌘⌥↑', keywords: 'split pane arrange tile', run: () => move('up') },
-      { id: 'layout.move-down', title: 'Move pane down', group: 'Layout', shortcut: '⌘⌥↓', keywords: 'split pane arrange tile', run: () => move('down') },
+      { id: 'layout.move-left', title: 'Move pane left', group: 'Pane', shortcut: '⌘⌥←', keywords: 'split pane arrange tile', run: () => move('left') },
+      { id: 'layout.move-right', title: 'Move pane right', group: 'Pane', shortcut: '⌘⌥→', keywords: 'split pane arrange tile', run: () => move('right') },
+      { id: 'layout.move-up', title: 'Move pane up', group: 'Pane', shortcut: '⌘⌥↑', keywords: 'split pane arrange tile', run: () => move('up') },
+      { id: 'layout.move-down', title: 'Move pane down', group: 'Pane', shortcut: '⌘⌥↓', keywords: 'split pane arrange tile', run: () => move('down') },
       {
         id: 'layout.swap-next',
         title: 'Swap pane with next',
-        group: 'Layout',
+        group: 'Pane',
         shortcut: '⌘⌥S',
         keywords: 'split pane arrange tile',
         run: () => {
@@ -83,11 +85,11 @@
           ws.focusPane(layout.focusedIndex);
         },
       },
-      { id: 'layout.preset-cols', title: 'Layout: equal columns', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('cols') },
-      { id: 'layout.preset-rows', title: 'Layout: equal rows', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('rows') },
-      { id: 'layout.preset-one-two-below', title: 'Layout: one above two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-below') },
-      { id: 'layout.preset-one-two-beside', title: 'Layout: one beside two', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('one-two-beside') },
-      { id: 'layout.preset-grid', title: 'Layout: grid', group: 'Layout', keywords: 'split pane arrange tile', run: () => preset('grid') },
+      { id: 'layout.preset-cols', title: 'Use equal-columns layout', group: 'Pane', keywords: 'split pane arrange tile', run: () => preset('cols') },
+      { id: 'layout.preset-rows', title: 'Use equal-rows layout', group: 'Pane', keywords: 'split pane arrange tile', run: () => preset('rows') },
+      { id: 'layout.preset-one-two-below', title: 'Use one-above-two layout', group: 'Pane', keywords: 'split pane arrange tile', run: () => preset('one-two-below') },
+      { id: 'layout.preset-one-two-beside', title: 'Use one-beside-two layout', group: 'Pane', keywords: 'split pane arrange tile', run: () => preset('one-two-beside') },
+      { id: 'layout.preset-grid', title: 'Use grid layout', group: 'Pane', keywords: 'split pane arrange tile', run: () => preset('grid') },
     ]);
     return () => {
       window.removeEventListener('keydown', h, { capture: true });
@@ -133,7 +135,7 @@
       );
       if (targetWorkspace === scope && broadcastText.trim() === text) broadcastText = '';
       const n = resp.session_ids.length;
-      toasts.info('Broadcast sent', `Delivered to ${n} session${n === 1 ? '' : 's'}.`);
+      toasts.info('Broadcast sent', `Delivered to ${plural(n, 'session')}.`);
     } catch (e) {
       toastError('Couldn’t send the broadcast', e);
     } finally {
@@ -167,14 +169,13 @@
         aria-pressed={broadcastMode}
       ><Icon name="send" size={12} />{broadcastMode ? 'Exit broadcast' : 'Broadcast'}</button>
       {#if broadcastMode}
-        <!-- svelte-ignore a11y_autofocus -->
         <input
           class="broadcast-input"
           aria-label="Broadcast message"
           bind:value={broadcastText}
           placeholder="Send to all visible sessions — Enter to send"
           disabled={broadcastBusy}
-          autofocus
+          use:focusOnMount
           onkeydown={onBroadcastKeydown}
         />
         <button
@@ -211,7 +212,7 @@
     flex-shrink: 0;
   }
   .broadcast-toggle {
-    gap: 5px;
+    gap: 4px;
   }
   .broadcast-toggle.active {
     border-color: var(--accent);

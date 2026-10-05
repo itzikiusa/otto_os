@@ -9,6 +9,7 @@
   // Coordinates are relative, so pins survive resize. Pins render at
   //   left:{x_pct*100}% top:{y_pct*100}%.
   import { tick } from 'svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { toastError } from '../../lib/toastError';
   import { product } from '../../lib/stores/product.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -342,7 +343,7 @@
       <textarea
         bind:value={pendingBody}
         aria-label="Annotation note"
-        placeholder="Add a note…"
+        placeholder="e.g. Make this button the primary action"
         rows="3"
         use:focusOnMount
       ></textarea>
@@ -392,7 +393,7 @@
 
   <div class="note-list">
     {#if loading}
-      <div class="note-empty">Loading annotations…</div>
+      <Skeleton rows={3} height={28} label="annotations" />
     {:else if notes.length === 0}
       <div class="note-empty">
         No annotations yet.{mode === 'annotate' ? ' Click the mockup to drop a pin.' : ''}
@@ -450,7 +451,7 @@
     font-weight: 600;
     display: grid;
     place-items: center;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-card);
     /* Pins are clickable for their tooltip even in interact mode. */
     pointer-events: auto;
     cursor: default;
@@ -461,11 +462,7 @@
   }
   .pin.pending {
     background: var(--status-warn);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 50%, transparent); }
-    50% { box-shadow: 0 0 0 6px transparent; }
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
 
   .editor {
@@ -480,7 +477,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--glass-shadow);
     padding: 8px;
     pointer-events: auto;
   }
@@ -579,7 +576,7 @@
     color: var(--text);
   }
   .mt.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .note-list {
@@ -595,7 +592,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 7px 8px;
+    padding: 6px 8px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
   }
   .note:last-child {

@@ -6,6 +6,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
+  import { plural } from '../../lib/plural';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -19,6 +22,7 @@
   let { initialId = null }: Props = $props();
 
   const canEdit = $derived(ws.myRole !== 'viewer');
+  let listW = $state(loadPaneWidth('api.envListW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   // svelte-ignore state_referenced_locally
   let selectedId = $state<Id | null>(initialId);
   const selected = $derived(
@@ -215,19 +219,21 @@
     />
   {:else}
     <div class="split">
-      <ul class="env-list" aria-label="Environments">
+      <ul class="env-list" aria-label="Environments" style:--env-list-w="{listW}px">
         {#each apiClient.environments as env (env.id)}
           <li class="env-item" class:sel={env.id === selected?.id}>
             <button class="env-pick" onclick={() => void pick(env)} aria-current={env.id === selected?.id ? 'true' : undefined}>
               <span class="env-name">{env.name}</span>
               <span class="env-meta">
-                {varCount(env)} variable{varCount(env) === 1 ? '' : 's'}{env.secret_keys.length ? ` · ${env.secret_keys.length} secret` : ''}
+                {plural(varCount(env), 'variable')}{env.secret_keys.length ? ` · ${plural(env.secret_keys.length, 'secret')}` : ''}
               </span>
             </button>
             {#if env.is_active}<span class="chip ok active-chip" title="Used when you send">Active</span>{/if}
           </li>
         {/each}
       </ul>
+      <!-- display:contents slot so the stacked (narrow-container) layout can hide the divider. -->
+      <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="api.envListW" label="Resize the environments list" /></div>
 
       {#if selected}
         <section class="editor" aria-label="Variables in {selected.name}">
@@ -252,13 +258,13 @@
             </div>
             {#each rows as row, i (i)}
               <div class="vt-row var-row">
-                <input class="input mono var-key" placeholder={i === rows.length - 1 ? 'new_variable' : 'name'} value={row.key} disabled={!canEdit}
+                <input class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
                   aria-label="Variable name" oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                 <input
                   class="input mono var-val"
                  
                   type={row.secret ? 'password' : 'text'}
-                  placeholder={row.secret && !row.touched ? '•••••• stored in Keychain — type to replace' : 'value'}
+                  placeholder={row.secret && !row.touched ? '•••••• stored in Keychain — type to replace' : 'https://api.example.com'}
                   value={row.value}
                   disabled={!canEdit}
                   aria-label="Value of {row.key || 'new variable'}"
@@ -266,8 +272,8 @@
                 />
                 <span class="vt-secret">
                   <button class="icon-btn" class:on={row.secret} disabled={!canEdit}
-                    title={row.secret ? 'Secret: the value is kept in the Keychain. Click to make it plain.' : 'Make secret: move the value to the Keychain when you save'}
-                    aria-label="Toggle secret" aria-pressed={row.secret} onclick={() => void toggleSecret(i)}>
+                    title="Keep the value in the Keychain"
+                    aria-label="Keep the value in the Keychain" aria-pressed={row.secret} onclick={() => void toggleSecret(i)}>
                     <Icon name={row.secret ? 'lock' : 'unlock'} size={14} />
                   </button>
                 </span>
@@ -323,15 +329,35 @@
     font-size: var(--fs-s);
     color: var(--text);
   }
+  /* List | divider | editor. The divider stretches to the row's height; the
+     list and editor keep their natural heights. */
   .split {
-    display: grid;
-    grid-template-columns: 220px minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
+    display: flex;
+    gap: 12px;
+  }
+  .split > .env-list {
+    flex: none;
+    inline-size: var(--env-list-w, 280px);
+    align-self: flex-start;
+  }
+  .split > .editor {
+    flex: 1;
+    min-width: 0;
+    align-self: flex-start;
+  }
+  .divider-slot {
+    display: contents;
   }
   @container (max-width: 640px) {
     .split {
-      grid-template-columns: minmax(0, 1fr);
+      flex-direction: column;
+    }
+    .split > .env-list {
+      inline-size: auto;
+      align-self: stretch;
+    }
+    .divider-slot {
+      display: none;
     }
   }
   .env-list {

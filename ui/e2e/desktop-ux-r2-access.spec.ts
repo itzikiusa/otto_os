@@ -40,7 +40,7 @@ test('pointer-opened nested sheets return focus to Browse after Escape',async ({
   const session=page.getByRole('dialog',{name:'New session',exact:true});
   const browse=session.getByRole('button',{name:'Browse…'}).first();
   await browse.click();
-  const picker=page.getByRole('dialog',{name:'Choose working directory'});
+  const picker=page.getByRole('dialog',{name:'Choose working folder'});
   await expect(picker).toBeVisible(); await expectFullyInViewport(page,picker);
   await page.keyboard.press('Escape');
   await expect(picker).toBeHidden(); await expect(browse).toBeFocused();
@@ -64,7 +64,7 @@ for(const variant of variants) test(`Long Markdown and short sheet: ${variant.na
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.addInitScript(({id,v})=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');localStorage.setItem('otto_theme',v.theme);localStorage.setItem('otto_scheme',v.scheme);localStorage.setItem('otto_direction',v.direction);},{id,v:variant});
   await page.goto('/#/skills-eval');
-  await page.getByRole('searchbox',{name:'Search skills'}).fill(name);
+  await page.getByRole('searchbox',{name:'Filter skills'}).fill(name);
   await page.getByTestId('skill-row').click();
   const preview=page.getByTestId('skill-preview'); await expect(preview.locator('table')).toBeVisible();
   await preview.scrollIntoViewIfNeeded();

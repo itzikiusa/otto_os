@@ -1,5 +1,6 @@
 <script lang="ts">
   import { confirmer } from '../confirm.svelte';
+  import Skeleton from './Skeleton.svelte';
   import { toasts } from '../toast.svelte';
   import { untrack } from 'svelte';
   import { accessApi } from '../api/access';
@@ -194,7 +195,7 @@
   </header>
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if notice}<p role="status">{notice}</p>{/if}
-  {#if loading}<p>Loading access…</p>
+  {#if loading}<Skeleton rows={2} height={28} label="access" />
   {:else if policy}
     <nav aria-label="Access views">
       <button class="btn" class:primary={tab === 'rules'} onclick={() => (tab = 'rules')}
@@ -526,7 +527,7 @@
   label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
     font-size: var(--fs-s);
   }
   input,
@@ -537,7 +538,7 @@
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--border);
-    padding: 7px;
+    padding: 8px;
     border-radius: var(--radius-s);
   }
   textarea {
@@ -548,7 +549,7 @@
   .operations {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 9px;
+    gap: 8px;
   }
   .operations label {
     flex-direction: row;
@@ -562,7 +563,7 @@
     overflow-wrap: anywhere;
   }
   .preview {
-    padding: 14px;
+    padding: 12px;
     background: var(--surface-2);
     display: flex;
     flex-direction: column;
@@ -571,9 +572,9 @@
   .decision {
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 5px;
+    gap: 6px;
     border-block-end: 1px solid var(--border);
-    padding: 10px 0;
+    padding: 12px 0;
     font-size: var(--fs-s);
   }
   .decision p,
@@ -592,7 +593,7 @@
   details[open] {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
   .mode {
     max-width: 360px;

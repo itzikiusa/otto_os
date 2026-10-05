@@ -1,10 +1,13 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The governed-call audit ledger — every invoke (UI tester, gateway, inward
   // read-only server, outward otto.* tools) writes one redacted row here. The
   // table is filterable by server, tool, and decision; rows show the decision,
   // ok/error, latency, bytes, and time.
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { sentenceCase } from '../../lib/labels';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -113,7 +116,7 @@
     <h2>Audit</h2>
     <span class="grow"></span>
     {#if view === 'log'}
-      <span class="count">{rows.length}{hasMore ? '+' : ''} row{rows.length === 1 && !hasMore ? '' : 's'}</span>
+      <span class="count">{hasMore ? `${rows.length}+ rows` : plural(rows.length, 'row')}</span>
     {/if}
     <div class="views" role="group" aria-label="Audit view">
       <button
@@ -160,13 +163,13 @@
           />
           <select bind:value={fDecision}>
             <option value="">All decisions</option>
-            <option value="allowed">allowed</option>
-            <option value="approved">approved</option>
-            <option value="auto_approved">auto_approved</option>
-            <option value="denied">denied</option>
-            <option value="dry_run">dry_run</option>
-            <option value="pending_approval">pending_approval</option>
-            <option value="error">error</option>
+            <option value="allowed">{sentenceCase('allowed')}</option>
+            <option value="approved">{sentenceCase('approved')}</option>
+            <option value="auto_approved">{sentenceCase('auto_approved')}</option>
+            <option value="denied">{sentenceCase('denied')}</option>
+            <option value="dry_run">{sentenceCase('dry_run')}</option>
+            <option value="pending_approval">{sentenceCase('pending_approval')}</option>
+            <option value="error">{sentenceCase('error')}</option>
           </select>
           <button class="btn small" onclick={() => void load()}>Apply</button>
         </div>
@@ -174,12 +177,7 @@
     </div>
     <LoadState what="the audit log" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
       {#snippet emptyView()}
-      <div class="empty">
-        <Icon name="note" size={22} />
-        <p>
-          No calls yet. Calls made by external MCP clients and by sessions through the gateway appear here.
-        </p>
-      </div>
+        <EmptyState icon="note" title="No calls yet" body="Calls made by external MCP clients and by sessions through the gateway appear here." />
       {/snippet}
       <div class="grid">
         <div class="thead">
@@ -187,23 +185,27 @@
           <span>Server</span>
           <span>Tool</span>
           <span>Decision</span>
-          <span>Dir</span>
-          <span class="num">OK</span>
+          <span>Direction</span>
+          <span class="num">Result</span>
           <span class="num">Latency</span>
           <span class="num">Bytes</span>
         </div>
         {#each rows as r (r.id)}
+          <!-- Each cell carries its column name (`.cl`): visually hidden while the
+               header row shows, inline once rows stack on a phone. -->
           <div class="arow">
-            <span class="cell when">{new Date(r.created_at).toLocaleString()}</span>
-            <span class="cell"><span class="trunc" title={r.server_name ?? undefined}>{r.server_name ?? '—'}</span></span>
-            <span class="cell mono"><span class="trunc" title={callTitle(r)}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry</span>{/if}</span>
-            <span class="cell" title={r.decision_reason ?? undefined}><McpPill kind="decision" value={r.decision} small /></span>
-            <span class="cell"><McpPill kind="direction" value={r.direction} small /></span>
+            <span class="cell when"><span class="cl">Time</span>{new Date(r.created_at).toLocaleString()}</span>
+            <span class="cell"><span class="cl">Server</span><span class="trunc" title={r.server_name ?? undefined}>{r.server_name ?? '—'}</span></span>
+            <span class="cell mono"><span class="cl">Tool</span><span class="trunc" title={callTitle(r)}>{r.tool}</span>{#if r.dry_run}<span class="dry">dry run</span>{/if}</span>
+            <span class="cell" title={r.decision_reason ?? undefined}><span class="cl">Decision</span><McpPill kind="decision" value={r.decision} small /></span>
+            <span class="cell"><span class="cl">Direction</span><McpPill kind="direction" value={r.direction} small /></span>
             <span class="cell num">
-              {#if r.ok}<Icon name="check" size={13} />{:else}<span class="bad" title={r.error ?? 'error'}><Icon name="x" size={13} /></span>{/if}
+              <span class="cl">Result</span>
+              <!-- Words, not just a glyph: the icon is decorative. -->
+              {#if r.ok}<span class="ok" title="Succeeded"><Icon name="check" size={13} /><span class="cl">OK</span></span>{:else}<span class="bad" title={r.error ?? 'Failed'}><Icon name="x" size={13} /><span class="cl">Failed</span></span>{/if}
             </span>
-            <span class="cell num">{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
-            <span class="cell num">{fmtBytes(r.bytes)}</span>
+            <span class="cell num"><span class="cl">Latency</span>{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
+            <span class="cell num"><span class="cl">Bytes</span>{fmtBytes(r.bytes)}</span>
           </div>
         {/each}
       </div>
@@ -216,7 +218,7 @@
             disabled={loadingMore}
             onclick={() => void loadMore()}
           >
-            {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
+            {loadingMore ? 'Loading more rows…' : moreError ? 'Retry' : 'Load more'}
           </button>
         </div>
       {/if}
@@ -254,7 +256,7 @@
     border-radius: var(--radius-s);
     background: transparent;
     color: var(--text-dim);
-    padding: 4px 9px;
+    padding: 4px 8px;
     font-size: var(--fs-s);
     cursor: pointer;
   }
@@ -306,10 +308,10 @@
   .thead,
   .arow {
     display: grid;
-    grid-template-columns: 170px minmax(110px, 1fr) minmax(140px, 1.4fr) 130px 70px 40px 80px 80px;
+    grid-template-columns: 170px minmax(110px, 1fr) minmax(140px, 1.4fr) 130px 80px 64px 80px 80px;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
   }
   .thead {
     position: sticky;
@@ -318,7 +320,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     z-index: 1;
   }
@@ -358,7 +360,7 @@
     font-family: var(--font-mono);
   }
   .dry {
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     flex: none;
     font-size: var(--fs-xs);
     text-transform: uppercase;
@@ -367,6 +369,22 @@
   .bad {
     color: var(--danger);
     display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .ok {
+    color: var(--success);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .cl {
+    position: absolute;
+    inline-size: 1px;
+    block-size: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
   .more {
     display: flex;
@@ -379,15 +397,6 @@
     color: var(--danger);
     font-size: var(--fs-s);
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 36px 24px;
-  }
 
   @media (max-width: 640px) {
     .thead {
@@ -396,6 +405,19 @@
     .arow {
       grid-template-columns: 1fr 1fr;
       gap: 4px 8px;
+    }
+    .cell.num {
+      justify-content: flex-start;
+    }
+    .cl {
+      position: static;
+      inline-size: auto;
+      block-size: auto;
+      overflow: visible;
+      clip-path: none;
+      flex: none;
+      font-size: var(--fs-xs);
+      color: var(--text-dim);
     }
   }
 </style>

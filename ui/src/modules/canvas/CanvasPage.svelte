@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Canvas Studio entry. Left: scene list. Right: an infinite Mermaid board that
   // renders the scene's agent-edited `.mermaid` source (full rich diagrams), or a
   // hero to start a new canvas. You never write Mermaid — you describe what you
@@ -19,6 +20,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
   import MermaidCanvas from './MermaidCanvas.svelte';
@@ -141,12 +143,27 @@
     canvas.closeScene();
   }
 
+  // ⌘K: the page's verbs (new scene per format; the assistant while a scene
+  // is open). Group = the module name.
+  $effect(() => {
+    if (!ws.currentId) return registry.register('canvas', []);
+    const open = !!canvas.currentId;
+    return registry.register('canvas', [
+      { id: 'canvas.new-excalidraw', title: 'New Excalidraw board', group: 'Canvas', keywords: 'create scene whiteboard draw', run: () => void createBlank('excalidraw') },
+      { id: 'canvas.new-mermaid', title: 'New Mermaid diagram', group: 'Canvas', keywords: 'create scene flowchart sequence', run: () => void createBlank('mermaid') },
+      { id: 'canvas.new-d2', title: 'New D2 diagram', group: 'Canvas', keywords: 'create scene architecture', run: () => void createBlank('d2') },
+      ...(open
+        ? [{ id: 'canvas.assistant', title: 'Open the canvas assistant', group: 'Canvas', keywords: 'agent ai redraw chat', run: () => (showConvo = true) }]
+        : []),
+    ]);
+  });
+
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
       const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
-      toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create canvas', e);
     }
   }
 </script>
@@ -175,7 +192,7 @@
   {#snippet actions()}
     <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
     {#if ws.currentId && !noScenes}
-      <button class="btn primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
+      <button class="btn small primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
         <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={11} />
       </button>
     {/if}
@@ -279,7 +296,7 @@
           <h2>Start a new canvas</h2>
           <p class="sub">
             Describe a diagram in plain English — the agent draws it and keeps refining it as you
-            chat. Pick how it's drawn:
+            chat. Pick how it’s drawn:
           </p>
           <div class="modes">
             <button class="mode" onclick={() => createBlank('excalidraw')}>
@@ -416,7 +433,7 @@
     font-size: var(--fs-m);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .ai-fab :global(svg) {
     color: var(--accent-text);
@@ -468,8 +485,8 @@
     cursor: pointer;
     text-align: center;
     transition:
-      border-color 0.12s,
-      transform 0.12s;
+      border-color var(--dur-fast),
+      transform var(--dur-fast);
   }
   .mode:hover {
     border-color: var(--accent);

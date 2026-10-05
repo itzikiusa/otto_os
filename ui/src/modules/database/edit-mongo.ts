@@ -7,6 +7,7 @@ import { cellStr, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import { parseSimpleSelect } from './edit-sql';
 import { flattenPaths, getAtPath } from './expansion-plan';
 import type { DiffLine, EditAdapter, RowPatch, TypedValue } from './edit-types';
+import { plural } from '../../lib/plural';
 
 /** Collection name for an editable Mongo result: a `db.<coll>.find(...)` or a
  * single-collection SELECT (which translates to a find). Null otherwise. */
@@ -182,7 +183,7 @@ export const mongoAdapter: EditAdapter = {
   buildDelete(idxs, ctx) {
     if (idxs.length === 0) return null;
     const n = idxs.length;
-    const noun = `${n} row${n === 1 ? '' : 's'}`;
+    const noun = `${plural(n, 'row')}`;
     const ids = idxs.map((i) => mongoIdValueFor(idOf(ctx, i))).join(', ');
     return {
       title: `Review deleteMany (${noun})`,

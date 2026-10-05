@@ -39,7 +39,7 @@ for (const variant of variants) {
       localStorage.setItem('otto_direction', v.direction);
     }, variant);
     await page.goto('/#/skills-eval');
-    await page.getByRole('searchbox', { name: 'Search skills' }).fill(skillName);
+    await page.getByRole('searchbox', { name: 'Filter skills' }).fill(skillName);
     await page.getByTestId('skill-row').click();
     const preview = page.getByTestId('skill-preview');
     await expect(preview.locator('pre')).toContainText('./q --help');
@@ -75,7 +75,7 @@ test('nested folder sheet owns Tab and Escape, then restores the Browse trigger'
   const browse = session.getByRole('button', { name: 'Browse…' }).first();
   await browse.focus();
   await browse.press('Enter');
-  const picker = page.getByRole('dialog', { name: 'Choose working directory' });
+  const picker = page.getByRole('dialog', { name: 'Choose working folder' });
   await expect(picker.getByRole('button', { name: 'Use this folder' })).toBeVisible();
   await picker.getByRole('button', { name: 'Use this folder' }).focus();
   await page.keyboard.press('Tab');

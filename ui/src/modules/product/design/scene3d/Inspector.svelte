@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../../lib/plural';
   // Scene inspector — the game-studio right panel. With nothing selected it shows
   // the SCENE (background, grid) and CAMERA panels; an object gets Transform +
   // Material (+ Text / Model) + Notes; a light gets its light panel; a group gets
@@ -373,7 +374,7 @@
 
     {#if group}
       <section class="s3d-panel">
-        {@render panelHead('group', 'Group', `${group.children.length} member${group.children.length === 1 ? '' : 's'}`)}
+        {@render panelHead('group', 'Group', `${plural(group.children.length, 'member')}`)}
         {#if open.group !== false}
           <div class="s3d-panel-body">
             {#if group.children.length}
@@ -388,7 +389,7 @@
             {:else}
               <div class="s3d-hint">Empty group. Right-click a node in the hierarchy → <em>Move to {group.name}</em>.</div>
             {/if}
-            <div class="s3d-hint">Groups organise the hierarchy; they carry no transform of their own.</div>
+            <div class="s3d-hint">Groups organize the hierarchy; they carry no transform of their own.</div>
           </div>
         {/if}
       </section>
@@ -438,7 +439,7 @@
   .s3d-head-name-input {
     font-weight: 600;
     font-size: var(--fs-m);
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
     background: transparent;
@@ -465,7 +466,7 @@
   .s3d-id {
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -490,13 +491,13 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: 0;
     background: transparent;
     color: var(--text-dim);
     font: 600 var(--fs-xs) var(--font-ui);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-align: start;
   }
@@ -505,7 +506,7 @@
   }
   .s3d-ph-chev {
     display: inline-flex;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
     width: 12px;
   }
   .s3d-ph-chev.closed {
@@ -595,7 +596,7 @@
     flex-shrink: 0;
   }
   .s3d-reset:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .s3d-check {
@@ -622,11 +623,11 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font: var(--fs-xs) var(--font-ui);
-    padding: 3px 7px;
+    padding: 2px 6px;
     cursor: pointer;
   }
   .s3d-mini:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .s3d-mini:disabled {
     opacity: 0.5;
@@ -673,7 +674,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
@@ -700,18 +701,18 @@
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, white 85%, var(--ball)) 0%, var(--ball) 45%, color-mix(in srgb, black 55%, var(--ball)) 100%);
-    box-shadow: 0 1px 2px color-mix(in srgb, black 25%, transparent);
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, white 85%, var(--ball)) 0%, var(--ball) 45%, color-mix(in srgb, black 55%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
+    box-shadow: var(--shadow-xs);
   }
   .s3d-preset.brushed-metal .s3d-ball {
-    background: radial-gradient(circle at 35% 30%, white 0%, var(--ball) 40%, color-mix(in srgb, black 50%, var(--ball)) 100%);
+    background: radial-gradient(circle at 35% 30%, white 0%, var(--ball) 40%, color-mix(in srgb, black 50%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
   }
   .s3d-preset.frosted-glass .s3d-ball {
-    background: radial-gradient(circle at 35% 30%, white 0%, color-mix(in srgb, var(--ball) 70%, transparent) 55%, color-mix(in srgb, var(--ball) 40%, transparent) 100%);
+    background: radial-gradient(circle at 35% 30%, white 0%, color-mix(in srgb, var(--ball) 70%, transparent) 55%, color-mix(in srgb, var(--ball) 40%, transparent) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
     border: 1px solid var(--border);
   }
   .s3d-preset.matte-paper .s3d-ball {
-    background: radial-gradient(circle at 40% 35%, color-mix(in srgb, white 40%, var(--ball)) 0%, var(--ball) 70%, color-mix(in srgb, black 25%, var(--ball)) 100%);
+    background: radial-gradient(circle at 40% 35%, color-mix(in srgb, white 40%, var(--ball)) 0%, var(--ball) 70%, color-mix(in srgb, black 25%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
   }
   .s3d-plabel {
     font-size: var(--fs-xs);

@@ -4,6 +4,7 @@
   // the graph), right panel (backlinks / outgoing / outline / properties /
   // OKF). Files on disk are the truth; the daemon keeps a derived index.
   import { onMount } from 'svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -16,6 +17,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import DocsAgentsView from './DocsAgentsView.svelte';
   import FileTree from './FileTree.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -36,8 +38,8 @@
   const RIGHT_W_KEY = 'otto_vault_right_w';
   // Storage is a convenience cache: lsGet/lsSet swallow a blocked accessor or
   // a full quota, so a private window never blanks the page.
-  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
-  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, 520));
+  let leftW = $state(loadPaneWidth(LEFT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
+  let rightW = $state(loadPaneWidth(RIGHT_W_KEY, LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let rightOpen = $state(lsGet('otto_vault_right_open') !== '0');
   let leftOpen = $state(lsGet('otto_vault_left_open') !== '0');
 
@@ -127,6 +129,17 @@
       openNewNote('');
     }
   }
+
+  // ⌘K: the page's verbs (the same ones the toolbar and ⌘O / ⌘N offer).
+  $effect(() => {
+    const hasVault = !!vault.current;
+    return registry.register('vault', hasVault
+      ? [
+          { id: 'vault.new-note', title: 'New note…', group: 'Vault', keywords: 'create markdown doc page', shortcut: '⌘N', run: () => openNewNote('') },
+          { id: 'vault.open-note', title: 'Open note…', group: 'Vault', keywords: 'quick switcher jump find file', shortcut: '⌘O', run: () => (vault.switcherOpen = true) },
+        ]
+      : []);
+  });
 
   /** Header ⋯: the less-used views (history, trash) and the pane toggles —
    *  the toolbar keeps ≤5 controls (graph, docs agent, switcher, new note, ⋯). */
@@ -288,7 +301,7 @@
         <button class="icon-btn vh-tool" title="Quick switcher (⌘O)" aria-label="Quick switcher" data-icon="search" onclick={() => (vault.switcherOpen = true)}>
           <Icon name="search" size={14} />
         </button>
-        <button class="btn primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
+        <button class="btn small primary" title="New note (⌘N)" data-icon="plus" onclick={() => openNewNote('')}>
           <Icon name="plus" size={13} /> New note
         </button>
         <!-- Collapses FIRST (not data-keep): once anything overflows, this
@@ -375,7 +388,7 @@
           <TagsPanel />
         {/if}
       </aside>
-      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" min={LIST_PANE.min} max={520} />
+      <PaneDivider bind:width={leftW} storageKey={LEFT_W_KEY} label="Resize sidebar" />
       {/if}
 
       <main class="center">
@@ -390,7 +403,7 @@
           <!-- Each tab is a presentational wrapper around TWO real buttons (the
                tab + its close), so the close control isn't nested inside an
                interactive role=tab. Middle-click closes too. -->
-          <div class="tabstrip" role="tablist" aria-label="Open notes">
+          <div class="tabstrip scroll-thin" role="tablist" aria-label="Open notes">
             {#each vault.tabs as t, i (t.kind + ':' + t.path)}
               {@const tabName = t.kind === 'note'
                 ? (t.path.split('/').pop() ?? t.path).replace(/\.md$/i, '')
@@ -463,7 +476,7 @@
       </main>
 
       {#if rightOpen && vault.centerMode === 'note'}
-        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" min={LIST_PANE.min} max={520} invert /></div>
+        <div class="resizer-right"><PaneDivider bind:width={rightW} storageKey={RIGHT_W_KEY} label="Resize details panel" invert /></div>
         <aside class="right-pane" style="width:{rightW}px">
           <RightPanel />
         </aside>
@@ -475,7 +488,9 @@
         {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ?? vault.current.links} links{#if (vault.status?.unresolved ?? 0) > 0}{' · '}{vault.status?.unresolved} unresolved{/if}
       </span>
       {#if vault.note}
-        <span>{vault.backlinks.length} backlinks</span>
+        <span>
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={11} /> couldn’t refresh</span>{/if}
+        </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
@@ -498,8 +513,7 @@
     <form class="av-body" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
       <div class="field">
         <label for="av-name">Name</label>
-        <!-- svelte-ignore a11y_autofocus -->
-        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" autofocus />
+        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
       </div>
       <div class="field">
         <label for="av-path">Folder</label>
@@ -554,12 +568,12 @@
   .vault-pick {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     color: var(--text);
     border-radius: var(--radius-m);
-    padding: 5px 10px;
+    padding: 4px 10px;
     font-size: var(--fs-s);
     cursor: pointer;
     max-width: 260px;
@@ -581,7 +595,7 @@
   .okf-chip {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.4px;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -609,13 +623,13 @@
   .run-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
-    padding: 2px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     white-space: nowrap;
     animation: otto-pulse 1.4s ease-in-out infinite;
@@ -688,7 +702,6 @@
     padding: 4px 8px 0;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .vtab {
     display: inline-flex;
@@ -756,6 +769,14 @@
     border-inline-start: 1px solid var(--border);
     flex-shrink: 0;
     min-height: 0;
+  }
+  .vs-inline {
+    margin-inline-start: 6px;
+    vertical-align: middle;
+  }
+  .vs-warn {
+    margin-inline-start: 6px;
+    color: var(--warning);
   }
   .vault-statusbar {
     display: flex;

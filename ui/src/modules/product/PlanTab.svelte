@@ -3,6 +3,7 @@
   // story, render it as a task tree with 3-state checkboxes the PO can toggle,
   // and persist toggles in place. Modeled on RewriteTab's load/poll pattern.
   import { product } from '../../lib/stores/product.svelte';
+  import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
@@ -132,7 +133,7 @@
       body = full.body_md ?? '';
     } catch (e) {
       // Nothing on screen yet → inline error with Retry; a refresh of a shown plan → toast.
-      if (planVersion) toasts.error('Could not load plan', product.errMsg(e));
+      if (planVersion) toastError('Couldn’t load plan', e);
       else loadError = loadErrorText(e);
     } finally {
       loading = false;
@@ -156,6 +157,13 @@
     } catch (e) {
       console.error('[PlanTab] poll error', e);
     }
+  }
+
+  /** Stop waiting for the plan (neutral: agents already started keep running,
+   *  and their plan still lands on this tab when it's written). */
+  function stopWaiting(): void {
+    clearPoll();
+    toasts.info('Stopped waiting for the plan', 'Planning agents already started keep running — the plan appears here when it’s ready.');
   }
 
   function startPolling(): void {
@@ -256,7 +264,7 @@
       );
       startPolling();
     } catch (e) {
-      toasts.error('Plan generation failed', product.errMsg(e));
+      toastError('Couldn’t start planning', e);
     } finally {
       generating = false;
     }
@@ -278,7 +286,7 @@
       if (plan) await loadPlanBody(plan);
       toasts.info('Refreshed', 'Loaded the latest plan version.');
     } catch (e) {
-      toasts.error('Refresh failed', product.errMsg(e));
+      toastError('Couldn’t refresh the plan', e);
     }
   }
 
@@ -304,7 +312,7 @@
         savedTick = true;
         setTimeout(() => { savedTick = false; }, 1500);
       }).catch((e) => {
-        toasts.error('Could not save progress', product.errMsg(e));
+        toastError('Couldn’t save progress', e);
         // Best-effort reload to resync with the server.
         const plan = latestPlan();
         if (plan) void loadPlanBody(plan);
@@ -375,7 +383,7 @@
     const stage = product.detail?.story?.stage;
     const notApproved = stage && stage !== 'approved' && stage !== 'done';
     const warn = notApproved
-      ? `\n\n⚠ This story is still "${stage}", not "approved". Send it for implementation anyway?`
+      ? `\n\n⚠ This story is still “${stage}”, not “approved”. Send it for implementation anyway?`
       : '';
     const ok = await confirmer.ask(
       `Create a project in ${where} from this story and seed it with the plan tasks? You can then run the swarm to implement it.${warn}`,
@@ -392,7 +400,7 @@
       await swarm.openProject(ws.currentId, resp.swarm.id, resp.project.id);
       router.go('swarm');
     } catch (e) {
-      toasts.error('Send to Swarm failed', product.errMsg(e));
+      toastError('Couldn’t send to Swarm', e);
     } finally {
       sendingToSwarm = false;
     }
@@ -453,7 +461,7 @@
           <label class="autonomy-toggle">
             <input type="checkbox" bind:checked={dontAsk} disabled={generating} />
             <span class="autonomy-text">
-              Don't ask me questions — I'm not available; I'll review the plan at the end
+              Don’t ask me questions — I’m not available; I’ll review the plan at the end
             </span>
           </label>
 
@@ -475,6 +483,9 @@
               {/if}
             </button>
             {#if pollTimer !== null}
+              <button class="btn" onclick={stopWaiting} title="Stop waiting for the plan (agents already started keep running)">
+                <Icon name="x" size={12} /> Stop waiting
+              </button>
               <span class="polling-indicator">checking every 3s…</span>
             {/if}
             {#if !swarmLink && swarm.swarms.length > 1}
@@ -499,7 +510,7 @@
           <div class="watching">
             <span class="watching-dot"></span>
             <span class="watching-text">
-              Watching {planSessionIds.length} planning agent{planSessionIds.length > 1 ? 's' : ''}
+              Watching {plural(planSessionIds.length, 'planning agent')}
               {planInteractive ? ' — answer any questions in their tiles' : ' (running unattended)'}
             </span>
             <button class="btn small" onclick={tilePlanSessions}>Show agents</button>
@@ -549,6 +560,11 @@
               <button class="btn small" onclick={regenerate} disabled={generating || pollTimer !== null}>
                 {pollTimer !== null ? 'Generating…' : 'Regenerate…'}
               </button>
+              {#if pollTimer !== null}
+                <button class="btn small" onclick={stopWaiting} title="Stop waiting for the plan (agents already started keep running)">
+                  <Icon name="x" size={12} /> Stop waiting
+                </button>
+              {/if}
               {#if !swarmLink && swarm.swarms.length > 1}
                 <select class="input pl-sel" bind:value={targetSwarmId} title="Which swarm implements this story" aria-label="Target swarm">
                   <option value="">First swarm</option>
@@ -649,7 +665,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -668,7 +684,7 @@
   }
 
   /* Provider multi-select: global .pill-toggle + the provider mark. */
-  .pl-provider-group { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pl-provider-group { display: flex; flex-wrap: wrap; gap: 4px; }
   .pl-provider-group .pill-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
 
   /* Autonomy toggle */
@@ -729,7 +745,7 @@
   .prog-fill {
     height: 100%;
     background: var(--accent);
-    transition: width 160ms;
+    /* Data-driven width: no transition (motion is for user actions). */
   }
   .ph-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-inline-start: auto; }
   .saving { font-size: var(--fs-xs); color: var(--text-dim); font-style: italic; }
@@ -762,7 +778,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
     white-space: nowrap;
@@ -771,8 +787,8 @@
   .status-in_progress { background: var(--warning-soft); color: var(--warning); }
   .status-done { background: var(--success-soft); color: var(--success); }
 
-  .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 5px; }
-  .item { display: flex; align-items: flex-start; gap: 9px; font-size: var(--fs-m); line-height: 1.5; }
+  .items { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  .item { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-m); line-height: 1.5; }
   .item.status-done .item-text { text-decoration: line-through; color: var(--text-dim); }
   .item-text { color: var(--text); padding-top: 1px; }
   .checkbox {
@@ -790,7 +806,7 @@
     justify-content: center;
     cursor: pointer;
     padding: 0;
-    transition: background 110ms, border-color 110ms;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
   }
   .checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
   .checkbox.status-done { background: var(--success); border-color: var(--success); }

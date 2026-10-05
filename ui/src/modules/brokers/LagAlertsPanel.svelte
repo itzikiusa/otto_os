@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Lag alert configuration UI. Lists configured alerts for a cluster,
   // showing breach status when the last metrics sweep detected a threshold
   // crossing. Allows creating and deleting alerts.
@@ -92,16 +93,14 @@
 <div class="lag-alerts">
   <h5>Lag Alerts</h5>
   <p class="muted small">
-    Alerts fire when the group's lag for a topic exceeds the threshold.
+    Alerts fire when the group’s lag for a topic exceeds the threshold.
     Breach status is evaluated each time metrics are refreshed and shown here.
   </p>
 
-  {#if loading}
-    <p class="muted pad">Loading lag alerts…</p>
-  {:else if loadError}
-    <LoadState what="lag alerts" variant="compact" error={loadError} empty onretry={loadAlerts} />
-  {:else}
-    {#if alerts.length > 0}
+  <!-- First load: skeleton; failed load: inline error (or a stale bar over the
+       last good list); a reload after add/delete keeps the rows on screen. -->
+  <LoadState what="lag alerts" variant="compact" {loading} error={loadError} empty={alerts.length === 0} onretry={loadAlerts}>
+    {#snippet emptyView()}<p class="muted pad">No lag alerts yet.</p>{/snippet}
       <table>
         <thead>
           <tr>
@@ -117,13 +116,11 @@
               <td>{a.threshold.toLocaleString()}</td>
               <td>
                 {#if a.breach_lag !== undefined}
-                  <span class="badge breach">
-                    Breached ({a.breach_lag.toLocaleString()})
-                  </span>
+                  <Badge tone="bad" label={`Breached (${a.breach_lag.toLocaleString()})`} />
                 {:else if a.enabled}
-                  <span class="badge ok">Active</span>
+                  <Badge tone="ok" label="Active" />
                 {:else}
-                  <span class="badge dim">Disabled</span>
+                  <Badge label="Disabled" />
                 {/if}
               </td>
               <td>
@@ -137,14 +134,13 @@
           {/each}
         </tbody>
       </table>
-    {:else}
-      <p class="muted pad">No alerts configured.</p>
-    {/if}
+  </LoadState>
 
+  {#if alerts.length > 0 || (!loading && !loadError)}
     <h5 class="create-head">Add alert</h5>
     <div class="create-row">
-      <input type="text" bind:value={newTopic} placeholder="topic" class="field" aria-label="Topic" />
-      <input type="text" bind:value={newGroup} placeholder="consumer group" class="field wide" aria-label="Consumer group" />
+      <input type="text" bind:value={newTopic} placeholder="orders.events" class="field" aria-label="Topic" />
+      <input type="text" bind:value={newGroup} placeholder="billing-service" class="field wide" aria-label="Consumer group" />
       <label class="thresh-label">
         Threshold
         <input type="number" bind:value={newThreshold} min="1" class="narrow" />
@@ -171,7 +167,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   h5.create-head {
@@ -199,24 +195,6 @@
     font-family: var(--font-mono);
     font-size: var(--fs-s);
   }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-  }
-  .badge.breach {
-    background: var(--danger-soft);
-    color: var(--danger);
-    font-weight: 600;
-  }
-  .badge.ok {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .badge.dim {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .create-row {
     display: flex;
     gap: 8px;
@@ -228,7 +206,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     min-width: 120px;
@@ -240,7 +218,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 5px 7px;
+    padding: 4px 6px;
     color: var(--text);
     font-size: var(--fs-m);
     width: 90px;
@@ -248,7 +226,7 @@
   .thresh-label {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

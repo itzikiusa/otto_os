@@ -307,7 +307,7 @@
       <input bind:this={searchEl} class="search-in" placeholder="Search…" bind:value={search} aria-label="Search logs" />
       {#if q}<span class="count mono">{matchCount}</span>{/if}
     </div>
-    <button class="icon-btn" onclick={() => void start()} title="Reload" aria-label="Reload logs"><Icon name="refresh" size={13} /></button>
+    <button class="icon-btn" onclick={() => void start()} title="Refresh logs" aria-label="Refresh logs"><Icon name="refresh" size={13} /></button>
     <button class="icon-btn" onclick={download} title="Download" aria-label="Download logs" disabled={!lineCount}><Icon name="arrowDown" size={13} /></button>
   </div>
 
@@ -315,7 +315,6 @@
     <div class="err">{error} <button class="btn small" onclick={() => void start()}>Retry</button></div>
   {/if}
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="logs-body" dir="ltr" bind:this={wrapEl} onscrollcapture={onScroll}>
     {#if !lineCount && !error}
       <div class="dim pad">{streaming ? 'Waiting for output…' : 'No log lines.'}</div>
@@ -374,7 +373,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search-in {
     border: none;
@@ -390,7 +389,7 @@
   .logs-body {
     flex: 1;
     min-height: 0;
-    background: color-mix(in srgb, var(--surface-2) 60%, black 8%);
+    background: var(--term-bg);
   }
   .logs-body :global(.logs-vlist) {
     height: 100%;
@@ -409,9 +408,9 @@
     padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
-    background: hsl(var(--h) 50% 50% / 0.22);
+    background: hsl(var(--h) 50% 50% / 0.22); /* ui-guards: allow — per-pod hue (data colour) */
     /* Mixed toward the scheme's text colour so the tag reads in light AND dark. */
-    color: color-mix(in srgb, hsl(var(--h) 70% 55%) 45%, var(--text));
+    color: color-mix(in srgb, hsl(var(--h) 70% 55%) 45%, var(--text)); /* ui-guards: allow — per-pod hue */
     font: inherit;
     font-size: var(--fs-xs);
     line-height: 16px;
@@ -419,13 +418,13 @@
     vertical-align: middle;
   }
   .podtag:hover {
-    background: hsl(var(--h) 50% 50% / 0.38);
+    background: hsl(var(--h) 50% 50% / 0.38); /* ui-guards: allow — per-pod hue */
   }
   .podtag .ctr {
     opacity: 0.7;
   }
   .ln mark {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
     color: inherit;
     border-radius: 2px;
   }
@@ -433,14 +432,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 3px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
     font-size: var(--fs-xs);
   }
   .live {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--success);
   }
   .live-dot {
@@ -448,12 +447,7 @@
     height: 6px;
     border-radius: 50%;
     background: var(--status-working);
-    animation: blink 1s ease-in-out infinite;
-  }
-  @keyframes blink {
-    50% {
-      opacity: 0.3;
-    }
+    animation: otto-pulse 1s ease-in-out infinite;
   }
   .err {
     padding: 8px 10px;

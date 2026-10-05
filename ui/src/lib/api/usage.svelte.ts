@@ -446,7 +446,7 @@ class UsageStore {
       toasts.success('Budgets saved');
       return true;
     } catch (e) {
-      toasts.error('Could not save budgets', errMsg(e));
+      toasts.error('Couldn’t save budgets', errMsg(e));
       return false;
     } finally {
       // Ignore refreshes begun before or during this mutation.
@@ -670,7 +670,7 @@ class UsageStore {
         toasts.error('Install finished but engine is not available', 'Check daemon logs.');
       }
     } catch (e) {
-      toasts.error('Install failed', errMsg(e));
+      toasts.error('Couldn’t install', errMsg(e));
     } finally {
       this.installing = false;
     }
@@ -683,7 +683,7 @@ class UsageStore {
       toasts.success('Usage settings saved');
       await this.loadAll();
     } catch (e) {
-      toasts.error('Save failed', errMsg(e));
+      toasts.error('Couldn’t save', errMsg(e));
     } finally {
       this.saving = false;
     }

@@ -319,14 +319,14 @@
   }
   .vv-tool:hover:not(:disabled) {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .vv-tool:disabled {
     opacity: 0.5;
     cursor: default;
   }
   .jrec.compare-pick {
-    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .jrec-tag {
     font-size: var(--fs-xs);
@@ -335,7 +335,7 @@
   .jrec-more {
     font-size: var(--fs-m);
     line-height: 1;
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .jrec-head {
     display: flex;

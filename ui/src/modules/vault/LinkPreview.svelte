@@ -3,6 +3,7 @@
   // into the viewport: hangs under the anchor, flips above it only when that
   // fits, otherwise pins to the bottom edge; height capped + scrollable.
   import { linkPreview } from './previewStore.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
 
   let el = $state<HTMLElement | undefined>();
   let h = $state(120);
@@ -29,7 +30,7 @@
   <div class="lp" role="tooltip" bind:this={el} {style} data-testid="vault-link-preview">
     <div class="lp-title">{p.title}{#if p.type}<span class="lp-type">{p.type}</span>{/if}</div>
     <div class="lp-path">{p.path}</div>
-    {#if p.state === 'loading'}<p class="lp-dim" role="status">Loading preview…</p>
+    {#if p.state === 'loading'}<Skeleton rows={2} height={12} label="the preview" />
     {:else if p.state === 'error'}<p class="lp-dim">Preview unavailable</p>
     {:else if p.text}<p>{p.text}</p>
     {:else}<p class="lp-dim">Empty note</p>{/if}
@@ -45,7 +46,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-s);
     pointer-events: none;
   }
@@ -53,7 +54,7 @@
   .lp-type {
     font-size: var(--fs-xs);
     font-weight: 400;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--text-dim);
@@ -63,7 +64,6 @@
   p { margin: 0; overflow-wrap: anywhere; }
   .lp-dim { color: var(--text-dim); }
   @media (prefers-reduced-motion: no-preference) {
-    .lp { animation: lp-in 120ms ease-out; }
+    .lp { animation: otto-fade-in var(--dur-enter) var(--ease-out); }
   }
-  @keyframes lp-in { from { opacity: 0; } to { opacity: 1; } }
 </style>

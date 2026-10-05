@@ -6,6 +6,9 @@
   // backlinks with hover previews, and LIVE CONTEXT from the rest of Otto.
   // Sits above the unchanged markdown body; plain notes never mount it.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { sentenceCase } from '../../lib/labels';
   import type { VaultNote } from '../../lib/api/types';
   import { vault } from './vault.svelte';
   import LiveContext from './LiveContext.svelte';
@@ -38,7 +41,7 @@
 <div class="structured" data-testid="vault-structured">
   <div class="meta-head">
     <span class="kind">{model.label}</span>
-    {#if model.status}<span class="sn-chip status">{model.status}</span>{/if}
+    {#if model.status}<Badge label={sentenceCase(model.status)} />{/if}
     {#if model.operation}
       <code class="op"><span class="method m-{model.operation.method.toLowerCase()}">{model.operation.method}</span> {model.operation.path}</code>
     {/if}
@@ -47,7 +50,7 @@
     {#if model.owners.length}<div><dt>Owners</dt><dd>{model.owners.join(', ')}</dd></div>{/if}
     {#if model.resource && !model.operation}<div><dt>Resource</dt><dd class="mono" title={model.resource}>{model.resource}</dd></div>{/if}
     {#if model.tags.length}
-      <div><dt>Tags</dt><dd class="tags">{#each model.tags as t (t)}<button class="sn-chip tag" onclick={() => vault.searchTag(t)} title="Search #{t}">#{t}</button>{/each}</dd></div>
+      <div><dt>Tags</dt><dd class="tags">{#each model.tags as t (t)}<button class="chip tag" onclick={() => vault.searchTag(t)} title="Search #{t}">#{t}</button>{/each}</dd></div>
     {/if}
   </dl>
 
@@ -91,7 +94,7 @@
       <div class="chips">
         {#each outgoing.slice(0, 40) as o (o.dst_path ?? o.raw_target)}
           <button
-            class="sn-chip lnkchip"
+            class="chip lnkchip"
             class:unresolved={!o.dst_path}
             disabled={!o.dst_path || !/\.md$/i.test(o.dst_path)}
             title={o.dst_path ?? `${o.raw_target} (unresolved)`}
@@ -107,11 +110,22 @@
     </div>
     <div class="col" data-testid="vault-structured-backlinks">
       <h4>Linked from <span class="n">{vault.backlinks.length}</span></h4>
-      {#if vault.backlinks.length === 0}<p class="dim">No backlinks yet</p>{/if}
+      <!-- A failed lookup is never shown as "No backlinks yet": the first load
+           fails inline with Retry, a failed refresh keeps the last good links
+           under a slim stale bar (LoadState). -->
+      <LoadState
+        what="backlinks"
+        variant="compact"
+        loading={vault.backlinksLoading}
+        error={vault.backlinksError || null}
+        empty={vault.backlinks.length === 0}
+        onretry={() => void vault.reloadBacklinks()}
+      >
+        {#snippet emptyView()}<p class="dim">No backlinks yet</p>{/snippet}
       <div class="chips">
         {#each vault.backlinks.slice(0, 40) as b (b.path + b.kind)}
           <button
-            class="sn-chip lnkchip"
+            class="chip lnkchip"
             title={b.path}
             onclick={() => open(b.path)}
             onmouseenter={(e) => showPreview(e, b.path)}
@@ -122,6 +136,7 @@
         {/each}
         {#if vault.backlinks.length > 40}<span class="dim">+{vault.backlinks.length - 40} more in the side panel</span>{/if}
       </div>
+      </LoadState>
     </div>
   </div>
 
@@ -142,22 +157,12 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--accent-text);
     background: var(--accent-soft);
     padding: 2px 8px;
     border-radius: 999px;
   }
-  .sn-chip {
-    font-size: var(--fs-xs);
-    padding: 1px 7px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: none;
-    color: var(--text-dim);
-    white-space: nowrap;
-  }
-  .status { text-transform: capitalize; }
   .op { font-family: var(--font-mono); font-size: var(--fs-s); overflow-wrap: anywhere; }
   .method { font-weight: 600; color: var(--info); }
   .m-post { color: var(--success); } .m-delete { color: var(--danger); } .m-put, .m-patch { color: var(--warning); }
@@ -170,7 +175,7 @@
   .tag { cursor: pointer; color: var(--accent-text); }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-block-start: 12px; }
   .sn-card { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 8px 10px; min-width: 0; background: var(--bg); }
-  h4 { margin: 0 0 6px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+  h4 { margin: 0 0 6px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
   .n { font-weight: 400; margin-inline-start: 4px; }
   ul { margin: 0; padding-inline-start: 16px; }
   li { margin: 2px 0; overflow-wrap: anywhere; }

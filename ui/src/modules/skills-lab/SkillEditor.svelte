@@ -13,6 +13,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { sourceLabel } from './skillGroups';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -224,7 +226,7 @@
     <section class="pane">
       <div class="pane-head">
         <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
-        {#if dirty}<span class="chip tone-warning">Unsaved</span>{/if}
+        {#if dirty}<Badge tone="warn" label="Unsaved" />{/if}
         <span class="grow"></span>
         {#if editable && !loading && !binary && !loadError}
           {#if dirty}
@@ -235,14 +237,11 @@
           <button class="btn small primary" disabled={saving || !dirty} title={dirty ? 'Save (⌘S)' : 'No changes to save'} onclick={save} data-testid="save-skill">{saving ? 'Saving…' : 'Save'}</button>
         {/if}
       </div>
-      {#if loading}
-        <p class="dim msg" role="status">Loading {currentFile}…</p>
-      {:else if loadError}
-        <div class="msg load-err" role="alert">
-          <Icon name="warning" size={14} />
-          <span class="grow">{source === 'bundled' ? loadError : `Couldn’t open ${currentFile}. ${loadError}`}</span>
-          {#if source !== 'bundled'}<button class="btn small" onclick={() => open(currentFile)}>Retry</button>{/if}
-        </div>
+      {#if loadError && source === 'bundled'}
+        <!-- Not a failure: a bundled skill's other files open once installed. -->
+        <p class="dim msg">{loadError}</p>
+      {:else if loading || loadError}
+        <LoadState what={currentFile} {loading} error={loadError} empty rows={6} onretry={() => open(currentFile)} />
       {:else if binary}
         <p class="dim msg">Binary file — not editable here.</p>
       {:else}
@@ -380,11 +379,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .chip.tone-warning {
-    color: var(--warning);
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-  }
   .code {
     flex: 1;
     min-height: 0;
@@ -402,17 +396,6 @@
   .msg {
     padding: 14px;
     margin: 0;
-  }
-  .load-err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
-  }
-  .load-err > :global(svg) {
-    color: var(--text-dim);
-    flex: none;
   }
   @container skilldetail (max-width: 640px) {
     .editor {

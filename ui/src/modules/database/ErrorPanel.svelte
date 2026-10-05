@@ -70,7 +70,7 @@
     if (!tab || !n.token) return;
     const next = applySuggestion(tab.statement, n.token, suggestion);
     if (next === null) {
-      toasts.info('Nothing to replace', `\`${n.token}\` isn't in the editor any more.`);
+      toasts.info('Nothing to replace', `\`${n.token}\` isn’t in the editor any more.`);
       return;
     }
     // One statement change — the editor applies it as an undoable edit (⌘Z).
@@ -80,7 +80,7 @@
 
   async function copyRaw() {
     if (await copyText(error)) toasts.success('Error copied');
-    else toasts.error('Copy failed');
+    else toasts.error('Couldn’t copy');
   }
 </script>
 
@@ -171,7 +171,7 @@
   }
   .err-code {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     color: var(--danger);
     background: var(--danger-soft);
@@ -183,10 +183,10 @@
   .err-engine {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .err-grow {
@@ -270,7 +270,7 @@
   .err-excerpt-label {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 2px;
   }

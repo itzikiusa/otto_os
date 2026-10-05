@@ -496,6 +496,12 @@
   .layout.single {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Phone: the group list stacks above the editor (layout.md §4.1). */
+  @media (max-width: 640px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   .list-pane {
     display: flex;
     flex-direction: column;
@@ -568,11 +574,14 @@
     border-radius: var(--radius-m);
     background: var(--surface);
   }
+  /* Floated so the legend is an ordinary flex item inside the fieldset box
+     (not drawn on its border); inline-start keeps it right in RTL. */
   .detail-title {
-    float: left;
-    width: 100%;
+    float: inline-start;
+    inline-size: 100%;
     padding: 0;
-    margin: 0 0 2px;
+    margin: 0;
+    margin-block-end: 2px;
     font-size: var(--fs-m);
     font-weight: 600;
   }

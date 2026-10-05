@@ -7,13 +7,14 @@
   import { untrack } from 'svelte';
   import { pollWhileVisible } from '../../lib/poll';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { isAbortError } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
   import type { K8sRow } from '../../lib/api/types';
   import type { K8sDrawerTab } from '../../lib/stores/k8s.svelte';
-  import { formatAge, formatBytes, formatMillicores, healthClass, rowAge } from './k8s-util';
+  import { formatAge, formatBytes, formatMillicores, healthTone, rowAge } from './k8s-util';
 
   interface Props {
     clusterId: string;
@@ -98,15 +99,19 @@
       <div class="dim pad">No pods match <code class="mono">{selector}</code>.</div>
     {/snippet}
       <div class="wp-head" class:metrics={hasMetrics}>
-        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts">↻</span>
+        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts"><Icon name="refresh" size={11} /><span class="sr-only">Restarts</span></span>
         {#if hasMetrics}<span class="num">CPU</span><span class="num">MEM</span>{/if}
         <span class="num">Age</span><span></span>
       </div>
       {#each pods as p (p.name)}
-        <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics} role="button" tabindex="0" onclick={() => onopenpod(p.name)} onkeydown={(e) => { if (e.key === 'Enter') onopenpod(p.name); }} title={p.name}>
-          <span class="mono ell">{p.name}</span>
+        {@const tone = healthTone(p.health, p.status)}
+        <!-- The row itself is not interactive: the pod name is the open control (a
+             real <button>, Enter + Space), and Logs / Shell are its siblings —
+             never nested inside another interactive element. -->
+        <div class="wp-row" class:metrics={hasMetrics}>
+          <button type="button" class="wp-name mono ell" title="Open {p.name}" onclick={() => onopenpod(p.name)}>{p.name}</button>
           <span class="num mono">{p.ready ?? ''}</span>
-          <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
+          <span class="wp-status"><Badge {tone} dot live={tone === 'info'}><span class="ell">{p.status}</span></Badge></span>
           <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
           {#if hasMetrics}
             <span class="num mono">{p.cpu == null ? '' : formatMillicores(p.cpu)}</span>
@@ -114,8 +119,8 @@
           {/if}
           <span class="num mono">{formatAge(rowAge(p))}</span>
           <span class="acts">
-            <button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'logs'); }} title="Logs" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
-            {#if canEdit}<button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'terminal'); }} title="Shell (exec)" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
+            <button class="icon-btn" onclick={() => onopenpod(p.name, 'logs')} title="Logs of {p.name}" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
+            {#if canEdit}<button class="icon-btn" onclick={() => onopenpod(p.name, 'terminal')} title="Shell into {p.name}" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
           </span>
         </div>
       {/each}
@@ -161,7 +166,7 @@
   .wp-head {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
@@ -169,12 +174,26 @@
   }
   .wp-row {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-    cursor: pointer;
-    outline: none;
   }
   .wp-row:hover,
-  .wp-row:focus-visible {
-    background: var(--surface-2);
+  .wp-row:focus-within {
+    background: var(--hover);
+  }
+  .wp-name {
+    display: block;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .wp-name:hover {
+    text-decoration: underline;
+  }
+  .wp-name:focus-visible {
+    border-radius: var(--radius-s);
   }
   .num {
     text-align: end;
@@ -202,42 +221,13 @@
   .wp-row:focus-within .acts {
     opacity: 1;
   }
-  .status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
+  /* The status Badge shrinks to its grid column; the inner .ell ellipsizes. */
+  .wp-status {
     min-width: 0;
+    display: flex;
   }
-  .hdot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .health-ok {
-    color: var(--success);
-  }
-  .health-ok .hdot {
-    background: var(--success);
-  }
-  .health-bad {
-    color: var(--danger);
-  }
-  .health-bad .hdot {
-    background: var(--status-exited);
-  }
-  .health-progressing {
-    color: var(--accent-text);
-  }
-  .health-progressing .hdot {
-    background: var(--accent);
-  }
-  .health-warn {
-    color: var(--warning);
-  }
-  .health-warn .hdot {
-    background: var(--status-warn);
+  .wp-status :global(.badge) {
+    max-width: 100%;
   }
   .dim {
     color: var(--text-dim);

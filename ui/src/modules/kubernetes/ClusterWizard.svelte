@@ -8,11 +8,13 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { router } from '../../lib/router.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { k8sApi } from '../../lib/api/k8s';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { Environment, K8sCluster, K8sDiscoveredContext } from '../../lib/api/types';
 
   interface Props {
@@ -110,11 +112,11 @@
   async function testAndToast(c: K8sCluster): Promise<void> {
     try {
       const r = await k8sApi.testCluster(c.id);
-      if (r.ok) toasts.success(`${c.name}: connected`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
-      else toasts.warn(`${c.name}: saved, but unreachable`, r.message);
+      if (r.ok) toasts.success(`Connected to ${c.name}`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
+      else toasts.warn(`Saved ${c.name}, but couldn’t reach it`, r.message);
       void k8s.loadCapabilities(c.id, true);
     } catch (e) {
-      toasts.warn(`${c.name}: saved, test failed`, e instanceof Error ? e.message : String(e));
+      toasts.warn(`Saved ${c.name}, but couldn’t test it`, loadErrorText(e));
     }
   }
 
@@ -180,19 +182,6 @@
       busy = false;
     }
   }
-  function sourceKey(e: KeyboardEvent): void {
-    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    const button = e.currentTarget as HTMLButtonElement;
-    const tabs = Array.from(button.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? []);
-    const rtl = getComputedStyle(button).direction === 'rtl';
-    const step = (e.key === 'ArrowRight' ? 1 : -1) * (rtl ? -1 : 1);
-    const i = tabs.indexOf(button);
-    const j = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (i + step + tabs.length) % tabs.length;
-    tabs[j]?.click();
-    tabs[j]?.focus();
-  }
-
 </script>
 
 <Modal title={existing ? 'Edit cluster' : step === 1 ? 'Add cluster' : 'Cluster details'} width={580} {onclose}>
@@ -200,9 +189,9 @@
     {#if !auth.isRoot}<p class="hint">Owner manages credentials and native cluster settings. You can edit the name.</p>{/if}
     {#if step === 1}
       <div class="segmented modes" role="tablist" aria-label="Cluster source">
-        <button role="tab" aria-selected={mode === 'contexts'} tabindex={mode === 'contexts' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'contexts'} onclick={() => (mode = 'contexts')}>From kubeconfig</button>
-        <button role="tab" aria-selected={mode === 'paste'} tabindex={mode === 'paste' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'paste'} onclick={() => (mode = 'paste')}>Paste kubeconfig</button>
-        <button role="tab" aria-selected={mode === 'eks'} tabindex={mode === 'eks' ? 0 : -1} onkeydown={sourceKey} class:active={mode === 'eks'} onclick={() => (mode = 'eks')}>From EKS</button>
+        <button role="tab" aria-selected={mode === 'contexts'} tabindex={mode === 'contexts' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'contexts'} onclick={() => (mode = 'contexts')}>From kubeconfig</button>
+        <button role="tab" aria-selected={mode === 'paste'} tabindex={mode === 'paste' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'paste'} onclick={() => (mode = 'paste')}>Paste kubeconfig</button>
+        <button role="tab" aria-selected={mode === 'eks'} tabindex={mode === 'eks' ? 0 : -1} onkeydown={onTabKey} class:active={mode === 'eks'} onclick={() => (mode = 'eks')}>From EKS</button>
       </div>
 
       {#if mode === 'contexts'}
@@ -239,7 +228,7 @@
           <textarea id="k8s-yaml" class="input mono" rows="10" bind:value={yamlText} placeholder="apiVersion: v1&#10;kind: Config&#10;…" spellcheck="false"></textarea>
         </div>
         <div class="field">
-          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file's current-context)</span></label>
+          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file’s current-context)</span></label>
           <input id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
         </div>
       {:else}
@@ -358,13 +347,13 @@
     cursor: pointer;
   }
   .ctx:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ctx.on {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .ctx input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .ctx-main {
     display: flex;
@@ -419,7 +408,7 @@
   }
   .env-chip {
     height: 24px;
-    padding: 0 13px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -427,11 +416,11 @@
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
-    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .env-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
     color: var(--accent-text);
     font-weight: 500;
   }

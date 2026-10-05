@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // ActionCard — renders ONE agent-proposed DiscoveryAction as a trustworthy
   // card with an explicit Apply button. Nothing is applied until the PO clicks;
   // every apply is reversible (sticky "✓ … · Undo" row) and toasted.
@@ -66,7 +68,7 @@
       appliedLabel = 'Draft replaced';
       toasts.success('Draft replaced');
     } catch (e) {
-      toasts.error('Could not replace draft', product.errMsg(e));
+      toastError('Couldn’t replace draft', e);
     } finally {
       applying = false;
     }
@@ -84,7 +86,7 @@
       applied = false;
       toasts.success('Draft restored');
     } catch (e) {
-      toasts.error('Could not undo', product.errMsg(e));
+      toastError('Couldn’t undo', e);
     } finally {
       undoing = false;
     }
@@ -127,10 +129,10 @@
       createdQuestionIds = result.created_question_ids;
       await product.loadQuestions();
       applied = true;
-      appliedLabel = `Added ${picked.length} question${picked.length === 1 ? '' : 's'}`;
+      appliedLabel = `Added ${plural(picked.length, 'question')}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Could not add questions', product.errMsg(e));
+      toastError('Couldn’t add questions', e);
     } finally {
       applying = false;
     }
@@ -149,10 +151,10 @@
       createdNoteIds = result.created_note_ids;
       await product.loadNotes();
       applied = true;
-      appliedLabel = `Added ${picked.length} note${picked.length === 1 ? '' : 's'}`;
+      appliedLabel = `Added ${plural(picked.length, 'note')}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Could not add notes', product.errMsg(e));
+      toastError('Couldn’t add notes', e);
     } finally {
       applying = false;
     }
@@ -175,7 +177,7 @@
       applied = false;
       toasts.success('Undone');
     } catch (e) {
-      toasts.error('Could not undo', product.errMsg(e));
+      toastError('Couldn’t undo', e);
     } finally {
       undoing = false;
     }
@@ -218,7 +220,7 @@
         toasts.success('Canvas created');
       }
     } catch (e) {
-      toasts.error('Could not create canvas', product.errMsg(e));
+      toastError('Couldn’t create canvas', e);
     } finally {
       applying = false;
     }
@@ -310,7 +312,7 @@
         >
           {applying
             ? 'Adding…'
-            : `Add ${checkedCount} question${checkedCount === 1 ? '' : 's'}`}
+            : `Add ${plural(checkedCount, 'question')}`}
         </button>
       </div>
     {:else if action.type === 'add_notes'}
@@ -342,7 +344,7 @@
           onclick={applyNotes}
           disabled={applying || checkedCount === 0}
         >
-          {applying ? 'Adding…' : `Add note${checkedCount === 1 ? '' : 's'}`}
+          {applying ? 'Adding…' : checkedCount === 1 ? 'Add note' : 'Add notes'}
         </button>
       </div>
     {:else if action.type === 'create_canvas'}
@@ -383,7 +385,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
   }
   /* The proposal's kind: a neutral micro-label at the 11px floor. */
@@ -391,7 +393,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -439,7 +441,7 @@
     overflow: hidden;
     position: relative;
     -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
-    mask-image: linear-gradient(to bottom, #000 55%, transparent);
+    mask-image: linear-gradient(to bottom, #000 55%, transparent); /* ui-guards: allow — mask alpha, not a color */
   }
 
   /* ── Item lists (questions / notes) ─────────────────────────────────────── */
@@ -457,7 +459,7 @@
   .item-label {
     display: flex;
     align-items: flex-start;
-    gap: 7px;
+    gap: 6px;
     padding: 4px 6px;
     cursor: pointer;
   }
@@ -492,8 +494,8 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    padding: 1px 5px;
+    letter-spacing: .06em;
+    padding: 1px 4px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
     color: var(--text-dim);
@@ -536,7 +538,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 7px 11px;
+    padding: 6px 10px;
     background: var(--success-soft);
     border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }

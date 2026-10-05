@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { scrollRegion } from './scroll-region';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   // "Run on…" — the SAME script on several targets (connections × databases)
   // and/or once per parameter value. Four stages in one sheet:
   //   setup    → pick targets, give each placeholder its value list, options;
@@ -383,9 +386,8 @@
       {/if}
 
       <section class="mr-sec" aria-label="Script">
-        <h3 class="mr-h">Script <span class="mr-dim">· {scriptLines} line{scriptLines === 1 ? '' : 's'}</span></h3>
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-        <pre class="mr-code mono" tabindex="0">{statement}</pre>
+        <h3 class="mr-h">Script <span class="mr-dim">· {plural(scriptLines, 'line')}</span></h3>
+        <pre class="mr-code mono" use:scrollRegion={'Statement'}>{statement}</pre>
       </section>
 
       <section class="mr-sec" aria-label="Targets">
@@ -406,7 +408,7 @@
                 {#if on}
                   <div class="mr-scopes">
                     {#if sc === 'loading'}
-                      <span class="mr-dim">Loading databases…</span>
+                      <span class="mr-dim"><span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Loading databases…</span>
                     {:else if sc && 'error' in sc}
                       <span class="mr-err">Couldn’t list databases: {sc.error}</span>
                       <button class="btn small ghost" onclick={() => loadScopes(c.id)}>Retry</button>
@@ -476,7 +478,7 @@
                   <input type="checkbox" bind:checked={drafts[n].escape} /> esc
                 </label>
               {/if}
-              <span class="mr-dim mr-count">{count} value{count === 1 ? '' : 's'}</span>
+              <span class="mr-dim mr-count">{plural(count, 'value')}</span>
             </div>
             {/if}
           {/each}
@@ -517,9 +519,9 @@
       {/if}
     {:else if stage === 'preview' && plan}
       <p class="mr-lead">
-        <strong>{plan.runs.length}</strong> run{plan.runs.length === 1 ? '' : 's'} on
-        <strong>{plan.targets.length}</strong> target{plan.targets.length === 1 ? '' : 's'}
-        {#if plan.write_count > 0}· <span class="mr-warn-text">{plan.write_count} write{plan.write_count === 1 ? '' : 's'}/DDL</span>{/if}
+        <strong>{plural(plan.runs.length, 'run')}</strong> on
+        <strong>{plural(plan.targets.length, 'target')}</strong>
+        {#if plan.write_count > 0}· <span class="mr-warn-text">{plural(plan.write_count, 'write')}/DDL</span>{/if}
         · {concurrency === 1 ? 'one at a time' : `${concurrency} in parallel`}
         · {stopOnError ? 'stops at the first failure' : 'continues past failures'}
       </p>
@@ -593,12 +595,11 @@
                   <span class="mr-idx mono">#{r.index + 1}</span>
                   <span class="mr-name">{r.label}</span>
                   <EnvBadge env={t.environment} readOnly={t.read_only} />
-                  {#if r.is_write}<span class="mr-tag warn">write</span>{/if}
-                  {#if r.needs_confirm}<span class="mr-tag danger">needs confirm</span>{/if}
-                  {#if r.on_cluster?.length}<span class="mr-tag info">ON CLUSTER ×{r.on_cluster.length}</span>{/if}
+                  {#if r.is_write}<Badge tone="warn" label="Write" />{/if}
+                  {#if r.needs_confirm}<Badge tone="bad" label="Needs confirm" />{/if}
+                  {#if r.on_cluster?.length}<Badge tone="info" label={`ON CLUSTER ×${r.on_cluster.length}`} />{/if}
                 </summary>
-                <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                <pre class="mr-code mono" tabindex="0">{r.statement}</pre>
+                <pre class="mr-code mono" use:scrollRegion={`Statement for ${r.label}`}>{r.statement}</pre>
                 {#each r.cluster_skipped ?? [] as s (s)}
                   <p class="mr-dim mr-small">Not rewritten: {s}</p>
                 {/each}
@@ -612,7 +613,7 @@
       <div class="mr-danger" role="alert">
         <Icon name="warning" size={14} />
         <span>
-          {guardedRuns.length} run{guardedRuns.length === 1 ? '' : 's'} will WRITE / change the schema on production or
+          {plural(guardedRuns.length, 'run')} will WRITE / change the schema on production or
           read-only targets. This can modify or destroy data. Check every target and statement below.
         </span>
       </div>
@@ -625,8 +626,7 @@
               <span class="mr-name">{r.label}</span>
               <EnvBadge env={t.environment} readOnly={t.read_only} />
             </div>
-            <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-            <pre class="mr-code mono" tabindex="0">{r.statement}</pre>
+            <pre class="mr-code mono" use:scrollRegion={`Statement for ${r.label}`}>{r.statement}</pre>
           </li>
         {/each}
       </ul>
@@ -690,18 +690,16 @@
                 {#if detailError}
                   <div class="mr-error" role="alert"><Icon name="warning" size={13} /><span>{detailError}</span></div>
                 {:else if !detail}
-                  <span class="mr-dim">Loading result details…</span>
+                  <Skeleton rows={3} height={20} label="result details" />
                 {:else}
-                  <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                  <pre class="mr-code mono" tabindex="0">{detail.statement}</pre>
+                  <pre class="mr-code mono" use:scrollRegion={'Final statement'}>{detail.statement}</pre>
                   <div class="mr-detail-actions">
                     <button class="btn small ghost" onclick={() => openInTab(detail!.statement)} title="Open this final statement in a new query tab">
                       <Icon name="external" size={12} /> Open in a new tab
                     </button>
                   </div>
                   {#if detail.result && detail.result.columns.length > 0}
-                    <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
-                    <div class="mr-table-wrap" tabindex="0" role="region" aria-label="Result of run {it.index + 1}">
+                    <div class="mr-table-wrap" use:scrollRegion={`Result of run ${it.index + 1}`}>
                       <table class="mr-table mono">
                         <thead>
                           <tr>{#each detail.result.columns as col (col.name)}<th>{col.name}</th>{/each}</tr>
@@ -739,7 +737,7 @@
         disabled={!!setupBlocker || planning}
         title={setupBlocker ?? 'Show the final statement for every run before anything executes'}
       >
-        {planning ? 'Preparing…' : `Preview ${runCount} run${runCount === 1 ? '' : 's'}`}
+        {planning ? 'Preparing…' : `Preview ${plural(runCount, 'run')}`}
       </button>
     {:else if stage === 'preview' && plan}
       <button class="btn" onclick={() => (stage = 'setup')}>Back</button>
@@ -750,7 +748,7 @@
         disabled={starting || planning || planStale}
         title={planStale ? 'Update the preview first' : plan.needs_confirm ? 'Writes to production / read-only targets — you will confirm each one' : 'Run every statement shown'}
       >
-        {starting ? 'Starting…' : plan.needs_confirm ? `Review ${guardedRuns.length} guarded write${guardedRuns.length === 1 ? '' : 's'}…` : `Run ${plan.runs.length}`}
+        {starting ? 'Starting…' : plan.needs_confirm ? `Review ${plural(guardedRuns.length, 'guarded write')}…` : `Run ${plan.runs.length}`}
       </button>
     {:else if stage === 'confirm' && plan}
       <button class="btn" onclick={() => (stage = 'preview')}>Back</button>
@@ -931,7 +929,7 @@
     gap: 8px;
     inline-size: 100%;
     min-inline-size: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -969,24 +967,6 @@
   .mr-idx {
     color: var(--text-dim);
     font-size: var(--fs-xs);
-  }
-  .mr-tag {
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
-  .mr-tag.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .mr-tag.danger {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-  .mr-tag.info {
-    background: var(--info-soft);
-    color: var(--info);
   }
   .mr-cl {
     display: flex;
@@ -1064,7 +1044,7 @@
   }
   .mr-table th,
   .mr-table td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-block-end: 1px solid var(--separator);
     text-align: start;
     white-space: nowrap;

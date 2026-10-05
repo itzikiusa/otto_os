@@ -3,6 +3,7 @@
   // into an object URL, or an SVG document shown through a data-URL `<img>`
   // (an <img> never runs scripts). Fit-to-pane by default; toggle to 1:1.
   import { onDestroy } from 'svelte';
+  import Skeleton from '../../../lib/components/Skeleton.svelte';
   import { workbenchAssetUrl } from '../../../lib/api/workbench';
   import { svgDataUrl } from './kinds';
   import PreviewError from './PreviewError.svelte';
@@ -90,7 +91,7 @@
     </button>
   </div>
   {#if loading}
-    <div class="state" aria-busy="true">Loading image…</div>
+    <div class="state"><Skeleton rows={1} height={200} label="the image" /></div>
   {:else if error}
     <PreviewError title="Image unavailable" message={error} onretry={svg ? undefined : () => attempt++} />
   {:else if url}

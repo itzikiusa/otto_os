@@ -11,7 +11,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { fmtAgo, roleFromArn, awsErrorText } from './util';
@@ -20,14 +20,17 @@
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
-    /** Account filter text (the input lives in the AWS page header). */
-    filter?: string;
     onadd: () => void;
     onedit: (a: AwsAccount) => void;
     ondelete: (a: AwsAccount) => void;
     onsignin: (a: AwsAccount) => void;
   }
-  let { filter = '', onadd, onedit, ondelete, onsignin }: Props = $props();
+  let { onadd, onedit, ondelete, onsignin }: Props = $props();
+
+  // The account filter sits above the cards it narrows (only once there are
+  // enough accounts to need it) — not in the page header.
+  let filter = $state('');
+  const showFilter = $derived(aws.accounts.length > 3);
 
   const canAdmin = $derived(auth.isRoot);
   const visible = $derived.by(() => {
@@ -92,10 +95,16 @@
 </script>
 
 <div class="ov">
-  {#if aws.accountsLoading && !aws.accountsLoaded}
-    <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={3} height={90} /></div>
-  {:else if aws.accountsError && aws.accounts.length === 0}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
+  {#if (aws.accountsLoading && !aws.accountsLoaded) || (aws.accountsError && aws.accounts.length === 0)}
+    <LoadState
+      variant="page"
+      what="accounts"
+      loading={aws.accountsLoading}
+      error={aws.accountsError ? awsErrorText(aws.accountsError) : null}
+      empty
+      rows={3}
+      onretry={() => void aws.loadAccounts()}
+    />
   {:else if aws.accounts.length === 0}
     <EmptyState
       variant="page"
@@ -109,6 +118,24 @@
       onaction={canAdmin ? onadd : undefined}
     />
   {:else}
+    {#if showFilter}
+      <div class="ov-bar">
+        <label class="ov-filter input-group">
+          <Icon name="search" size={13} />
+          <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
+        </label>
+        {#if filter.trim()}<span class="dim">{visible.length} of {aws.accounts.length}</span>{/if}
+      </div>
+    {/if}
+    {#if visible.length === 0}
+      <EmptyState
+        icon="search"
+        title="No accounts match “{filter.trim()}”"
+        actionLabel="Clear filter"
+        actionKind="secondary"
+        onaction={() => (filter = '')}
+      />
+    {/if}
     <div class="cards">
       {#each visible as a (a.id)}
         {@const p = aws.perms(a.id)}
@@ -123,7 +150,7 @@
             <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
             <h2 class="name">{a.name}</h2>
             <EnvBadge env={a.environment} />
-            <button class="icon-btn more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions"><Icon name="more" size={14} /></button>
+            <button class="icon-btn more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title={`Actions for ${a.name}`}><Icon name="more" size={14} /></button>
           </div>
           <dl class="meta">
             <dt>Identity</dt>
@@ -151,8 +178,11 @@
               {@const st = chipState(a, s.id)}
               {@const rbac = resourceAccess.can('aws_account', a.id, s.id === 's3' ? 'discover' : `${s.id}_view`, `aws_${s.id}` as Feature, 'view')}
               <a
-                class="chip {st}"
-                class:norbac={!rbac}
+                class="chip perm"
+                class:ok={st === 'allowed'}
+                class:perm-denied={st === 'denied'}
+                class:perm-unknown={st === 'unknown'}
+                class:perm-off={!rbac}
                 href={rbac ? `#/aws/${a.id}/${s.id}` : undefined}
                 title={!rbac ? `${s.label}: you lack View on this feature` : st === 'denied' ? `${s.label}: AccessDenied for this account` : st === 'unknown' ? `${s.label}: not probed yet` : s.label}
                 aria-disabled={!rbac}
@@ -163,13 +193,12 @@
             {/each}
             <button
               class="chip-refresh"
-              class:spin={loadingP}
               onclick={() => void aws.loadPermissions(a.id, true)}
               title="Re-check permissions"
               aria-label="Re-check permissions"
               disabled={loadingP || !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view')}
             >
-              <Icon name="refresh" size={12} />
+              {#if loadingP}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={12} />{/if}
             </button>
           </div>
           {#if p?.login_required}
@@ -203,10 +232,22 @@
 {/if}
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
+  .ov-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px 0;
+  }
+  .ov-filter {
+    height: 28px;
+    padding: 0 8px;
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    width: min(280px, 100%);
+  }
+  .ov-filter input {
+    flex: 1;
+    min-width: 0;
   }
   .ov {
     display: flex;
@@ -214,9 +255,6 @@
     min-height: 0;
     overflow: auto;
     height: 100%;
-  }
-  .pad {
-    padding: 18px 20px;
   }
   .cards {
     display: grid;
@@ -264,7 +302,7 @@
   .meta {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 3px 10px;
+    gap: 2px 10px;
     margin: 0;
     font-size: var(--fs-s);
   }
@@ -292,33 +330,19 @@
     gap: 6px;
     flex-wrap: wrap;
   }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: var(--fs-s);
+  /* Service links ride the global `.chip` (with its `ok` tone when the
+     account's probe allowed the service); only the per-state marks are local. */
+  .perm {
     text-decoration: none;
-    border: 1px solid var(--border);
-    color: var(--text);
   }
-  .chip.allowed {
-    border-color: color-mix(in srgb, var(--status-working) 55%, transparent);
-    background: color-mix(in srgb, var(--status-working) 14%, transparent);
-    color: var(--success);
-  }
-  .chip.denied {
-    background: var(--surface-2);
-    color: var(--text-dim);
+  .perm-denied {
     text-decoration: line-through;
   }
-  .chip.unknown {
+  .perm-unknown {
     background: transparent;
-    color: var(--text-dim);
     border-style: dashed;
   }
-  .chip.norbac {
+  .perm-off {
     opacity: 0.45;
     pointer-events: none;
   }
@@ -332,9 +356,6 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-  }
-  .chip-refresh.spin :global(svg) {
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .login-row {
@@ -367,9 +388,6 @@
     .cards {
       grid-template-columns: 1fr;
       padding: 8px 10px 24px;
-    }
-    .head {
-      padding: 12px 10px 4px;
     }
   }
 </style>

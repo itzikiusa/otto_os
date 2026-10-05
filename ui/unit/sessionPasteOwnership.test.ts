@@ -19,7 +19,7 @@ function setup() {
   const context: Record<string, any> = {socketFactory: null, readOnly: false, sessionId: 'a', sock: a,
     transformFrame: null, WebSocket: {OPEN: 1}, Blob, Uint8Array,
     toPngBytes: async () => new Uint8Array(), snipApi: {uploadPng: () => upload.promise},
-    textToBase64: (s: string) => s, toasts: {error: (...args: unknown[]) => errors.push(args)}};
+    textToBase64: (s: string) => s, toasts: {error: (...args: unknown[]) => errors.push(args)}, toastError: (...args: unknown[]) => errors.push(args)};
   context.sendJson = (v: unknown) => context.sock.send(JSON.stringify(v));
   runInNewContext(ts.transpileModule(fn.getText(ast), {compilerOptions: {target: ts.ScriptTarget.ES2022}}).outputText, context);
   return {context, upload, a, b, sentA, sentB, errors};

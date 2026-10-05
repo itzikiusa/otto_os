@@ -426,7 +426,20 @@
         action: () => void navigator.clipboard?.writeText(`otto://design/${artifact.id}@approved#view:${id}`).then(() => toasts.success('Copied', `#view:${id}`)),
       },
       { separator: true },
-      { label: 'Delete view', icon: 'trash', danger: true, disabled: readonly, action: () => edit(removeCameraPreset(doc!, id)) },
+      {
+        label: 'Delete view…',
+        icon: 'trash',
+        danger: true,
+        disabled: readonly,
+        action: async () => {
+          const ok = await confirmer.ask(`Delete the view “${cam.name ?? cam.id}”? Embeds that point at #view:${id} fall back to the default camera.`, {
+            title: 'Delete view',
+            confirmLabel: 'Delete',
+            danger: true,
+          });
+          if (ok) edit(removeCameraPreset(doc!, id));
+        },
+      },
     ]);
   }
 
@@ -575,7 +588,7 @@
         <span class="k">Scene</span>
         <p>
           {doc.objects.length} objects · {doc.lights.length} lights{doc.states?.length ? ` · ${doc.states.length} states` : ''}.
-          {#if kit}Materials can use <strong>{kit.label}</strong>.{:else}No brand kit in this project yet — brand colours appear once one exists.{/if}
+          {#if kit}Materials can use <strong>{kit.label}</strong>.{:else}No brand kit in this project yet — brand colors appear once one exists.{/if}
         </p>
       </section>
     </aside>
@@ -870,7 +883,7 @@
   }
   .toolbar .on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .grow {
@@ -888,12 +901,7 @@
     height: 8px;
     border-radius: 50%;
     background: var(--accent);
-    animation: pulse 1.4s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   @media (prefers-reduced-motion: reduce) {
     .pulse {
@@ -1027,7 +1035,7 @@
   }
   .ver {
     font-size: var(--fs-xs);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--success-soft);
     color: var(--success);

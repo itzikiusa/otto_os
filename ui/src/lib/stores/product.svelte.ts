@@ -4,6 +4,7 @@
 // singleton-class + Svelte-5-runes pattern as database.svelte.ts.
 
 import { api, authedBlobUrl, authedText, ApiError } from '../api/client';
+import { NO_WORKSPACE } from '../labels';
 import { loadErrorText } from '../loadError';
 import { ws } from './workspace.svelte';
 import type { Session, ProductLens } from '../api/types';
@@ -214,7 +215,7 @@ class ProductStore {
   /** Return the current workspace id, or throw if none is active. */
   private wsId(): string {
     const id = ws.currentId;
-    if (!id) throw new Error('No workspace selected');
+    if (!id) throw new Error(NO_WORKSPACE);
     return id;
   }
 

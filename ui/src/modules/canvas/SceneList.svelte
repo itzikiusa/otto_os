@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Scene list — the workspace's canvas scenes grouped into collapsible SECTIONS
   // (a folder path like "Platform/Staging" → sections + sub-sections), with
   // search, New, click-to-open, inline RENAME, MOVE-to-section, and delete.
@@ -67,7 +68,7 @@
     try {
       await canvas.updateMeta(s.id, { title: t.trim() });
     } catch (err) {
-      toasts.error('Rename failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t rename', err);
     }
   }
 
@@ -83,7 +84,7 @@
     try {
       await canvas.updateMeta(s.id, { section: sec.trim() || null });
     } catch (err) {
-      toasts.error('Move failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t move', err);
     }
   }
 
@@ -109,7 +110,7 @@
       await canvas.loadScenes().catch(() => {});
       toasts.success('Scene duplicated', `${row.title} (copy)`);
     } catch (err) {
-      toasts.error('Duplicate failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t duplicate', err);
     }
   }
 
@@ -125,7 +126,7 @@
       await canvas.del(s.id);
       toasts.success('Scene deleted', s.title);
     } catch (err) {
-      toasts.error('Delete failed', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t delete', err);
     }
   }
 </script>
@@ -133,9 +134,9 @@
 <div class="scene-list">
   <div class="search">
     <Icon name="search" size={13} />
-    <input type="search" placeholder="Search scenes…" aria-label="Search scenes" bind:value={filter} spellcheck="false" />
+    <input type="search" placeholder="Filter scenes…" aria-label="Filter scenes" bind:value={filter} spellcheck="false" />
     {#if filter}
-      <button class="clear" onclick={() => (filter = '')} aria-label="Clear search" title="Clear search">
+      <button class="clear" onclick={() => (filter = '')} aria-label="Clear the filter" title="Clear the filter">
         <Icon name="x" size={12} />
       </button>
     {/if}
@@ -245,7 +246,7 @@
   }
   /* The field itself is borderless; the box carries the focus ring. */
   .search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 1px var(--accent);
   }
   .search input {
@@ -295,7 +296,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     cursor: pointer;
     text-transform: uppercase;
   }
