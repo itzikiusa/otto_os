@@ -2979,3 +2979,37 @@ mod waiting_tests {
         assert!(waiting_for(&sid).is_empty());
     }
 }
+
+#[cfg(test)]
+mod row_workspace_guard {
+    /// Guard (S4-01 class): every handler that takes BOTH a path workspace and
+    /// a row id (`Path((ws, …))`) must tie the row to that workspace —
+    /// `swarm_in_ws(…)` or an explicit `workspace_id != ws` check — because
+    /// the role check alone only covers the path workspace. Handlers keyed by
+    /// the row alone derive the workspace from the row and are not matched.
+    #[test]
+    fn workspace_scoped_row_handlers_check_row_ownership() {
+        let src = include_str!("engine.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod row_workspace_guard").unwrap()];
+        let mut checked = 0;
+        for (i, _) in code.match_indices("Path((ws, ") {
+            let fn_start = code[..i].rfind("async fn ").unwrap();
+            let name = code[fn_start + 9..].split('(').next().unwrap().to_string();
+            let body_end = ["\nasync fn ", "\nfn ", "\npub fn ", "\npub async fn "]
+                .iter()
+                .filter_map(|m| code[i..].find(m))
+                .min()
+                .map_or(code.len(), |e| i + e);
+            let body = &code[i..body_end];
+            assert!(
+                body.contains("swarm_in_ws(") || body.contains("workspace_id != ws"),
+                "{name}: Path((ws, row)) handler never checks the row belongs to `ws`"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 6,
+            "guard matched {checked} handlers — pattern drifted?"
+        );
+    }
+}
