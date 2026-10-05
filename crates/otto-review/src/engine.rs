@@ -384,7 +384,7 @@ pub struct AgentRun {
 impl AgentRun {
     /// Lens slugs whose per-lens files the watch guard tracks for the row's
     /// progress note. Empty for fan-out (one lens, no sub-agents).
-    fn lens_slugs(&self) -> Vec<String> {
+    pub fn lens_slugs(&self) -> Vec<String> {
         self.lenses.iter().map(|l| l.slug.clone()).collect()
     }
 }
@@ -586,27 +586,27 @@ pub fn label_findings_with_lens(
 #[derive(Deserialize)]
 pub struct DraftComment {
     #[serde(default)]
-    path: Option<String>,
+    pub path: Option<String>,
     #[serde(default)]
-    line: Option<u32>,
+    pub line: Option<u32>,
     /// Optional end of a multi-line finding range. Anchors the finding to a
     /// span, not just a single line, when the agent reports one.
     #[serde(default)]
-    line_end: Option<u32>,
+    pub line_end: Option<u32>,
     #[serde(default = "default_draft_severity")]
-    severity: String,
-    body: String,
+    pub severity: String,
+    pub body: String,
     // Enriched workflow fields (optional; derived from `body` when absent).
     #[serde(default)]
-    category: Option<String>,
+    pub category: Option<String>,
     #[serde(default)]
-    title: Option<String>,
+    pub title: Option<String>,
     #[serde(default)]
-    evidence: Option<String>,
+    pub evidence: Option<String>,
     #[serde(default)]
-    reasoning: Option<String>,
+    pub reasoning: Option<String>,
     #[serde(default)]
-    suggested_fix: Option<String>,
+    pub suggested_fix: Option<String>,
 }
 
 pub fn default_draft_severity() -> String {
