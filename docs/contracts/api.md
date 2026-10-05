@@ -6008,7 +6008,12 @@ matched route TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed) and the U
 names its client span `http.client.<method>.<template>` (same shape as the server
 span name) so client latency rolls up per endpoint. A request whose client
 disconnects before the response is recorded with `status:"cancelled"` and
-`http.response.status_code:499`;
+`http.response.status_code:499`, and is rolled up under its own operation
+`<name> [cancelled]` so aborted requests neither skew the real operation's
+latency quantiles nor disappear; `GET /telemetry/traces/{id}` returns `status` as
+`ok`, `error`, `cancelled` or `unset` (OTLP Unset is never shown as `ok`), with
+the suffix stripped from `name`. Long-polls (`GET /sessions/{id}/wait`) and
+WebSocket upgrades are not timed as server spans;
 raw URLs, prompts, SQL, body text, headers, file paths and user identifiers are
 never exported. Browser timestamps allow at most one day of age / one minute
 of future skew; duration is finite and bounded to one hour. Attributes have an
