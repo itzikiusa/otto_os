@@ -439,7 +439,13 @@ async fn get_session<S: SessionsCtx>(
 
 /// `session.meta` keys a PATCH may never change (an unchanged round-trip is
 /// accepted and dropped): the agent-UI-control grant and the device stamp.
-pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id"];
+pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id", DELEGATED_BY_META];
+
+/// Meta key naming the agent session that opened this one as a worker
+/// (`POST /workspaces/{id}/sessions/open`). The server stamps it from the
+/// caller's credential; it decides whether that agent's own token may
+/// message this session, so a PATCH must never set or change it.
+pub const DELEGATED_BY_META: &str = "delegated_by";
 
 /// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
@@ -471,7 +477,7 @@ async fn patch_session<S: SessionsCtx>(
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
-                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control"
+                "ui_control / client_id / delegated_by are server-owned (UI control: POST /sessions/{id}/ui-control)"
                     .into(),
             )));
         }

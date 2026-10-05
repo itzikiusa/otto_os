@@ -23,10 +23,12 @@ pub async fn get_all(
 /// settings object.
 pub async fn put_all(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<Map<String, Value>>,
 ) -> ApiResult<Json<Map<String, Value>>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = SettingsRepo::new(ctx.pool.clone());
     for (key, value) in &body {
         repo.put(key, value).await?;
@@ -176,11 +178,13 @@ pub async fn db_stats(
 /// reclaims free pages incrementally. Never run automatically.
 pub async fn db_compact(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<CompactReq>,
 ) -> ApiResult<axum::response::Response> {
     use axum::response::IntoResponse;
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     if !body.confirm {
         return Err(
             otto_core::Error::Invalid("compact requires an explicit confirm: true".into()).into(),
@@ -268,9 +272,11 @@ fn secrets_control() -> ApiResult<std::sync::Arc<otto_keychain::SecretsControl>>
 /// (`locked` while a Keychain prompt waits). Root only. Never returns values
 /// or key names.
 pub async fn secrets_status(
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<otto_keychain::SecretsStatus>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let c = secrets_control()?;
     // Counting entries reads the plaintext file — keep it off the worker.
     let st = tokio::task::spawn_blocking(move || c.status())
@@ -296,10 +302,12 @@ pub struct SecureSecretsReq {
 /// is locked (`502`, nothing changed).
 pub async fn secrets_secure(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<SecureSecretsReq>,
 ) -> ApiResult<Json<otto_keychain::control::MigrationReport>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     if !body.confirm {
         return Err(otto_core::Error::Invalid(
             "securing secrets requires an explicit confirm: true".into(),

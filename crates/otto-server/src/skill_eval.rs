@@ -2264,10 +2264,12 @@ async fn get_config(
 
 async fn put_config(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<SkillEvalConfig>,
 ) -> ApiResult<Json<SkillEvalConfig>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let value = serde_json::to_value(&body)
         .map_err(|e| ApiError(Error::Internal(format!("serialize: {e}"))))?;
@@ -2468,10 +2470,12 @@ fn pick_iteration<'a>(
 async fn promote_skill(
     AxPath(eval_id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<PromoteSkillReq>,
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?; // writes to the shared Otto library (like PUT /library/skills)
+    crate::auth::require_human(&auth.0)?;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)

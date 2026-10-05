@@ -434,10 +434,12 @@ struct InstallReq {
 /// Copies/clones into the plugins home, reads the manifest, registers it (disabled).
 async fn install(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<InstallReq>,
 ) -> ApiResult<Json<PluginRecord>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
     let home = ctx.plugins.plugins_home().to_path_buf();
     std::fs::create_dir_all(&home).ok();
@@ -549,9 +551,11 @@ async fn install(
 async fn enable(
     State(ctx): State<ServerCtx>,
     AxPath(slug): AxPath<String>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<PluginRecord>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
     let rec = ctx
         .plugins
@@ -581,9 +585,11 @@ async fn enable(
 async fn disable(
     State(ctx): State<ServerCtx>,
     AxPath(slug): AxPath<String>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
     ctx.plugins
         .repo()
@@ -598,9 +604,11 @@ async fn disable(
 async fn remove(
     State(ctx): State<ServerCtx>,
     AxPath(slug): AxPath<String>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let _guard = ctx.plugins.lifecycle.lock().await;
     ctx.plugins.stop(&slug).await;
     ctx.plugins.repo().delete(&slug).await.map_err(ApiError)?;

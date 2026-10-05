@@ -1666,9 +1666,14 @@ pub struct ApproveRunReq {
 pub async fn approve_run(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ApproveRunReq>,
 ) -> ApiResult<Json<Value>> {
+    // S3-01: the `human_approval` gate supervises the run's own agents. A
+    // workflow step's managed token authorizes as the run's owner, so the
+    // Editor check alone would let the supervised agent approve itself.
+    crate::auth::require_human(&auth.0)?;
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     let rev = repo(&ctx)

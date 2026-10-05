@@ -162,6 +162,11 @@ pub async fn mint_share(
         )));
     }
 
+    // Guard 1b (S1-02): a share token carries no session binding, so an
+    // agent's credential minting one could attach to a sibling terminal (and,
+    // through a tunnel, hand out a remote shell) with no person involved.
+    crate::auth::require_human(&auth.0)?;
+
     // Guard 2: block scoped (share) tokens from minting sub-shares.
     if auth.0.scope.is_some() {
         return Err(ApiError(Error::Forbidden(

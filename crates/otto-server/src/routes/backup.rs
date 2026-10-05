@@ -154,10 +154,12 @@ pub struct SettingsImportReq {
 /// immediately if `providers` was in the payload, matching `PUT /settings`.
 pub async fn import_settings(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<SettingsImportReq>,
 ) -> ApiResult<Json<Map<String, Value>>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
 
     let repo = SettingsRepo::new(ctx.pool.clone());
     let mut accepted: Vec<String> = Vec::new();
@@ -333,10 +335,12 @@ pub struct StateRestoreReq {
 /// the DB, drop tables, delete sessions or workspaces, or overwrite secrets.
 pub async fn state_restore(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<StateRestoreReq>,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
 
     if !req.confirm {
         return Err(ApiError(otto_core::Error::Invalid(
@@ -499,10 +503,12 @@ async fn archive_preview(
 }
 async fn archive_restore(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ArchiveRestoreRequest>,
 ) -> ApiResult<Json<crate::state_archive::RestoreResult>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     tokio::spawn(async move {
         let fresh = otto_state::UsersRepo::new(ctx.pool.clone())
             .get(&user.id)

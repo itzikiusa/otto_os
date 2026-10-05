@@ -75,10 +75,13 @@ fn in_scope(req: &ExportRequest, workspace: Option<&str>) -> bool {
 
 pub async fn export_connections(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ExportRequest>,
 ) -> ApiResult<(HeaderMap, Json<ExportResult>)> {
     fresh_root(&ctx, &user.id).await?;
+    // S11-03: `include_passwords` exports every stored SSH/DB/Kafka secret.
+    crate::auth::require_human(&auth.0)?;
     validate_scope(&req)?;
     let format = conn_export::formats()
         .into_iter()
