@@ -310,19 +310,6 @@
   .state {
     padding: 8px 0;
   }
-  .error {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
   .pending-bubble {
     align-self: flex-end;
     display: flex;

@@ -112,7 +112,11 @@ function pruneCss(src, gone, rel, report) {
   const styleAt = src.search(/<style\b[^>]*>/);
   if (styleAt === -1) return src;
   const markup = src.slice(0, styleAt);
-  const dead = gone.filter((c) => !new RegExp(String.raw`class(?:="[^"]*\b|:)${c}\b|class=\{[^}]*\b${c}\b|['"\`\s]${c}['"\`\s]`).test(markup));
+  // Still used = named in a class attribute, a class: directive, or as a
+  // quoted word inside a class={…} expression (not any 'error' string).
+  const dead = gone.filter(
+    (c) => !new RegExp(String.raw`class="[^"]*(?<![\w-])${c}(?![\w-])|class:${c}(?![\w-])|class=\{[^}]*['"\`\s]${c}['"\`\s]`).test(markup),
+  );
   if (dead.length === 0) return src;
   const deadRe = new RegExp(String.raw`\.(?:${dead.map((c) => c.replace(/[-]/g, '\\-')).join('|')})(?![\w-])`);
   // Rules start after the <style> tag itself; a selector never holds `<`.
