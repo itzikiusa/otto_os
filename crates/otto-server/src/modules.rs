@@ -7628,27 +7628,158 @@ async fn send_input(
 }
 
 // ---------------------------------------------------------------------------
-// Browser proxy route  (GET /browser/proxy?url=…&token=…)
+// Browser proxy route  (GET /browser/proxy?url=…&ticket=…)
 // ---------------------------------------------------------------------------
+//
+// The take-over iframe can't send an `Authorization` header, so the proxy used
+// to accept the owner's bearer as `?token=` — which leaked it into the iframe
+// URL (history, Referer, the proxied page's `location.href`) and ran arbitrary
+// third-party HTML on the daemon origin, where it could read that token back.
+// Now the UI mints a single-use, short-lived ticket bound to ONE url via an
+// authed POST (`/api/v1/browser/proxy-ticket`), and every proxy response is
+// served with `Content-Security-Policy: sandbox allow-scripts` (no
+// `allow-same-origin`): the proxied page runs in an opaque origin and can
+// neither read the daemon's storage nor make credentialed same-origin calls.
 
 /// Picker script injected before </body>.
 const PICKER_SCRIPT: &str = r#"<script>(function(){var on=false;function sel(el){if(!el||el===document.body||el.nodeType!==1)return 'body';var parts=[],e=el,d=0;while(e&&e.nodeType===1&&e!==document.body&&d<5){var p=e.tagName.toLowerCase();if(e.id){parts.unshift('#'+e.id);break;}var cls=[].slice.call(e.classList||[]).filter(function(c){return !/[0-9]/.test(c)&&c.length<24;}).slice(0,2);if(cls.length)p+='.'+cls.join('.');parts.unshift(p);e=e.parentElement;d++;}return parts.join(' > ');}function desc(el){var s=sel(el);var a=['aria-label','placeholder','name','href'].map(function(k){var v=el.getAttribute&&el.getAttribute(k);return v?'['+k+'="'+String(v).slice(0,60)+'"]':'';}).join('');var t=((el.textContent||'').trim()).slice(0,50);return s+a+(t?' "'+t+'"':'');}window.addEventListener('message',function(ev){if(ev.data&&ev.data.type==='otto-takeover'){on=!!ev.data.enabled;document.documentElement.style.cursor=on?'crosshair':'';}});document.addEventListener('click',function(e){if(!on)return;e.preventDefault();e.stopPropagation();try{parent.postMessage({type:'otto-element',desc:desc(e.target),x:Math.round(e.clientX),y:Math.round(e.clientY),url:location.href},'*');}catch(_){}},true);})();</script>"#;
 
+/// CSP sent on EVERY proxy response (HTML, pass-through bytes, errors): the
+/// document is sandboxed into an opaque origin — scripts run (the picker needs
+/// them) but the page is never same-origin with the daemon.
+const PROXY_CSP: &str = "sandbox allow-scripts";
+
+/// How long a minted proxy ticket stays redeemable.
+const PROXY_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Cap on outstanding tickets (each mint prunes expired ones first; this only
+/// bounds a caller hammering the mint route).
+const PROXY_TICKET_MAX: usize = 1024;
+
+struct ProxyTicket {
+    url: String,
+    expires: std::time::Instant,
+}
+
+/// In-memory single-use ticket store. Process-local on purpose: a ticket only
+/// needs to survive the ~instant between the UI minting it and the iframe
+/// loading it, and a daemon restart invalidating every ticket is harmless.
+static PROXY_TICKETS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, ProxyTicket>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Mint a ticket for `url`, valid for `ttl`.
+fn mint_proxy_ticket(url: &str, ttl: std::time::Duration) -> String {
+    use rand::rand_core::UnwrapErr;
+    use rand::rngs::SysRng;
+    use rand::Rng;
+    let mut bytes = [0u8; 32];
+    UnwrapErr(SysRng).fill_bytes(&mut bytes);
+    let ticket = hex::encode(bytes);
+    let now = std::time::Instant::now();
+    let mut map = PROXY_TICKETS.lock().unwrap_or_else(|p| p.into_inner());
+    map.retain(|_, t| t.expires > now);
+    if map.len() >= PROXY_TICKET_MAX {
+        // Drop the soonest-to-expire ticket rather than refusing the mint.
+        if let Some(k) = map
+            .iter()
+            .min_by_key(|(_, t)| t.expires)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&k);
+        }
+    }
+    map.insert(
+        ticket.clone(),
+        ProxyTicket {
+            url: url.to_owned(),
+            expires: now + ttl,
+        },
+    );
+    ticket
+}
+
+/// Redeem (and consume) a ticket for `url`. Single-use: the ticket is removed
+/// whether or not it matches, so a leaked/guessed ticket can't be retried
+/// against a different URL.
+fn redeem_proxy_ticket(ticket: &str, url: &str) -> bool {
+    let mut map = PROXY_TICKETS.lock().unwrap_or_else(|p| p.into_inner());
+    match map.remove(ticket) {
+        Some(t) => t.expires > std::time::Instant::now() && t.url == url,
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+struct ProxyTicketReq {
+    url: String,
+}
+
+#[derive(serde::Serialize)]
+struct ProxyTicketResp {
+    ticket: String,
+    expires_in_secs: u64,
+}
+
+/// `POST /browser/proxy-ticket` — authed (bearer + `Browser`/Edit policy);
+/// returns a single-use ticket the take-over iframe passes as `?ticket=`.
+async fn browser_proxy_ticket(Json(req): Json<ProxyTicketReq>) -> ApiResult<Json<ProxyTicketResp>> {
+    let url = req.url.trim();
+    let ok_scheme = reqwest::Url::parse(url)
+        .map(|u| matches!(u.scheme(), "http" | "https"))
+        .unwrap_or(false);
+    if !ok_scheme {
+        return Err(ApiError(Error::Invalid(
+            "url must be an absolute http(s) URL".into(),
+        )));
+    }
+    Ok(Json(ProxyTicketResp {
+        ticket: mint_proxy_ticket(url, PROXY_TICKET_TTL),
+        expires_in_secs: PROXY_TICKET_TTL.as_secs(),
+    }))
+}
+
+/// Authed API route that mints proxy tickets (mounted under `/api/v1`).
+pub fn browser_proxy_ticket_routes() -> Router<ServerCtx> {
+    Router::new().route("/browser/proxy-ticket", post(browser_proxy_ticket))
+}
+
 #[derive(serde::Deserialize)]
 struct BrowserProxyQuery {
     url: Option<String>,
-    token: Option<String>,
+    ticket: Option<String>,
 }
 
 /// State carried by the root-level browser proxy router.
 #[derive(Clone)]
 struct BrowserProxyState {
-    auth: Arc<dyn otto_core::auth::TokenAuthenticator>,
     http: reqwest::Client,
 }
 
-/// Root-level browser proxy router (self-authenticates via `?token=`).
-pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthenticator>) -> Router {
+/// Stamp the isolation headers onto every proxy response, whatever branch
+/// produced it (an error page or a pass-through image is still attacker-
+/// controlled content served from the daemon origin).
+async fn browser_proxy_headers(mut resp: axum::response::Response) -> axum::response::Response {
+    use axum::http::{header, HeaderValue};
+    let h = resp.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(PROXY_CSP),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp
+}
+
+/// Root-level browser proxy router (self-authenticates via a single-use
+/// `?ticket=` minted by `POST /api/v1/browser/proxy-ticket`).
+pub fn browser_proxy_router() -> Router {
     // SSRF guard: the guarded resolver vets the address actually dialled (no
     // DNS rebinding after the pre-flight check) and each redirect hop is capped
     // + re-validated so an upstream 30x can't bounce the proxy inward.
@@ -7660,10 +7791,62 @@ pub fn browser_proxy_router(authenticator: Arc<dyn otto_core::auth::TokenAuthent
 
     Router::new()
         .route("/browser/proxy", axum::routing::get(browser_proxy))
-        .with_state(BrowserProxyState {
-            auth: authenticator,
-            http,
-        })
+        .layer(axum::middleware::map_response(browser_proxy_headers))
+        .with_state(BrowserProxyState { http })
+}
+
+/// Escape text for an HTML attribute value / text node.
+fn proxy_html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn proxy_error_page(status: axum::http::StatusCode, msg: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = format!(
+        r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
+        proxy_html_escape(msg)
+    );
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// Inject `<base href>` (HTML-escaped — the URL is caller-supplied) after
+/// `<head>` and the picker script before `</body>`.
+fn proxy_transform_html(html: &str, url: &str) -> String {
+    let base_tag = format!(r#"<base href="{}">"#, proxy_html_escape(url));
+    let html = {
+        // Try to find <head> (case-insensitive). `to_ascii_lowercase` keeps
+        // byte offsets aligned with `html` (full Unicode lowercasing doesn't).
+        let lower = html.to_ascii_lowercase();
+        if let Some(pos) = lower.find("<head>") {
+            let insert_at = pos + "<head>".len();
+            format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
+        } else if let Some(pos) = lower.find("<head ") {
+            // <head …> with attributes: advance to the closing >.
+            if let Some(close) = lower[pos..].find('>') {
+                let insert_at = pos + close + 1;
+                format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
+            } else {
+                format!("{}{}", base_tag, html)
+            }
+        } else {
+            format!("{}{}", base_tag, html)
+        }
+    };
+    let lower = html.to_ascii_lowercase();
+    if let Some(pos) = lower.rfind("</body>") {
+        format!("{}{}{}", &html[..pos], PICKER_SCRIPT, &html[pos..])
+    } else {
+        format!("{}{}", html, PICKER_SCRIPT)
+    }
 }
 
 async fn browser_proxy(
@@ -7673,30 +7856,16 @@ async fn browser_proxy(
     use axum::http::{HeaderValue, StatusCode};
     use axum::response::IntoResponse;
 
-    // --- Auth: validate ?token= ---
-    let token = match q.token {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(otto_core::api::Problem {
-                    code: "unauthorized".into(),
-                    message: "missing ?token= parameter".into(),
-                }),
-            )
-                .into_response();
-        }
-    };
-    if st.auth.authenticate(&token).await.is_err() {
-        return (
+    let unauthorized = |message: &str| {
+        (
             StatusCode::UNAUTHORIZED,
             axum::Json(otto_core::api::Problem {
                 code: "unauthorized".into(),
-                message: "invalid token".into(),
+                message: message.into(),
             }),
         )
-            .into_response();
-    }
+            .into_response()
+    };
 
     // --- Validate target URL ---
     let url = match q.url {
@@ -7713,6 +7882,15 @@ async fn browser_proxy(
         }
     };
 
+    // --- Auth: redeem the single-use ?ticket= (bound to this exact url) ---
+    let ticket = match q.ticket {
+        Some(t) if !t.is_empty() => t,
+        _ => return unauthorized("missing ?ticket= parameter"),
+    };
+    if !redeem_proxy_ticket(&ticket, &url) {
+        return unauthorized("invalid, expired or already-used ticket");
+    }
+
     // --- SSRF guard: resolve + classify before fetching ---
     if let Err(msg) = crate::routes::api_client::net_guard::check_url(&url).await {
         return (
@@ -7728,18 +7906,7 @@ async fn browser_proxy(
     // --- Fetch upstream ---
     let upstream = match st.http.get(&url).send().await {
         Ok(r) => r,
-        Err(e) => {
-            let body = format!(
-                r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                e
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                body,
-            )
-                .into_response();
-        }
+        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
 
     // Determine content-type before consuming the body.
@@ -7753,23 +7920,13 @@ async fn browser_proxy(
     let is_html = content_type.contains("text/html");
 
     if !is_html {
-        // Stream bytes through with the upstream content-type.
+        // Stream bytes through with the upstream content-type (the response
+        // layer still stamps the sandbox CSP + nosniff on it).
         let ct_val = HeaderValue::from_str(&content_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
         let bytes = match upstream.bytes().await {
             Ok(b) => b,
-            Err(e) => {
-                let body = format!(
-                    r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                    e
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    body,
-                )
-                    .into_response();
-            }
+            Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
         };
         return ([(axum::http::header::CONTENT_TYPE, ct_val)], bytes).into_response();
     }
@@ -7777,49 +7934,7 @@ async fn browser_proxy(
     // --- HTML: read, transform, return ---
     let html = match upstream.text().await {
         Ok(t) => t,
-        Err(e) => {
-            let body = format!(
-                r#"<!doctype html><html><body><h2>Proxy error</h2><pre>{}</pre></body></html>"#,
-                e
-            );
-            return (
-                StatusCode::BAD_GATEWAY,
-                [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                body,
-            )
-                .into_response();
-        }
-    };
-
-    // (a) Inject <base href="…"> after <head> (case-insensitive).
-    let base_tag = format!(r#"<base href="{}">"#, url);
-    let html = {
-        // Try to find <head> (case-insensitive).
-        let lower = html.to_lowercase();
-        if let Some(pos) = lower.find("<head>") {
-            let insert_at = pos + "<head>".len();
-            format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
-        } else if let Some(pos) = lower.find("<head ") {
-            // <head …> with attributes: advance to the closing >.
-            if let Some(close) = lower[pos..].find('>') {
-                let insert_at = pos + close + 1;
-                format!("{}{}{}", &html[..insert_at], base_tag, &html[insert_at..])
-            } else {
-                format!("{}{}", base_tag, html)
-            }
-        } else {
-            format!("{}{}", base_tag, html)
-        }
-    };
-
-    // (b) Inject picker script before </body> (case-insensitive).
-    let html = {
-        let lower = html.to_lowercase();
-        if let Some(pos) = lower.rfind("</body>") {
-            format!("{}{}{}", &html[..pos], PICKER_SCRIPT, &html[pos..])
-        } else {
-            format!("{}{}", html, PICKER_SCRIPT)
-        }
+        Err(e) => return proxy_error_page(StatusCode::BAD_GATEWAY, &e.to_string()),
     };
 
     (
@@ -7827,9 +7942,95 @@ async fn browser_proxy(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         )],
-        html,
+        proxy_transform_html(&html, &url),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod browser_proxy_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn assert_isolation_headers(resp: &axum::response::Response) {
+        let h = resp.headers();
+        assert_eq!(h[header::CONTENT_SECURITY_POLICY], "sandbox allow-scripts");
+        assert!(!h[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("allow-same-origin"));
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    }
+
+    #[tokio::test]
+    async fn every_proxy_response_carries_sandbox_csp() {
+        let app = browser_proxy_router();
+        // Missing url, missing ticket, bogus ticket, and an SSRF-refused
+        // (loopback) target all still get the isolation headers.
+        let t = mint_proxy_ticket("http://127.0.0.1:7700/", PROXY_TICKET_TTL);
+        for uri in [
+            "/browser/proxy".to_string(),
+            "/browser/proxy?url=https%3A%2F%2Fexample.com%2F".to_string(),
+            "/browser/proxy?url=https%3A%2F%2Fexample.com%2F&ticket=nope".to_string(),
+            format!("/browser/proxy?url=http%3A%2F%2F127.0.0.1%3A7700%2F&ticket={t}"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert!(!resp.status().is_success(), "{uri} -> {}", resp.status());
+            assert_isolation_headers(&resp);
+        }
+    }
+
+    #[tokio::test]
+    async fn bearer_token_param_is_no_longer_accepted() {
+        let resp = browser_proxy_router()
+            .oneshot(
+                Request::get("/browser/proxy?url=https%3A%2F%2Fexample.com%2F&token=anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn ticket_is_single_use() {
+        let t = mint_proxy_ticket("https://example.com/a", PROXY_TICKET_TTL);
+        assert!(redeem_proxy_ticket(&t, "https://example.com/a"));
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn ticket_is_bound_to_its_url_and_burned_on_mismatch() {
+        let t = mint_proxy_ticket("https://example.com/a", PROXY_TICKET_TTL);
+        assert!(!redeem_proxy_ticket(&t, "https://evil.example/"));
+        // Burned by the failed attempt — can't be retried with the right url.
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn expired_ticket_is_rejected() {
+        let t = mint_proxy_ticket("https://example.com/a", std::time::Duration::ZERO);
+        assert!(!redeem_proxy_ticket(&t, "https://example.com/a"));
+    }
+
+    #[test]
+    fn base_href_is_html_escaped() {
+        let url = r#"https://x.example/"><script>alert(1)</script>"#;
+        let out = proxy_transform_html("<html><head></head><body></body></html>", url);
+        assert!(!out.contains("<script>alert(1)"), "{out}");
+        assert!(out.contains(
+            r#"<base href="https://x.example/&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;">"#
+        ));
+        assert!(out.contains("otto-element"), "picker still injected");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8226,6 +8427,8 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         // Runtime custom plugins: management + scoped host-API + reverse-proxy to
         // sidecar processes. (Asset/iframe routes are root-mounted; see root vec.)
         crate::plugins::api_routes(),
+        // Single-use tickets for the root-level `/browser/proxy` take-over frame.
+        browser_proxy_ticket_routes(),
     ];
     let root = vec![
         otto_sessions::ws_router(ctx.authenticator.clone(), ctx.clone()),
@@ -8233,7 +8436,7 @@ pub fn module_routers(ctx: &ServerCtx) -> (Vec<Router<ServerCtx>>, Vec<Router>) 
         crate::routes::api_stream::ws_router(ctx.clone()),
         // Remote live browser viewer socket (`/ws/browser/{tab_id}/live`).
         crate::routes::browser_live::ws_router(ctx.clone()),
-        browser_proxy_router(ctx.authenticator.clone()),
+        browser_proxy_router(),
         // Runtime-plugin iframe assets: /plugins/{slug}/ui/* served as public
         // static files (root-mounted, outside /api/v1; the iframe's API calls are
         // the gated part). Listed last so it doesn't shadow other root routes.

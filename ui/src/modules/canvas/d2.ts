@@ -11,6 +11,7 @@
 // below into one readable line. Dark themes start at 200 ("Dark Mauve").
 
 import { createRenderQueue, isStaleResult, type Stale } from './renderQueue';
+import { sanitizeD2Svg } from './svgSanitize';
 
 type D2CompileOptions = { sketch?: boolean; themeID?: number };
 export type D2Api = {
@@ -120,7 +121,12 @@ export async function renderD2(
     if (typeof svg !== 'string' || !svg.includes('<svg')) {
       return { error: 'D2 returned an unexpected render payload' };
     }
-    return { svg };
+    // Every caller injects this via innerHTML / {@html}: purify centrally so
+    // a `link: javascript:…` or an HTML label with `onerror` can't run.
+    const purify = (await import('dompurify')).default;
+    const clean = sanitizeD2Svg(svg, purify);
+    if (!clean) return { error: 'D2 returned an unexpected render payload' };
+    return { svg: clean };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { error: friendlyError(msg) };

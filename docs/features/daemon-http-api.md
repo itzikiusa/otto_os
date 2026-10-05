@@ -141,7 +141,7 @@ The WebSocket and proxy endpoints live at the **server root** (not under
 | `GET /ws/events` | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred) or `?token=` | Daemon event stream (§5) |
 | `GET /ws/lsp?lang=&root=&token=` | `?token=`; ws editor | LSP WebSocket bridge |
 | `GET /ws/api-client/stream?token=` | `?token=`; ws editor | API-client streaming-response bridge |
-| `GET /browser/proxy?url=&token=` | `?token=` | In-app browser HTTP proxy |
+| `GET /browser/proxy?url=&ticket=` | single-use `?ticket=` from `POST /api/v1/browser/proxy-ticket` | In-app browser take-over proxy (sandboxed: `CSP: sandbox allow-scripts`) |
 
 > Prefer the `Sec-WebSocket-Protocol: otto-bearer, <token>` form for the two
 > WebSockets — it keeps the token out of the URL (which proxies and servers log).

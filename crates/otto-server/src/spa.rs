@@ -47,7 +47,55 @@ const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 /// deploy is picked up on the next load rather than after a stale cache hit.
 const REVALIDATE: &str = "no-cache";
 
+/// CSP for the UI when ottod itself serves it (remote/LAN/Tailscale clients,
+/// `npm run preview` against the daemon). Mirrors the desktop app's CSP in
+/// `apps/desktop/src-tauri/tauri.conf.json` minus the Tauri-only sources
+/// (`ipc:` / `http://ipc.localhost`). `'self'` is the daemon origin, which —
+/// per CSP3 — also matches same-host `ws:`/`wss:` for the event/terminal
+/// sockets. `frame-ancestors 'self'` stops another site from framing the UI
+/// (clickjacking); the same-origin side pane (`?embed=1`) still works.
+pub const SPA_CSP: &str = "default-src 'self'; \
+    script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; \
+    style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data: blob: https: http://127.0.0.1:7700; \
+    font-src 'self' data:; \
+    connect-src 'self' http://127.0.0.1:7700 ws://127.0.0.1:7700 https://127.0.0.1:7700 \
+    wss://127.0.0.1:7700 http://localhost:7700 ws://localhost:7700 blob: data:; \
+    worker-src 'self' blob:; \
+    frame-src 'self' blob: data: https: http:; \
+    media-src 'self' blob: data: https://github.com https://objects.githubusercontent.com \
+    https://release-assets.githubusercontent.com; \
+    object-src 'none'; \
+    base-uri 'self'; \
+    frame-ancestors 'self'";
+
+/// Stamp the document-hardening headers on every SPA response.
+fn harden(mut response: Response) -> Response {
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(SPA_CSP),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+}
+
 fn serve_spa(path: &str, load: AssetLoader) -> Response {
+    harden(serve_spa_inner(path, load))
+}
+
+fn serve_spa_inner(path: &str, load: AssetLoader) -> Response {
     let trimmed = path.trim_start_matches('/');
     let candidate = if trimmed.is_empty() {
         "index.html"
@@ -293,6 +341,31 @@ mod tests {
         for path in ["/assets/main.js", "/sw.js"] {
             let (_, cache) = cache_control(path).await;
             assert_eq!(cache, None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spa_responses_carry_csp_and_anti_framing() {
+        for path in [
+            "/",
+            "/rooms/x",
+            "/assets/main.js",
+            "/assets/gone-AbCdEfGh.js",
+        ] {
+            let app = Router::new()
+                .fallback(move |uri: Uri| spa_fallback_with_assets(uri, Some(fixture)));
+            let response = app
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let h = response.headers();
+            let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+            assert!(csp.contains("frame-ancestors 'self'"), "{path}: {csp}");
+            assert!(csp.contains("object-src 'none'"), "{path}");
+            assert!(!csp.contains("ipc:"), "tauri-only source leaked: {csp}");
+            assert!(!csp.contains("  "), "no stray whitespace from line joins");
+            assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{path}");
+            assert_eq!(h[header::X_FRAME_OPTIONS], "SAMEORIGIN", "{path}");
         }
     }
 

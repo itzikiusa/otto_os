@@ -56,7 +56,8 @@ use PolicyDecision::{Deny, Exempt, Require};
 /// `matched_path` is the Axum route **template** with `{id}`-style placeholders,
 /// including the `/api/v1` nest prefix the daemon mounts the API under — e.g.
 /// `/api/v1/connections/{id}/db/query`. Root-mounted WebSocket / proxy routers
-/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` and never reach
+/// (`/ws/...`, `/browser/proxy`) self-authenticate via `?token=` / a single-use
+/// `?ticket=` and never reach
 /// the central guard, so they are not represented here.
 pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // Strip the `/api/v1` nest prefix so the rules read against the
@@ -1235,6 +1236,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
         return Require(Browser, if get { View } else { Edit });
     }
     if p == "/browser/tabs/{id}" || p == "/browser/annotations/{id}" {
+        return Require(Browser, Edit);
+    }
+    // Take-over proxy ticket: lets the root-level `/browser/proxy` fetch a
+    // caller-supplied URL once, so it's gated like `/page` (Edit).
+    if p == "/browser/proxy-ticket" {
         return Require(Browser, Edit);
     }
     if p == "/workspaces/{wid}/browser/page" || p == "/workspaces/{wid}/browser/query" {
@@ -2848,6 +2854,14 @@ mod tests {
         );
         assert_eq!(
             pol(Method::POST, "/api/v1/workspaces/{wid}/browser/ask"),
+            Require(Browser, Edit)
+        );
+    }
+
+    #[test]
+    fn browser_proxy_ticket_mint_is_edit() {
+        assert_eq!(
+            pol(Method::POST, "/api/v1/browser/proxy-ticket"),
             Require(Browser, Edit)
         );
     }

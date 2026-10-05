@@ -2839,7 +2839,7 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
 | GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
 | GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
-| GET /browser/proxy?url=&token= | `?token=` | in-app browser HTTP proxy |
+| GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)
 
@@ -4907,6 +4907,7 @@ a workspace Admin, or root may see, attach to or drive it; everyone else gets
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| POST /api/v1/browser/proxy-ticket | Browser Edit | `{url}` (absolute http(s)) | `BrowserProxyTicket` `{ticket, expires_in_secs}` — single-use ticket for `GET /browser/proxy?url=<same url>&ticket=`; consumed on first redemption (even a URL mismatch burns it); held in daemon memory only |
 | GET /api/v1/browser/live/status | Browser View | — | `BrowserLiveStatus` — per-build install state (+ approximate download size), current settings, the running install job, process/session counts |
 | PUT /api/v1/browser/live/settings | Browser Admin | `BrowserLiveSettings` (partial) | `BrowserLiveSettings` — 400 on `headed:true` with `build:"chrome-headless-shell"`, unknown build, or out-of-range caps. Stored in the settings KV under `browser_live`. Applies to newly started Chromium processes |
 | POST /api/v1/browser/live/install | Browser Admin | `{build?}` (default: the configured build) | 202 `BrowserEngineInstallJob` — starts the one-time download (409 while another install runs; 200 with `state:"installed"` when already present; 400 when the build's checksum isn't pinned or the platform is unsupported) |
