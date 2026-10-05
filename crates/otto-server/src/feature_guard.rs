@@ -873,6 +873,7 @@ mod root_route_tests {
     /// marker that proves its handler applies the agent-credential rules. A
     /// new root route fails this test until it is gated and listed.
     #[test]
+    #[allow(clippy::disallowed_methods)] // sync source scan in a test
     fn root_routes_apply_agent_rules() {
         // (route path, file that handles it, marker that file must contain)
         const COVERED: &[(&str, &str, &str)] = &[
