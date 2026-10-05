@@ -106,26 +106,64 @@ pub async fn middleware(
     }
     span.attributes
         .insert("http.request.method".into(), req.method().as_str().into());
-    span.attributes.insert("http.route".into(), route.into());
-    let started = Instant::now();
+    span.attributes
+        .insert("http.route".into(), route.clone().into());
+    let traceparent = format!("00-{}-{}-01", span.trace_id, span.span_id);
+    // A client that disconnects drops this future mid-request; the guard
+    // still records the span (status `cancelled`, 499) so aborted slow
+    // requests are not invisible in the latency data.
+    let mut guard = RequestSpan {
+        service: Arc::clone(service),
+        span: Some(span),
+        started: Instant::now(),
+    };
+    let parent = guard.span.clone().expect("span present until finish");
     let mut response =
-        otto_telemetry::context::scope(Arc::clone(service), &span, next.run(req)).await;
-    span.duration_ms = started.elapsed().as_secs_f64() * 1000.0;
-    span.status = if response.status().as_u16() < 400 {
-        "ok"
-    } else {
-        "error"
-    }
-    .into();
-    span.attributes.insert(
-        "http.response.status_code".into(),
-        response.status().as_u16().into(),
-    );
-    if let Ok(value) = format!("00-{}-{}-01", span.trace_id, span.span_id).parse() {
+        otto_telemetry::context::scope(Arc::clone(service), &parent, next.run(req)).await;
+    guard.finish(response.status().as_u16());
+    if let Ok(value) = traceparent.parse() {
         response.headers_mut().insert("traceparent", value);
     }
-    service.record(span);
+    // The static route template (never a concrete URL) lets the UI name its
+    // client span per endpoint instead of one opaque `http.client` bucket.
+    if let Ok(value) = route.parse() {
+        response.headers_mut().insert(ROUTE_HEADER, value);
+    }
     response
+}
+
+/// Response header carrying the matched route TEMPLATE (`/api/v1/repos/{id}/fetch`).
+pub const ROUTE_HEADER: &str = "x-otto-route";
+
+/// Records the request span exactly once: on completion with the response
+/// status, or on drop (client abort / cancelled future) as `cancelled`.
+struct RequestSpan {
+    service: Arc<TelemetryService>,
+    span: Option<SpanRecord>,
+    started: Instant,
+}
+impl RequestSpan {
+    fn finish(&mut self, status: u16) {
+        let Some(mut span) = self.span.take() else {
+            return;
+        };
+        span.duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
+        span.status = match status {
+            499 => "cancelled",
+            s if s < 400 => "ok",
+            _ => "error",
+        }
+        .into();
+        span.attributes
+            .insert("http.response.status_code".into(), status.into());
+        self.service.record(span);
+    }
+}
+impl Drop for RequestSpan {
+    fn drop(&mut self) {
+        // 499: the de-facto "client closed request" code.
+        self.finish(499);
+    }
 }
 
 #[cfg(test)]
@@ -138,6 +176,52 @@ mod tests {
         assert!(parent(&good.replace("00-", "01-")).is_none());
         assert!(parent(&format!("{good}-extra")).is_none());
         assert!(parent("00-00000000000000000000000000000000-1234567890abcdef-01").is_none());
+    }
+    #[tokio::test]
+    async fn aborted_request_is_recorded_as_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let usage = otto_usage::UsageEngine::start(
+            otto_usage::UsageConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            temp.path().join("usage"),
+        )
+        .await;
+        let service =
+            TelemetryService::start(usage.clone(), temp.path().to_path_buf(), Default::default())
+                .await;
+        service.enable_ingestion_for_tests();
+        {
+            let _guard = RequestSpan {
+                service: Arc::clone(&service),
+                span: Some(SpanRecord::new("http.get.repos", "git", 0.0)),
+                started: Instant::now(),
+            };
+            // Dropped without finish(): the client went away mid-request.
+        }
+        let mut done = RequestSpan {
+            service: Arc::clone(&service),
+            span: Some(SpanRecord::new("http.get.repos", "git", 0.0)),
+            started: Instant::now(),
+        };
+        done.finish(200);
+        drop(done);
+        let statuses: Vec<_> = service
+            .queued_spans_for_tests()
+            .into_iter()
+            .map(|s| (s.status, s.attributes["http.response.status_code"].clone()))
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                ("cancelled".to_string(), serde_json::json!(499)),
+                ("ok".to_string(), serde_json::json!(200))
+            ],
+            "abort recorded once, completed request recorded once"
+        );
+        service.shutdown().await;
+        usage.shutdown().await;
     }
     #[test]
     fn workspace_routes_keep_the_feature_component() {

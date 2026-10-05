@@ -6003,6 +6003,12 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
 `ui.request.queue`, `ui.response.decode`. Server spans use matched route templates;
+while telemetry is enabled every instrumented response carries `x-otto-route` (the
+matched route TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed) and the UI
+names its client span `http.client.<method>.<template>` (same shape as the server
+span name) so client latency rolls up per endpoint. A request whose client
+disconnects before the response is recorded with `status:"cancelled"` and
+`http.response.status_code:499`;
 raw URLs, prompts, SQL, body text, headers, file paths and user identifiers are
 never exported. Browser timestamps allow at most one day of age / one minute
 of future skew; duration is finite and bounded to one hour. Attributes have an
@@ -6020,5 +6026,22 @@ Errors use the standard `Problem` envelope: 401 unauthenticated, 403 non-root,
 400 invalid settings/batch, 413 oversized ingestion, 502 unavailable local
 pipeline or profiling prerequisites. Concrete TypeScript DTOs live in
 `ui/src/lib/api/types.ts`.
+
+Delivery is batched: spans, per-minute resource maxima and spike/profile logs are
+buffered in the daemon and handed to a short-lived collector about every 5 minutes
+under a background ClickHouse lease that neither wakes an idle-stopped engine nor
+resets its idle clock (buffered data waits at most ~30 minutes, or until queue
+pressure, before one flush wakes it). Telemetry therefore never keeps ClickHouse or
+the collector resident. A failed send is retried and its data re-queued.
+`TelemetryStatus.buffered_samples` counts buffered resource minutes + logs,
+`last_flush_at` is the last successful flush (unix seconds), `collector_send_failed`
+is the cumulative count of records the collector's ClickHouse exporters gave up on
+(scraped from its loopback-only internal metrics; details in
+`telemetry/collector.log`, rotated at 1 MiB), and `collector_queue_size` is the
+exporter queue depth at the end of the last flush. `collector_ready` means the last
+flush succeeded. The first analysis runs one hour after enabling, then every
+`analysis_interval_hours`. Latency suggestions rank by `self_ms` (exclusive time:
+duration minus direct children, `null` when unmeasured) and collapse candidates
+that share the same slowest trace.
 
 `TelemetryStatus.exported` counts spans accepted by the collector, not a durable-storage acknowledgment. `dropped` counts daemon-side validation/queue discards and unacknowledged sends (including canceled sends). Collector exporter queues may still be retrying; dashboard operation counts reflect the actual stored rollups.

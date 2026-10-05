@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::cadence;
 use crate::cancel_signal::CancelSignal;
@@ -75,7 +75,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             continue;
         };
 
-        info!(task = %task.id, "scheduled tasks: firing due task");
+        debug!(task = %task.id, "scheduled tasks: firing due task");
         let ctx2 = ctx.clone();
         tokio::spawn(async move {
             // The guard clears the in-flight entry on drop — including on panic.

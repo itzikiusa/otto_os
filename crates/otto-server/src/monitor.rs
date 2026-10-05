@@ -439,16 +439,16 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
                 }) => {
                     let provider = match providers.get(&session_id) {
                         Some(p) => p.clone(),
-                        None => {
-                            let p = ctx
-                                .manager
-                                .get(&session_id)
-                                .await
-                                .map(|s| s.provider)
-                                .unwrap_or_default();
-                            providers.insert(session_id.clone(), p.clone());
-                            p
-                        }
+                        // A failed lookup (row not yet visible, DB busy) is
+                        // NOT cached: the old `unwrap_or_default` pinned the
+                        // empty provider on that session for its lifetime.
+                        None => match ctx.manager.get(&session_id).await {
+                            Ok(s) => {
+                                providers.insert(session_id.clone(), s.provider.clone());
+                                s.provider
+                            }
+                            Err(_) => String::new(),
+                        },
                     };
                     if let Some(ev) = crate::routes::usage::trail_to_usage(
                         &workspace_id,
@@ -459,8 +459,19 @@ pub fn spawn_usage_recorder(ctx: ServerCtx) {
                         ctx.usage.record(ev);
                     }
                 }
-                Ok(Event::SessionRemoved { session_id, .. }) => {
+                // Evict once the session can no longer emit trail rows from
+                // its live child (exited / archived / removed); a resumed
+                // session simply re-resolves on its next entry.
+                Ok(Event::SessionRemoved { session_id, .. })
+                | Ok(Event::SessionStatus {
+                    session_id,
+                    status: otto_core::domain::SessionStatus::Exited,
+                    ..
+                }) => {
                     providers.remove(&session_id);
+                }
+                Ok(Event::SessionArchiveChanged { session }) => {
+                    providers.remove(&session.id);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -866,6 +877,22 @@ impl OutputScanner for AuthScanner {
                 .map_err(|e| tracing::warn!("mid-session auth notice: {e}"));
         });
     }
+
+    /// The session's output stream closed: forget its tail and debounce mark.
+    /// Both maps were insert-only before, so every session the daemon ever ran
+    /// kept up to `TAIL_CAP` bytes (+ its id) for the process lifetime. A
+    /// respawn (same id) scans afresh; the notice's `source_key` still
+    /// de-dupes a repeat alert.
+    fn on_session_end(&self, session_id: &Id) {
+        match self.tails.lock() {
+            Ok(mut g) => g.remove(session_id),
+            Err(p) => p.into_inner().remove(session_id),
+        };
+        match self.flagged.lock() {
+            Ok(mut g) => g.remove(session_id),
+            Err(p) => p.into_inner().remove(session_id),
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,5 +1035,26 @@ mod tests {
             scan_chunk(&mut tail, b"ged in\n", REAUTH_NEEDLES, TAIL_CAP),
             Some("you are not logged in")
         );
+    }
+
+    /// Perf P2: per-session scanner state is released when the stream ends —
+    /// both the rolling tail and the debounce mark (they used to grow with
+    /// every session for the daemon's lifetime).
+    #[tokio::test]
+    async fn session_end_releases_tail_and_flag() {
+        use otto_sessions::OutputScanner;
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let scanner = super::AuthScanner::new(pool, tx);
+        let (quiet, flagged) = ("s-quiet".to_string(), "s-flagged".to_string());
+        scanner.on_output(&quiet, "claude", b"working on it, you are not log");
+        scanner.on_output(&flagged, "claude", b"Session expired. Run `claude login`");
+        assert!(scanner.tails.lock().unwrap().contains_key(&quiet));
+        assert!(scanner.flagged.lock().unwrap().contains(&flagged));
+        scanner.on_session_end(&quiet);
+        scanner.on_session_end(&flagged);
+        assert!(scanner.tails.lock().unwrap().is_empty());
+        assert!(scanner.flagged.lock().unwrap().is_empty());
     }
 }

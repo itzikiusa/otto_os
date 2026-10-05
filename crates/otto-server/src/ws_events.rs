@@ -135,16 +135,9 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                        // rest — they are dropped before the authorization check and serializing.
     let mut topics: Option<std::collections::HashSet<String>> = None;
 
-    // Role-check results cached per workspace for this connection's lifetime.
-    let mut role_cache: HashMap<Id, bool> = HashMap::new();
-    // Session owner (`created_by`) cached per session_id for this connection's
-    // lifetime. `created_by` is immutable, so one lookup per session_id is
-    // enough — this keeps the high-frequency `TrailAppended` path off the DB.
-    let mut owner_cache: HashMap<Id, Option<Id>> = HashMap::new();
-    // Workspace-Admin results cached per workspace for this connection's
-    // lifetime, like `role_cache` — a non-owner, non-root recipient used to
-    // pay an Admin role query per `session_status` / `trail_appended` (F8).
-    let mut admin_cache: HashMap<Id, bool> = HashMap::new();
+    // Per-connection authorization caches (role / session owner / admin);
+    // see `AuthCaches` for their freshness + bounds.
+    let mut caches = AuthCaches::new(std::time::Instant::now());
     // Hands the worker back while a burst of big frames drains.
     let mut pacer = crate::ws_fanout::Pacer::new();
 
@@ -156,7 +149,12 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
                     if topics.as_ref().is_some_and(|t| !t.contains(event.type_name())) {
                         continue;
                     }
-                    if !allowed(&ctx, &user, event, &mut role_cache, &mut owner_cache, &mut admin_cache).await {
+                    caches.expire(std::time::Instant::now());
+                    let ok = allowed(&ctx, &user, event, &mut caches.role, &mut caches.owner, &mut caches.admin).await;
+                    // After the check: the owner must still receive its own
+                    // `session_removed` before the entry goes.
+                    caches.forget(event);
+                    if !ok {
                         continue;
                     }
                     let Some(text) = frame.text() else { continue };
@@ -501,6 +499,58 @@ fn scope_of(event: &Event) -> Scope<'_> {
 /// Notice → everyone; workspace events → members (viewer+); session-family
 /// events → the session's owner, a workspace Admin, or root (after the same
 /// viewer-membership gate).
+/// How long a cached workspace role / Admin answer is trusted. There is no
+/// membership-change event, so a demoted (or removed) member kept receiving a
+/// workspace's events for the socket's whole lifetime; now within this window.
+const AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
+/// Session owners cached per socket before the map is reset (a long-lived
+/// socket otherwise remembered every session it ever saw an event for).
+const OWNER_CACHE_CAP: usize = 4096;
+
+/// The per-connection authorization caches `allowed` reads.
+struct AuthCaches {
+    /// Workspace viewer-membership results.
+    role: HashMap<Id, bool>,
+    /// Session owner (`created_by`, immutable) per session_id — keeps the
+    /// high-frequency `TrailAppended` path off the DB.
+    owner: HashMap<Id, Option<Id>>,
+    /// Workspace-Admin results — a non-owner, non-root recipient used to pay
+    /// an Admin role query per `session_status` / `trail_appended` (F8).
+    admin: HashMap<Id, bool>,
+    refreshed: std::time::Instant,
+}
+
+impl AuthCaches {
+    fn new(now: std::time::Instant) -> Self {
+        Self {
+            role: HashMap::new(),
+            owner: HashMap::new(),
+            admin: HashMap::new(),
+            refreshed: now,
+        }
+    }
+
+    /// Drop role/Admin answers older than [`AUTH_CACHE_TTL`] so a membership
+    /// change takes effect on open sockets, and bound the owner map.
+    fn expire(&mut self, now: std::time::Instant) {
+        if now.saturating_duration_since(self.refreshed) >= AUTH_CACHE_TTL {
+            self.role.clear();
+            self.admin.clear();
+            self.refreshed = now;
+        }
+        if self.owner.len() >= OWNER_CACHE_CAP {
+            self.owner.clear();
+        }
+    }
+
+    /// Forget a removed session's owner (it can emit nothing further).
+    fn forget(&mut self, event: &Event) {
+        if let Event::SessionRemoved { session_id, .. } = event {
+            self.owner.remove(session_id);
+        }
+    }
+}
+
 async fn allowed(
     ctx: &ServerCtx,
     user: &User,
@@ -1153,5 +1203,32 @@ mod tests {
                 "{ev:?}"
             );
         }
+    }
+
+    /// Perf P3 / security: role + Admin answers expire after the TTL (a
+    /// demoted member stops receiving events), a removed session's owner is
+    /// evicted, and the owner map stays bounded.
+    #[test]
+    fn auth_caches_expire_roles_and_evict_removed_sessions() {
+        let t0 = std::time::Instant::now();
+        let mut c = AuthCaches::new(t0);
+        c.role.insert("w".into(), true);
+        c.admin.insert("w".into(), true);
+        c.owner.insert("s1".into(), Some("u".into()));
+        c.owner.insert("s2".into(), Some("u".into()));
+        c.expire(t0 + Duration::from_secs(5));
+        assert!(c.role.contains_key("w") && c.admin.contains_key("w"));
+        c.expire(t0 + AUTH_CACHE_TTL);
+        assert!(c.role.is_empty() && c.admin.is_empty());
+        c.forget(&Event::SessionRemoved {
+            session_id: "s1".into(),
+            workspace_id: "w".into(),
+        });
+        assert!(!c.owner.contains_key("s1") && c.owner.contains_key("s2"));
+        for i in 0..OWNER_CACHE_CAP {
+            c.owner.insert(format!("x{i}"), None);
+        }
+        c.expire(t0 + AUTH_CACHE_TTL);
+        assert!(c.owner.is_empty(), "owner cache is bounded");
     }
 }

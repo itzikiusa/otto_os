@@ -45,6 +45,8 @@ test('open tabs fetch immediately, selected first, with at most two requests', a
   f.calls[1].result.resolve(status); f.calls[2].result.resolve(status); await flush();
   assert.equal(f.git.refsRev.three, 1);
   await f.advance(30_000);
+  assert.equal(f.calls.length, 3, 'the selected repo refetches every 60 s, not 30 s');
+  await f.advance(30_000);
   assert.deepEqual(f.calls.map((c) => c.id), ['three', 'one', 'two', 'three']);
   f.calls[3].result.resolve(status); await flush();
   await f.advance(90_000);
@@ -88,7 +90,7 @@ test('failure backs off despite focus events; manual retry surfaces errors and c
   f.calls[1].result.reject(new Error('auth failed'));
   await assert.rejects(failure, /auth failed/); await flush();
   const manual = f.git.fetchRepo('one'); f.calls[2].result.resolve(status); await manual; await flush();
-  await f.advance(30_000);
+  await f.advance(60_000);
   assert.equal(f.calls.length, 4);
   f.git.setAutoFetch(false); f.calls[3].result.resolve(status); await flush();
   await f.advance(600_000); assert.equal(f.calls.length, 4);
@@ -103,7 +105,7 @@ test('restart during an in-flight round does not overlap or revive the stopped t
   assert.equal(f.calls.length, 1);
   f.calls[0].result.resolve(status); await flush();
   assert.equal(f.timers.size, 1);
-  await f.advance(30_000);
+  await f.advance(60_000);
   assert.equal(f.calls.length, 2);
   f.git.stopAutoFetch(); f.calls[1].result.resolve(status); await flush();
   assert.equal(f.timers.size, 0);
@@ -158,4 +160,17 @@ test('manual caller promotes a queued background fetch and retains its request a
   assert.deepEqual(f.calls.map((c) => c.id), ['manual-one', 'manual-two', 'queued']);
   f.calls[1].result.resolve(status); f.calls[2].result.resolve(status);
   await Promise.all([second, explicit]);
+});
+
+test('background tabs unused for 15 minutes stop fetching; the selected tab and a reactivated tab continue', async () => {
+  const f = fixture(); f.git.openRepoIds = ['one', 'two']; f.git.activeRepoId = 'one';
+  f.git.startAutoFetch(); await f.advance(0);
+  f.calls[0].result.resolve(status); f.calls[1].result.resolve(status); await flush();
+  await f.advance(16 * 60_000);
+  assert.deepEqual(f.calls.slice(2).map((c) => c.id), ['one'], 'idle background tab is skipped');
+  f.calls[2].result.resolve(status); await flush();
+  f.git.activateRepoTab('two'); await f.advance(0);
+  assert.deepEqual(f.calls.slice(3).map((c) => c.id), ['two']);
+  f.calls[3].result.resolve(status); await flush();
+  f.git.stopAutoFetch();
 });

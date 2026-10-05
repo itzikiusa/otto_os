@@ -507,6 +507,48 @@ pub(crate) fn remote_lock(id: &Id) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// When each repo's last SUCCESSFUL fetch finished — the single-flight
+/// marker [`fetch_coalesced`] compares a caller's arrival against.
+fn fetch_done() -> &'static StdMutex<HashMap<String, std::time::Instant>> {
+    static DONE: OnceLock<StdMutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
+    DONE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// Single-flight `git fetch` per repo. Callers serialise on the repo's
+/// remote lock; one that arrived while another fetch of the same repo was
+/// running reuses that fetch's refs instead of re-running it, so N windows
+/// (or the auto-fetch sweep racing a manual click) cost ONE network round,
+/// not N back-to-back ones (telemetry: `POST /repos/{id}/fetch` ~6/min at
+/// p95 3 s). Only a success is shared — after a failure the next waiter runs
+/// its own fetch (it may carry a different, valid token). Returns the held
+/// lock guard and whether this caller actually ran the fetch.
+pub(crate) async fn fetch_coalesced<'a, F, Fut>(
+    id: &Id,
+    lock: &'a tokio::sync::Mutex<()>,
+    fetch: F,
+) -> Result<(tokio::sync::MutexGuard<'a, ()>, bool)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let arrived = std::time::Instant::now();
+    let guard = lock.lock().await;
+    let shared = fetch_done()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(id.as_str())
+        .is_some_and(|done| *done > arrived);
+    if shared {
+        return Ok((guard, false));
+    }
+    fetch().await?;
+    fetch_done()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(id.to_string(), std::time::Instant::now());
+    Ok((guard, true))
+}
+
 /// Forget a deleted repo's locks (both maps otherwise only ever grow). An
 /// in-flight holder keeps its own `Arc`, so dropping the entry is safe.
 fn forget_repo_locks(id: &Id) {
@@ -515,6 +557,10 @@ fn forget_repo_locks(id: &Id) {
         .unwrap_or_else(|p| p.into_inner())
         .remove(id.as_str());
     remote_locks()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(id.as_str());
+    fetch_done()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .remove(id.as_str());
@@ -1370,9 +1416,10 @@ async fn repo_fetch<S: GitCtx>(
     let token = optional_token(&s, &user, &repo).await?;
     // Fetch and push both rewrite the tracking refs: one at a time per repo,
     // so neither dies on "cannot lock ref". The worktree lock is not needed.
+    // Concurrent callers share one fetch (see `fetch_coalesced`).
     let lock = remote_lock(&id);
-    let _g = lock.lock().await;
-    git.fetch(token).await?;
+    let (_g, _ran) =
+        fetch_coalesced(&id, &lock, || async { git.fetch(token).await.map(drop) }).await?;
     status_after_release(&git, _g).await
 }
 
@@ -3857,5 +3904,51 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Fetches queued behind a running one reuse its result; a later fetch
+    /// (or one after a failure) runs again.
+    #[tokio::test]
+    async fn concurrent_fetches_of_one_repo_share_a_single_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let id: Id = "repo-fetch-single-flight".into();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let spawn = |delay: u64| {
+            let (id, lock, runs) = (id.clone(), lock.clone(), runs.clone());
+            tokio::spawn(async move {
+                let (_g, ran) = fetch_coalesced(&id, &lock, || async {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+                ran
+            })
+        };
+        let first = spawn(80);
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let joined: Vec<_> = (0..3).map(|_| spawn(0)).collect();
+        assert!(first.await.unwrap());
+        for j in joined {
+            assert!(!j.await.unwrap(), "a waiter must reuse the running fetch");
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        // Arriving after it finished: a fresh fetch.
+        assert!(spawn(0).await.unwrap());
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
+        // A failure is never shared with the next caller.
+        let err = fetch_coalesced(&id, &lock, || async {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            Err(Error::Internal("offline".into()))
+        });
+        let (r, after) = tokio::join!(err, async {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            spawn(0).await.unwrap()
+        });
+        assert!(r.is_err());
+        assert!(after);
+        forget_repo_locks(&id);
     }
 }
