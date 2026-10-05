@@ -72,15 +72,19 @@ test('every section page titles itself from the registry', () => {
   for (const s of SETTINGS_SECTIONS) {
     // The component mapped to this id in Settings.svelte's VIEWS table…
     const key = s.id.includes('-') ? `'${s.id}'` : s.id;
-    const m = settings.match(new RegExp(`\\n\\s*${key}: (\\w+),`));
+    // Sections load lazily (`id: lazyComponent(() => import('./X.svelte'))`);
+    // the default one wraps a static import (`{ default: Appearance }`).
+    const m = settings.match(new RegExp(`\\n\\s*${key}: lazyComponent\\((.*)\\),\\n`));
     assert.ok(m, `no view mapped for ${s.id}`);
-    const imp = settings.match(new RegExp(`import ${m[1]} from '(.+?)';`));
-    assert.ok(imp, `no import for ${m[1]}`);
-    const src = readFileSync(new URL(imp[1], new URL('settings/', base)), 'utf8');
+    let path = m[1].match(/import\('(.+?)'\)/)?.[1];
+    const local = m[1].match(/default: (\w+)/)?.[1];
+    if (!path && local) path = settings.match(new RegExp(`import ${local} from '(.+?)';`))?.[1];
+    assert.ok(path, `no import for ${s.id}`);
+    const src = readFileSync(new URL(path, new URL('settings/', base)), 'utf8');
     // …renders a PageHeader whose title is the registry label.
     assert.ok(
       src.includes(`title={sectionLabel('${s.id}')}`),
-      `${m[1]} does not title its PageHeader with sectionLabel('${s.id}')`,
+      `${path} does not title its PageHeader with sectionLabel('${s.id}')`,
     );
   }
   assert.equal(sectionLabel('tokens'), 'Personal access tokens');
