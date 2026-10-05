@@ -258,7 +258,24 @@ impl LocalGit {
             .await
             .ok_or_else(|| Error::NotFound("Git directory unavailable".into()))?;
         let active = gd.join("BISECT_START").exists();
-        let current_sha = self.commit_sha("HEAD").await?;
+        let current_sha = match self.commit_sha("HEAD").await {
+            Ok(sha) => sha,
+            // An unborn HEAD (a repo with no commits yet) cannot be bisecting:
+            // report "inactive" instead of failing GET /bisect.
+            Err(_) if !active => {
+                return Ok(BisectState {
+                    active: false,
+                    current_sha: String::new(),
+                    current_subject: String::new(),
+                    finished: false,
+                    first_bad: None,
+                    remaining: None,
+                    log: String::new(),
+                    output: String::new(),
+                });
+            }
+            Err(e) => return Err(e),
+        };
         let current_subject = self
             .run_read(&["show", "-s", "--format=%s", "HEAD"])
             .await?
@@ -530,6 +547,16 @@ mod tests {
         }
         let local = LocalGit::new(dir.path());
         (dir, local)
+    }
+    /// S2-22: GET /bisect on a repo with no commits reports inactive.
+    #[tokio::test]
+    async fn bisect_state_on_unborn_head_is_inactive() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-b", "main"]);
+        let state = LocalGit::new(dir.path()).bisect_state().await.unwrap();
+        assert!(!state.active);
+        assert!(!state.finished);
+        assert!(state.current_sha.is_empty());
     }
     #[tokio::test]
     async fn reflog_recovery_branch_keeps_current_head_and_worktree() {

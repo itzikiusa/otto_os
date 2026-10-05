@@ -1262,3 +1262,121 @@ mod cached_reads {
         assert_eq!(posts().await, 3, "the resolve dropped the memo");
     }
 }
+
+// ---------------------------------------------------------------------------
+// S15-10: merges pinned to the head the user reviewed
+// ---------------------------------------------------------------------------
+
+mod merge_pin {
+    use super::*;
+    use crate::providers::bitbucket::Bitbucket;
+    use crate::providers::github::Github;
+    use crate::providers::gitlab::Gitlab;
+    use otto_core::api::MergeStrategy;
+    use otto_core::Error;
+    use wiremock::matchers::body_partial_json;
+
+    #[test]
+    fn check_head_is_prefix_aware_with_a_floor() {
+        use crate::providers::check_head;
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        assert!(check_head(Some(full), full).is_ok());
+        assert!(
+            check_head(Some("0123456789ab"), full).is_ok(),
+            "bitbucket short"
+        );
+        assert!(
+            check_head(Some(full), "0123456789AB").is_ok(),
+            "case-insensitive"
+        );
+        assert!(matches!(
+            check_head(Some("fedcba987654"), full),
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(check_head(None, full), Err(Error::Conflict(_))));
+        assert!(
+            check_head(Some(full), "").is_err(),
+            "an empty pin never matches"
+        );
+        assert!(
+            check_head(Some(full), "0123").is_err(),
+            "below the 7-char floor"
+        );
+    }
+
+    /// GitHub gets the pin as the merge body's `sha`; its 409 "Head branch was
+    /// modified" surfaces as the shared "PR changed — re-check" conflict.
+    #[tokio::test]
+    async fn github_forwards_sha_and_maps_head_moved() {
+        let server = MockServer::start().await;
+        let gh = Github::with_base("tok".into(), server.uri());
+        Mock::given(method("PUT"))
+            .and(path("/repos/acme/app/pulls/7/merge"))
+            .and(body_partial_json(
+                json!({"merge_method": "squash", "sha": "abc1234def"}),
+            ))
+            .respond_with(ResponseTemplate::new(409).set_body_json(
+                json!({"message": "Head branch was modified. Review and try the merge again."}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = gh
+            .merge_pinned(&rr(), 7, MergeStrategy::Squash, false, Some("abc1234def"))
+            .await
+            .unwrap_err();
+        match err {
+            Error::Conflict(m) => assert!(m.contains("PR changed"), "{m}"),
+            other => panic!("expected 409, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gitlab_forwards_sha_in_the_merge_body() {
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5/merge$"))
+            .and(body_partial_json(json!({"sha": "abc1234def"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        gl.merge_pinned(&rr(), 5, MergeStrategy::Merge, false, Some("abc1234def"))
+            .await
+            .unwrap();
+    }
+
+    /// Bitbucket has no forge-side pin: a moved head (abbreviated hash) is
+    /// refused BEFORE the merge call; a matching prefix merges.
+    #[tokio::test]
+    async fn bitbucket_compares_the_abbreviated_head_before_merging() {
+        for (head, merges) in [("fedcba987654", false), ("abc1234def01", true)] {
+            let server = MockServer::start().await;
+            let bb = Bitbucket::with_base("user".into(), "tok".into(), server.uri());
+            Mock::given(method("GET"))
+                .and(path("/repositories/acme/app/pullrequests/9"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"id": 9, "source": {"commit": {"hash": head}}})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/repositories/acme/app/pullrequests/9/merge"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+                .expect(u64::from(merges))
+                .mount(&server)
+                .await;
+            let full = "abc1234def0123456789abcdef0123456789abcd";
+            let res = bb
+                .merge_pinned(&rr(), 9, MergeStrategy::Merge, false, Some(full))
+                .await;
+            if merges {
+                res.unwrap();
+            } else {
+                assert!(matches!(res, Err(Error::Conflict(_))), "{res:?}");
+            }
+        }
+    }
+}

@@ -158,6 +158,27 @@ pub trait GitProvider: Send + Sync {
         strategy: MergeStrategy,
         delete_source_branch: bool,
     ) -> Result<()>;
+    /// [`Self::merge`] pinned to the head the caller reviewed: with
+    /// `expected_head_sha` set, a PR whose head moved since (an agent or a
+    /// teammate pushed while the merge dialog was open) is refused with a 409
+    /// "PR changed — re-check" instead of merging unreviewed commits.
+    /// GitHub/GitLab forward the sha to the forge (an atomic check);
+    /// this default reads the PR first and compares (prefix-aware — Bitbucket
+    /// abbreviates hashes).
+    async fn merge_pinned(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        expected_head_sha: Option<&str>,
+    ) -> Result<()> {
+        if let Some(want) = expected_head_sha {
+            let pr = self.get_pr(r, number).await?;
+            check_head(pr.summary.head_sha.as_deref(), want)?;
+        }
+        self.merge(r, number, strategy, delete_source_branch).await
+    }
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()>;
     async fn request_changes(&self, r: &RemoteRef, number: u64, body: Option<&str>) -> Result<()>;
     async fn list_pr_commits(&self, r: &RemoteRef, number: u64) -> Result<Vec<PrCommit>>;
@@ -316,6 +337,44 @@ pub(crate) fn vstr(v: &Value, path: &[&str]) -> String {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string()
+}
+
+/// Refuse a merge whose PR head is no longer `expected` (S15-10). Hashes are
+/// compared case-insensitively and by PREFIX (Bitbucket reports 12-char
+/// abbreviations), with a 7-char floor so an empty/garbage value never
+/// "matches". An unknown head is refused too — the pin can't be honoured.
+pub(crate) fn check_head(actual: Option<&str>, expected: &str) -> Result<()> {
+    let want = expected.trim().to_ascii_lowercase();
+    let have = actual.unwrap_or("").trim().to_ascii_lowercase();
+    let ok =
+        want.len() >= 7 && have.len() >= 7 && (have.starts_with(&want) || want.starts_with(&have));
+    if ok {
+        return Ok(());
+    }
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    Err(otto_core::Error::Conflict(format!(
+        "PR changed — re-check: its head is now {} (you reviewed {})",
+        if have.is_empty() {
+            "unknown".to_string()
+        } else {
+            short(&have)
+        },
+        short(&want)
+    )))
+}
+
+/// Re-word a forge's own "head moved" refusal of a pinned merge (GitHub 409
+/// "Head branch was modified", GitLab 409 "SHA does not match HEAD") as the
+/// same "PR changed — re-check" conflict [`check_head`] returns.
+pub(crate) fn pinned_merge_err(e: otto_core::Error) -> otto_core::Error {
+    match e {
+        otto_core::Error::Conflict(m)
+            if m.contains("Head branch was modified") || m.contains("SHA does not match") =>
+        {
+            otto_core::Error::Conflict(format!("PR changed — re-check ({m})"))
+        }
+        other => other,
+    }
 }
 
 pub(crate) fn vstr_opt(v: &Value, path: &[&str]) -> Option<String> {

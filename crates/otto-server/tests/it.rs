@@ -44,12 +44,18 @@ mod policy_coverage;
 mod provider_resolve;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
+#[path = "review_agent_retry.rs"]
+mod review_agent_retry;
+#[path = "review_comment_states.rs"]
+mod review_comment_states;
 #[path = "rooms_api.rs"]
 mod rooms_api;
 #[path = "route_inventory.rs"]
 mod route_inventory;
 #[path = "router_mount.rs"]
 mod router_mount;
+#[path = "run_repo_scope.rs"]
+mod run_repo_scope;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
 #[path = "share_api.rs"]

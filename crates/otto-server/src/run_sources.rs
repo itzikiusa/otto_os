@@ -22,8 +22,27 @@ use crate::state::ServerCtx;
 
 const BODY_CAP: usize = 12_000;
 
-/// Resolve the registered git repo the run will work in.
+/// Resolve the registered git repo the run will work in. Whatever picked it
+/// (an explicit `repo_id`, a finding id, …), the repo MUST belong to the run's
+/// workspace: launch only requires Editor on THAT workspace, so a repo id from
+/// another workspace would hand its checkout to an agent the caller has no
+/// role over. Out-of-workspace ⇒ `NotFound` (no existence leak).
 pub(crate) async fn resolve_repo(
+    ctx: &ServerCtx,
+    workspace_id: &Id,
+    explicit_repo_id: Option<&str>,
+    source_kind: SourceKind,
+    source_ref: &str,
+) -> Result<Repo> {
+    let repo =
+        resolve_repo_any(ctx, workspace_id, explicit_repo_id, source_kind, source_ref).await?;
+    if repo.workspace_id != *workspace_id {
+        return Err(Error::NotFound("repo".into()));
+    }
+    Ok(repo)
+}
+
+async fn resolve_repo_any(
     ctx: &ServerCtx,
     workspace_id: &Id,
     explicit_repo_id: Option<&str>,

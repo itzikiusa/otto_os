@@ -453,6 +453,7 @@ impl ReviewFindingsRepo {
             seen_fingerprints,
             run_id,
             None,
+            None,
         )
         .await
     }
@@ -464,6 +465,13 @@ impl ReviewFindingsRepo {
     /// whose every run reviews the same change, and WRONG for local reviews:
     /// those all share the `pr_number = 0` sentinel, so an unscoped call from
     /// one branch's review resolved every open local finding in the repo.
+    ///
+    /// `branch` narrows further to findings last raised by a review of THAT
+    /// source branch (`review_run_context`): two branches editing the same
+    /// file must not close each other's findings — branch B's review never
+    /// contained branch A's code. Findings from reviews with no recorded
+    /// branch are then out of scope (left open, never wrongly resolved).
+    #[allow(clippy::too_many_arguments)]
     pub async fn resolve_absent_scoped(
         &self,
         workspace_id: &str,
@@ -472,6 +480,7 @@ impl ReviewFindingsRepo {
         seen_fingerprints: &[&str],
         run_id: &str,
         paths: Option<&[&str]>,
+        branch: Option<&str>,
     ) -> Result<u64> {
         if paths.is_some_and(|p| p.is_empty()) {
             return Ok(0);
@@ -494,6 +503,12 @@ impl ReviewFindingsRepo {
         if let Some(p) = paths {
             sql.push_str(&format!(" AND path IN ({})", marks(p.len())));
         }
+        if branch.is_some() {
+            sql.push_str(
+                " AND review_id IN \
+                 (SELECT review_id FROM review_run_context WHERE source_branch = ?)",
+            );
+        }
         let now = fmt(Utc::now());
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .bind(run_id)
@@ -506,6 +521,9 @@ impl ReviewFindingsRepo {
         }
         for p in paths.unwrap_or(&[]) {
             q = q.bind(*p);
+        }
+        if let Some(b) = branch {
+            q = q.bind(b);
         }
         let res = q
             .execute(&self.pool)
@@ -983,7 +1001,7 @@ mod tests {
         let scope: &[&str] = &["src/a.rs"];
         let empty: &[&str] = &[];
         let n = repo
-            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run2", Some(scope))
+            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run2", Some(scope), None)
             .await
             .unwrap();
         assert_eq!(n, 1);
@@ -993,10 +1011,64 @@ mod tests {
 
         // An empty scope resolves nothing.
         let n = repo
-            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run3", Some(empty))
+            .resolve_absent_scoped("ws1", "repo1", 0, empty, "run3", Some(empty), None)
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// S2-05: two local branches editing the same file never resolve each
+    /// other's findings — only the reviewed branch's own absent findings go.
+    #[tokio::test]
+    async fn branch_scoped_resolution_leaves_other_branches_findings_open() {
+        let pool = mem_pool().await;
+        let repo = ReviewFindingsRepo::new(pool.clone());
+        let reviews = crate::ReviewsRepo::new(pool);
+        let ctx = |b: &str| crate::ReviewRunContext {
+            source_branch: Some(b.into()),
+            ..Default::default()
+        };
+        reviews
+            .set_run_context(&"rev-A".to_string(), &ctx("feature/a"))
+            .await
+            .unwrap();
+        reviews
+            .set_run_context(&"rev-B1".to_string(), &ctx("feature/b"))
+            .await
+            .unwrap();
+        let mut on_a = sample("fp-a", "high");
+        on_a.pr_number = None;
+        on_a.path = Some("src/foo.rs");
+        on_a.review_id = "rev-A";
+        let mut on_b = sample("fp-b", "high");
+        on_b.pr_number = None;
+        on_b.path = Some("src/foo.rs");
+        on_b.review_id = "rev-B1";
+        let (a, _) = repo.upsert(&on_a).await.unwrap();
+        let (b, _) = repo.upsert(&on_b).await.unwrap();
+
+        // A second review of feature/b touches foo.rs and sees nothing.
+        let scope: &[&str] = &["src/foo.rs"];
+        let empty: &[&str] = &[];
+        let n = repo
+            .resolve_absent_scoped(
+                "ws1",
+                "repo1",
+                0,
+                empty,
+                "rev-B2",
+                Some(scope),
+                Some("feature/b"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(repo.get_full(&b.id).await.unwrap().state, "resolved");
+        assert_eq!(
+            repo.get_full(&a.id).await.unwrap().state,
+            "open",
+            "branch A's finding is not B's to resolve"
+        );
     }
 
     #[test]
