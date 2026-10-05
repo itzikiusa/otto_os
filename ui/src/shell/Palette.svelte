@@ -466,7 +466,7 @@
       {#if mode === 'commands'}
         <div class="pal-input-row">
           <Icon name="search" size={14} />
-          <input
+          <input dir="ltr"
             bind:this={inputEl}
             bind:value={query}
             placeholder="Type a command…"
@@ -565,7 +565,7 @@
         </div>
       {:else}
         <div class="pal-english">
-          <textarea
+          <textarea dir="auto"
             aria-label="Describe what you want Otto to do"
             bind:this={textareaEl}
             bind:value={englishText}

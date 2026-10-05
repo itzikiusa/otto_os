@@ -323,7 +323,7 @@
     <div class="cp-footer">
       {#if attachOpen}
         <div class="attach-picker">
-          <input
+          <input dir="ltr"
             class="attach-search"
             placeholder="Filter scenes to attach…"
             aria-label="Filter scenes to attach"

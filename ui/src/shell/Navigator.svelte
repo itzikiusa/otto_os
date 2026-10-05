@@ -791,7 +791,7 @@
     {#if !ui.sidebarEditMode}
       <div class="nav-search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           class="nav-search-input"
           placeholder="Filter sessions…"
           aria-label="Filter sessions"
@@ -942,7 +942,7 @@
       {#if showWsFilter}
         <div class="nav-search ws-filter">
           <Icon name="search" size={12} />
-          <input
+          <input dir="ltr"
             class="nav-search-input"
             placeholder="Filter workspaces…"
             aria-label="Filter workspaces"
@@ -1513,7 +1513,7 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <input
+      <input dir="auto"
         class="nav-rename"
         bind:value={draft}
         use:focusOnMount

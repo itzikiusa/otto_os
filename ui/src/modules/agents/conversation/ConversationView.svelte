@@ -763,7 +763,7 @@
     {#if searchOpen}
       <div class="search" class:wide={narrowHead} role="search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="auto"
           bind:this={searchEl}
           bind:value={query}
           class="search-in"

@@ -346,7 +346,7 @@
       </div>
       {#if streamKind === 'websocket'}
         <div class="ws-send">
-          <input class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
+          <input dir="auto" class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
             bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
           <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>
@@ -463,7 +463,7 @@
           {#if parsed !== undefined && (bodyView === 'pretty' || bodyView === 'tree')}
             <label class="filter">
               <Icon name="search" size={12} />
-              <input
+              <input dir="ltr"
                 class="mono"
                 placeholder={bodyView === 'tree' ? 'Find a key or value…' : '$.data[0].id'}
                 aria-label={bodyView === 'tree' ? 'Find in the response' : 'JSONPath filter'}

@@ -122,7 +122,7 @@
       <div class="ov-bar">
         <label class="ov-filter input-group">
           <Icon name="search" size={13} />
-          <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
+          <input dir="ltr" type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
         </label>
         {#if filter.trim()}<span class="dim">{visible.length} of {aws.accounts.length}</span>{/if}
       </div>

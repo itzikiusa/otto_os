@@ -589,7 +589,7 @@
 {#snippet filterBox()}
   <div class="filter">
     <Icon name="search" size={12} />
-    <input bind:this={filterEl} class="filter-in" placeholder="Filter rows…" bind:value={k8s.filter} aria-label="Filter rows" aria-keyshortcuts="/" title="Filter rows (/)" data-testid="k8s-filter" />
+    <input dir="ltr" bind:this={filterEl} class="filter-in" placeholder="Filter rows…" bind:value={k8s.filter} aria-label="Filter rows" aria-keyshortcuts="/" title="Filter rows (/)" data-testid="k8s-filter" />
     {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
   </div>
 {/snippet}

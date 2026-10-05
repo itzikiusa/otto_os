@@ -177,7 +177,7 @@
     <div class="ab">
       <label class="ab-row">
         <span class="ab-label">Collection</span>
-        <input class="input mono ab-coll" bind:value={coll} placeholder="collection" spellcheck="false" />
+        <input dir="ltr" class="input mono ab-coll" bind:value={coll} placeholder="collection" spellcheck="false" />
         <span class="ab-hint">db.<strong class="mono">{coll.trim() || '…'}</strong>.aggregate([ … ])</span>
       </label>
 
@@ -196,7 +196,7 @@
               <button class="icon-btn" title="Move down" aria-label="Move stage {i + 1} down" disabled={i === stages.length - 1} onclick={() => move(i, 1)}><Icon name="arrowDown" size={12} /></button>
               <button class="icon-btn" title="Remove stage" aria-label="Remove stage {i + 1}" onclick={() => remove(i)}><Icon name="trash" size={12} /></button>
             </div>
-            <textarea class="input mono ab-body" rows={s.op === '$limit' || s.op === '$skip' || s.op === '$count' || s.op === '$unwind' ? 1 : 3} bind:value={s.body} spellcheck="false" aria-label="Stage {i + 1} body"></textarea>
+            <textarea dir="ltr" class="input mono ab-body" rows={s.op === '$limit' || s.op === '$skip' || s.op === '$count' || s.op === '$unwind' ? 1 : 3} bind:value={s.body} spellcheck="false" aria-label="Stage {i + 1} body"></textarea>
           </li>
         {/each}
       </ol>

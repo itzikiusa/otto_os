@@ -77,7 +77,7 @@
     {#if readonly}
       <p class="vq" class:big={group === 'voice'}>{prose.summary || '—'}</p>
     {:else}
-      <textarea
+      <textarea dir="auto"
         class="vq input"
         class:big={group === 'voice'}
         rows={group === 'voice' ? 1 : 2}
@@ -98,11 +98,11 @@
         <div class="ddrow" role="row">
           <span class="cell do" role="cell">
             <Icon name="check" size={12} />
-            <input class="line" value={prose.do?.[i] ?? ''} oninput={(e) => setLine('do', i, e.currentTarget.value)} disabled={readonly} placeholder={c.doPh} aria-label="Do example {i + 1}" maxlength="2000" />
+            <input dir="auto" class="line" value={prose.do?.[i] ?? ''} oninput={(e) => setLine('do', i, e.currentTarget.value)} disabled={readonly} placeholder={c.doPh} aria-label="Do example {i + 1}" maxlength="2000" />
           </span>
           <span class="cell dont" role="cell">
             <Icon name="x" size={12} />
-            <input class="line" value={prose.dont?.[i] ?? ''} oninput={(e) => setLine('dont', i, e.currentTarget.value)} disabled={readonly} placeholder={c.dontPh} aria-label="Don’t example {i + 1}" maxlength="2000" />
+            <input dir="auto" class="line" value={prose.dont?.[i] ?? ''} oninput={(e) => setLine('dont', i, e.currentTarget.value)} disabled={readonly} placeholder={c.dontPh} aria-label="Don’t example {i + 1}" maxlength="2000" />
             {#if !readonly}
               <button class="icon-btn" aria-label="Remove example {i + 1}" title="Remove" onclick={() => removePair(i)}><Icon name="trash" size={12} /></button>
             {/if}

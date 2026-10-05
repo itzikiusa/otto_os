@@ -734,7 +734,7 @@
           Fields <span class="count">{mongoFields.length}</span>
           <span class="hint dim">sampled</span>
           <span class="grow"></span>
-          <input
+          <input dir="auto"
             class="ib-search"
             type="search"
             bind:value={fieldQuery}
@@ -880,7 +880,7 @@
                 Fields
                 <span class="ib-count">{idxCols.length} selected</span>
                 <span class="grow"></span>
-                <input
+                <input dir="auto"
                   class="ib-search"
                   type="search"
                   bind:value={idxFieldQuery}
@@ -958,7 +958,7 @@
                       <option value="in">in</option>
                     </select>
                     {#if cond.op === 'in'}
-                      <input
+                      <input dir="ltr"
                         class="mono"
                         type="text"
                         bind:value={cond.values}
@@ -1012,7 +1012,7 @@
 
             <label class="ib-name">
               Name
-              <input
+              <input dir="ltr"
                 class="mono"
                 type="text"
                 bind:value={idxName}

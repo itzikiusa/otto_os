@@ -995,7 +995,7 @@
         </div>
         {#if codeView && isText}
           <!-- Code view: the raw source, autosaved like every other editor. -->
-          <textarea class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
+          <textarea dir="ltr" class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
         {/if}
       </div>
 

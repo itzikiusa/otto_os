@@ -117,11 +117,11 @@
   <div class="grid2">
     <div class="field">
       <label for="ag-name">Name</label>
-      <input id="ag-name" class="input" bind:value={name} />
+      <input dir="auto" id="ag-name" class="input" bind:value={name} />
     </div>
     <div class="field">
       <label for="ag-title">Title / role</label>
-      <input id="ag-title" class="input" bind:value={title} placeholder="e.g. CTO" />
+      <input dir="auto" id="ag-title" class="input" bind:value={title} placeholder="e.g. CTO" />
     </div>
     <div class="field">
       <label for="ag-provider">Provider</label>
@@ -142,27 +142,27 @@
     </div>
     <div class="field">
       <label for="ag-avatar">Avatar (emoji)</label>
-      <input id="ag-avatar" class="input" bind:value={avatar} maxlength="4" />
+      <input dir="auto" id="ag-avatar" class="input" bind:value={avatar} maxlength="4" />
     </div>
     <div class="field">
       <label for="ag-spec">Specialization</label>
-      <input id="ag-spec" class="input" bind:value={specialization} />
+      <input dir="auto" id="ag-spec" class="input" bind:value={specialization} />
     </div>
   </div>
 
   <div class="field">
     <label for="ag-soul">Soul (background + traits)</label>
-    <textarea id="ag-soul" class="input" rows="3" bind:value={soulMd}></textarea>
+    <textarea dir="auto" id="ag-soul" class="input" rows="3" bind:value={soulMd}></textarea>
   </div>
   <div class="field">
     <label for="ag-scope">Scope (what they own)</label>
-    <textarea id="ag-scope" class="input" rows="2" bind:value={scopeMd}></textarea>
+    <textarea dir="auto" id="ag-scope" class="input" rows="2" bind:value={scopeMd}></textarea>
   </div>
 
   <div class="field">
     <label for="ag-skill">Skills (must-use toggle)</label>
     <div class="skill-add">
-      <input
+      <input dir="auto"
         id="ag-skill"
         class="input grow"
         placeholder="skill name…"
@@ -227,7 +227,7 @@
           </select>
         {/if}
       </div>
-      <textarea class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
+      <textarea dir="auto" class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
     {/if}
   </div>
 

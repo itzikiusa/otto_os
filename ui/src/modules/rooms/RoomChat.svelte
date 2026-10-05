@@ -20,7 +20,7 @@
   </div>
   <form onsubmit={(event) => { event.preventDefault(); submit(); }}>
     <label for="room-message">Message everyone</label>
-    <textarea id="room-message" bind:value={draft} rows="3" placeholder={connected ? 'Write a message…' : 'Reconnecting — your draft is saved here'}></textarea>
+    <textarea dir="auto" id="room-message" bind:value={draft} rows="3" placeholder={connected ? 'Write a message…' : 'Reconnecting — your draft is saved here'}></textarea>
     <div class="send-row"><span class:too-long={bytes > 4096}>{bytes > 4096 ? 'Message exceeds 4 KiB' : ''}</span>
       {#if pending}<button class="btn" type="button" disabled={!connected} onclick={() => pending && send({type: 'chat', ...pending})}>Retry message</button>
       {:else}<button class="btn" disabled={!connected || !draft.trim() || bytes > 4096}>Send</button>{/if}

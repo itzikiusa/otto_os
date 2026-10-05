@@ -29,7 +29,7 @@
 {#if editing}
   <form onsubmit={(e) => {e.preventDefault(); void apply();}}>
     {#each PROPERTY_FIELDS as key (key)}
-      <label>{key}<input aria-label={`Property ${key}`} bind:value={values[key]} placeholder={key === 'tags' || key === 'aliases' ? 'Comma-separated values' : ''} /></label>
+      <label>{key}<input dir="auto" aria-label={`Property ${key}`} bind:value={values[key]} placeholder={key === 'tags' || key === 'aliases' ? 'Comma-separated values' : ''} /></label>
     {/each}
     <details><summary>Preview source</summary><pre>{preview}</pre></details>
     <div class="actions"><button type="submit" disabled={vault.saving || vault.conflict}>Save properties</button><button type="button" onclick={() => {editing = false; error = '';}}>Cancel</button></div>

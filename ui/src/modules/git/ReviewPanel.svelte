@@ -1085,7 +1085,7 @@
         {/if}
       </div>
       <div class="rp-context-row">
-        <textarea
+        <textarea dir="auto"
           class="rp-context-input"
           rows={2}
           placeholder="What should the reviewers focus on? (optional)"
@@ -1194,7 +1194,7 @@
       {/if}
     </div>
     <div class="rp-context-row">
-      <textarea
+      <textarea dir="auto"
         class="rp-context-input"
         rows={2}
         placeholder="What should the reviewers focus on? (optional)"
@@ -1481,7 +1481,7 @@
           </div>
           {#if presetSaveOpen}
             <div class="cfg-repo-row cfg-preset-save-row">
-              <input
+              <input dir="auto"
                 class="cfg-input"
                 bind:value={presetNameDraft}
                 placeholder="Preset name (e.g. Backend services)"
@@ -1513,7 +1513,7 @@
             <div class="cfg-agent-fields">
               <div class="cfg-field">
                 <span class="cfg-label">Name</span>
-                <input class="cfg-input" bind:value={editAgents[i].name} />
+                <input dir="auto" class="cfg-input" bind:value={editAgents[i].name} />
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Run on (CLIs)</span>
@@ -1532,7 +1532,7 @@
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Lens / instructions</span>
-                <textarea class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
+                <textarea dir="auto" class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
               </div>
             </div>
             <div class="cfg-agent-actions">
@@ -1579,7 +1579,7 @@
           <div class="cfg-agent-fields">
             <div class="cfg-field">
               <span class="cfg-label">Name</span>
-              <input class="cfg-input" bind:value={editSummarizer.name} />
+              <input dir="auto" class="cfg-input" bind:value={editSummarizer.name} />
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Provider <span class="dim">(uses its default model)</span></span>
@@ -1591,7 +1591,7 @@
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Merge / dedupe instructions</span>
-              <textarea class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
+              <textarea dir="auto" class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
             </div>
           </div>
         </div>

@@ -750,7 +750,7 @@
                 <div class="ed-grid">
                   <label class="ed-field">
                     <span>Name</span>
-                    <input
+                    <input dir="auto"
                       class="input"
                       value={space.name}
                       maxlength="24"
@@ -927,7 +927,7 @@
           <Icon name="sparkle" size={inApp ? 15 : 17} />
           {#if unread}<span class="unread" aria-label="New reply"></span>{/if}
         </button>
-        <input
+        <input dir="ltr"
           bind:this={inputEl}
           bind:value={query}
           class="input-main"

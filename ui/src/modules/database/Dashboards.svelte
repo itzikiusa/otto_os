@@ -215,7 +215,7 @@
   <Modal title={editing ? 'Edit widget' : 'Add widget'} width={520} onclose={() => (adding = false)}>
     <div class="field">
       <label for="w-title">Title</label>
-      <input id="w-title" class="input" bind:value={wTitle} placeholder="Daily signups" />
+      <input dir="auto" id="w-title" class="input" bind:value={wTitle} placeholder="Daily signups" />
     </div>
     {#if editing}
       <p class="conn-note" title={editing.connection_id}>
@@ -224,7 +224,7 @@
     {/if}
     <div class="field">
       <label for="w-stmt">Statement</label>
-      <textarea id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
+      <textarea dir="ltr" id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
     </div>
     <div class="field">
       <label for="w-viz">Visualization</label>

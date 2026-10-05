@@ -403,7 +403,7 @@
   <Modal title={editing ? 'Edit MCP server' : 'Add MCP server'} width={540} onclose={closeForm}>
     <div class="field">
       <label for="mcp-name">Name</label>
-      <input
+      <input dir="ltr"
         id="mcp-name"
         class="input mono"
         bind:value={fName}
@@ -416,7 +416,7 @@
     {#if !auth.isRoot}<p class="hint owner-note">The owner manages credentials and the server command.</p>{/if}
     <div class="field">
       <label for="mcp-command">Command</label>
-      <input
+      <input dir="ltr"
         id="mcp-command"
         class="input mono"
         bind:value={fCommand}
@@ -428,7 +428,7 @@
     </div>
     <div class="field">
       <label for="mcp-args">Arguments <span class="dim">(one per line)</span></label>
-      <textarea
+      <textarea dir="ltr"
         id="mcp-args"
         class="input mono"
         rows="3"
@@ -440,7 +440,7 @@
     </div>
     <div class="field">
       <label for="mcp-env">Environment <span class="dim">(KEY=value, one per line)</span></label>
-      <textarea
+      <textarea dir="ltr"
         id="mcp-env"
         class="input mono"
         rows="3"
@@ -453,7 +453,7 @@
     </div>
     <div class="field">
       <label for="mcp-secret-env"><Icon name="lock" size={12} /> Secret environment <span class="dim">(KEY=value, one per line)</span></label>
-      <textarea
+      <textarea dir="ltr"
         id="mcp-secret-env"
         class="input mono"
         rows="3"

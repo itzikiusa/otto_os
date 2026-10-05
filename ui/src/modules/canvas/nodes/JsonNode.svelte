@@ -84,7 +84,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="body" ondblclick={startEdit}>
     {#if editing}
-      <textarea
+      <textarea dir="auto"
         bind:value={draft}
         use:focusOnMount
         spellcheck="false"

@@ -120,12 +120,12 @@
   <div class="form">
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="prod-kafka" aria-invalid={nameErr ? 'true' : undefined} />
+      <input dir="auto" bind:value={name} placeholder="prod-kafka" aria-invalid={nameErr ? 'true' : undefined} />
       {#if nameErr}<span class="field-err">{nameErr}</span>{/if}
     </label>
     <label class="field">
       <span>Bootstrap servers</span>
-      <input bind:value={bootstrap} placeholder="broker1:9092,broker2:9092" aria-invalid={bootstrapErr ? 'true' : undefined} />
+      <input dir="ltr" bind:value={bootstrap} placeholder="broker1:9092,broker2:9092" aria-invalid={bootstrapErr ? 'true' : undefined} />
       {#if bootstrapErr}<span class="field-err">{bootstrapErr}</span>{/if}
     </label>
 
@@ -155,7 +155,7 @@
       <div class="row">
         <label class="field">
           <span>SASL username</span>
-          <input bind:value={saslUser} autocomplete="off" />
+          <input dir="auto" bind:value={saslUser} autocomplete="off" />
         </label>
         <label class="field">
           <span>SASL password</span>
@@ -177,13 +177,13 @@
 
     <label class="field">
       <span>Schema registry URL <em>(optional — enables Avro decode)</em></span>
-      <input bind:value={srUrl} placeholder="http://schema-registry:8081" />
+      <input dir="ltr" bind:value={srUrl} placeholder="http://schema-registry:8081" />
     </label>
     {#if srUrl.trim()}
       <div class="row">
         <label class="field">
           <span>Registry username</span>
-          <input bind:value={srUser} autocomplete="off" />
+          <input dir="auto" bind:value={srUser} autocomplete="off" />
         </label>
         <label class="field">
           <span>Registry password</span>
@@ -199,7 +199,7 @@
 
     <label class="field">
       <span>Metrics URL <em>(optional — Prometheus, e.g. Redpanda :9644/public_metrics)</em></span>
-      <input bind:value={metricsUrl} placeholder="http://broker:9644/public_metrics" />
+      <input dir="ltr" bind:value={metricsUrl} placeholder="http://broker:9644/public_metrics" />
     </label>
 
     <label class="check">
@@ -211,7 +211,7 @@
         <div class="row">
           <label class="field" style="flex: 1;">
             <span>Tunnel host</span>
-            <input bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" aria-invalid={tunHostErr ? 'true' : undefined} />
+            <input dir="ltr" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" aria-invalid={tunHostErr ? 'true' : undefined} />
             {#if tunHostErr}<span class="field-err">{tunHostErr}</span>{/if}
           </label>
           <label class="field" style="flex: 0 0 90px;">
@@ -221,12 +221,12 @@
         </div>
         <label class="field">
           <span>Tunnel user <em>(optional)</em></span>
-          <input bind:value={tunUser} placeholder="default (~/.ssh/config or $USER)" spellcheck="false" />
+          <input dir="auto" bind:value={tunUser} placeholder="default (~/.ssh/config or $USER)" spellcheck="false" />
         </label>
         <label class="field">
           <span>Identity file <em>(optional — defaults to ssh-agent)</em></span>
           <div class="file-input-row">
-            <input bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
+            <input dir="ltr" bind:value={tunIdentity} placeholder="~/.ssh/id_rsa" spellcheck="false" />
             <button class="btn browse-btn" onclick={() => (showTunnelFilePicker = true)}>Browse…</button>
           </div>
         </label>
@@ -244,7 +244,7 @@
       </label>
       <label class="field">
         <span>Accent color</span>
-        <input bind:value={color} placeholder="#0a84ff" />
+        <input dir="auto" bind:value={color} placeholder="#0a84ff" />
       </label>
     </div>
     <label class="check">

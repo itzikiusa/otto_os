@@ -684,27 +684,27 @@
     >
       <div class="field">
         <label for="pv-name">Name</label>
-        <input id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-name" class="input mono-in" bind:value={name} placeholder="opencode" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-cmd">Command</label>
-        <input id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
+        <input dir="ltr" id="pv-cmd" class="input mono-in" bind:value={cmd} placeholder="opencode" spellcheck="false" autocomplete="off" />
       </div>
       <div class="field">
         <label for="pv-args">Arguments (optional)</label>
-        <input id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
+        <input dir="ltr" id="pv-args" class="input mono-in" bind:value={args} placeholder={'--session {sid}'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-resume">Resume arguments (optional)</label>
-        <input id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
+        <input dir="ltr" id="pv-resume" class="input mono-in" bind:value={resumeArgs} placeholder={'--resume {sid}'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-update">Update command (optional)</label>
-        <input id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
+        <input dir="ltr" id="pv-update" class="input mono-in" bind:value={updateCmd} placeholder={'npm i -g opencode'} spellcheck="false" />
       </div>
       <div class="field">
         <label for="pv-model">Model flag template (optional)</label>
-        <input id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
+        <input dir="ltr" id="pv-model" class="input mono-in" bind:value={modelArgs} placeholder={'--model {model}'} spellcheck="false" />
       </div>
     </form>
     <p class="hint">

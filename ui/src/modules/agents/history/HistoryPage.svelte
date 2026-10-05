@@ -454,7 +454,7 @@
     <div class="toolbar">
       <div class="search-wrap">
         <Icon name="search" size={12} />
-        <input
+        <input dir="auto"
           class="search"
           bind:this={searchEl}
           placeholder="Search titles and first prompts…"

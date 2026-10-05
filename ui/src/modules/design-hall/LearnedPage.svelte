@@ -398,7 +398,7 @@
         body="Atomic preferences (“avoid”, “prefer”, “pattern”) land here when agents or people save them to the design collection." />
     {:else}
       <label class="search"><Icon name="search" size={13} />
-        <input class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
+        <input dir="ltr" class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kind</th><th>Memory</th><th>Source</th><th>Created</th></tr></thead>

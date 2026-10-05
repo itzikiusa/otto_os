@@ -332,8 +332,8 @@
           {#if !editing}<button class="btn ghost small" onclick={beginEdit}><Icon name="edit" size={12} />Edit</button>{/if}
         </div>
         {#if editing}
-          <label class="field"><span class="flabel">Goal</span><textarea class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
-          <label class="field"><span class="flabel">Result summary</span><textarea class="input field-input" rows="2" bind:value={editResult}></textarea></label>
+          <label class="field"><span class="flabel">Goal</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editGoal}></textarea></label>
+          <label class="field"><span class="flabel">Result summary</span><textarea dir="auto" class="input field-input" rows="2" bind:value={editResult}></textarea></label>
           <label class="field">
             <span class="flabel">Risk (policy)</span>
             <select class="input field-input" bind:value={editRisk}>
@@ -386,7 +386,7 @@
           </ul>
         {/if}
         <div class="ap-req">
-          <input class="input req-in" placeholder="Reason (optional)" aria-label="Approval reason (optional)" bind:value={approveReason} onkeydown={(e) => e.key === 'Enter' && !busy && void requestApproval()} />
+          <input dir="auto" class="input req-in" placeholder="Reason (optional)" aria-label="Approval reason (optional)" bind:value={approveReason} onkeydown={(e) => e.key === 'Enter' && !busy && void requestApproval()} />
           <button class="btn small" disabled={busy} onclick={requestApproval}>Request approval</button>
         </div>
       </section>

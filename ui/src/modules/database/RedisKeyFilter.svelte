@@ -28,7 +28,7 @@
 
 <div class="kf" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
   <Icon name="search" size={12} />
-  <input
+  <input dir="auto"
     class="kf-input"
     placeholder="filter by prefix…"
     bind:value={draft}

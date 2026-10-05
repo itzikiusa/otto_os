@@ -30,7 +30,7 @@
   <div class="sp" data-testid="wb-session-picker">
     <p class="sp-hint">The file is pasted, never run — you press Enter in the session yourself.</p>
     {#if all.length > 0}
-      <input
+      <input dir="ltr"
         class="input sp-filter"
         type="search"
         placeholder="Filter sessions…"

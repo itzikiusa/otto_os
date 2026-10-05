@@ -32,7 +32,7 @@
 
     <div class="field">
       <label for="login-user">Username</label>
-      <input id="login-user" class="input" bind:value={username} autocomplete="username" />
+      <input dir="auto" id="login-user" class="input" bind:value={username} autocomplete="username" />
     </div>
     <div class="field">
       <label for="login-pass">Password</label>

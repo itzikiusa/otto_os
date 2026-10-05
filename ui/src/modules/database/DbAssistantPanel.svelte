@@ -171,7 +171,7 @@
           </div>
         {/if}
         <div class="da-ask">
-          <textarea
+          <textarea dir="auto"
             bind:value={draft}
             onkeydown={onKey}
             placeholder={info.placeholder}

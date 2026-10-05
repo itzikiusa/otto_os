@@ -116,7 +116,7 @@
         <li class="item">
           <span class="chip src" title="Learned from">{SOURCE_LABEL[item.source]}</span>
           {#if editingLine === item.line}
-            <input class="grow" bind:value={draft} aria-label="Memory text" disabled={busy}
+            <input dir="auto" class="grow" bind:value={draft} aria-label="Memory text" disabled={busy}
               onkeydown={(e) => { if (e.key === 'Enter') void submit(item, draft); if (e.key === 'Escape') editingLine = null; }} />
             <button class="btn small" disabled={busy} onclick={() => (editingLine = null)}>Cancel</button>
             <button class="btn small primary" disabled={busy || !draft.trim()} onclick={() => void submit(item, draft)}>Save</button>

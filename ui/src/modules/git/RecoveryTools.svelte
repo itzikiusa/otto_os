@@ -155,7 +155,7 @@
         </div>
       {:else}
         <p>Preview linear commits, reorder them, squash into the previous commit, or stop to edit. Commit or stash changes before starting.</p>
-        <div class="actions"><label>Onto revision <input bind:value={onto} oninput={() => { plan = null; }} placeholder="main or a commit SHA" disabled={busy} /></label>
+        <div class="actions"><label>Onto revision <input dir="auto" bind:value={onto} oninput={() => { plan = null; }} placeholder="main or a commit SHA" disabled={busy} /></label>
           <button class="btn" disabled={busy || !onto.trim()} onclick={preview}>Preview plan</button></div>
         {#if plan}
           <p>{plural(plan.commits.length, 'commit')} · current {plan.head_sha.slice(0, 10)} → onto {plan.onto_sha.slice(0, 10)}</p>
@@ -194,8 +194,8 @@
         <details><summary>Bisect history</summary><pre>{bisect.log}</pre></details>
       {:else}
         <p>Choose known good and bad revisions, or select them from a commit’s graph menu. Progress survives closing Otto.</p>
-        <label>Known good <input bind:value={good} placeholder="Commit SHA or revision" disabled={busy} /></label>
-        <label>Known bad <input bind:value={bad} placeholder="HEAD" disabled={busy} /></label>
+        <label>Known good <input dir="auto" bind:value={good} placeholder="Commit SHA or revision" disabled={busy} /></label>
+        <label>Known bad <input dir="auto" bind:value={bad} placeholder="HEAD" disabled={busy} /></label>
         <button class="btn primary" disabled={busy || !good.trim() || !bad.trim()} onclick={() => bisectAction('start')}>Start bisect…</button>
       {/if}
     {/if}

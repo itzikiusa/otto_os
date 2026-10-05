@@ -74,7 +74,7 @@
 </script>
 
 <Modal title="Open file" {onclose}>
-  <input
+  <input dir="ltr"
     bind:this={input}
     class="wb-qo-input"
     type="search"

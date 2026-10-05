@@ -304,7 +304,7 @@
     <span class="spacer"></span>
     <div class="search">
       <Icon name="search" size={12} />
-      <input bind:this={searchEl} class="search-in" placeholder="Search…" bind:value={search} aria-label="Search logs" />
+      <input dir="auto" bind:this={searchEl} class="search-in" placeholder="Search…" bind:value={search} aria-label="Search logs" />
       {#if q}<span class="count mono">{matchCount}</span>{/if}
     </div>
     <button class="icon-btn" onclick={() => void start()} title="Refresh logs" aria-label="Refresh logs"><Icon name="refresh" size={13} /></button>

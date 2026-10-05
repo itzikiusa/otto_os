@@ -50,7 +50,7 @@
   <Resizer {id} visible={selected} minWidth={80} minHeight={28} />
   <Handle type="target" position={Position.Left} />
   {#if editing}
-    <textarea
+    <textarea dir="auto"
       bind:value={draft}
       use:focusOnMount
       style:text-align={align}

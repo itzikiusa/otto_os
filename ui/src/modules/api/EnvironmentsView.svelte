@@ -258,7 +258,7 @@
             </div>
             {#each rows as row, i (i)}
               <div class="vt-row var-row">
-                <input class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
+                <input dir="ltr" class="input mono var-key" placeholder="base_url" value={row.key} disabled={!canEdit}
                   aria-label="Variable name" oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                 <input
                   class="input mono var-val"

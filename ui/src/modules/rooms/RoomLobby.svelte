@@ -77,7 +77,7 @@
 </div>
 {#if settingsOpen}<RoomSettingsModal onclose={() => settingsOpen = false} />{/if}
 {#if joinOpen}<Modal title="Join a room" onclose={() => joinOpen = false}>
-  <label>Invitation link <input type="url" bind:value={link} placeholder="https://host/#/room/…" autocomplete="off" spellcheck="false" /></label>
+  <label>Invitation link <input dir="ltr" type="url" bind:value={link} placeholder="https://host/#/room/…" autocomplete="off" spellcheck="false" /></label>
   <p>You will see the destination before connecting.</p>
   {#if joinError}<p role="alert">{joinError}</p>{/if}
   {#snippet footer()}<button class="btn" onclick={() => joinOpen = false}>Cancel</button><button class="btn primary" disabled={!link.trim() || joining} onclick={join}>{joining ? 'Joining…' : 'Continue'}</button>{/snippet}

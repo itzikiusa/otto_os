@@ -163,7 +163,7 @@
             <div class="var-editor">
               {#each rows as row, i (i)}
                 <div class="var-row">
-                  <input class="input var-key mono" placeholder="base_url" aria-label="Variable name" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
+                  <input dir="ltr" class="input var-key mono" placeholder="base_url" aria-label="Variable name" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                   <input
                     class="input var-val mono"
                     class:secret={row.secret}

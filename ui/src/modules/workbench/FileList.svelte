@@ -137,7 +137,7 @@
   <div class="wb-files-head">
     <label class="wb-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         type="search"
         placeholder={workbench.showTrash ? 'Search trash' : 'Search files'}
         aria-label={workbench.showTrash ? 'Search trash' : 'Search files'}

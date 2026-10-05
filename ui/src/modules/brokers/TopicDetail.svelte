@@ -697,14 +697,14 @@
         <option value="base64">Base64</option>
       </select>
       <div class="filter-group">
-        <input class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
+        <input dir="ltr" class="grow" bind:value={keyFilter} placeholder="filter key…" aria-label="Filter by key" title="Server-side key filter (case-insensitive substring)" />
         {#if keyFilter.trim()}
           <label class="chk-small" title="Scan from beginning to find older matching messages">
             <input type="checkbox" bind:checked={keyFromBeginning} /> From start
           </label>
         {/if}
       </div>
-      <input class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
+      <input dir="ltr" class="grow" bind:value={valueFilter} placeholder="filter value…" aria-label="Filter by value" />
       <label class="auto" class:on={autoPoll} title="Append new messages every 3 s, backing off to 15 s while none arrive (incremental, capped at {TAIL_CAP})">
         <input type="checkbox" bind:checked={autoPoll} disabled={!!consumeError && !autoPoll} /> Live
       </label>
@@ -875,8 +875,8 @@
     {/if}
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
-      <input class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
+      <input dir="auto" class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
+      <input dir="auto" class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
       <button
         class="btn small"
         onclick={setConfig}
@@ -911,7 +911,7 @@
       </div>
       <label class="field">
         <span>Key (optional){pKeyBase64 ? ' — base64' : ''}</span>
-        <input bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
+        <input dir="auto" bind:value={pKey} placeholder={pKeyBase64 ? 'base64-encoded bytes' : 'string key'} />
       </label>
       <label class="field">
         <span>Partition (optional)</span>
@@ -923,7 +923,7 @@
       {#if !pTombstone}
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
-          <textarea
+          <textarea dir="auto"
             bind:value={pValue}
             rows="6"
             placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}
@@ -940,8 +940,8 @@
         </div>
         {#each pHeaders as h, i (i)}
           <div class="header-row">
-            <input bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
-            <input bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
+            <input dir="ltr" bind:value={h.key} placeholder="key" class="header-key" aria-label="Header {i + 1} key" />
+            <input dir="ltr" bind:value={h.value} placeholder="value" class="header-val" aria-label="Header {i + 1} value" />
             <button
               class="icon-btn danger-tiny"
               onclick={() => removeHeader(i)}

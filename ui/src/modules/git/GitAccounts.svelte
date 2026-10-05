@@ -352,11 +352,11 @@
     </div>
     <div class="field">
       <label for="ga-label">Label</label>
-      <input id="ga-label" class="input" bind:value={label} placeholder="Work {PROVIDER_LABELS[provider]}" />
+      <input dir="auto" id="ga-label" class="input" bind:value={label} placeholder="Work {PROVIDER_LABELS[provider]}" />
     </div>
     <div class="field">
       <label for="ga-user">Username</label>
-      <input id="ga-user" class="input" bind:value={username} spellcheck="false" />
+      <input dir="auto" id="ga-user" class="input" bind:value={username} spellcheck="false" />
     </div>
     <div class="field">
       <label for="ga-token">Token</label>
@@ -369,13 +369,13 @@
     </div>
     <div class="field">
       <label for="ga-ns">{namespaceLabel[provider]} <span class="dim">(optional)</span></label>
-      <input id="ga-ns" class="input mono" bind:value={namespace} spellcheck="false" placeholder={provider === 'bitbucket' ? 'your-org' : ''} />
+      <input dir="ltr" id="ga-ns" class="input mono" bind:value={namespace} spellcheck="false" placeholder={provider === 'bitbucket' ? 'your-org' : ''} />
       <span class="hint">{namespaceHint[provider]}</span>
     </div>
     {#if provider === 'gitlab'}
       <div class="field">
         <label for="ga-base">API base URL <span class="dim">(optional, self-hosted)</span></label>
-        <input id="ga-base" class="input mono" bind:value={apiBaseUrl} placeholder="https://gitlab.example.com/api/v4" spellcheck="false" />
+        <input dir="ltr" id="ga-base" class="input mono" bind:value={apiBaseUrl} placeholder="https://gitlab.example.com/api/v4" spellcheck="false" />
       </div>
     {/if}
     <div class="field">

@@ -67,7 +67,7 @@
   <form class="save-form" onsubmit={submit}>
     <div class="field">
       <label for="save-req-name">Name</label>
-      <input id="save-req-name" class="input" bind:value={name} placeholder="List customers" autocomplete="off" />
+      <input dir="auto" id="save-req-name" class="input" bind:value={name} placeholder="List customers" autocomplete="off" />
     </div>
     <div class="field">
       <label for="save-req-where">Save to</label>
@@ -79,7 +79,7 @@
         <option value={NEW}>New collection…</option>
       </select>
       {#if target === NEW}
-        <input class="input new-col" bind:value={newCollection} placeholder="Payments API" aria-label="New collection name" />
+        <input dir="auto" class="input new-col" bind:value={newCollection} placeholder="Payments API" aria-label="New collection name" />
       {/if}
       <span class="hint">Collections group requests by API or feature. Everyone in this workspace can see saved requests; stored credentials go to the macOS Keychain.</span>
     </div>

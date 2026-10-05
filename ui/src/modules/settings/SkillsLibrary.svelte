@@ -267,7 +267,7 @@
     <div class="toolbar">
       <label class="filter">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           type="search"
           class="filter-input"
           bind:value={query}

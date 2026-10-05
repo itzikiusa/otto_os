@@ -145,7 +145,7 @@
   <div class="s3d-field">
     <span class="s3d-flabel">{label}</span>
     <input class="s3d-color" type="color" value={value ?? fallback} disabled={readonly} aria-label={label} oninput={(e) => on(inputVal(e))} />
-    <input class="s3d-hex" type="text" value={value ?? ''} placeholder={fallback} maxlength="7" spellcheck="false" disabled={readonly} aria-label="{label} hex" onchange={(e) => {
+    <input dir="auto" class="s3d-hex" type="text" value={value ?? ''} placeholder={fallback} maxlength="7" spellcheck="false" disabled={readonly} aria-label="{label} hex" onchange={(e) => {
       const t = inputVal(e).trim().toLowerCase();
       if (!t) on(undefined);
       else if (/^#[0-9a-f]{6}$/.test(t)) on(t);
@@ -196,7 +196,7 @@
     </section>
   {:else}
     <div class="s3d-head">
-      <input
+      <input dir="auto"
         class="s3d-head-name-input"
         value={nodeLabel(sel)}
         disabled={readonly}
@@ -257,7 +257,7 @@
             {@render panelHead('text', 'Text')}
             {#if open.text !== false}
               <div class="s3d-panel-body">
-                <input class="s3d-text" value={obj.text ?? obj.name} maxlength="500" disabled={readonly} aria-label="Text" oninput={(e) => emit(setText(doc, obj.id, inputVal(e)))} />
+                <input dir="auto" class="s3d-text" value={obj.text ?? obj.name} maxlength="500" disabled={readonly} aria-label="Text" oninput={(e) => emit(setText(doc, obj.id, inputVal(e)))} />
                 <div class="s3d-hint">Drawn on a 2 × 0.5 m quad; scale it like any object. Color comes from the material.</div>
               </div>
             {/if}
@@ -399,7 +399,7 @@
       {@render panelHead('notes', 'Notes', sel.node.notes ? `${sel.node.notes.length}` : undefined)}
       {#if open.notes !== false}
         <div class="s3d-panel-body">
-          <textarea
+          <textarea dir="auto"
             class="s3d-notes"
             rows="4"
             maxlength="4000"

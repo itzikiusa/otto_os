@@ -327,7 +327,7 @@
       >
         {#if renamingId === id}
           {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
-          <input
+          <input dir="auto"
             class="tab-rename"
             bind:value={draft}
             use:focusOnMount

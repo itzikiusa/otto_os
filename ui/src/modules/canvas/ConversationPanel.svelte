@@ -164,7 +164,7 @@
   </div>
 
   <div class="composer">
-    <textarea
+    <textarea dir="auto"
       bind:value={draft}
       onkeydown={onKey}
       aria-label="Ask the canvas assistant"

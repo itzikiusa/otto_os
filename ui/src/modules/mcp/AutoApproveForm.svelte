@@ -188,7 +188,7 @@
 
     <label class="field">
       <span>Name</span>
-      <input bind:value={name} placeholder="Optional — shown in the audit trail" />
+      <input dir="auto" bind:value={name} placeholder="Optional — shown in the audit trail" />
     </label>
 
     {#if irreversible}

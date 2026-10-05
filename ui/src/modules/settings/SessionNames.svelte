@@ -192,11 +192,11 @@
       <p class="new-sub">Your own list of names — family, a team, a band. Sessions use them in order.</p>
       <div class="field">
         <label for="nt-label">Theme name</label>
-        <input id="nt-label" class="input" placeholder="Family" bind:value={newLabel} />
+        <input dir="auto" id="nt-label" class="input" placeholder="Family" bind:value={newLabel} />
       </div>
       <div class="field">
         <label for="nt-names">Names <span class="dim">(one per line, most-used first)</span></label>
-        <textarea
+        <textarea dir="auto"
           id="nt-names"
           class="input names-area"
           rows="5"

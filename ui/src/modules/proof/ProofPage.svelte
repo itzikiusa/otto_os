@@ -1024,7 +1024,7 @@
     </div>
     <div class="field">
       <label for="a-title">Title</label>
-      <input id="a-title" class="input" bind:value={aTitle} placeholder="e.g. cargo test output" />
+      <input dir="auto" id="a-title" class="input" bind:value={aTitle} placeholder="e.g. cargo test output" />
     </div>
     <div class="field">
       <label for="a-status">Status</label>
@@ -1034,7 +1034,7 @@
     </div>
     <div class="field">
       <label for="a-content">Content (optional)</label>
-      <textarea id="a-content" class="input" rows={6} bind:value={aContent} placeholder="e.g. test result: 214 passed; 0 failed"></textarea>
+      <textarea dir="auto" id="a-content" class="input" rows={6} bind:value={aContent} placeholder="e.g. test result: 214 passed; 0 failed"></textarea>
     </div>
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (addOpen = false)}>Cancel</button>
@@ -1050,7 +1050,7 @@
     </p>
     <div class="field">
       <label for="w-reason">Reason</label>
-      <textarea
+      <textarea dir="auto"
         id="w-reason"
         class="input"
         rows={4}
@@ -1079,7 +1079,7 @@
     </div>
     <div class="field">
       <label for="m-title">Title</label>
-      <input id="m-title" class="input" bind:value={mTitle} placeholder="e.g. Dashboard after fix" />
+      <input dir="auto" id="m-title" class="input" bind:value={mTitle} placeholder="e.g. Dashboard after fix" />
     </div>
     <div class="field">
       <label for="m-file">File <span class="dim">(≤ 25 MiB)</span></label>
@@ -1110,7 +1110,7 @@
     </div>
     <div class="field">
       <label for="e-title">Title</label>
-      <input id="e-title" class="input" bind:value={eTitle} placeholder="e.g. GET /health → 200" />
+      <input dir="auto" id="e-title" class="input" bind:value={eTitle} placeholder="e.g. GET /health → 200" />
     </div>
     {#if eType === 'api'}
       <div class="field-row">
@@ -1122,50 +1122,50 @@
         </div>
         <div class="field">
           <label for="e-status">Status</label>
-          <input id="e-status" class="input" inputmode="numeric" bind:value={eStatus} placeholder="e.g. 200" />
+          <input dir="auto" id="e-status" class="input" inputmode="numeric" bind:value={eStatus} placeholder="e.g. 200" />
         </div>
       </div>
       <div class="field">
         <label for="e-url">URL</label>
-        <input id="e-url" class="input" bind:value={eUrl} placeholder="e.g. https://api.example.com/health" />
+        <input dir="ltr" id="e-url" class="input" bind:value={eUrl} placeholder="e.g. https://api.example.com/health" />
       </div>
       <div class="field">
         <label for="e-response">Response (optional)</label>
-        <textarea id="e-response" class="input" rows={4} bind:value={eResponse} placeholder={'e.g. {"status": "ok"}'}></textarea>
+        <textarea dir="ltr" id="e-response" class="input" rows={4} bind:value={eResponse} placeholder={'e.g. {"status": "ok"}'}></textarea>
       </div>
     {:else if eType === 'db'}
       <div class="field-row">
         <div class="field">
           <label for="e-engine">Engine (optional)</label>
-          <input id="e-engine" class="input" bind:value={eEngine} placeholder="e.g. mysql" />
+          <input dir="auto" id="e-engine" class="input" bind:value={eEngine} placeholder="e.g. mysql" />
         </div>
         <div class="field">
           <label for="e-rows">Row count (optional)</label>
-          <input id="e-rows" class="input" inputmode="numeric" bind:value={eRowCount} placeholder="e.g. 42" />
+          <input dir="auto" id="e-rows" class="input" inputmode="numeric" bind:value={eRowCount} placeholder="e.g. 42" />
         </div>
       </div>
       <div class="field">
         <label for="e-query">Query (optional)</label>
-        <textarea id="e-query" class="input" rows={3} bind:value={eQuery} placeholder="e.g. SELECT count(*) FROM orders"></textarea>
+        <textarea dir="ltr" id="e-query" class="input" rows={3} bind:value={eQuery} placeholder="e.g. SELECT count(*) FROM orders"></textarea>
       </div>
       <div class="field">
         <label for="e-sample">Sample (optional)</label>
-        <textarea id="e-sample" class="input" rows={4} bind:value={eSample} placeholder="e.g. count(*) = 42"></textarea>
+        <textarea dir="auto" id="e-sample" class="input" rows={4} bind:value={eSample} placeholder="e.g. count(*) = 42"></textarea>
       </div>
     {:else}
       <div class="field-row">
         <div class="field">
           <label for="e-topic">Topic</label>
-          <input id="e-topic" class="input" bind:value={eTopic} placeholder="e.g. orders.events" />
+          <input dir="ltr" id="e-topic" class="input" bind:value={eTopic} placeholder="e.g. orders.events" />
         </div>
         <div class="field">
           <label for="e-msgs">Message count (optional)</label>
-          <input id="e-msgs" class="input" inputmode="numeric" bind:value={eMsgCount} placeholder="e.g. 100" />
+          <input dir="auto" id="e-msgs" class="input" inputmode="numeric" bind:value={eMsgCount} placeholder="e.g. 100" />
         </div>
       </div>
       <div class="field">
         <label for="e-ksample">Sample (optional)</label>
-        <textarea id="e-ksample" class="input" rows={4} bind:value={eSample} placeholder={'e.g. {"order_id": 42, "status": "paid"}'}></textarea>
+        <textarea dir="ltr" id="e-ksample" class="input" rows={4} bind:value={eSample} placeholder={'e.g. {"order_id": 42, "status": "paid"}'}></textarea>
       </div>
     {/if}
     {#snippet footer()}
@@ -1183,20 +1183,20 @@
     </p>
     <div class="field">
       <label for="pr-title">Title</label>
-      <input id="pr-title" class="input" bind:value={prTitle} placeholder="e.g. PR #123 description check" />
+      <input dir="auto" id="pr-title" class="input" bind:value={prTitle} placeholder="e.g. PR #123 description check" />
     </div>
     <div class="field">
       <label for="pr-desc">PR description</label>
-      <textarea id="pr-desc" class="input" rows={6} bind:value={prDesc} placeholder="e.g. Fixes the login redirect and adds tests for expired sessions"></textarea>
+      <textarea dir="auto" id="pr-desc" class="input" rows={6} bind:value={prDesc} placeholder="e.g. Fixes the login redirect and adds tests for expired sessions"></textarea>
     </div>
     <div class="field-row">
       <div class="field">
         <label for="pr-base">Base (optional)</label>
-        <input id="pr-base" class="input" bind:value={prBase} placeholder="e.g. main" />
+        <input dir="auto" id="pr-base" class="input" bind:value={prBase} placeholder="e.g. main" />
       </div>
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
-        <PathField bind:value={prCwd}><input id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" /></PathField>
+        <PathField bind:value={prCwd}><input dir="ltr" id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" /></PathField>
       </div>
     </div>
     {#snippet footer()}
@@ -1217,7 +1217,7 @@
       </label>
       <div class="field">
         <label for="cfg-cmd">Test command (optional)</label>
-        <input id="cfg-cmd" class="input" bind:value={cfg.test_cmd} placeholder="e.g. cargo test --workspace" />
+        <input dir="ltr" id="cfg-cmd" class="input" bind:value={cfg.test_cmd} placeholder="e.g. cargo test --workspace" />
       </div>
       <label class="check-row">
         <input type="checkbox" bind:checked={cfg.require_ci} /> Require passing CI

@@ -520,7 +520,7 @@
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         class="tree-search-input"
         type="text"
         value={database.objectSearchQuery}

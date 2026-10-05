@@ -284,7 +284,7 @@
   <div class="tree-tools">
     <label class="search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         placeholder="Filter requests…"
         bind:value={search}
         aria-label="Search collections and requests"

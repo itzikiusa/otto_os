@@ -154,7 +154,7 @@
       </div>
 
       <div class="ma-composer">
-        <textarea
+        <textarea dir="auto"
           bind:value={draft}
           onkeydown={onKey}
           placeholder={locked ? 'Ask for a change…' : `Describe the ${FORMATS[mockupAssist.format].label.toLowerCase()} to create…`}

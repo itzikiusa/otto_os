@@ -155,7 +155,7 @@
             <option value="">All servers</option>
             {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
           </select>
-          <input
+          <input dir="ltr"
             bind:value={fTool}
             placeholder="Filter tool…"
             class="mono"

@@ -120,7 +120,7 @@
 
   <div class="label">
     {#if editing}
-      <textarea
+      <textarea dir="auto"
         bind:value={draft}
         use:focusOnMount
         onblur={commit}

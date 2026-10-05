@@ -296,7 +296,7 @@
   <label class="picker-label" for="ss-query">
     {sourceKind === 'jira' ? 'Search issues' : 'Search pages'}
   </label>
-  <input
+  <input dir="auto"
     id="ss-query"
     class="picker-input"
     bind:value={query}

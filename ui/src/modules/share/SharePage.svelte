@@ -316,7 +316,7 @@
         {/if}
       </p>
       <div class="otp-input-row">
-        <input
+        <input dir="ltr"
           class="otp-input"
           type="text"
           inputmode="numeric"

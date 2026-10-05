@@ -308,7 +308,7 @@
 <div class="s3d-hier">
   <div class="s3d-hier-head">
     <span class="s3d-hier-title">Hierarchy</span>
-    <input class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
+    <input dir="ltr" class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
     {#if !readonly}
       <button class="s3d-icon-btn" title="Add object, light or group" aria-label="Add object, light or group" onclick={addMenu}>
         <Icon name="plus" size={14} />
@@ -356,7 +356,7 @@
         {/if}
         <span class="s3d-row-icon"><Icon name={iconFor(r.node)} size={13} /></span>
         {#if renaming === r.id}
-          <input
+          <input dir="auto"
             class="s3d-rename"
             aria-label="Name"
             bind:value={draft}
@@ -422,7 +422,7 @@
           <span class="s3d-disclose spacer"></span>
           <span class="s3d-row-icon light"><Icon name="zap" size={13} /></span>
           {#if renaming === l.id}
-            <input
+            <input dir="auto"
               class="s3d-rename"
               aria-label="Name"
               bind:value={draft}

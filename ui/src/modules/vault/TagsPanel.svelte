@@ -10,7 +10,7 @@
 </script>
 
 <div class="tags">
-  <input type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
+  <input dir="ltr" type="search" bind:value={filter} placeholder="Filter tags…" aria-label="Filter tags" />
   {#if vault.tagsError}
     <div role="alert">Couldn’t refresh tags. {vault.tags.length ? 'Showing the last loaded tags.' : ''} {vault.tagsError}</div>
     <button class="btn small" onclick={() => void vault.loadTags()} disabled={vault.tagsLoading}>Retry</button>

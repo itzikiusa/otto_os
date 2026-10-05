@@ -215,7 +215,7 @@
       </div>
 
       <label class="field-label" for="gt-name">Name</label>
-      <input
+      <input dir="auto"
         id="gt-name"
         class="input"
         data-testid="golden-name"
@@ -224,7 +224,7 @@
       />
 
       <label class="field-label" for="gt-prompt">Prompt</label>
-      <textarea
+      <textarea dir="auto"
         id="gt-prompt"
         class="input"
         rows="3"
@@ -236,11 +236,11 @@
       <div class="gt-grid">
         <div>
           <label class="field-label" for="gt-skill">Skill</label>
-          <input id="gt-skill" class="input" placeholder="skill name (optional)" bind:value={fSkill} />
+          <input dir="auto" id="gt-skill" class="input" placeholder="skill name (optional)" bind:value={fSkill} />
         </div>
         <div>
           <label class="field-label" for="gt-test">Test command</label>
-          <input
+          <input dir="auto"
             id="gt-test"
             class="input"
             data-testid="golden-test-cmd"
@@ -250,12 +250,12 @@
         </div>
         <div>
           <label class="field-label" for="gt-lint">Lint command</label>
-          <input id="gt-lint" class="input" placeholder="cargo clippy · npm run check" bind:value={fLint} />
+          <input dir="auto" id="gt-lint" class="input" placeholder="cargo clippy · npm run check" bind:value={fLint} />
         </div>
       </div>
 
       <label class="field-label" for="gt-rubric">Rubric</label>
-      <textarea
+      <textarea dir="auto"
         id="gt-rubric"
         class="input"
         rows="2"

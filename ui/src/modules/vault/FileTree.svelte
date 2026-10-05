@@ -356,7 +356,7 @@
             {/if}
           {/if}
           {#if renaming === n.entry.path}
-            <input
+            <input dir="auto"
               class="rename"
               aria-label="New name"
               bind:value={renameValue}
@@ -402,7 +402,7 @@
             <option value={p}>{p}</option>
           {/each}
         </select>
-        <input
+        <input dir="ltr"
           class="sel-input"
           bind:value={groupModel}
           placeholder="Model (optional)"
@@ -411,7 +411,7 @@
         />
       </div>
       <div class="sel-row">
-        <input
+        <input dir="auto"
           class="sel-input"
           bind:this={groupInputEl}
           bind:value={groupPrompt}

@@ -473,7 +473,7 @@
         {#each aws.regions as r (r.code)}<option value={r.code}>{r.code}</option>{/each}
       </select>
     {:else}
-      <input class="mono" bind:value={region} aria-label="Region" size={12} />
+      <input dir="ltr" class="mono" bind:value={region} aria-label="Region" size={12} />
     {/if}
   </label>
   <div class="seg" role="tablist" aria-label="Logs view">
@@ -551,7 +551,7 @@
             {/each}
           </div>
           <form class="pat" onsubmit={(e) => { e.preventDefault(); applyPattern(); }}>
-            <input
+            <input dir="ltr"
               class="mono"
               bind:value={pattern}
               placeholder={'Filter pattern: ERROR, { $.level = "error" }'}
@@ -651,7 +651,7 @@
           {/if}
           <button class="icon-btn" onclick={exportInsights} disabled={!iResult?.result.rows.length} aria-label="Export results as CSV" title="Export results as CSV"><Icon name="download" size={13} /></button>
         </div>
-        <textarea class="mono q" bind:value={query} rows="4" spellcheck="false" aria-label="Logs Insights query"></textarea>
+        <textarea dir="ltr" class="mono q" bind:value={query} rows="4" spellcheck="false" aria-label="Logs Insights query"></textarea>
         {#if saved.length}
           <div class="saved">
             {#each saved as s (s.name)}

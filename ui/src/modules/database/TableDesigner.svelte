@@ -283,8 +283,8 @@
       </div>
       {#each rows as r, i (i)}
         <div class="td-row" class:dropped={r.drop}>
-          <input class="mono" bind:value={r.name} placeholder="name" spellcheck="false" />
-          <input class="mono" bind:value={r.type} placeholder="type" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={r.name} placeholder="name" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={r.type} placeholder="type" spellcheck="false" />
           <span class="ctr">
             <input
               type="checkbox"
@@ -293,7 +293,7 @@
               title={isClickhouse ? 'ClickHouse nullability lives in the type — use Nullable(T)' : undefined}
             />
           </span>
-          <input class="mono" bind:value={r.def} placeholder="NULL" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={r.def} placeholder="NULL" spellcheck="false" />
           <button
             class="icon-btn"
             title={r.orig === null ? 'Remove' : r.drop ? 'Keep' : 'Drop column'}
@@ -324,8 +324,8 @@
       <div class="td-section-title">Indexes</div>
       {#each indexes as ix, i (i)}
         <div class="td-ix-row">
-          <input class="mono" bind:value={ix.name} placeholder="index name (optional)" spellcheck="false" />
-          <input class="mono" bind:value={ix.cols} placeholder="columns (comma-separated)" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={ix.name} placeholder="index name (optional)" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={ix.cols} placeholder="columns (comma-separated)" spellcheck="false" />
           <label class="td-chk" title="Unique index"><input type="checkbox" bind:checked={ix.unique} />Unique</label>
           <button class="icon-btn" title="Remove index" aria-label="Remove index" onclick={() => (indexes = indexes.filter((_, j) => j !== i))}><Icon name="trash" size={12} /></button>
         </div>
@@ -338,11 +338,11 @@
       <div class="td-section-title">Foreign keys</div>
       {#each fks as fk, i (i)}
         <div class="td-fk-row">
-          <input class="mono" bind:value={fk.cols} placeholder="column(s)" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={fk.cols} placeholder="column(s)" spellcheck="false" />
           <span class="td-fk-arrow">→</span>
-          <input class="mono" bind:value={fk.refTable} placeholder="referenced table" spellcheck="false" />
-          <input class="mono" bind:value={fk.refCols} placeholder="referenced column(s)" spellcheck="false" />
-          <input class="mono" bind:value={fk.name} placeholder="name (optional)" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={fk.refTable} placeholder="referenced table" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={fk.refCols} placeholder="referenced column(s)" spellcheck="false" />
+          <input dir="ltr" class="mono" bind:value={fk.name} placeholder="name (optional)" spellcheck="false" />
           <button class="icon-btn" title="Remove foreign key" aria-label="Remove foreign key" onclick={() => (fks = fks.filter((_, j) => j !== i))}><Icon name="trash" size={12} /></button>
         </div>
       {/each}

@@ -832,7 +832,7 @@
       <p id="snip-keyboard-help" class="snip-keyboard-help">Choose a tool, then press Enter on the image to add it. Use [ and ] to select annotations, arrow keys to move, and Delete to remove. Enter edits selected text.</p>
       <span class="sr-only" role="status">{selected === null ? `${annos.length} annotations` : `Selected ${annos.find(a => a.id === selected)?.tool ?? 'annotation'} ${annos.findIndex(a => a.id === selected) + 1} of ${annos.length}`}</span>
       {#if textDraft}
-        <textarea
+        <textarea dir="auto"
           class="snip-textentry"
           aria-label="Annotation text"
           style={textOverlayStyle}

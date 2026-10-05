@@ -308,7 +308,7 @@
 
 {#if jiraOpen}
   <div class="fa-jira">
-    <input
+    <input dir="auto"
       class="fa-jira-input"
       placeholder="PROJ"
       aria-label="Jira project key"

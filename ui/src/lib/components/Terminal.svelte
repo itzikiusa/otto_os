@@ -2812,7 +2812,7 @@
   <div class="term-wrap" class:otto-force-dark={forceDark}>
     {#if findOpen}
       <div class="find-bar" role="search" aria-label="Find in terminal">
-        <input
+        <input dir="auto"
           bind:this={findInput}
           bind:value={findQuery}
           placeholder="Find in terminal"

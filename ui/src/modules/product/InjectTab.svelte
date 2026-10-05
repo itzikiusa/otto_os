@@ -128,7 +128,7 @@
         </select>
 
         <label class="field-label" for="inject-cwd">cwd</label>
-        <PathField bind:value={cwd} disabled={launching}><input
+        <PathField bind:value={cwd} disabled={launching}><input dir="ltr"
           id="inject-cwd"
           class="cwd-input"
           type="text"

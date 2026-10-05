@@ -243,7 +243,7 @@
     </div>
     <label class="settings-nav-filter">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         bind:this={filterEl}
         bind:value={query}
         class="settings-filter-input"

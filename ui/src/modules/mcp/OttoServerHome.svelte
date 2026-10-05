@@ -381,7 +381,7 @@
         audited. Policies govern registered external servers, not these tools.
       </p>
     </div>
-    <input
+    <input dir="ltr"
       class="input filter"
       type="search"
       placeholder="Filter tools…"

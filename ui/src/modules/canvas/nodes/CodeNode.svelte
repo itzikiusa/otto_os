@@ -63,7 +63,7 @@
     <span class="lang">{lang ?? 'text'}</span>
   </div>
   {#if editing}
-    <textarea
+    <textarea dir="auto"
       bind:value={draft}
       use:focusOnMount
       spellcheck="false"

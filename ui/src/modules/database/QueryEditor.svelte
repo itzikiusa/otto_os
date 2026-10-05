@@ -1068,7 +1068,7 @@
           </span>
         {/if}
         {#if renaming === i}
-          <input
+          <input dir="ltr"
             class="qe-tab-rename mono"
             bind:value={renameText}
             use:focusOnMount
@@ -1347,7 +1347,7 @@
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
         <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
-          <input
+          <input dir="auto"
             class="input qe-var-input"
             value={spec.value}
             placeholder={spec.type === 'number' ? '123' : 'value'}
@@ -1418,7 +1418,7 @@
 
   {#if saving}
     <div class="save-bar">
-      <input
+      <input dir="auto"
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}

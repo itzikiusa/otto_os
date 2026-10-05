@@ -1203,10 +1203,10 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
+      <input dir="auto" class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
-      <input class="field-input" type="text" bind:value={fieldDraft} />
+      <input dir="auto" class="field-input" type="text" bind:value={fieldDraft} />
       {#if ef.schema_type !== 'string'}
         <span class="field-raw-note">raw ({ef.schema_type})</span>
       {/if}
@@ -1255,7 +1255,7 @@
       </div>
       {#if editingTitle}
         <div class="title-edit">
-          <input
+          <input dir="auto"
             class="title-input"
             bind:value={titleDraft}
             spellcheck="false"
@@ -1315,7 +1315,7 @@
           class="tag-add-form"
           onsubmit={(e) => { e.preventDefault(); void addTag(); }}
         >
-          <input
+          <input dir="auto"
             class="tag-input"
             bind:value={tagInput}
             placeholder="Add tag…"
@@ -1415,7 +1415,7 @@
 
             <div class="field">
               <label class="label" for="draft-title">Title</label>
-              <input
+              <input dir="auto"
                 id="draft-title"
                 class="input wide-input"
                 bind:value={draftTitle}
@@ -1426,7 +1426,7 @@
 
             <div class="field">
               <label class="label" for="draft-body">Body (Markdown)</label>
-              <textarea
+              <textarea dir="auto"
                 id="draft-body"
                 class="textarea"
                 bind:value={draftBody}
@@ -1521,13 +1521,13 @@
 
             <!-- Add transcript form -->
             <div class="add-transcript-form">
-              <input
+              <input dir="auto"
                 class="input wide-input"
                 bind:value={newTranscriptTitle}
                 placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
               />
-              <textarea
+              <textarea dir="ltr"
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
@@ -1580,7 +1580,7 @@
 
             {#if editingDesc}
               <div class="desc-editor">
-                <textarea
+                <textarea dir="auto"
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
@@ -1640,7 +1640,7 @@
                   </div>
                   <!-- Add comment form -->
                   <div class="add-comment-form">
-                    <textarea
+                    <textarea dir="auto"
                       class="textarea comment-textarea"
                       bind:value={newCommentBody}
                       rows={3}

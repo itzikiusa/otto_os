@@ -919,7 +919,7 @@
   <!-- Commit composer -->
   <div class="wp-composer">
     <div class="msg-box">
-      <input
+      <input dir="auto"
         class="input subject-input"
         bind:value={subject}
         placeholder={amend
@@ -964,7 +964,7 @@
         <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
       </div>
     {/if}
-    <textarea
+    <textarea dir="auto"
       class="input body-input"
       rows="2"
       bind:value={body}

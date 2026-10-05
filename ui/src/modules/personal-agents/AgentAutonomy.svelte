@@ -203,7 +203,7 @@
           {#each goals as g, i (g.id ?? `new-${i}`)}
             <li class="item">
               <input type="checkbox" bind:checked={g.enabled} disabled={!editable || saving} aria-label="Goal enabled" title="Enabled" />
-              <input class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
+              <input dir="auto" class="input grow" bind:value={g.text} disabled={!editable || saving} placeholder="What should it keep an eye on?" aria-label="Goal" />
               <span class="meta">Worked <RelTime iso={g.last_run_at} fallback="never" /></span>
               {#if editable && g.id}
                 <button class="btn small" disabled={workingGoal !== null || dirty || saving} title={dirty ? 'Save first' : 'Start a read-only run on this goal now'} onclick={() => g.id && workNow(g.id)}>Work on it now</button>
@@ -235,7 +235,7 @@
         <ul class="list">
           {#each rules as r, i (r.id ?? `new-${i}`)}
             <li class="item rule">
-              <input class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
+              <input dir="auto" class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
                   {#if r.enforce}<Icon name="lock" size={11} />{/if}{enforceLabel(r)}

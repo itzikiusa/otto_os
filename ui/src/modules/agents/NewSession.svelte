@@ -502,7 +502,7 @@
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>
-    <input id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
+    <input dir="auto" id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
     {#if total > 1 && title.trim() !== ''}
       <span class="hint">Numbered per session — “{title.trim()} 1” … “{title.trim()} {total}”.</span>
     {/if}
@@ -511,7 +511,7 @@
   {#if chosen.some((p) => p !== 'shell')}
     <div class="field">
       <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
-      <textarea
+      <textarea dir="auto"
         id="ns-prompt"
         class="input prompt-input"
         rows="3"
@@ -527,7 +527,7 @@
   <div class="field">
     <label for="ns-cwd">Working folder</label>
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-cwd"
         class="input mono"
         bind:value={cwd}
@@ -572,7 +572,7 @@
       </ul>
     {/if}
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-extra-dir"
         class="input mono"
         bind:value={dirDraft}

@@ -160,7 +160,7 @@
       {:else}
         <form class="answer" onsubmit={(e) => { e.preventDefault(); if (answer.trim()) void run('approve', { answer: answer.trim() }, 'answer'); }}>
           <label class="sr-only" for={`answer-${task.id}`}>Your answer</label>
-          <input id={`answer-${task.id}`} class="input" bind:value={answer} placeholder="Your answer" />
+          <input dir="auto" id={`answer-${task.id}`} class="input" bind:value={answer} placeholder="Your answer" />
           <button class="btn small" type="submit" disabled={!answer.trim() || busy !== null}>Answer</button>
         </form>
       {/if}

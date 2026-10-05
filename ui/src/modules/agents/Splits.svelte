@@ -169,7 +169,7 @@
         aria-pressed={broadcastMode}
       ><Icon name="send" size={12} />{broadcastMode ? 'Exit broadcast' : 'Broadcast'}</button>
       {#if broadcastMode}
-        <input
+        <input dir="auto"
           class="broadcast-input"
           aria-label="Broadcast message"
           bind:value={broadcastText}

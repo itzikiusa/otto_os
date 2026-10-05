@@ -174,7 +174,7 @@
           <div class="val-row">
             <div class="field grow">
               <label for={`sv-name-${i}`}>Name</label>
-              <input
+              <input dir="auto"
                 id={`sv-name-${i}`}
                 class="input"
                 placeholder="logging"
@@ -194,7 +194,7 @@
           </div>
           <div class="field">
             <label for={`sv-crit-${i}`}>Passes when</label>
-            <textarea
+            <textarea dir="auto"
               id={`sv-crit-${i}`}
               class="input val-textarea"
               rows="2"

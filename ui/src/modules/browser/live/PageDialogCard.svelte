@@ -59,7 +59,7 @@
     <p class="msg">{message}</p>
   {/if}
   {#if kind === 'prompt'}
-    <input class="input answer" bind:value={text} aria-label="Answer to the page" disabled={!canAnswer} />
+    <input dir="auto" class="input answer" bind:value={text} aria-label="Answer to the page" disabled={!canAnswer} />
   {/if}
   <div class="actions">
     {#if !canAnswer}

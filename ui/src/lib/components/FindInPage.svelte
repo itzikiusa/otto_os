@@ -414,7 +414,7 @@
 
 {#if findInPage.open}
   <div class="otto-find-bar" role="search" aria-label="Find in page">
-    <input
+    <input dir="auto"
       bind:this={inputEl}
       class="find-input"
       type="text"

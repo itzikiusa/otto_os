@@ -48,7 +48,7 @@
   <Resizer {id} visible={selected} minWidth={100} minHeight={80} />
   <Handle type="target" position={Position.Left} />
   {#if editing}
-    <textarea
+    <textarea dir="auto"
       bind:value={draft}
       use:focusOnMount
       onblur={commit}

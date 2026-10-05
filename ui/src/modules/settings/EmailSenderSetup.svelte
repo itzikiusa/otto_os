@@ -205,7 +205,7 @@
 
     <div class="field">
       <label for="es-gmail">Gmail address</label>
-      <input
+      <input dir="ltr"
         id="es-gmail"
         class="input"
         type="email"
@@ -274,7 +274,7 @@
     {/if}
     <div class="field">
       <label for="es-base-url">Domain for share links</label>
-      <input
+      <input dir="ltr"
         id="es-base-url"
         class="input"
         type="url"

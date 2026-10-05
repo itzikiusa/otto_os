@@ -893,7 +893,7 @@
           {#each headCols as ci (ci)}
             {@const c = result.columns[ci]}
             <td style="width:{widthFor(ci)}ch; max-width:{widthFor(ci)}ch;">
-              <input
+              <input dir="ltr"
                 class="col-filter mono"
                 type="text"
                 spellcheck="false"

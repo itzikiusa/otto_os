@@ -413,7 +413,7 @@
       <!-- Focus input -->
       <div class="focus-wrap">
         <label class="field-label" for="focus-input">Focus <span class="focus-optional">(optional)</span></label>
-        <textarea
+        <textarea dir="auto"
           id="focus-input"
           class="focus-input"
           rows={2}

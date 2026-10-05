@@ -164,7 +164,7 @@
     {/if}
     <div class="field">
       <label for="ns-name">Name</label>
-      <input
+      <input dir="ltr"
         id="ns-name"
         class="input mono"
         bind:value={name}
@@ -183,13 +183,13 @@
     <div class="row2">
       <div class="field">
         <label for="ns-cat">Category</label>
-        <input id="ns-cat" class="input" list="ns-cats" bind:value={category} placeholder="review" />
+        <input dir="auto" id="ns-cat" class="input" list="ns-cats" bind:value={category} placeholder="review" />
         <datalist id="ns-cats">{#each categories as c (c)}<option value={c}></option>{/each}</datalist>
       </div>
     </div>
     <div class="field">
       <label for="ns-desc">Description</label>
-      <textarea id="ns-desc" class="input" rows="2" bind:value={description} placeholder="Draft release notes from the PRs merged since the last tag."></textarea>
+      <textarea dir="auto" id="ns-desc" class="input" rows="2" bind:value={description} placeholder="Draft release notes from the PRs merged since the last tag."></textarea>
       <span class="hint">Agents read this to decide when to use the skill — say what it does and when.</span>
     </div>
   {/if}

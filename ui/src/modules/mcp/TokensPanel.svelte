@@ -234,7 +234,7 @@
         </div>
         <div class="field tok-field">
           <label for="mcp-token-label">Label</label>
-          <input id="mcp-token-label" class="input" placeholder="ci-readonly" bind:value={fLabel} />
+          <input dir="ltr" id="mcp-token-label" class="input" placeholder="ci-readonly" bind:value={fLabel} />
         </div>
         <div class="field tok-field">
           <label for="mcp-token-workspace">Workspace pin (optional)</label>

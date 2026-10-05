@@ -219,7 +219,7 @@
     <div class="exp-row">
       <span class="exp-label">Folder</span>
       <div class="exp-dir">
-        <input class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
+        <input dir="ltr" class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
         <button class="btn small" onclick={() => (pickingDir = true)} title="Browse the daemon host">
           <Icon name="folder" size={12} />Browse…
         </button>
@@ -228,7 +228,7 @@
 
     <label class="exp-row">
       <span class="exp-label">File name</span>
-      <input class="exp-input mono" bind:value={exportName} spellcheck="false" placeholder="result.csv" />
+      <input dir="ltr" class="exp-input mono" bind:value={exportName} spellcheck="false" placeholder="result.csv" />
     </label>
 
     <label class="exp-row">

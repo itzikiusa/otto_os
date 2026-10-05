@@ -72,7 +72,7 @@
   <!-- keydown on the wrapper so Esc closes even when a mode/Draw button is focused -->
   <div class="prompt-bar" class:busy role="toolbar" aria-label="Ask Otto to draw" tabindex="-1" {onkeydown}>
     <Icon name="zap" />
-    <input
+    <input dir="auto"
       bind:value={prompt}
       use:focusOnMount
       aria-label="Describe a diagram or blocks"

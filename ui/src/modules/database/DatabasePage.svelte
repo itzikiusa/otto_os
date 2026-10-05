@@ -1451,7 +1451,7 @@
 {#snippet connSearchBox()}
   <div class="tree-search">
     <Icon name="search" size={12} />
-    <input
+    <input dir="ltr"
       class="tree-search-input"
       type="text"
       bind:value={connFilter}
@@ -1566,7 +1566,7 @@
   {#if database.sideTab === 'saved'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter saved queries…"
         bind:value={savedSearch}
@@ -1587,7 +1587,7 @@
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
           {#if renamingId === q.id}
-            <input
+            <input dir="auto"
               class="rename-input"
               bind:value={renameDraft}
               use:focusOnMount
@@ -1622,7 +1622,7 @@
   {:else if database.sideTab === 'history'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter history…"
         bind:value={historySearch}

@@ -268,7 +268,7 @@
           <button class="rev-chip-x" title="Remove {r}" aria-label="Remove reviewer {r}" onclick={() => removeReviewer(r)}><Icon name="x" size={12} /></button>
         </span>
       {/each}
-      <input
+      <input dir="auto"
         id="pr-reviewers"
         class="chips-text"
         placeholder={reviewers.length === 0 ? (revLookupFailed ? 'username, Enter to add' : 'Type to search…') : ''}
@@ -327,12 +327,12 @@
 
   <div class="field">
     <label for="pr-title">Title</label>
-    <input id="pr-title" class="input" bind:value={title} />
+    <input dir="auto" id="pr-title" class="input" bind:value={title} />
   </div>
 
   <div class="field">
     <label for="pr-desc">Description <span class="dim">(markdown)</span></label>
-    <textarea id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
+    <textarea dir="auto" id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
   </div>
   <!-- Outward: say where it goes and who sees it before the button does it. -->
   <p class="cp-where dim">

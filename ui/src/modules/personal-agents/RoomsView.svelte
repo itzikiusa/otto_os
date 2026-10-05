@@ -201,7 +201,7 @@
   {#if !viewport.isPhone || !selectedId}
   <aside class="list" aria-label="Rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
-      <input
+      <input dir="auto"
         bind:this={createEl}
         bind:value={newRoomName}
         placeholder="New room name"
@@ -345,7 +345,7 @@
 
         {#if error}<div class="err" role="alert">{error}</div>{/if}
         <div class="composer">
-          <textarea
+          <textarea dir="auto"
             value={draft}
             oninput={(e) => { if (selectedId) drafts[selectedId] = e.currentTarget.value; }}
             rows="2"

@@ -219,7 +219,7 @@
 
       {#if addingTask}
         <form class="task-add" onsubmit={(e) => { e.preventDefault(); void submitTask(); }} data-testid="add-task-form">
-          <input
+          <input dir="auto"
             class="task-input"
             placeholder="Task title — the agent adds it to its list and does it next"
             bind:value={taskTitle}
@@ -228,7 +228,7 @@
             spellcheck="false"
             aria-label="Task title"
           />
-          <textarea
+          <textarea dir="auto"
             class="task-input desc"
             placeholder="Details (optional) — sent along with the nudge"
             bind:value={taskDesc}
@@ -305,11 +305,11 @@
             </button>
           {/each}
         </div>
-        <input class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
+        <input dir="ltr" class="search" placeholder="Filter…" aria-label="Filter the trail" bind:value={query} spellcheck="false" />
       </div>
 
       <div class="note-add">
-        <input
+        <input dir="auto"
           class="note-input"
           placeholder="Waiting on the staging deploy"
           aria-label="Note"

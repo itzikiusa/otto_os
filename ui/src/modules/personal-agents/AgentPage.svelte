@@ -511,7 +511,7 @@
         </div>
         <div class="field">
           <label for="{uid}-directive">Directive (the run’s task prompt)</label>
-          <textarea id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
+          <textarea dir="auto" id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
         </div>
         <div class="field">
           <label for="{uid}-permission">Permissions for its runs</label>

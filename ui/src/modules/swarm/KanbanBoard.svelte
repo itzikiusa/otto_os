@@ -509,7 +509,7 @@
 
   {#if adding}
     <div class="add-row">
-      <input
+      <input dir="auto"
         class="input grow"
         aria-label="New task title"
         placeholder="Task title…"
@@ -644,7 +644,7 @@
   <Modal title={goal ? 'Edit project goal' : 'Set project goal'} width={560} onclose={() => (editingGoal = false)}>
     <div class="field">
       <label for="goal-md">Goal</label>
-      <textarea
+      <textarea dir="auto"
         id="goal-md"
         class="input"
         rows={8}

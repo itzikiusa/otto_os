@@ -114,7 +114,7 @@
   <div class="form">
     <label class="field">
       <span>Name</span>
-      <input
+      <input dir="auto"
         bind:value={name}
         placeholder="Approve all dangerous writes"
         aria-invalid={nameError != null}
@@ -152,7 +152,7 @@
 
     <label class="field">
       <span>Match (JSON)</span>
-      <textarea
+      <textarea dir="ltr"
         bind:value={matchText}
         rows="7"
         class="mono"
@@ -168,7 +168,7 @@
 
     <label class="field">
       <span>Reason</span>
-      <input bind:value={reason} placeholder="Shown when this rule decides (optional)" />
+      <input dir="auto" bind:value={reason} placeholder="Shown when this rule decides (optional)" />
     </label>
   </div>
 

@@ -70,11 +70,11 @@
     </div>
     <div class="field">
       <label for="git-msg">Commit message</label>
-      <input id="git-msg" class="input" bind:value={commitMsg} />
+      <input dir="auto" id="git-msg" class="input" bind:value={commitMsg} />
     </div>
     <div class="field">
       <label for="git-branch">Branch (optional)</label>
-      <input id="git-branch" class="input mono" bind:value={branch} placeholder="api-collections-update" />
+      <input dir="ltr" id="git-branch" class="input mono" bind:value={branch} placeholder="api-collections-update" />
       <span class="hint">Push to a new branch to open a pull request from the Git page afterwards.</span>
     </div>
     <p class="summary">

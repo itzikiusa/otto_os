@@ -425,7 +425,7 @@
           {:else}
             <div class="field">
               <label for="lib-name">Name</label>
-              <input
+              <input dir="ltr"
                 id="lib-name"
                 class="input mono"
                 bind:value={editName}

@@ -80,7 +80,7 @@
 {#if visible}
   <div class="mfb" data-testid="mongo-filter-bar">
     <span class="mfb-label" title="Rewrite the active find() filter and run"><Icon name="search" size={12} />Filter</span>
-    <input
+    <input dir="ltr"
       bind:this={inputEl}
       class="mfb-input mono"
       type="text"

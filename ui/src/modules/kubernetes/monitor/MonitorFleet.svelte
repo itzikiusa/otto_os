@@ -653,7 +653,7 @@
     {/if}
   {:else if activeTab === 'table'}
     <div class="toolbar">
-      <input class="input" placeholder="Quick filter…" bind:value={quick} aria-label="Quick filter" />
+      <input dir="ltr" class="input" placeholder="Quick filter…" bind:value={quick} aria-label="Quick filter" />
       <div class="segmented" role="radiogroup" aria-label="Group by">
         <button role="radio" onkeydown={radioKey} aria-checked={group === 'workload'} tabindex={group === 'workload' ? 0 : -1} onclick={() => (group = 'workload')}>Workloads</button>
         <button role="radio" onkeydown={radioKey} aria-checked={group === 'pod'} tabindex={group === 'pod' ? 0 : -1} onclick={() => (group = 'pod')}>Pods</button>

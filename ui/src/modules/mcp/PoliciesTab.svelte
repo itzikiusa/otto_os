@@ -190,7 +190,7 @@
 
   {#if importOpen}
     <div class="import-panel">
-      <textarea
+      <textarea dir="ltr"
         bind:value={importText}
         rows="5"
         class="mono"
@@ -220,7 +220,7 @@
         {#if servers.length === 0}<option value="">No servers</option>{/if}
         {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
       </select>
-      <input bind:value={evalTool} placeholder="tool name" class="mono" />
+      <input dir="ltr" bind:value={evalTool} placeholder="tool name" class="mono" />
       <button class="btn small" onclick={() => void evaluate()} disabled={evaluating || servers.length === 0}>
         {evaluating ? '…' : 'Preview decision'}
       </button>

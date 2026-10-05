@@ -436,16 +436,16 @@
               <div class="row3">
                 <label class="field"><span>Delay (s)</span><input type="number" min="0" max="900" bind:value={sendDelay} aria-invalid={!validDelay} />{#if !validDelay}<span class="err">Enter a whole number from 0 to 900.</span>{/if}</label>
                 {#if selected.fifo}
-                  <label class="field"><span>Message group ID</span><input bind:value={sendGroup} required /></label>
-                  <label class="field"><span>Dedup ID <em>(optional)</em></span><input bind:value={sendDedup} /></label>
+                  <label class="field"><span>Message group ID</span><input dir="auto" bind:value={sendGroup} required /></label>
+                  <label class="field"><span>Dedup ID <em>(optional)</em></span><input dir="auto" bind:value={sendDedup} /></label>
                 {/if}
               </div>
               <div class="field">
                 <span>Message attributes (String)</span>
                 {#each sendAttrs as a, i (i)}
                   <div class="kv">
-                    <input aria-label="Attribute {i + 1} name" placeholder="name" bind:value={a.k} />
-                    <input aria-label="Attribute {i + 1} value" placeholder="value" bind:value={a.v} />
+                    <input dir="auto" aria-label="Attribute {i + 1} name" placeholder="name" bind:value={a.k} />
+                    <input dir="auto" aria-label="Attribute {i + 1} value" placeholder="value" bind:value={a.v} />
                     <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute" title="Remove attribute"><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
@@ -478,9 +478,9 @@
                 Move messages from this queue (typically a dead-letter queue) back to their source. Uses
                 <code>start-message-move-task</code>; SQS enforces the DLQ relationship.
               </p>
-              <label class="field"><span>Source ARN</span><input class="mono" value={attrs?.attributes.QueueArn ?? '…'} readonly /></label>
+              <label class="field"><span>Source ARN</span><input dir="ltr" class="mono" value={attrs?.attributes.QueueArn ?? '…'} readonly /></label>
               {#if dlqSource.length}<p class="dim">Known source queues: {dlqSource.join(', ')}</p>{/if}
-              <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
+              <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input dir="ltr" class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
               <div class="bar">
                 <button class="btn primary small" onclick={() => void redrive()} disabled={!canRedrive || redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
               </div>

@@ -487,7 +487,7 @@
     {/if}
   {:else}
     <div class="toolbar">
-      <input class="input" placeholder="Filter workloads…" bind:value={filter} aria-label="Filter workloads" />
+      <input dir="ltr" class="input" placeholder="Filter workloads…" bind:value={filter} aria-label="Filter workloads" />
       {#if namespaces.length > 1 || ns}
         <select class="input" bind:value={ns} aria-label="Namespace">
           <option value="">All configured namespaces</option>

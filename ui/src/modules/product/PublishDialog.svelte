@@ -388,7 +388,7 @@
         <!-- Optional parent page id -->
         <div class="field">
           <label class="label" for="pd-parent">Parent page ID <span class="dim">(optional)</span></label>
-          <input
+          <input dir="auto"
             id="pd-parent"
             class="input"
             bind:value={parentId}
@@ -401,7 +401,7 @@
         <!-- Optional title override -->
         <div class="field">
           <label class="label" for="pd-title">Title override <span class="dim">(optional)</span></label>
-          <input
+          <input dir="auto"
             id="pd-title"
             class="input"
             bind:value={rfcTitle}

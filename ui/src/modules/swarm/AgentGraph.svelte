@@ -392,7 +392,7 @@
       <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
-        <input class="search-input" aria-label="Filter live tasks" placeholder="Filter live tasks…" bind:value={taskQuery} />
+        <input dir="ltr" class="search-input" aria-label="Filter live tasks" placeholder="Filter live tasks…" bind:value={taskQuery} />
       </div>
       <div class="task-list" role="list" aria-label="Live tasks">
         {#each shownTasks as t (t.id)}
