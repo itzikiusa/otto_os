@@ -394,7 +394,7 @@ mod namespace_scope_tests {
                 subject_id: user.id.clone(),
                 effect: RuleEffect::Allow,
                 operations: vec!["discover".into(), "logs".into()],
-                children: Some(vec!["shop".into()]),
+                children: Some(vec!["namespace:shop".into()]),
                 grantable_operations: vec![],
                 credential_connection_id: None,
             }],
