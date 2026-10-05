@@ -936,7 +936,7 @@ async fn handle_event(
     // The allowed-users gate runs HERE as well as in the bridge: before it,
     // anyone who could message the bot made the daemon download up to 50 MB
     // per attachment into the temp dir — only for the bridge to drop it.
-    if !crate::bridge::user_allowed(&integ.allowed_users, &user) {
+    if !crate::bridge::integration_admits(integ, &user) {
         info!(
             event_type,
             user = %user,

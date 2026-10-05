@@ -234,23 +234,46 @@ fn neutralize_markers(text: &str) -> String {
 }
 
 /// The allowed-users gate. `allowed_users` is the integration's comma-separated
-/// list of channel-native user ids; blank = everyone. Entries are trimmed and
+/// list of channel-native user ids; blank = everyone ONLY when
+/// `open_when_blank` (the integration's explicit `open_to_all` opt-in, or a
+/// webhook — authenticated by its own secret), else blank = NOBODY (fail
+/// closed: a Telegram bot is reachable by anyone who finds its username, and
+/// a sender drives an agent session as the owner). Entries are trimmed and
 /// empty ones (a trailing comma) ignored, and ids compare case-insensitively —
 /// Slack ids are upper-case (`U0123ABC`) and a hand-typed `u0123abc` used to
 /// lock its owner out silently. A message with no sender id never passes a
 /// non-blank list. Shared by the bridge and the Slack listener, which checks it
 /// BEFORE downloading a message's attachments.
-pub fn user_allowed(allowed_users: &str, user: &str) -> bool {
+pub fn user_allowed(allowed_users: &str, open_when_blank: bool, user: &str) -> bool {
     let mut entries = allowed_users
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .peekable();
     if entries.peek().is_none() {
-        return true;
+        return open_when_blank;
     }
     let user = user.trim();
     !user.is_empty() && entries.any(|a| a.eq_ignore_ascii_case(user))
+}
+
+/// [`user_allowed`] for an integration: a blank list is open only under the
+/// explicit `open_to_all` opt-in, or for a webhook (whose caller already
+/// proved the integration's secret).
+pub fn integration_admits(integ: &Integration, user: &str) -> bool {
+    user_allowed(
+        &integ.allowed_users,
+        integ.open_to_all || integ.channel == Channel::Webhook,
+        user,
+    )
+}
+
+/// True when an integration admits every sender (a blank allow-list under
+/// the `open_to_all` opt-in) — the listeners warn about it on every start.
+pub fn open_to_everyone(integ: &Integration) -> bool {
+    integ.channel != Channel::Webhook
+        && integ.open_to_all
+        && integ.allowed_users.split(',').all(|s| s.trim().is_empty())
 }
 
 /// Derive a session title from the first inbound message so the sidebar pane is
@@ -603,7 +626,7 @@ impl Bridge {
         );
 
         // --- 1. Allowed-users check ---
-        if !user_allowed(&integ.allowed_users, &msg.user) {
+        if !integration_admits(integ, &msg.user) {
             info!(
                 channel = %adapter.channel().as_str(),
                 workspace = %msg.workspace_id,
@@ -1348,19 +1371,58 @@ mod tests {
 
     #[test]
     fn allowed_users_gate() {
-        // Blank (or only separators) = everyone.
-        assert!(user_allowed("", "U1"));
-        assert!(user_allowed(" , ", "U1"));
+        // Blank (or only separators) = everyone ONLY under the opt-in…
+        assert!(user_allowed("", true, "U1"));
+        assert!(user_allowed(" , ", true, "U1"));
+        // …and NOBODY without it (fail closed — review S5-02).
+        assert!(!user_allowed("", false, "U1"));
+        assert!(!user_allowed(" , ", false, "U1"));
         // Listed ids pass, trimmed, case-insensitively; others don't.
-        assert!(user_allowed("U0123ABC, U0456", "U0123ABC"));
-        assert!(user_allowed("u0123abc", "U0123ABC"));
-        assert!(!user_allowed("U0123ABC,", "U0456"));
-        assert!(!user_allowed("U0123ABC", "U0123AB"), "no prefix match");
-        // A sender-less event never passes a real list.
-        assert!(!user_allowed("U0123ABC", ""));
-        assert!(!user_allowed("U0123ABC,", "  "));
-        // Telegram numeric ids work the same way.
-        assert!(user_allowed("12345, 678", "678"));
+        for open in [false, true] {
+            assert!(user_allowed("U0123ABC, U0456", open, "U0123ABC"));
+            assert!(user_allowed("u0123abc", open, "U0123ABC"));
+            assert!(!user_allowed("U0123ABC,", open, "U0456"));
+            assert!(!user_allowed("U0123ABC", open, "U0123AB"), "no prefix match");
+            // A sender-less event never passes a real list.
+            assert!(!user_allowed("U0123ABC", open, ""));
+            assert!(!user_allowed("U0123ABC,", open, "  "));
+            // Telegram numeric ids work the same way.
+            assert!(user_allowed("12345, 678", open, "678"));
+        }
+    }
+
+    #[test]
+    fn a_blank_allow_list_admits_nobody_unless_opened() {
+        let mut integ = Integration {
+            workspace_id: "ws".into(),
+            channel: Channel::Telegram,
+            enabled: true,
+            allowed_users: String::new(),
+            open_to_all: false,
+            agent_reply: true,
+            reply_instructions: String::new(),
+            channel_id: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: false,
+            updated_at: chrono::Utc::now(),
+        };
+        // A new Telegram bot with no list: a stranger is refused.
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // The explicit opt-in (migrated pre-flag bots) keeps it open, flagged.
+        integ.open_to_all = true;
+        assert!(integration_admits(&integ, "424242"));
+        assert!(open_to_everyone(&integ));
+        // A real list wins over the opt-in.
+        integ.allowed_users = "7".into();
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // A webhook's caller proved the secret: blank stays open.
+        integ.channel = Channel::Webhook;
+        integ.allowed_users.clear();
+        integ.open_to_all = false;
+        assert!(integration_admits(&integ, "caller"));
     }
 
     #[test]

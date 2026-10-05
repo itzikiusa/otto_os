@@ -411,6 +411,17 @@ impl ChannelManager {
                 }
             };
             let integ = integ.clone();
+            if crate::bridge::open_to_everyone(&integ) {
+                // Loud on every start: anyone who can message this bot drives
+                // an agent session as the owner (review S5-02). Kept only for
+                // integrations configured before the allow-list was required.
+                warn!(
+                    workspace = %ws_id,
+                    channel = integ.channel.as_str(),
+                    "channel OPEN TO EVERYONE: blank allowed_users with open_to_all — any sender \
+                     can drive an agent session; set an allow-list in Settings → Channels"
+                );
+            }
             match tokens {
                 ListenerTokens::Telegram { token } => {
                     if !listening.insert(token.clone()) {
@@ -480,6 +491,7 @@ mod tests {
             channel,
             enabled: true,
             allowed_users: String::new(),
+            open_to_all: false,
             agent_reply: true,
             reply_instructions: String::new(),
             channel_id: String::new(),

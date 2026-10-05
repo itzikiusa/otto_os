@@ -1669,6 +1669,15 @@ channel-agnostic. For `webhook`, the reused fields carry webhook meanings:
 `channel_id` = the optional default **reply callback URL**, `allowed_users` = the
 optional allowed caller ids (matched against the request's `user`).
 
+**Allow-list (Slack / Telegram) fails closed.** A blank `allowed_users` admits
+**nobody** unless the integration carries the explicit `open_to_all: true` opt-in
+(`Integration.open_to_all`; `UpsertIntegrationReq.open_to_all` — omitted ⇒ the stored
+value is kept, a new integration starts `false`). Integrations created before the flag
+existed with a blank list were migrated to `open_to_all: true` so they keep working; the
+daemon logs a `channel OPEN TO EVERYONE` warning for each on every listener start, and
+Settings → Channels badges them. A webhook (authenticated by its secret key) treats a
+blank caller list as everyone and ignores the flag.
+
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{id}/integrations | ws viewer | — | configured channel integrations |

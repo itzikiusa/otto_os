@@ -2090,6 +2090,10 @@ pub struct UpsertIntegrationReq {
     /// Write-only; Slack app-level token (slack only).
     pub app_token: Option<String>,
     pub allowed_users: String,
+    /// The explicit "open to everyone" opt-in (see `Integration::open_to_all`).
+    /// Omitted ⇒ the stored value is kept.
+    #[serde(default)]
+    pub open_to_all: Option<bool>,
     pub agent_reply: bool,
     pub reply_instructions: String,
     pub channel_id: String,
