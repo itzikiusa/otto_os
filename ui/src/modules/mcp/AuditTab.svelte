@@ -206,6 +206,15 @@
             </span>
             <span class="cell num"><span class="cl">Latency</span>{r.latency_ms != null ? `${r.latency_ms}ms` : '—'}</span>
             <span class="cell num"><span class="cl">Bytes</span>{fmtBytes(r.bytes)}</span>
+            <details class="call-details">
+              <summary>Call details</summary>
+              <dl>
+                <dt>Server</dt><dd>{r.server_name ?? '—'}</dd>
+                <dt>Tool</dt><dd>{r.tool}</dd>
+                {#if r.decision_reason}<dt>Decision reason</dt><dd>{r.decision_reason}</dd>{/if}
+                {#if !r.ok}<dt>Error</dt><dd>{r.error ?? 'Failed'}</dd>{/if}
+              </dl>
+            </details>
           </div>
         {/each}
       </div>
@@ -330,6 +339,29 @@
   }
   .arow:hover {
     background: var(--hover);
+  }
+  .call-details {
+    grid-column: 1 / -1;
+    min-inline-size: 0;
+  }
+  .call-details summary {
+    cursor: pointer;
+    min-block-size: 32px;
+    align-content: center;
+    inline-size: fit-content;
+  }
+  .call-details dl {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    margin: 8px 0;
+  }
+  .call-details dt { font-weight: 500; }
+  .call-details dd {
+    margin: 0 0 8px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    min-inline-size: 0;
   }
   .cell {
     display: flex;
