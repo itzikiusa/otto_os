@@ -2128,9 +2128,8 @@
       align-items: center;
       align-self: stretch;
     }
-    .cfg-agent-actions .btn { min-height: 34px; }
     .cfg-add-row { flex-wrap: wrap; }
-    .cfg-add-row .btn { min-height: 36px; flex: 1 1 auto; }
+    .cfg-add-row .btn { flex: 1 1 auto; }
     .cfg-check-label { padding: 4px 0; }
   }
 
@@ -2255,10 +2254,7 @@
       overflow-wrap: anywhere;
       word-break: break-word;
     }
-    /* Bigger touch targets across the panel's action buttons. */
-    .rp-header .btn,
-    .rp-running-header .btn,
-    .rp-comment-head .btn { min-height: 32px; }
+    /* Action .btn hit areas come from the global coarse-pointer rule (app.css). */
     .rp-loc { max-width: 100%; }
     /* Tiny ✕ icon buttons (dismiss / remove-Jira / preset add+delete) are ~12px
        on desktop — far below a tappable size; grow them to a real touch target
@@ -2266,30 +2262,26 @@
     .rp-precheck-dismiss,
     .rp-jira-remove,
     .cfg-preset-action {
-      min-width: 36px;
-      min-height: 36px;
+      min-width: var(--hit-min);
+      min-height: var(--hit-min);
       display: inline-flex;
       align-items: center;
       justify-content: center;
     }
     /* The "Past reviews" disclosure is a zero-padding text button — give it real
        tap height. */
-    .rp-history-toggle { padding: 6px 0; min-height: 36px; }
+    .rp-history-toggle { padding: 6px 0; min-height: var(--hit-min); }
     /* 16px input text prevents iOS Safari from auto-zooming on focus. */
     .rp-context-input { font-size: 16px; } /* ui-guards: allow — 16px stops iOS zoom-on-focus */
   }
   @media (max-width: 640px) {
-    .rp-header .btn,
-    .rp-running-header .btn,
-    .rp-comment-head .btn,
-    .rp-error .btn { min-height: 38px; }
     /* The absolutely-positioned Configure button collides with the empty-state
        title on a narrow phone — drop it back into normal flow, full-width. */
     .rp-cfg-btn {
       position: static;
       width: 100%;
       margin-top: 8px;
-      min-height: 38px;
+      min-height: var(--hit-min);
     }
     /* Comment action buttons (Approve / Decline) span the row so they're easy
        to tap once the head has wrapped them to their own line. */

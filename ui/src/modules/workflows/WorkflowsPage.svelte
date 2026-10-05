@@ -536,7 +536,10 @@
       popRight = 8;
       return;
     }
-    popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+    // Offset from the pane's inline END (inset-inline-end), so RTL mirrors.
+    const rtl = mainEl ? getComputedStyle(mainEl).direction === 'rtl' : false;
+    const fromEnd = rtl ? b.left - m.left : m.right - b.right;
+    popRight = Math.max(8, Math.min(fromEnd, m.width - width - 8));
   }
 
   /** A workflow row's ⋯ / right-click menu. */
@@ -2049,7 +2052,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style="right:{popRight}px">
+        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style:inset-inline-end="{popRight}px">
           {#each types as t (t.kind)}
             <button class="pal-item" onclick={() => addNode(t)}>
               <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
@@ -2062,7 +2065,7 @@
         </div>
       {/if}
       {#if runsOpen}
-        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style="right:{popRight}px">
+        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style:inset-inline-end="{popRight}px">
           <LoadState
             what="runs"
             variant="compact"

@@ -574,11 +574,12 @@
     inset-inline-start: 0;
     width: min(100%, 560px);
     max-width: 100%;
-    max-height: var(--pop-max, min(320px, 50vh));
+    /* popMax (script) is the room above the box, from window.innerHeight. */
+    max-height: var(--pop-max);
     overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--glass-border);
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
     padding: 4px;
     z-index: var(--z-popover);
