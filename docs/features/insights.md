@@ -40,7 +40,7 @@ even though the on-disk HTML uses the same report style (see §7).
 | UI API client | `ui/src/lib/api/insights.ts` |
 | TypeScript DTOs | `ui/src/lib/api/types.ts` (`InsightsConfig`, `InsightReport`, `InsightKind`, `RunInsightsReq`, `RunInsightsResp`) |
 | Backend (scheduler + generator + HTTP API) | `crates/otto-server/src/insights.rs` |
-| Scheduler start-up wiring | `crates/ottod/src/main.rs` (`InsightsScheduler::new(ctx).start()`) |
+| Scheduler start-up wiring | `crates/otto-server/src/boot/tasks.rs` (`start_insights_scheduler`) |
 | Route mount | `crates/otto-server/src/modules.rs` (`crate::insights::routes()`) |
 | RBAC policy | `crates/otto-server/src/policy.rs` (the `Insights` feature) |
 | WS event source | `crates/otto-server/src/insights.rs` → `Event::InsightReady` |

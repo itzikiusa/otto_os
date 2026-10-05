@@ -77,7 +77,7 @@ tracks whether your copy still matches the bundled one.
 | Library CRUD routes | `GET/PUT/DELETE /library/skills[/{name}]` (and souls/context). |
 
 > **Data-dir note.** The library root is resolved by the daemon as
-> `<data_dir>/library` (`crates/ottod/src/main.rs`), where `data_dir` is
+> `<data_dir>/library` (`crates/otto-server/src/boot/build.rs`), where `data_dir` is
 > `$OTTO_DATA_DIR` or `~/Library/Application Support/Otto`
 > (`crates/ottod/src/config.rs`). Everything below is relative to that root.
 

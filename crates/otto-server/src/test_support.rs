@@ -3,7 +3,8 @@
 //! Before this module every integration suite copied a ~70-field `ServerCtx`
 //! struct literal, so adding a field to the context meant editing a dozen test
 //! files. [`ServerCtx::for_tests`] is now the ONE place that wires a
-//! self-contained context (in-memory secrets, no-op connection spawner, usage
+//! self-contained context (the shared literal itself is
+//! [`ServerCtx::from_parts`], which the daemon's `boot::build_ctx` uses too) (in-memory secrets, no-op connection spawner, usage
 //! engine disabled, no telemetry, no channel bridge). Suites that need a
 //! different value override the public field afterwards:
 //!
@@ -25,6 +26,7 @@ use otto_core::{Error, Id, Result};
 use otto_state::DbPool;
 use tokio::sync::broadcast;
 
+use crate::boot::CtxParts;
 use crate::state::ServerCtx;
 
 /// Process-local secret store (the Keychain is never touched by tests).
@@ -93,29 +95,10 @@ impl ServerCtx {
             events: events.clone(),
             library_root: data_dir.join("lib"),
         });
-        let connections = Arc::new(otto_connections::ConnectionsService::new(
-            otto_state::ConnectionsRepo::new(pool.clone()),
-            otto_state::ConnectionSectionsRepo::new(pool.clone()),
-            secrets.clone(),
-        ));
-        let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
-            otto_state::ConnectionsRepo::new(pool.clone()),
-            secrets.clone(),
-            otto_state::DbExplorerRepo::new(pool.clone()),
-        ));
         let brokers = Arc::new(otto_brokers::BrokersService::new(
             otto_state::BrokerClustersRepo::new(pool.clone()),
             secrets.clone(),
             None,
-        ));
-        let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
-        let swarm_repo = otto_state::SwarmRepo::new(pool.clone());
-        let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
-        let product_repo = otto_state::ProductRepo::new(pool.clone());
-        let product = Arc::new(otto_product::ProductService::new(
-            product_repo.clone(),
-            otto_state::IssuesRepo::new(pool.clone()),
-            secrets.clone(),
         ));
         let usage = otto_usage::UsageEngine::start(
             otto_usage::UsageConfig {
@@ -126,13 +109,10 @@ impl ServerCtx {
         )
         .await;
 
-        ServerCtx {
+        ServerCtx::from_parts(CtxParts {
             pool: pool.clone(),
             secrets,
-            events: events.clone(),
-            authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
-            roles: Arc::new(otto_rbac::RbacRoleChecker::new(pool.clone())),
-            auth_cache: otto_rbac::AuthCache::new(),
+            events,
             version: "test".into(),
             base_url: "http://127.0.0.1:0".into(),
             data_dir: data_dir.clone(),
@@ -143,76 +123,22 @@ impl ServerCtx {
                 "http://127.0.0.1:7700/api/v1/plugin-host".into(),
             )),
             manager,
-            rooms: Default::default(),
-            workspaces: otto_state::WorkspacesRepo::new(pool.clone()),
-            connections,
-            db_explorer,
-            db_assist: crate::db_assist::new_registry(),
-            transcript_cache: Default::default(),
-            brokers,
-            mcp,
             spawner: Arc::new(NoopSpawner),
-            git_store: otto_state::GitStore::new(pool.clone()),
-            issues_store: otto_state::IssuesRepo::new(pool.clone()),
-            integrations_store: otto_state::IntegrationsRepo::new(pool.clone()),
+            brokers,
             channel_bridge: None,
-            wf_skip_current: Default::default(),
-            reviews_store: otto_state::ReviewsRepo::new(pool.clone()),
-            review_cancels: Default::default(),
-            review_agent_cancels: Default::default(),
-            findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
-            finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),
-            repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
-            proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
-            skill_evals_store: otto_state::SkillEvalsRepo::new(pool.clone()),
-            golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
-            eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
-            skill_eval_cancels: Default::default(),
-            skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
-            skill_review_cancels: Default::default(),
             orchestrator,
             improve_engine,
             context_library: otto_context::Library::new(data_dir.join("ctx")),
             usage,
             telemetry: None,
-            product,
-            product_repo,
-            attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-            discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
-            refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
-            mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
-            discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
-            canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-            product_agent_cancels: crate::product_run::new_cancel_registry(),
-            design_jobs: crate::design_blender::new_job_registry(),
             memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-            vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
-            vault_docs_runs: crate::vault_docs_agent::new_run_registry(),
-            vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
-            swarm,
-            swarm_repo,
-            swarm_coords: crate::swarm_runtime::new_registry(),
-            swarm_run_cancels: crate::swarm_run::new_cancel_registry(),
-            goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-            goal_loops: crate::goal_loop::new_registry(),
-            workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-                otto_state::WorkGraphRepo::new(pool.clone()),
-                events.clone(),
-            )),
-            scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-            proof_repo: otto_state::ProofRepo::new(pool.clone()),
-            proof_locks: crate::proof::new_locks(),
-            runs: otto_state::RunsRepo::new(pool.clone()),
-            runs_engine: crate::run_engine::RunEngine::new(),
-            browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
-            browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
-            browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
+            proof_media_dir: None,
             browser: Arc::new(crate::routes::browser::BrowserEngineHandle::new(
                 None,
                 data_dir.join("browser"),
             )),
-            ui_bridge: Default::default(),
-        }
+            cache_auth_lookups: false,
+        })
     }
 }
 

@@ -174,7 +174,7 @@ For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<i
 | Domain types/default role prompts | `crates/otto-core/src/domain.rs` |
 | Request DTOs | `crates/otto-core/src/api.rs` |
 | Persistence | `crates/otto-state/src/goal_loops.rs`; migrations `0065` and `0133` |
-| Boot recovery | `crates/ottod/src/main.rs` |
+| Boot recovery | `crates/otto-server/src/boot/recovery.rs` (`recover_goal_loops`) |
 | UI | `ui/src/modules/loops/` |
 
 ## Related features

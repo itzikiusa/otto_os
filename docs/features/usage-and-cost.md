@@ -68,7 +68,7 @@ Two storage layers cooperate:
 | **UI** | `ui/src/modules/usage/` (`UsagePage.svelte`, `AttributionDrilldown.svelte`, `CostForecastChip.svelte`) | The dashboard, attribution drilldown, and forecast chip. |
 
 The engine is started once at daemon boot
-(`UsageEngine::start(usage_config, data_dir)` in `crates/ottod/src/main.rs`) and
+(`UsageEngine::start(usage_config, data_dir)` in `crates/otto-server/src/boot/build.rs`) and
 the tailer right after it (`UsageTailer::new(usage, pool, data_dir, home).start()`).
 
 ---

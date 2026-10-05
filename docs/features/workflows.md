@@ -608,7 +608,7 @@ useful macro triggers.
 > `workflow_trigger_scheduler::start` — a 60-second supervisor that scans enabled
 > `schedule` triggers, checks `is_due`, advances the `last_run` cursor first
 > (idempotency: a slow/failing run can't double-fire), and spawns runs — is
-> **started in `crates/ottod/src/main.rs`** at boot (log line *"workflow
+> **started in `crates/otto-server/src/boot/tasks.rs`** at boot (log line *"workflow
 > schedule-trigger scheduler started"*), alongside the event listener and the
 > swarm / scheduled-tasks supervisors. Its `is_due` **delegates to the shared
 > `cadence` engine** (the one Scheduled Tasks use), so workflow schedule triggers
