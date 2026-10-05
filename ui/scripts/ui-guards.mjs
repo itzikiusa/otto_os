@@ -150,10 +150,12 @@
 //                     lib/components → LoadState (`error` + `onretry`), which
 //                     owns the one "Couldn’t load X / detail / Retry" look
 //                     (components.md §11).
-//   local-tablist     a `role="tablist"` outside lib/components (a `.segmented`
-//                     class no longer exempts it — any look can be a <Tabs>
-//                     with `variant`) → <Tabs> (lib/components/Tabs.svelte:
-//                     one style, arrow keys, roving focus, named panels).
+//   local-tablist     a `role="tablist"` outside lib/components → <Tabs>
+//                     (lib/components/Tabs.svelte: one underline style, arrow
+//                     keys, roving focus, named panels). A `.segmented` view
+//                     switch is exempt only when it is keyboard-complete
+//                     (onTabKey / tabKeys wired in it — components.md §3); the
+//                     class alone no longer is.
 //   segmented-state   a button inside a `.segmented` group that marks its
 //                     selection with `active` but carries no `aria-pressed`,
 //                     `aria-selected`/`aria-checked` or `role="tab|radio"` —
@@ -726,7 +728,17 @@ for (const f of files) {
   }
   if (!f.rel.startsWith('src/lib/components/')) {
     for (const m of markup.matchAll(/\b(?:Retry|Try again)\b[^<>]*<\/button>/g)) hit('inline-retry', f, m.index, m[0].slice(0, 60));
-    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) hit('local-tablist', f, m.index, m[0].slice(0, 80));
+    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) {
+      // A `.segmented` VIEW switch is the sanctioned look for 2–4 page views
+      // (components.md §3) — but only when it is a real tablist: arrow keys
+      // via lib/tabKeys (on the strip or every tab) up to its </div>. A
+      // segmented class alone no longer exempts it.
+      if (/\bclass(?:=["{][^"}]*|:)\bsegmented\b/.test(m[0])) {
+        const body = markup.slice(m.index, markup.indexOf('</div>', m.index) + 1 || undefined);
+        if (/\bonTabKey\b|\btabKeys\(/.test(body)) continue;
+      }
+      hit('local-tablist', f, m.index, m[0].slice(0, 80));
+    }
   }
   // A `.segmented` group (up to its first closing </div>; segments don't nest
   // divs) whose `active`-marked buttons expose no state.
