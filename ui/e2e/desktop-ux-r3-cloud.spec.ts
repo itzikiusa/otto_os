@@ -59,6 +59,18 @@ function workload(name: string) {
 function event(name: string, kind = 'crash') {
   return { ts: '2026-09-25 12:00:00', namespace: 'default', workload: name, pod: name + '-pod', container: 'app', kind: 'restart', class: kind, reason: 'Restarted', exit_code: 1, detail: { prev_restarts: 0, next_restarts: 1 }, actor: '' };
 }
+/** Resolves once a request matching `match` finishes OR fails. The monitor
+ *  aborts a superseded fetch, and an aborted request never has a response, so
+ *  `waitForResponse` would hang. Arm it BEFORE the action that supersedes. */
+function requestSettled(page: Page, match: (url: string) => boolean): Promise<void> {
+  return new Promise(resolve => {
+    const on = (req: { url(): string }) => {
+      if (!match(req.url())) return;
+      page.off('requestfinished', on); page.off('requestfailed', on); resolve();
+    };
+    page.on('requestfinished', on); page.on('requestfailed', on);
+  });
+}
 async function monitoring(page: Page) {
   await page.route('**/monitor/workloads?*', r => r.fulfill({ json: { window: '1h', step_secs: 60, enabled: true, status, namespaces: ['default', 'payments'], workloads: [workload('checkout-api'), workload('billing-worker')] } }));
   await page.route('**/monitor/events?*', r => r.fulfill({ json: [event('checkout-api')] }));
@@ -86,15 +98,16 @@ test('monitor events ignore a previous filter response', async ({ page }) => {
   await page.route('**/monitor/events?*', async r => {
     const cls = new URL(r.request().url()).searchParams.get('class');
     if (cls === 'oom') { requested = true; await gate; }
-    await r.fulfill({ json: [event(cls === 'oom' ? 'old-oom-workload' : 'current-crash-workload', cls || 'crash')] });
+    // The superseded fetch may already be aborted by the time it is answered.
+    await r.fulfill({ json: [event(cls === 'oom' ? 'old-oom-workload' : 'current-crash-workload', cls || 'crash')] }).catch(() => {});
   });
   await openPage(page, 'kubernetes/monitor/ux-cluster/events');
   await page.getByLabel('Event class').selectOption('oom');
   await expect.poll(() => requested).toBe(true);
+  const stale = requestSettled(page, url => url.includes('/monitor/events?') && url.includes('class=oom'));
   await page.getByLabel('Event class').selectOption('crash');
   await expect(page.getByTestId('k8s-monitor-events')).toContainText('current-crash-workload');
-  const response = page.waitForResponse(r => r.url().includes('/monitor/events?') && r.url().includes('class=oom'));
-  release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
+  release(); await stale; await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.getByTestId('k8s-monitor-events')).not.toContainText('old-oom-workload');
 });
 
@@ -106,15 +119,16 @@ test('monitor trends ignore a previously expanded workload response', async ({ p
   await page.route('**/monitor/series?*', async r => {
     const query = new URL(r.request().url()).searchParams;
     if (query.get('workload') === 'checkout-api') { requested++; await gate; }
-    await r.fulfill({ json: { metric: query.get('workload') === 'checkout-api' ? 'old-workload-metric' : 'current-workload-metric', kind: 'gauge', step_secs: 60, points: [{ t: '2026-09-25T12:00:00Z', v: 200 }] } });
+    // The superseded fetches may already be aborted by the time they are answered.
+    await r.fulfill({ json: { metric: query.get('workload') === 'checkout-api' ? 'old-workload-metric' : 'current-workload-metric', kind: 'gauge', step_secs: 60, points: [{ t: '2026-09-25T12:00:00Z', v: 200 }] } }).catch(() => {});
   });
   await openPage(page, 'kubernetes/monitor/ux-cluster/workloads');
   await page.locator('.wl-row').filter({ hasText: 'checkout-api' }).click();
   await expect.poll(() => requested).toBe(2);
+  const stale = requestSettled(page, url => url.includes('/monitor/series?') && url.includes('workload=checkout-api'));
   await page.locator('.wl-row').filter({ hasText: 'billing-worker' }).click();
   await expect(page.locator('.detail')).toContainText('current-workload-metric');
-  const response = page.waitForResponse(r => r.url().includes('/monitor/series?') && r.url().includes('workload=checkout-api'));
-  release(); await response; await page.evaluate(() => new Promise(requestAnimationFrame));
+  release(); await stale; await page.evaluate(() => new Promise(requestAnimationFrame));
   await expect(page.locator('.detail')).not.toContainText('old-workload-metric');
 });
 
@@ -187,7 +201,10 @@ test('S3 pagination preserves rows and CSV and binary previews', async ({ page }
   await expect(page.getByRole('cell', { name: 'checkout', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Close preview' }).click();
   await page.getByRole('row').filter({ hasText: 'archive.bin' }).dblclick();
-  await expect(page.getByText('Binary content', { exact: false })).toBeVisible();
+  // Binary objects get no inline render — the note names the type and offers Download.
+  const preview = page.getByRole('complementary', { name: 'Object preview' });
+  await expect(preview.getByText('No preview for this type (application/octet-stream).', { exact: true })).toBeVisible();
+  await expect(preview.locator('.pv-note').getByRole('button', { name: 'Download', exact: true })).toBeVisible();
 });
 
 test('CloudWatch populated charts recover after refresh and select a new range', async ({ page }) => {
