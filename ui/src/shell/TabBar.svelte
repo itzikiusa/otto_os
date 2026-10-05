@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
@@ -339,7 +340,7 @@
             }}
           />
         {:else}
-          <button
+          <button use:rowMenu
             class="tab-main"
             role="tab"
             aria-selected={ws.activeSessionId === id}

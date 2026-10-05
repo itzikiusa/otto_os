@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { toastError } from '../../lib/toastError';
   // Scene list — the workspace's canvas scenes grouped into collapsible SECTIONS
   // (a folder path like "Platform/Staging" → sections + sub-sections), with
@@ -186,7 +187,7 @@
           {#each items as s (s.id)}
             <!-- The row is a real button (open) plus a sibling ⋯ button (the
                  row menu, also on right-click / ⇧F10) — no role=button div. -->
-            <div
+            <div use:rowMenuKeys
               class="row"
               class:active={canvas.currentId === s.id}
               class:nested={section !== ''}

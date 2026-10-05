@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import type { ProductPublicationPreview } from '../product/types';
   import { toastError } from '../../lib/toastError';
   import { focusOnMount } from '../../lib/focusOnMount';
@@ -2008,7 +2009,7 @@
               onblur={() => commitRename(wf)}
             />
           {:else}
-            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
+            <button use:rowMenuKeys class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
               <Icon name="split" size={13} />
               <span class="row-name">{wf.name}</span>
             </button>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import type { BadgeTone } from '../../lib/status';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
@@ -175,7 +176,7 @@
       </thead>
       <tbody>
         {#each shown as i (`${i.region ?? ''}/${i.identifier}`)}
-          <tr
+          <tr use:rowMenu
             class="trow"
             class:sel={detail?.inst.identifier === i.identifier}
             tabindex="0"

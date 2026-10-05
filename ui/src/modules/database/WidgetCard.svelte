@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // A dashboard tile: runs /db/widgets/{id}/run on mount (and on a refresh
   // interval set per-dashboard) and renders the result via Chart per its viz.
   import Icon from '../../lib/components/Icon.svelte';
@@ -135,7 +136,7 @@
   }
 </script>
 
-<div class="widget-card" role="group" aria-label={widget.title} oncontextmenu={menu}>
+<div use:rowMenu class="widget-card" role="group" aria-label={widget.title} oncontextmenu={menu}>
   <div class="wc-head">
     <span class="wc-title ellipsis" title={widget.title}>{widget.title}</span>
     <span class="wc-conn ellipsis" title="Connection: {connName}"><Icon name="db" size={9} />{connName}</span>

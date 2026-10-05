@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Athena: three-pane like the DB Explorer — catalog tree (databases → tables
@@ -414,7 +415,7 @@
                       {@const tk = `${db}.${t.name}`}
                       {@const topen = openTables[tk] === true}
                       <li>
-                        <button
+                        <button use:rowMenu
                           class="node"
                           onclick={() => (openTables = { ...openTables, [tk]: !topen })}
                           ondblclick={() => insertTable(db, t)}
@@ -531,7 +532,7 @@
           <thead><tr><th>State</th><th>Query</th><th class="hide-sm">Submitted</th><th class="num hide-sm">Scanned</th><th class="num hide-sm">Time</th></tr></thead>
           <tbody>
             {#each history as x (x.id)}
-              <tr class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openExecution(x); } }} oncontextmenu={(e) => ctxMenu.show(e, [
+              <tr use:rowMenu class="trow" tabindex="0" onclick={() => openExecution(x)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openExecution(x); } }} oncontextmenu={(e) => ctxMenu.show(e, [
                 { label: 'Load into editor', icon: 'edit', action: () => { sql = x.query; } },
                 { label: 'Open result', icon: 'play', action: () => openExecution(x) },
                 { label: 'Copy SQL', icon: 'copy', action: () => void copy(x.query, 'SQL') },

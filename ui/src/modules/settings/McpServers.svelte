@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -330,7 +331,7 @@
         {#each servers as s (s.id)}
           {@const locked = busyId === s.id || !canConfigure(s.id)}
           <!-- Right-click is a pointer shortcut; Edit / Remove are buttons on the card. -->
-          <div
+          <div use:rowMenu
             role="presentation"
             class="card server"
             class:off={!s.enabled}

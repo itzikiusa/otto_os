@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   // Collapsed 44px icon rail (⌘1 expands to the Navigator).
   import { navBadge } from '../lib/navBadge';
   import Icon from '../lib/components/Icon.svelte';
@@ -147,7 +148,7 @@
       {/if}
       {#each sec.modules as m (m.id)}
         {@const inSide = sidePane.active && sidePane.key === m.id}
-        <button
+        <button use:rowMenu
           class="rail-btn"
           class:active={isActive(m.id)}
           aria-current={isActive(m.id) ? 'page' : undefined}

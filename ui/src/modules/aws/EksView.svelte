@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { sentenceCase } from '../../lib/labels';
   import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
@@ -153,7 +154,7 @@
       <thead><tr><th>Cluster</th>{#if allRegions}<th>Region</th>{/if}<th>Status</th><th>Version</th><th class="hide-sm">Endpoint</th><th class="hide-sm">Created</th><th class="act"></th></tr></thead>
       <tbody>
         {#each shown as c (`${c.region ?? ''}/${c.name}`)}
-          <tr class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
+          <tr use:rowMenu class="trow" tabindex="0" onclick={() => void openDetail(c)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void openDetail(c); } }} oncontextmenu={(e) => menu(e, c)}>
             <td class="strong"><Icon name="helm" size={13} /> {c.name}</td>
             {#if allRegions}<td class="mono">{c.region ?? '—'}</td>{/if}
             <td><Badge tone={c.status === 'ACTIVE' ? 'ok' : 'warn'} label={sentenceCase(c.status)} /></td>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
   import { loadErrorText } from '../../../lib/loadError';
   import { radioKey } from '../../../lib/radioKey';
@@ -539,7 +540,7 @@
             {#each shown as r, j (`${r.namespace}/${r.workload}`)}
               {@const key = `${r.namespace}/${r.workload}`}
               {@const total = restartsTotal(r)}
-              <tr class="wl-row" aria-rowindex={win ? win.start + j + 2 : undefined} class:open={expanded === key} onclick={() => void toggle(r)} oncontextmenu={(e) => rowMenu(e, r)}>
+              <tr use:rowMenuKeys class="wl-row" aria-rowindex={win ? win.start + j + 2 : undefined} class:open={expanded === key} onclick={() => void toggle(r)} oncontextmenu={(e) => rowMenu(e, r)}>
                 <td>
                   <div class="wlname"><button class="workload-toggle" aria-expanded={expanded === key} onclick={(e) => { e.stopPropagation(); void toggle(r); }}>{r.workload}</button><span class="dim small"> {r.kind}{namespaces.length > 1 ? ` · ${r.namespace}` : ''}</span></div>
                   {#if r.crashloop}<span class="chip bad">CrashLoopBackOff ×{r.crashloop}</span>{/if}

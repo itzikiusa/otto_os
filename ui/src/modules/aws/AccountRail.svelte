@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // Left rail inside the AWS module: accounts → services. A service is greyed
   // (still navigable, so the AccessDenied is visible) when the account's IAM
@@ -90,7 +91,7 @@
     {@const open = !collapsed[a.id]}
     {@const note = sessionNote(a)}
     <div class="acct" class:active={a.id === activeId}>
-      <div class="acct-row" role="group" aria-label={a.name} oncontextmenu={(e) => menu(e, a)}>
+      <div use:rowMenu class="acct-row" role="group" aria-label={a.name} oncontextmenu={(e) => menu(e, a)}>
         <button
           class="acct-toggle"
           aria-expanded={open}

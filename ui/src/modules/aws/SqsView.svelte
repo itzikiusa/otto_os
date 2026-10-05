@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -338,7 +339,7 @@
           <tbody>
             {#each shown as q (q.url)}
               {@const a = aws.sqsAttrs[q.url]}
-              <tr
+              <tr use:rowMenu
                 class="trow"
                 class:sel={q.url === selectedUrl}
                 tabindex="0"

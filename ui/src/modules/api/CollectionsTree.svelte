@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Saved requests, grouped into collections and nested folders (parent_id).
   // Click a request to open it (an already-open or edited tab is never
   // overwritten — see apiClient.placeDraft). Row actions live in one ⋯ /
@@ -350,7 +351,7 @@
 {#snippet collectionNode(node: TreeNode, depth: number, isOpen: boolean)}
   <div class="vrow">
     <div class="col-head" style:padding-inline-start="{depth * 14 + 2}px">
-      <button class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
+      <button use:rowMenu class="col-toggle" onclick={() => toggle(node.col.id)} oncontextmenu={(e) => collectionMenu(e, node.col)} aria-expanded={isOpen}>
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
         <Icon name="folder" size={14} />
         <span class="col-name" title={node.col.name}>{node.col.name}</span>
@@ -366,7 +367,7 @@
 {#snippet requestRow(r: ApiRequest, depth: number)}
   <div class="vrow">
     <div class="req-row" class:active={activeRequestId === r.id} style:padding-inline-start="{depth * 14 + 20}px">
-      <button class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={activeRequestId === r.id ? 'true' : undefined}>
+      <button use:rowMenu class="req-open" onclick={() => openRequest(r)} oncontextmenu={(e) => requestMenu(e, r)} title="{r.method} {r.url}" aria-current={activeRequestId === r.id ? 'true' : undefined}>
         <MethodTag method={r.method} fixed />
         <span class="rname">{r.name}</span>
       </button>

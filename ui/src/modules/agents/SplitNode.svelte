@@ -19,6 +19,7 @@
 </script>
 
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // One node of the split TREE (C2). A `split` lays its two children out with an
   // 8px draggable gutter between them; a `leaf` renders the pane itself plus the
   // C3a drop veil. The component mounts itself for a/b — the tree is arbitrarily
@@ -192,7 +193,7 @@
         onpointerdown={() => ws.focusPane(idx)}
       >
         {#if paneCount > 1}
-          <button
+          <button use:rowMenu
             class="db-pane-close"
             title="Close pane — right-click for layout presets"
             aria-label="Close pane"

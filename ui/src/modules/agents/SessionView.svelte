@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PathField from '../../lib/components/PathField.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
@@ -788,7 +789,7 @@
         onmousedown={(e) => e.stopPropagation()}
       />
     {:else}
-      <span
+      <span use:rowMenu
         class="pane-title"
         class:draggable={gripOn}
         role="button"

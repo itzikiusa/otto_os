@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Vault file explorer — lazy directory tree over the store's TreeNode roots,
   // virtualized (big vaults stay cheap), with ctx-menu file ops and
   // drag-to-folder moves.
@@ -300,7 +301,7 @@
       findText={(n: TreeNode) => (n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name)}
     >
       {#snippet row(n: TreeNode)}
-        <div
+        <div use:rowMenu
           class="row {n.entry.kind}"
           class:active={isActive(n)}
           class:reserved={n.entry.reserved}

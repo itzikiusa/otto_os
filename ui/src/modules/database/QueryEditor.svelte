@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
@@ -1027,7 +1028,7 @@
 <div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
-      <div
+      <div use:rowMenu
         class="qe-tab"
         class:active={i === database.activeTab}
         class:agent={!!t.agent}

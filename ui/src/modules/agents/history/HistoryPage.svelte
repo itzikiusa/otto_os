@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../../lib/rowMenu';
   import { toastError } from '../../../lib/toastError';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   // History (`#/history[/<sessionId>]`) — every past Claude/Codex conversation,
@@ -532,7 +533,7 @@
                   data-status={e.status}
                   data-session-id={e.session_id}
                 >
-                  <button
+                  <button use:rowMenu
                     class="row-main"
                     aria-current={selKey === entryKey(e) ? 'true' : undefined}
                     onclick={() => pick(e)}

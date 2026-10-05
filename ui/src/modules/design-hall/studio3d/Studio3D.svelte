@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../../lib/rowMenu';
   // 3D Studio 1.5 — the Design Hall layout for a `scene3d` artifact (mockup S4):
   //
   //   ┌ HIERARCHY ─────┬ toolbar: ✨ Generate ▾ · Turntable · Play · Export ▾ ───┬ Inspector · Links · References ┐
@@ -573,7 +574,7 @@
           <ul class="views">
             {#each doc.cameras as c (c.id)}
               <li>
-                <button class="view" onclick={() => vp?.goToView(c)} oncontextmenu={(e) => { e.preventDefault(); viewMenu(e, c.id); }} title="#view:{c.id}">
+                <button use:rowMenu class="view" onclick={() => vp?.goToView(c)} oncontextmenu={(e) => { e.preventDefault(); viewMenu(e, c.id); }} title="#view:{c.id}">
                   <Icon name="eye" size={12} /> <span>{c.name ?? c.id}</span>
                 </button>
                 <button class="icon-btn" aria-label="View options" title="View options" onclick={(e) => viewMenu(e, c.id)}><Icon name="more" size={12} /></button>

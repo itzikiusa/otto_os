@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import { loadErrorText } from '../../lib/loadError';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -586,7 +587,7 @@
         <thead><tr><th>Bucket</th><th class="hide-sm">Region</th><th class="hide-sm">Created</th></tr></thead>
         <tbody>
           {#each bucketsShown as b (b.name)}
-            <tr
+            <tr use:rowMenuKeys
               class="trow"
               tabindex="0"
               onclick={() => goTo(b.name, '')}
@@ -694,7 +695,7 @@
           <tbody>
             {#if win.top}<tr class="tw-spacer" aria-hidden="true"><td colspan="5" style="height:{win.top}px"></td></tr>{/if}
             {#each rowsWindow as r (r.key)}
-              <tr
+              <tr use:rowMenuKeys
                 class="trow"
                 class:sel={selKey === r.key}
                 tabindex="0"

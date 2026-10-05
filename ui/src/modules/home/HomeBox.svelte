@@ -37,6 +37,7 @@
 </script>
 
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // One widget on the Home desktop: a quiet header (kind icon + title; the
   // refresh / zoom / menu controls surface on hover or focus), the kind’s live
   // body, and — in the grid — a drag grip for reordering plus a corner handle
@@ -190,7 +191,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<section
+<section use:rowMenu
   class="hbox"
   class:zoomed
   class:resizing

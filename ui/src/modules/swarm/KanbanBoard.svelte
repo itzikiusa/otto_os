@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Per-project Kanban: columns by task status, cards = tasks. Move status,
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
   // Cards support HTML5 drag-and-drop to change status columns.
@@ -562,7 +563,7 @@
                    the select checkbox, the title button (Enter / click → the
                    task's actions; x toggles selection) and the meta buttons.
                    Never a control nested inside a role="button" card. -->
-              <div
+              <div use:rowMenu
                 class="card kb-card"
                 role="listitem"
                 class:dragging={draggingId === t.id}

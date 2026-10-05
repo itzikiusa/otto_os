@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../../../lib/rowMenu';
   // Scene hierarchy — the game-studio left panel while a scene3d artifact is open
   // (the arena toggles it in place of the asset list). Groups collapse, rows
   // select, double-click / F2 renames inline, the eye hides, the ⋯ / right-click
@@ -330,7 +331,7 @@
     {#each visibleRows as r (r.id)}
       {@const hidden = r.node.node.visible === false}
       {@const dimmed = !isEffectivelyVisible(doc, r.id)}
-      <div
+      <div use:rowMenuKeys
         class="s3d-row"
         class:selected={selectedId === r.id}
         class:dimmed
@@ -404,7 +405,7 @@
       <div class="s3d-section" role="presentation">Lights</div>
       {#each visibleLights as l (l.id)}
         {@const hidden = l.visible === false}
-        <div
+        <div use:rowMenuKeys
           class="s3d-row"
           class:selected={selectedId === l.id}
           class:dimmed={hidden}

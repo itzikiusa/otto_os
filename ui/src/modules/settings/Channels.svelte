@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -378,7 +379,7 @@
         {@const h = health(intg, channel)}
         <!-- Right-click is a pointer shortcut; Enabled, Test, Edit, Remove and
              Set up are controls on the card itself. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="channel-card card"
           class:off={configured && !intg?.enabled}

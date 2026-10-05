@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from '../settings/sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -270,7 +271,7 @@
     <div class="acct-list" role="list">
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
-        <div
+        <div use:rowMenu
           class="acct card"
           role="listitem"
           oncontextmenu={(e) => ctxMenu.show(e, [

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
@@ -631,7 +632,7 @@
 
 {#snippet fileRow(file: TFile, depth: number, section: 'unstaged' | 'staged')}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
+  <div use:rowMenu
     class="wp-file"
     class:selected={selectedPath === file.change.path}
     style="padding-inline-start:{8 + depth * 14}px"
@@ -679,7 +680,7 @@
          same affordance file rows have. The name/chevron only folds — a name
          click must never mutate the index. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
+    <div use:rowMenu
       class="wp-folder"
       style="padding-inline-start:{8 + depth * 14}px"
       oncontextmenu={(e) => folderMenu(e, node, section)}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // Agent rooms — the only agent-to-agent transport, always user-visible.
   // Room list + create on the left; the selected room's membership editor,
@@ -214,7 +215,7 @@
     <ul>
       {#each rooms as r (r.room.id)}
         <li>
-          <button
+          <button use:rowMenu
             class="room"
             data-room-id={r.room.id}
             class:active={r.room.id === selectedId}

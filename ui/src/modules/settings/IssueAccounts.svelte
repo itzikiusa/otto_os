@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
@@ -223,7 +224,7 @@
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
         <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
