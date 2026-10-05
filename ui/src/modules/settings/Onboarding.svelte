@@ -72,6 +72,10 @@
         try {
           rootLogin = await api.post<LoginResp>('/auth/login', { username: 'root', password });
         } catch {
+          // A 409 whose credentials don't sign in means another root already
+          // exists (set up elsewhere): retrying here can never succeed, so the
+          // step offers the sign-in screen instead of an "already onboarded" loop.
+          if (e instanceof ApiError && e.status === 409) rootTaken = true;
           throw e;
         }
       }
@@ -81,15 +85,19 @@
   }
 
   let pwError = $state('');
+  let rootTaken = $state(false);
   async function confirmPassword(): Promise<void> {
     if (busy || !pwValid) return;
     busy = true;
     pwError = '';
+    rootTaken = false;
     try {
       await ensureRoot();
       step = 2;
     } catch (e) {
-      pwError = e instanceof Error ? e.message : String(e);
+      pwError = rootTaken
+        ? 'A root account already exists on this Otto daemon. Sign in with its password instead.'
+        : `Couldn’t create the account: ${e instanceof Error ? e.message : String(e)}`;
     } finally {
       busy = false;
     }
@@ -189,14 +197,19 @@
 
         <div class="ob-actions">
           <button class="btn" disabled={busy} onclick={() => (step = 0)}>Back</button>
-          <button class="btn primary" disabled={!pwValid || busy} onclick={confirmPassword}>
-            {busy ? 'Creating the account…' : 'Create account'}
-          </button>
+          {#if rootTaken}
+            <button class="btn primary" onclick={() => void auth.boot()}>Go to sign in</button>
+          {:else}
+            <button class="btn primary" disabled={!pwValid || busy} onclick={confirmPassword}>
+              {busy ? 'Creating the account…' : pwError ? 'Try again' : 'Create account'}
+            </button>
+          {/if}
         </div>
       </div>
     {:else if step === 2}
       <div class="ob-body">
         <h1 tabindex="-1">Create your first workspace</h1>
+        {#if rootLogin}<p class="ob-done" role="status"><Icon name="check" size={12} /> Root account created.</p>{/if}
         <p>A workspace maps to a project directory. Sessions and repos live inside it.</p>
 
         <div class="field">
@@ -223,7 +236,9 @@
         </div>
 
         <div class="ob-actions">
-          <button class="btn" disabled={!!rootLogin} title={rootLogin ? 'The root account is already created' : undefined} onclick={() => (step = 1)}>Back</button>
+          <!-- The root account exists from here on: going back to its password
+               step could only suggest editing a password that is already set. -->
+          {#if !rootLogin}<button class="btn" onclick={() => (step = 1)}>Back</button>{/if}
           <button class="btn ghost" onclick={() => { skipWorkspace = true; step = 3; }}>Skip</button>
           <button
             class="btn primary"
@@ -425,6 +440,15 @@
   }
   .hint.err {
     color: var(--danger);
+  }
+  .ob-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-s);
+  }
+  .ob-done :global(svg) {
+    color: var(--success);
   }
   .hint-line {
     font-size: var(--fs-xs);
