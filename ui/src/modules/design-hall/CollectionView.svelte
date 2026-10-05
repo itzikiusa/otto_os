@@ -27,6 +27,7 @@
   import { STUDIOS, studioInfo } from './model';
   import { library } from './library.svelte';
   import { openStoryInProduct } from './nav';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     scope: Scope;
@@ -289,10 +290,7 @@
   {#if !sLoaded && !sError}
     <Skeleton rows={3} height={180} />
   {:else if sError && !sLoaded}
-    <div class="err" role="alert">
-      <Icon name="warning" size={14} /> Couldn’t load these designs. <span class="dim">{sError}</span>
-      <button class="btn small" onclick={() => { void library.load(); void loadScoped(); }}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="these designs" error={sError} empty onretry={() => { void library.load(); void loadScoped(); }} />
   {:else if notFound}
     <EmptyState variant="page" icon="designHall" title="This project isn’t available" body="It was archived or deleted, or it belongs to a workspace you can’t view."
       actionLabel="Back to Design Hall" onaction={() => router.go('design')} />
@@ -364,20 +362,6 @@
     color: var(--info);
     margin-block-start: 1px;
     flex: none;
-  }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    font-size: var(--fs-s);
-  }
-  .err > :global(svg) {
-    color: var(--danger);
-  }
-  .dim {
-    color: var(--text-dim);
-    font-weight: 400;
   }
   .studio-filter {
     display: flex;

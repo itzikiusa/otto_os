@@ -67,6 +67,7 @@
   } from './model';
   import TurnMessage from './TurnMessage.svelte';
   import VariantsTray from './VariantsTray.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     artifact: DesignArtifact;
@@ -506,11 +507,7 @@
     {#if phase === 'loading'}
       <Skeleton rows={3} height={48} />
     {:else if phase === 'error'}
-      <div class="inline-err" role="alert">
-        <Icon name="warning" size={14} />
-        <span>Couldn’t load Otto’s turns. <span class="dim">{loadError}</span></span>
-        <button class="btn small" onclick={() => void loadAll()}>Retry</button>
-      </div>
+      <LoadState variant="compact" what="Otto’s turns" error={loadError || 'No details were reported.'} empty onretry={() => void loadAll()} />
     {:else if thread.length === 0}
       <div class="intro">
         {#if brief}
@@ -740,16 +737,6 @@
     background: var(--surface-2);
     border-radius: var(--radius-s);
     white-space: pre-wrap;
-  }
-  .inline-err {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .inline-err > :global(svg) {
-    color: var(--danger);
   }
   .exchange {
     display: flex;

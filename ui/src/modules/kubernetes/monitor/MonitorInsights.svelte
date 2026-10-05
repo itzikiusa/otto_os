@@ -185,7 +185,7 @@
         {#if reportLoading}
           <Skeleton rows={6} height={16} />
         {:else if reportError}
-          <div class="error" role="alert">Couldn’t load the report: {reportError} <button class="btn small" onclick={() => void openRun(selected)}>Retry</button></div>
+          <LoadState variant="compact" what="the report" error={reportError} empty onretry={() => void openRun(selected)} />
         {:else if html}
           <div class="md">{@html html}</div>
         {:else if selected}
