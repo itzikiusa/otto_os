@@ -16,6 +16,11 @@ pub struct Inbound {
     pub user: String,
     /// The user's message text.
     pub text: String,
+    /// A human EDIT of an earlier message (Slack `message_changed`), not a new
+    /// one: the bridge never re-fires commands or triggers for it (an edited
+    /// `Action: Workflow` must not start a second run) and marks it for the
+    /// agent as an edit.
+    pub edited: bool,
 }
 
 /// Sending/editing abstraction for a messaging channel.

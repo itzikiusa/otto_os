@@ -276,6 +276,12 @@ pub fn open_to_everyone(integ: &Integration) -> bool {
         && integ.allowed_users.split(',').all(|s| s.trim().is_empty())
 }
 
+/// The agent prompt for a human EDIT of an earlier message: marked, so the
+/// agent treats it as a correction to what it already saw, not a new task.
+fn edit_prompt(text: &str) -> String {
+    format!("[edited earlier message]\n{text}")
+}
+
 /// Derive a session title from the first inbound message so the sidebar pane is
 /// searchable (e.g. "Investigate ticket XXX"). First non-empty line, trimmed
 /// and truncated; falls back to "<Channel> chat". Set once at creation and not
@@ -615,7 +621,7 @@ impl Bridge {
     }
 
     /// Handle one inbound message.
-    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, msg: Inbound) {
+    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, mut msg: Inbound) {
         info!(
             channel = %adapter.channel().as_str(),
             workspace = %msg.workspace_id,
@@ -642,8 +648,14 @@ impl Bridge {
         // normal prompt rather than a control command. Command replies go via
         // `adapter.send`, which the webhook adapter no-ops, and a stray `/stop`
         // could disrupt a session — so skip interception for webhooks entirely.
+        // An EDIT of an earlier message re-fires nothing: no quick command,
+        // no swarm / run / workflow trigger (fixing a typo in an `Action:
+        // Workflow` post must not start a second run). It goes to the
+        // conversation's agent, marked as an edit.
+        let fresh = !msg.edited;
         let trimmed = msg.text.trim();
-        if adapter.channel() != Channel::Webhook
+        if fresh
+            && adapter.channel() != Channel::Webhook
             && trimmed.starts_with('/')
             && self
                 .handle_command(integ, adapter.clone(), &msg, trimmed)
@@ -665,7 +677,7 @@ impl Bridge {
         // --- 3b. Swarm trigger: a message on a swarm-bound channel launches the
         // team instead of starting a normal session. Webhook callers can launch
         // via the dedicated /webhooks/swarm route, so only chat channels route here.
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.swarm_trigger {
                 if let Some(ack) = trigger
                     .try_launch(
@@ -696,7 +708,7 @@ impl Bridge {
         // launches the one-button pipeline, and an `approve`/`reject` reply
         // resolves an awaiting run's gate. Like the swarm trigger, chat channels
         // only (webhook has its dedicated /webhooks/{ws}/run route).
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.run_trigger {
                 if let Some(ack) = trigger
                     .handle(
@@ -728,7 +740,7 @@ impl Bridge {
         // Action:Workflow trigger so a control word in a live run's thread isn't
         // mistaken for a new run; a non-command reply (or no matching active run)
         // returns None and falls through to normal routing.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_control(
                     &msg.workspace_id,
@@ -756,7 +768,7 @@ impl Bridge {
         // --- 3d. Workflow trigger: a structured `Action: Workflow` message starts
         // a workflow run (resolved by Name within the workspace). Available on all
         // channels, including webhook.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_start(
                     &msg.workspace_id,
@@ -779,6 +791,10 @@ impl Bridge {
                     .await;
                 return;
             }
+        }
+
+        if msg.edited {
+            msg.text = edit_prompt(&msg.text);
         }
 
         // --- 4. Find or create a session ---
@@ -1382,13 +1398,24 @@ mod tests {
             assert!(user_allowed("U0123ABC, U0456", open, "U0123ABC"));
             assert!(user_allowed("u0123abc", open, "U0123ABC"));
             assert!(!user_allowed("U0123ABC,", open, "U0456"));
-            assert!(!user_allowed("U0123ABC", open, "U0123AB"), "no prefix match");
+            assert!(
+                !user_allowed("U0123ABC", open, "U0123AB"),
+                "no prefix match"
+            );
             // A sender-less event never passes a real list.
             assert!(!user_allowed("U0123ABC", open, ""));
             assert!(!user_allowed("U0123ABC,", open, "  "));
             // Telegram numeric ids work the same way.
             assert!(user_allowed("12345, 678", open, "678"));
         }
+    }
+
+    #[test]
+    fn an_edit_is_marked_for_the_agent() {
+        assert_eq!(
+            edit_prompt("Action: Workflow\nName: PR Reviewer"),
+            "[edited earlier message]\nAction: Workflow\nName: PR Reviewer"
+        );
     }
 
     #[test]

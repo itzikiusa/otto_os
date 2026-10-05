@@ -285,12 +285,32 @@ fn is_membership_subtype(subtype: Option<&str>) -> bool {
     )
 }
 
-/// True when a `message_changed` payload's inner message was edited BY A HUMAN.
-/// Slack stamps `edited: {user, ts}` only then; the same event fires with no
-/// stamp when Slack rewrites the message on its own — attaching a link unfurl,
-/// a file preview, or reaction metadata.
-fn is_human_edit(message: &serde_json::Value) -> bool {
-    message["edited"].is_object()
+/// How far apart (seconds) a `message_changed` event and its message's
+/// `edited.ts` may be for the event to BE that human edit.
+const EDIT_EVENT_WINDOW_SECS: f64 = 60.0;
+
+/// True when a `message_changed` EVENT is a human edit happening now. Slack
+/// stamps `edited: {user, ts}` only on a human edit, and fires the same event
+/// with no stamp when it rewrites the message on its own (a link unfurl, a
+/// file preview, reaction metadata). The stamp then STAYS on every later
+/// rewrite of that message, so its presence alone re-injected an old edited
+/// message as a new turn after a restart (or once the dedup window evicted
+/// it): the edit must be fresh — `edited.ts` within a minute of the event's
+/// own ts. A `hidden` inner message is never user content.
+fn is_human_edit(event: &serde_json::Value) -> bool {
+    let message = &event["message"];
+    if message["hidden"].as_bool() == Some(true) {
+        return false;
+    }
+    let secs = |v: &serde_json::Value| v.as_str().and_then(|t| t.parse::<f64>().ok());
+    let Some(edited) = secs(&message["edited"]["ts"]) else {
+        return false;
+    };
+    match secs(&event["event_ts"]).or_else(|| secs(&event["ts"])) {
+        Some(at) => (at - edited).abs() <= EDIT_EVENT_WINDOW_SECS,
+        // No event timestamp to compare: trust the stamp (old behaviour).
+        None => true,
+    }
 }
 
 /// The dedup identity of an event. A `message_changed` event carries its own
@@ -309,7 +329,7 @@ fn dedup_ts(event: &serde_json::Value) -> String {
         .or_else(|| event["ts"].as_str())
         .unwrap_or("");
     match event["message"]["edited"]["ts"].as_str() {
-        Some(edit) if is_human_edit(&event["message"]) => format!("{original}#edit:{edit}"),
+        Some(edit) if is_human_edit(event) => format!("{original}#edit:{edit}"),
         _ => original.to_string(),
     }
 }
@@ -914,7 +934,7 @@ async fn handle_event(
     // happened to contain a URL got processed twice: two agent sessions, or two
     // runs of the same workflow, from one human message. Only a human edit
     // carries `message.edited`.
-    if subtype == Some("message_changed") && !is_human_edit(&event["message"]) {
+    if subtype == Some("message_changed") && !is_human_edit(event) {
         info!(
             event_type,
             "slack: message rewrite skipped (unfurl/attachment, no user edit)"
@@ -994,6 +1014,7 @@ async fn handle_event(
         thread,
         user,
         text: combined,
+        edited: subtype == Some("message_changed"),
     };
     info!(
         workspace = %inbound.workspace_id,
@@ -1203,10 +1224,7 @@ mod tests {
                 "attachments": [{"title": "some link"}]
             }
         });
-        assert!(
-            !is_human_edit(&unfurl["message"]),
-            "an unfurl is not an edit"
-        );
+        assert!(!is_human_edit(&unfurl), "an unfurl is not an edit");
         assert_eq!(
             dedup_ts(&unfurl),
             "1785255511.983239",
@@ -1227,7 +1245,19 @@ mod tests {
                 "edited": {"user": "U1", "ts": "1785255520.000000"}
             }
         });
-        assert!(is_human_edit(&edited["message"]));
+        assert!(is_human_edit(&edited));
+        // A LATER rewrite (unfurl, parent update) of an edited message keeps
+        // the old stamp — it is not a fresh edit and is not re-forwarded.
+        let mut stale = edited.clone();
+        stale["ts"] = serde_json::json!("1785259999.000100");
+        assert!(
+            !is_human_edit(&stale),
+            "an old edit stamp is not a new edit"
+        );
+        // A hidden inner message is never user content.
+        let mut hidden = edited.clone();
+        hidden["message"]["hidden"] = serde_json::json!(true);
+        assert!(!is_human_edit(&hidden));
         assert_eq!(
             dedup_ts(&edited),
             "1785255511.983239#edit:1785255520.000000",

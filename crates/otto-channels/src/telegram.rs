@@ -572,6 +572,7 @@ pub async fn run(
                         thread,
                         user,
                         text: text.clone(),
+                        edited: false,
                     };
                     info!(
                         workspace = %inbound.workspace_id,
