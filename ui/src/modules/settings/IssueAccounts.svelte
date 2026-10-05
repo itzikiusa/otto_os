@@ -43,7 +43,11 @@
       return u.trim().toLowerCase();
     }
   }
-  const hostChanged = $derived(!!editing && hostOf(baseUrl) !== hostOf(editing.base_url));
+  const hostChanged = $derived.by(() => {
+    // (cast: TS narrows the `$state(null)` initializer to `null` at this point)
+    const e = editing as IssueAccount | null;
+    return !!e && hostOf(baseUrl) !== hostOf(e.base_url);
+  });
   const needsToken = $derived(hostChanged && token === '');
 
   // ── Token-expiry helpers ───────────────────────────────────────────────────
