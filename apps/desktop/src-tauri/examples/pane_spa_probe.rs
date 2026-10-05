@@ -3,6 +3,9 @@
 //! daemon. Both host and child use nonpersistent WK stores; no installed app
 //! state, daemon setup, capture devices, or window registry is touched.
 #![allow(dead_code, unused_imports)]
+#[path = "../src/throttle.rs"]
+mod throttle;
+use throttle::NO_THROTTLE;
 #[path = "../src/panes.rs"]
 mod panes;
 #[path = "../src/panes_policy.rs"]

@@ -21,22 +21,17 @@ mod rooms;
 mod shortcuts;
 mod snip;
 mod supervisor;
+mod throttle;
 mod tray;
 mod windows;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
-/// Every Otto webview (main, pop-out, native pane child, room host) opts out
-/// of WebKit's inactive-view scheduling. xterm parses each PTY frame on a
-/// `setTimeout` and paints on rAF; once WebKit decides a window is occluded
-/// or "in the background" those clamp to ~1 s, which shows up as second-scale
-/// echo/scroll lag with an idle CPU. The UI's own pollers already pause on
-/// `visibilitychange`, so leaving timers live costs nothing while hidden.
-/// macOS 14+ only (`WKPreferences.inactiveSchedulingPolicy = .none`); older
-/// systems ignore it. The main window sets the same in `tauri.conf.json`.
-pub(crate) const NO_THROTTLE: tauri::utils::config::BackgroundThrottlingPolicy =
-    tauri::utils::config::BackgroundThrottlingPolicy::Disabled;
+/// The webview background-throttling policy every builder passes as
+/// `crate::NO_THROTTLE` (see `throttle.rs`); re-exported at the crate root so
+/// the examples that `#[path]`-include those modules resolve it the same way.
+pub(crate) use throttle::NO_THROTTLE;
 
 fn main() {
     // AppKit-dispatched callbacks can't unwind: log panics, contain them below.
