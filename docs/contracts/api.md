@@ -2927,7 +2927,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{ws}/vault/vaults | ws viewer | — | `Vault[]` (with note/link counts + scan_state) |
-| POST /workspaces/{ws}/vault/vaults | ws editor | `{name, root_path?, okf?}` | `Vault` — registers an existing dir (a non-existent `root_path` is created — Obsidian "create vault" behavior); omitted `root_path` creates `~/.otto/vault/<slug(name)>`. Kicks a full scan. |
+| POST /workspaces/{ws}/vault/vaults | ws editor | `{name, root_path?, okf?}` | `Vault` — registers an existing dir (a non-existent `root_path` is created — Obsidian "create vault" behavior); omitted `root_path` creates `~/.otto/vault/<slug(name)>`. Kicks a full scan. **Non-root callers:** `root_path` must be absolute (or `~/…`) without `..`, and is refused (403, before anything is created) when it is `/`, `$HOME`, inside Otto's data dir or a credential dir (`~/.ssh`, `~/.aws`, `~/Library/Keychains`, `/etc`, …), or CONTAINS one (e.g. `~/Library`) — a vault serves its whole tree to Viewers. Root may register any directory. |
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
@@ -2951,7 +2951,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | GET /workspaces/{ws}/vault/vaults/{id}/history | ws viewer | `?path=&before=` | `VaultRevision[]` — newest first, up to 200; optional exact path; `before` is the last ID from the previous page |
 | GET /workspaces/{ws}/vault/vaults/{id}/history/{entry} | ws viewer | — | `VaultRevisionDetail` — revision metadata plus `before: string|null`, `after: string`; snapshot checksum mismatch → 409 |
 | POST /workspaces/{ws}/vault/vaults/{id}/history/{entry}/restore | ws editor | `{version: "before"|"after", if_hash: string}` | 204 — guarded restore, creates a new revision; stale current hash → 409; `if_hash: ""` requires absent destination; missing before-version → 400 |
-| GET /workspaces/{ws}/vault/vaults/{id}/asset | ws viewer | `?path=` | attachment bytes with sniffed content type (traversal-guarded) |
+| GET /workspaces/{ws}/vault/vaults/{id}/asset | ws viewer | `?path=` | attachment bytes with sniffed content type (traversal-guarded); 403 for key-like file names (`id_rsa`, `*.pem`, `.env`, …) and for paths inside Otto's data dir / a credential dir unless the vault root itself is there (same guard on every note/file path) |
 
 Notes:
 - Every file op canonicalizes and guards paths (no `..`, absolutes, hidden or
@@ -3216,9 +3216,9 @@ Schema history lists identifiers only; opening it does not fetch every schema bo
 |---|---|---|---|
 | POST /workspaces/{ws}/memory/{mid}/state | ws editor | `{state}` (suggested\|accepted\|stale\|contradicted) | updated `Memory` |
 | POST /workspaces/{ws}/memory/{mid}/forget | ws editor | — | `{undo_token}` (soft-delete) |
-| POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory` |
-| POST /workspaces/{ws}/memory/merge | ws editor | `{ids}` | merged `Memory` |
-| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` |
+| POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory`; tokens are random, single-use and expire 30 days after the forget (404 after) |
+| POST /workspaces/{ws}/memory/merge | ws editor | `{ids, title, body}` | merged `Memory` — duplicate ids count once; when `body` equals a source (after normalisation) that source IS the merged memory and stays active, only the other sources are retired |
+| POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` — 400 when a part equals the parent or another part (nothing is written) |
 | POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported, import_id}` — `imported` counts the memories this import created (or revived from a forgotten/merged duplicate), which are parked as `suggested`; a section identical to a live memory leaves that memory's state and provenance untouched and is not counted |
 
 ## Must-have wave (Wave 3) — additional routes
