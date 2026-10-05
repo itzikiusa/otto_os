@@ -3,7 +3,7 @@
 //! per-engine capabilities. These form the stable contract every driver
 //! implements — keep them engine-agnostic.
 
-use crate::split::{split_statements, SqlDialect};
+use crate::split::{SqlDialect, split_statements};
 use otto_core::domain::ConnectionKind;
 use otto_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -1496,7 +1496,7 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
     select_writes_session
         || (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
         || upper.contains("GET_LOCK(")
-        || upper.contains("PG_ADVISORY_LOCK")
+        || upper.contains("ADVISORY_LOCK")
         || upper.contains("SET_CONFIG(")
 }
 
@@ -2045,21 +2045,27 @@ mod tests {
         // that is one round trip per database.
         let req = ObjectSearchReq::default();
         assert!(!req.all_schemas());
-        assert!(ObjectSearchReq {
-            scope: "all".into(),
-            ..Default::default()
-        }
-        .all_schemas());
-        assert!(ObjectSearchReq {
-            scope: "ALL".into(),
-            ..Default::default()
-        }
-        .all_schemas());
-        assert!(!ObjectSearchReq {
-            scope: "schema".into(),
-            ..Default::default()
-        }
-        .all_schemas());
+        assert!(
+            ObjectSearchReq {
+                scope: "all".into(),
+                ..Default::default()
+            }
+            .all_schemas()
+        );
+        assert!(
+            ObjectSearchReq {
+                scope: "ALL".into(),
+                ..Default::default()
+            }
+            .all_schemas()
+        );
+        assert!(
+            !ObjectSearchReq {
+                scope: "schema".into(),
+                ..Default::default()
+            }
+            .all_schemas()
+        );
     }
 
     #[test]
@@ -2386,9 +2392,11 @@ mod tests {
 
     #[test]
     fn appends_after_order_by() {
-        assert!(inject_row_limit("select a from t order by a", 50, None)
-            .sql
-            .ends_with(" LIMIT 50"));
+        assert!(
+            inject_row_limit("select a from t order by a", 50, None)
+                .sql
+                .ends_with(" LIMIT 50")
+        );
     }
 
     #[test]
@@ -2443,17 +2451,21 @@ mod tests {
 
     #[test]
     fn injects_after_leading_comment_and_for_cte_and_paren() {
-        assert!(inject_row_limit("-- pick\nSELECT * FROM t", 10, None)
-            .sql
-            .ends_with(" LIMIT 10"));
+        assert!(
+            inject_row_limit("-- pick\nSELECT * FROM t", 10, None)
+                .sql
+                .ends_with(" LIMIT 10")
+        );
         assert!(
             inject_row_limit("WITH c AS (SELECT 1) SELECT * FROM c", 10, None)
                 .sql
                 .ends_with(" LIMIT 10")
         );
-        assert!(inject_row_limit("(SELECT * FROM t)", 10, None)
-            .sql
-            .ends_with(" LIMIT 10"));
+        assert!(
+            inject_row_limit("(SELECT * FROM t)", 10, None)
+                .sql
+                .ends_with(" LIMIT 10")
+        );
     }
 
     #[test]

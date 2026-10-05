@@ -20,7 +20,7 @@ use redis::{
     Client, ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo,
     TlsCertificates, Value as RedisValue,
 };
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::driver::Driver;
 use crate::types::{
@@ -94,7 +94,7 @@ impl Driver for RedisDriver {
                     latency_ms: Some(started.elapsed().as_millis() as u64),
                     message: e.to_string(),
                     server_version: None,
-                })
+                });
             }
         };
 
@@ -1175,11 +1175,41 @@ fn refuse_connection_state_command(parts: &[String]) -> Result<()> {
         "CLIENT" if sub.as_deref() == Some("REPLY") => {
             "CLIENT REPLY would desynchronise the shared connection"
         }
-        _ => return Ok(()),
+        _ => return refuse_blocking_command(&name, sub.as_deref(), parts),
     };
     Err(types::invalid(format!(
         "redis: {name}{} changes the shared connection's state and is not allowed here — {why}",
         if name == "CLIENT" { " REPLY" } else { "" }
+    )))
+}
+
+/// Refuse commands that BLOCK the connection server-side. The console's
+/// multiplexed connection is shared per `cfg|db`: a `BLPOP jobs 0` keeps it
+/// blocked after the client-side timeout fires, and every later command from
+/// any tab, widget or agent queues behind it. Their non-blocking forms
+/// (`LPOP`, `XREAD` without `BLOCK`, …) are fine.
+fn refuse_blocking_command(name: &str, sub: Option<&str>, parts: &[String]) -> Result<()> {
+    let blocking = match name {
+        "BLPOP" | "BRPOP" | "BLMOVE" | "BRPOPLPUSH" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX"
+        | "BZMPOP" | "WAIT" | "WAITAOF" => true,
+        "XREAD" | "XREADGROUP" => parts
+            .iter()
+            .skip(1)
+            .any(|a| a.eq_ignore_ascii_case("BLOCK")),
+        "CLIENT" => sub == Some("PAUSE"),
+        "DEBUG" => sub == Some("SLEEP"),
+        _ => false,
+    };
+    if !blocking {
+        return Ok(());
+    }
+    Err(types::invalid(format!(
+        "redis: {name}{} blocks the shared connection server-side and is not allowed here — \
+         use the non-blocking form (e.g. LPOP / ZPOPMIN, or XREAD without BLOCK)",
+        match (name, sub) {
+            ("CLIENT" | "DEBUG", Some(sub)) => format!(" {sub}"),
+            _ => String::new(),
+        }
     )))
 }
 
@@ -1352,7 +1382,6 @@ const REDIS_COMMANDS: &[(&str, &str)] = &[
     ),
     ("COMMAND", "COMMAND [COUNT|INFO|DOCS] — command metadata"),
     ("MEMORY", "MEMORY USAGE key — estimate memory used by a key"),
-    ("WAIT", "WAIT numreplicas timeout — wait for replication"),
     ("PUBLISH", "PUBLISH channel message — publish to a channel"),
 ];
 
@@ -1391,6 +1420,37 @@ mod tests {
         let e = refuse_connection_state_command(&p("SELECT 2")).unwrap_err();
         assert!(e.to_string().contains("database picker"), "{e}");
         for ok in ["GET k", "CLIENT LIST", "PUBLISH ch m", "INFO", "DBSIZE"] {
+            assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
+        }
+        // S6-06: server-side BLOCKING forms would wedge the shared connection.
+        for line in [
+            "BLPOP jobs 0",
+            "brpop jobs 5",
+            "BLMOVE a b LEFT RIGHT 0",
+            "BRPOPLPUSH a b 0",
+            "BLMPOP 0 1 a LEFT",
+            "BZPOPMIN z 0",
+            "BZPOPMAX z 0",
+            "BZMPOP 0 1 z MIN",
+            "WAIT 1 0",
+            "WAITAOF 1 1 0",
+            "XREAD BLOCK 0 STREAMS s $",
+            "XREADGROUP GROUP g c block 0 STREAMS s >",
+            "CLIENT PAUSE 100000",
+            "DEBUG SLEEP 60",
+        ] {
+            let e = refuse_connection_state_command(&p(line)).unwrap_err();
+            assert!(
+                e.to_string().contains("blocks the shared connection"),
+                "{line}: {e}"
+            );
+        }
+        for ok in [
+            "LPOP jobs",
+            "XREAD COUNT 10 STREAMS s 0",
+            "ZPOPMIN z",
+            "CLIENT ID",
+        ] {
             assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
         }
         // The console's completions no longer offer them.
