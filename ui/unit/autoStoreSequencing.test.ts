@@ -82,3 +82,20 @@ test('scheduled tasks: the start snapshot landing after the finish one is droppe
   await onStart;
   assert.equal(scheduledTasks.runsByTask.T1[0].status, 'succeeded');
 });
+
+test('lazyComponent: a failed prefetch stays silent and the first open retries', async () => {
+  const { lazyComponent } = loadSource(new URL('../src/lib/lazy-component.svelte.ts', import.meta.url), {});
+  let calls = 0;
+  const lc = lazyComponent(() => {
+    calls += 1;
+    return calls === 1 ? Promise.reject(new Error('offline')) : Promise.resolve({ default: 'Comp' });
+  });
+  lc.prefetch();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(lc.error, null, 'a hover prefetch failure is not shown');
+  assert.equal(lc.component, null); // starts the real load
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(calls, 2);
+  assert.equal(lc.component, 'Comp');
+});
