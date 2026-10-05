@@ -96,7 +96,7 @@
   .prompt-wrap {
     position: absolute;
     top: 12px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     z-index: var(--z-sticky);
     width: min(720px, 92%);

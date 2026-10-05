@@ -9,6 +9,7 @@
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import { renderMermaid } from '../mermaid';
   import Resizer from './Resizer.svelte';
+  import { dblclickEdit, onEditRequest } from '../editRequest.svelte';
 
   interface Props {
     id: string;
@@ -75,10 +76,11 @@
       nodes: canvas.scene.nodes.map((n) => (n.id === id ? patched : n)),
     });
   }
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, startEdit);
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="mermaid" class:selected ondblclick={startEdit}>
+<div class="mermaid" class:selected use:dblclickEdit={startEdit}>
   <Resizer {id} visible={selected} minWidth={240} minHeight={160} />
   <Handle type="target" position={Position.Left} />
   {#if error}
@@ -172,5 +174,8 @@
     font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px;
+  }
+  textarea:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 </style>

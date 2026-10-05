@@ -6,6 +6,7 @@
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
+  import { onEditRequest } from '../editRequest.svelte';
 
   interface Props {
     id: string;
@@ -34,6 +35,8 @@
       nodes: canvas.scene.nodes.map((n) => (n.id === id ? patched : n)),
     });
   }
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, startEdit);
 </script>
 
 <div
@@ -100,5 +103,8 @@
     background: transparent;
     color: inherit;
     font: inherit;
+  }
+  textarea:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 </style>

@@ -409,7 +409,7 @@
   .ai-bar {
     position: absolute;
     bottom: 18px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     z-index: var(--z-sticky);
     display: flex;

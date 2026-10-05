@@ -7,6 +7,7 @@
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
+  import { dblclickEdit, onEditRequest } from '../editRequest.svelte';
 
   interface Props {
     id: string;
@@ -38,10 +39,11 @@
     };
     reader.readAsDataURL(f);
   }
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, pick);
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="image" class:selected ondblclick={pick}>
+<div class="image" class:selected use:dblclickEdit={pick}>
   <Resizer {id} visible={selected} minWidth={80} minHeight={60} />
   <Handle type="target" position={Position.Left} />
   {#if dataUrl}

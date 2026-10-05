@@ -8,6 +8,7 @@
   import type { CanvasNode, ShapeVariant } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
+  import { onEditRequest } from '../editRequest.svelte';
 
   interface Props {
     id: string;
@@ -48,6 +49,8 @@
   const PAD = 2;
   const innerW = $derived(Math.max(2, w - PAD * 2));
   const innerH = $derived(Math.max(2, h - PAD * 2));
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, startEdit);
 </script>
 
 <div
