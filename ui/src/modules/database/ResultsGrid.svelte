@@ -1396,9 +1396,7 @@
       {@render loadingFrame()}
     {:else}
       <div class="grid-empty idle">
-        <Icon name="grid" size={24} />
-        <span class="ge-title">No results yet</span>
-        <span class="ge-body">Run a query with <kbd>⌘↵</kbd> — the statement under the cursor, or your selection.</span>
+        <EmptyState icon="grid" title="No results yet" body="Run a query with ⌘↵ — the statement under the cursor, or your selection." />
       </div>
     {/if}
   {/if}
@@ -1990,23 +1988,9 @@
     padding-top: 12vh;
     text-align: center;
   }
-  .ge-title {
-    color: var(--text);
-    font-size: var(--fs-m);
-    font-weight: 500;
-  }
-  .ge-body,
   .ge-meta {
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .ge-body kbd {
-    font-family: var(--font-mono);
-    font-size: var(--fs-xs);
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
   }
   .grid-error {
     color: var(--danger);

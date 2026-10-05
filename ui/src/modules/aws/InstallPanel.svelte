@@ -26,7 +26,7 @@
 <div class="install" data-testid="aws-install-panel">
   <div class="card">
     <div class="ico"><Icon name="cloud" size={26} /></div>
-    <h1>Otto needs the AWS CLI</h1>
+    <h2>Otto needs the AWS CLI</h2>
     <p class="body">
       The AWS console shells out to <code>aws</code> (CLI v2) for every call — nothing else is
       installed and your <code>~/.aws</code> files are never written. Otto installs it with
@@ -95,7 +95,7 @@
     border: 1px solid var(--border);
     color: var(--text-dim);
   }
-  h1 {
+  h2 {
     margin: 0;
     font-size: var(--fs-xl);
   }

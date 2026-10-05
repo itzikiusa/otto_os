@@ -3345,8 +3345,7 @@
             <!-- Docked (or bottom) with nothing selected: a centered, intentional
                  empty state — not a stray line floating at the top. -->
             <div class="insp-blank">
-              <Icon name="split" size={26} />
-              <p>Select a node or connection<br />to configure it.</p>
+              <EmptyState icon="split" title="Select a node or connection to configure it" />
             </div>
           {/if}
         </div>
@@ -3948,18 +3947,6 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    padding: 24px 16px;
-    color: var(--text-dim);
-    text-align: center;
-  }
-  .insp-blank :global(svg) {
-    opacity: 0.5;
-  }
-  .insp-blank p {
-    font-size: var(--fs-s);
-    line-height: 1.5;
-    margin: 0;
   }
   .title-edit {
     background: none;

@@ -1012,9 +1012,7 @@
       </div>
     {:else if !loading}
       <div class="stage-empty">
-        <Icon name="layers" size={26} />
-        <p>Select an artifact to view and edit it, use <strong>New ▾</strong> for a blank one or a template, or
-          <strong>Create with AI</strong> to generate one in place.</p>
+        <EmptyState icon="layers" title="No artifact selected" body="Select an artifact to view and edit it, use New ▾ for a blank one or a template, or Create with AI to generate one in place." />
       </div>
     {/if}
   </div>
@@ -1507,16 +1505,6 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 20px;
-  }
-  .stage-empty p {
-    margin: 0;
-    font-size: var(--fs-m);
-    max-width: 360px;
-    line-height: 1.5;
   }
 
   /* ── Inspector + assistant ────────────────────────────────────────────── */

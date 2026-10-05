@@ -284,7 +284,7 @@ test('New scene: the menu offers D2 too — creates an empty D2 canvas', async (
   // A fresh, empty D2 board mounts — its own empty-state hint (no source yet,
   // so the WASM renderer is never even invoked for a blank scene).
   await expect(page.locator('.board').first()).toBeVisible({ timeout: 30_000 });
-  await expect(page.locator('.board .empty .lead', { hasText: 'D2 diagram' })).toBeVisible({
+  await expect(page.locator('.board .empty h3', { hasText: 'D2 diagram' })).toBeVisible({
     timeout: 15_000,
   });
 });
