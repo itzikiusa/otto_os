@@ -71,8 +71,13 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
 /// one-column grid — a panic in debug, a wrapped 65535 and an `unwrap` panic
 /// in release — freezing the reader thread just like a zero dimension did.
 /// xterm's FitAddon never proposes fewer than 2 columns either.
+///
+/// The row floor is 2 for the same reason: on a one-row grid a wrapping
+/// write scrolls the row it wrapped from away (`prev_pos.row -= scrolled`
+/// underflows in the emulator's `col_wrap`) — any line longer than the width
+/// panicked the reader thread.
 pub const RESIZE_MIN_COLS: u16 = 2;
-pub const RESIZE_MIN_ROWS: u16 = 1;
+pub const RESIZE_MIN_ROWS: u16 = 2;
 pub const RESIZE_MAX_COLS: u16 = 500;
 pub const RESIZE_MAX_ROWS: u16 = 300;
 
@@ -831,7 +836,8 @@ impl PtyHandle {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         validate_resize(cols, rows)?;
         let mut parser = lock_unpoisoned(&self.mirror.parser);
-        if parser.screen().size() == (rows, cols) {
+        let (old_rows, old_cols) = parser.screen().size();
+        if (old_rows, old_cols) == (rows, cols) {
             return Ok(());
         }
         let multi_thread = tokio::runtime::Handle::try_current()
@@ -841,7 +847,6 @@ impl PtyHandle {
         } else {
             parser.screen_mut().set_size(rows, cols);
         }
-        let (old_rows, old_cols) = parser.screen().size();
         drop(parser);
         let res = match &self.backend {
             Backend::Local { master, .. } => lock_unpoisoned(master)
@@ -1299,9 +1304,11 @@ mod tests {
             .resize(RESIZE_MIN_COLS, RESIZE_MIN_ROWS)
             .expect("min grid");
         assert_eq!(handle.size(), (RESIZE_MIN_COLS, RESIZE_MIN_ROWS));
-        // One column is below the floor: a wide glyph cannot fit it.
-        let err = handle.resize(1, 24).expect_err("1-column grid");
-        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        // One column / one row are below the floor (emulator wrap panics).
+        for (c, r) in [(1, 24), (80, 1)] {
+            let err = handle.resize(c, r).expect_err("below the floor");
+            assert!(matches!(err, Error::Invalid(_)), "{c}x{r}: {err:?}");
+        }
         let _ = handle.kill();
     }
 
@@ -1311,9 +1318,14 @@ mod tests {
     /// directly on the emulator for every width the bound admits.
     #[tokio::test]
     async fn wide_glyph_after_minimum_width_resize_does_not_panic() {
-        for rows in [RESIZE_MIN_ROWS, 24] {
-            let mut p = vt100::Parser::new(rows, RESIZE_MIN_COLS, 100);
-            p.process("\u{1F600}x\u{4E2D}\u{6587}\u{1F600}\r\n\u{1F600}".as_bytes());
+        for rows in [RESIZE_MIN_ROWS, RESIZE_MIN_ROWS + 1, 24] {
+            for cols in RESIZE_MIN_COLS..RESIZE_MIN_COLS + 4 {
+                let mut p = vt100::Parser::new(rows, cols, 100);
+                p.process(
+                    "\u{1F600}x\u{4E2D}\u{6587}\u{1F600}\r\nlong-line-wraps\u{1F600}\u{1F600}"
+                        .as_bytes(),
+                );
+            }
         }
         let spec = CommandSpec {
             program: "/bin/cat".into(),
