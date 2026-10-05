@@ -20,9 +20,17 @@ lsRemove(ADMIN_TOKEN_KEY);
 /** The admin token kept for the current impersonation (memory first). */
 let adminTokenMem: string | null = null;
 
+/** When this tab's impersonation began (ms), beside the admin token in THIS
+ *  tab's sessionStorage (S13-07). It used to live in shared localStorage,
+ *  where a second, non-impersonating admin tab cleared it and the banner
+ *  froze at "30:00" while the real 30-minute server TTL ran out. */
+const IMP_START_KEY = 'otto_imp_start_ms';
+lsRemove(IMP_START_KEY); // older builds' shared copy
+
 function saveAdminToken(token: string): void {
   adminTokenMem = token;
   ssSet(ADMIN_TOKEN_KEY, token);
+  ssSet(IMP_START_KEY, String(Date.now()));
 }
 
 /** Read AND clear the saved admin token. */
@@ -30,7 +38,14 @@ function takeAdminToken(): string | null {
   const t = adminTokenMem ?? ssGet(ADMIN_TOKEN_KEY);
   adminTokenMem = null;
   ssRemove(ADMIN_TOKEN_KEY);
+  ssRemove(IMP_START_KEY);
   return t;
+}
+
+/** Start of this tab's impersonation (ms since epoch), or null if unknown. */
+export function impersonationStartedMs(): number | null {
+  const v = parseInt(ssGet(IMP_START_KEY) ?? '', 10);
+  return Number.isFinite(v) && v > 0 ? v : null;
 }
 
 // Capability ladder: index = strength (higher = more permissive).
