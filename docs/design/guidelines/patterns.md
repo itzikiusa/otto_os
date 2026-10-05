@@ -81,6 +81,13 @@ PR description) must be:
    shared (a document, a design, a config, a repo) arrives as a proposal with
    explicit **Apply / Discard** (or Approve / Edit / Reject). Applying creates a
    new version; it never overwrites without a trace.
+   *Documented exception — Design Hall Otto turns:* a turn the person asked
+   for in the Otto tab commits as a new, attributed version (`v13 (Otto)`,
+   Compare → Restore the previous one); variants and conflicting turns still
+   wait for Apply. Shared consumers stay safe because render links follow the
+   **approved** version by default and only a person approves; a consumer that
+   opts into `@latest` (follow_latest) follows every head, agent ones included
+   (see `docs/features/design-hall.md` §Approve and propagation).
 4. **Editable after the fact, and tracked.** If a person edits agent output,
    the version records both ("v15 · Otto, edited by you").
 
