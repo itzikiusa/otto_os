@@ -2885,12 +2885,6 @@ pub async fn run_workflow(
     sweep_stale_run_worktrees(&ctx).await;
 }
 
-/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
-/// every session it spawned, mark unfinished steps skipped, write the
-/// `canceled` terminal state (CAS — it never overwrites a run that settled
-/// otherwise), report back and reap the worktrees. Shared by the in-loop
-/// cancel, a cancel that landed during startup, and one that landed after the
-/// last node boundary (the success/error CAS lost).
 /// Sleep a retry backoff of `total`, polling the run row every couple of
 /// seconds; `true` as soon as the run is canceled (also when it already is).
 async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) -> bool {
@@ -2907,6 +2901,12 @@ async fn backoff_canceled(repo: &WorkflowsRepo, run_id: &Id, total: Duration) ->
     }
 }
 
+/// The canceled finalize of [`run_workflow`]: cancel the run's reviews, kill
+/// every session it spawned, mark unfinished steps skipped, write the
+/// `canceled` terminal state (CAS — it never overwrites a run that settled
+/// otherwise), report back and reap the worktrees. Shared by the in-loop
+/// cancel, a cancel that landed during startup, and one that landed after the
+/// last node boundary (the success/error CAS lost).
 async fn finalize_canceled_run(
     ctx: &ServerCtx,
     repo: &WorkflowsRepo,
