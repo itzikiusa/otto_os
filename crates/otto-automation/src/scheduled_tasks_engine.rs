@@ -33,7 +33,7 @@ use otto_state::FinishRun;
 use otto_state::NewScheduledRun;
 use serde_json::json;
 use tokio::sync::Semaphore;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::cadence;
 // Report + delivery mechanics are shared with the personal-agents engine; the
@@ -64,7 +64,6 @@ const RETRY_BACKOFF: [Duration; 3] = [
 const SHELL_TIMEOUT: Duration = Duration::from_secs(300);
 /// Poll cadence + cap while waiting for a handed-off workflow run to finish.
 const WORKFLOW_POLL: Duration = Duration::from_secs(2);
-const WORKFLOW_WAIT: Duration = Duration::from_secs(600);
 
 /// Keep at most this many runs per task; older runs (+ their report files) are pruned.
 const KEEP_RUNS: i64 = 100;
@@ -100,6 +99,9 @@ struct ExecFailure {
     attempts: i64,
     /// Stopped by a user (`POST …/runs/{id}/cancel`), not failed.
     canceled: bool,
+    /// Not run at all: the workflow it hands off to was still busy with an
+    /// earlier run (S3-08). Recorded `skipped`, with no failure notice.
+    skipped: bool,
 }
 
 impl From<Error> for ExecFailure {
@@ -111,6 +113,7 @@ impl From<Error> for ExecFailure {
             workflow_run_id: None,
             attempts: 1,
             canceled: false,
+            skipped: false,
         }
     }
 }
@@ -373,10 +376,16 @@ async fn complete_run(
         }
         Err(fail) => {
             let msg = fail.error.to_string();
-            let canceled = fail.canceled;
+            // Neither a user's Stop nor a skipped overlap is a failure to
+            // notify about.
+            let quiet = fail.canceled || fail.skipped;
             let msg_for_notice = msg.clone();
-            let status = if fail.canceled { "canceled" } else { "error" };
-            warn!(task = %task.id, "scheduled task run failed: {msg}");
+            let status = fail_status(&fail);
+            if fail.skipped {
+                info!(task = %task.id, "scheduled task run skipped: {msg}");
+            } else {
+                warn!(task = %task.id, "scheduled task run failed: {msg}");
+            }
             // Keep whatever the failed run still produced (shell output, a
             // workflow report) so the run's report view shows why it failed.
             let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
@@ -412,8 +421,7 @@ async fn complete_run(
             // always fails used to grow its run list without bound.
             prune(ctx, &task.id).await;
             emit(ctx, task, &run_id, status);
-            // A user's Stop isn't a failure to tell them about.
-            if !canceled {
+            if !quiet {
                 task_notice(ctx, task, &run_id, Some(&msg_for_notice), None).await;
             }
             Ok(run_id)
@@ -531,6 +539,18 @@ async fn stop_run(ctx: &impl AutomationCtx, run_id: &str) -> ExecFailure {
         workflow_run_id,
         attempts: 1,
         canceled: true,
+        skipped: false,
+    }
+}
+
+/// The terminal run status of a non-ok execution.
+fn fail_status(fail: &ExecFailure) -> &'static str {
+    if fail.canceled {
+        "canceled"
+    } else if fail.skipped {
+        "skipped"
+    } else {
+        "error"
     }
 }
 
@@ -544,7 +564,7 @@ fn failure_finish(
     report_rel: Option<String>,
 ) -> FinishRun {
     FinishRun {
-        status: if fail.canceled { "canceled" } else { "error" }.into(),
+        status: fail_status(&fail).into(),
         error: Some(error),
         summary,
         report_path,
@@ -703,6 +723,7 @@ async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &
         workflow_run_id: None,
         attempts,
         canceled: false,
+        skipped: false,
     };
     if outcome.errored() {
         return Err(fail(Error::Internal(format!(
@@ -838,6 +859,7 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
             workflow_run_id: None,
             attempts,
             canceled: false,
+            skipped: false,
         });
     }
     Ok(ExecOutcome {
@@ -1010,10 +1032,9 @@ async fn execute_workflow(
         return Err(Error::Invalid("workflow belongs to a different workspace".into()).into());
     }
     // Overlap guard (the workflow schedule-trigger scheduler has the same one):
-    // this path stops waiting after WORKFLOW_WAIT and releases the task's
-    // in-flight guard, so a 40-minute workflow on a 15-minute cadence used to
-    // get a second — then third — concurrent run, each with its own worktrees
-    // and agents.
+    // a workflow still busy with an earlier run (started by a trigger, a
+    // manual run, or another task) is not stacked — this occurrence is
+    // recorded `skipped`, quietly.
     // The check and the insert are one write transaction (`admit_run_if_idle`):
     // a separate has_active_run → create_run let a trigger admit between them.
     let ws = ctx.workspaces().get(&task.workspace_id).await?;
@@ -1022,11 +1043,13 @@ async fn execute_workflow(
         .admit_run_if_idle(&workflow.id, &workflow.workspace_id, &input, None)
         .await?
     else {
-        return Err(Error::Conflict(format!(
-            "skipped: a run of workflow \"{}\" is still in progress",
-            workflow.name
-        ))
-        .into());
+        return Err(ExecFailure {
+            skipped: true,
+            ..ExecFailure::from(Error::Conflict(format!(
+                "skipped: a run of workflow \"{}\" is still in progress",
+                workflow.name
+            )))
+        });
     };
     let run_id = run.id.clone();
     // Linked at once: the run row can open it while it runs, and a Stop
@@ -1044,70 +1067,62 @@ async fn execute_workflow(
         None,
     );
 
-    // Wait (bounded) for the workflow to finish so the report reflects its outcome.
-    let deadline = std::time::Instant::now() + WORKFLOW_WAIT;
+    // Wait for the workflow to settle so the task run records its REAL
+    // outcome (S3-08: after a fixed 600 s the run used to be recorded `ok`
+    // with a "handed off" report, whatever the workflow later did, and the
+    // next tick's overlap was stored as a failure). Nothing is held but this
+    // task's own in-flight claim — its next tick would only skip anyway while
+    // the workflow runs — and a Stop still cancels both (see `stop_run`).
     loop {
         tokio::time::sleep(WORKFLOW_POLL).await;
         // Perf W2: poll the status only; the full row (50–200 KB of
         // `nodes_json`) is read ONCE, when the run has settled.
-        let settled = matches!(
-            repo.run_status(&run_id).await,
-            Ok(Some((
-                otto_core::workflows::RunStatus::Success
-                    | otto_core::workflows::RunStatus::Error
-                    | otto_core::workflows::RunStatus::Canceled,
-                _
-            )))
-        );
-        let full = if settled {
-            repo.get_run(&run_id).await.ok()
-        } else {
-            None
-        };
-        if let Some(r) = full {
-            let status = format!("{:?}", r.status).to_lowercase();
-            if matches!(status.as_str(), "success" | "error" | "canceled") {
-                let report = workflow_report(&workflow.name, &r);
-                let summary = extract_summary(&report);
-                // A canceled workflow did not do the task's job — reporting it
-                // `ok` (as this used to) hid a stopped run behind a green badge.
-                if let Some(error) = workflow_failure(&status, &run_id) {
-                    return Err(ExecFailure {
-                        error,
-                        report: Some(report),
-                        session_id: None,
-                        workflow_run_id: Some(run_id),
-                        attempts: 1,
-                        canceled: false,
-                    });
-                }
-                return Ok(ExecOutcome {
-                    report,
-                    summary,
-                    session_id: None,
+        let status = match repo.run_status(&run_id).await {
+            Ok(Some((s, _))) => s,
+            Ok(None) => {
+                return Err(ExecFailure {
                     workflow_run_id: Some(run_id),
-                    attempts: 1,
+                    ..ExecFailure::from(Error::Internal(
+                        "the workflow run disappeared before it finished".into(),
+                    ))
                 });
             }
+            // A transient read error: keep waiting.
+            Err(_) => continue,
+        };
+        use otto_core::workflows::RunStatus;
+        if !matches!(
+            status,
+            RunStatus::Success | RunStatus::Error | RunStatus::Canceled
+        ) {
+            continue;
         }
-        if std::time::Instant::now() >= deadline {
-            let report = format!(
-                "# Workflow handed off: {}\n\nLaunched workflow run `{}`; still running after \
-                 {}s — see the Workflows page for live status.\n\n---\n\nThe scheduled task \
-                 handed control to the workflow engine.",
-                workflow.name,
-                run_id,
-                WORKFLOW_WAIT.as_secs()
-            );
-            let summary = extract_summary(&report);
-            return Ok(ExecOutcome {
-                report,
-                summary,
+        let Ok(r) = repo.get_run(&run_id).await else {
+            continue;
+        };
+        let status = status.as_str();
+        let report = workflow_report(&workflow.name, &r);
+        let summary = extract_summary(&report);
+        // A canceled workflow did not do the task's job — reporting it `ok`
+        // (as this used to) hid a stopped run behind a green badge.
+        if let Some(error) = workflow_failure(status, &run_id) {
+            return Err(ExecFailure {
+                error,
+                report: Some(report),
                 session_id: None,
                 workflow_run_id: Some(run_id),
                 attempts: 1,
+                canceled: false,
+                skipped: false,
             });
         }
+        return Ok(ExecOutcome {
+            report,
+            summary,
+            session_id: None,
+            workflow_run_id: Some(run_id),
+            attempts: 1,
+        });
     }
 }
 
@@ -1736,6 +1751,7 @@ mod tests {
             workflow_run_id: Some("w1".into()),
             attempts: 3,
             canceled: false,
+            skipped: false,
         };
         let f = failure_finish(
             fail,

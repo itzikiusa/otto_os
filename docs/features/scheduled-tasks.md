@@ -436,8 +436,11 @@ matching tick instead of polling.
 - **A failed run says why, inline**: the run row shows its error and any delivery
   failure; the agent session stays linked (*Open session*), a shell task's
   stdout/stderr is kept as the report, and a workflow hand-off keeps its workflow
-  run id. A canceled workflow hand-off is a failed run, not a success. The task's
-  status badge reflects the latest run, manual ones included.
+  run id. A canceled workflow hand-off is a failed run, not a success. A workflow
+  task's run stays *Running* until its workflow run settles and records that real
+  outcome; when the workflow is still busy with an earlier run, the occurrence is
+  recorded **Skipped** (no failure notice). The task's status badge reflects the
+  latest run, manual ones included.
 - **Convert to workflow** asks first and, by default, pauses the original task — the
   new workflow's schedule trigger has the same cadence, so keeping both doubles every
   run and delivery.

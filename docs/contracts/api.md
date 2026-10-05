@@ -4131,7 +4131,7 @@ before it, so a resumed task does not catch up what it missed while paused, and 
 `daily 09:00` created at 15:00 first fires tomorrow 09:00 (its `next_run_at`). A
 `once` whose `run_at` changes forgets that it fired. `last_status` reflects the latest
 run, manual included (manual runs never move the cursor). A `ScheduledTaskRun` carries `{…,
-status (running|ok|error|canceled), trigger, started_at, finished_at?, summary, report_path?, report_rel?,
+status (running|ok|error|canceled|skipped — a workflow task whose workflow was still busy; no failure notice), trigger, started_at, finished_at?, summary, report_path?, report_rel?,
 delivered, delivery_error?, error?, session_id?, report_hash?, proof_pack_id?,
 attempts, skipped_delivery, workflow_run_id?, created_at}`. A failed run keeps what it
 produced: its `session_id` (open it to see why), a shell task's stdout/stderr as the

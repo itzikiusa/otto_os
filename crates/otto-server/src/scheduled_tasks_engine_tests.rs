@@ -333,3 +333,46 @@ async fn review4_schedule_http_edit_and_away_back_fence_actual_settlement() {
         }
     }
 }
+
+/// S3-08: a workflow task whose workflow is still busy with an earlier run is
+/// recorded `skipped` — not `error` (which also fired a "Scheduled task
+/// failed" notice for what is normal overlap on a short cadence).
+#[tokio::test]
+async fn workflow_task_overlap_is_recorded_skipped_not_error() {
+    use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    seed_workspace(&pool, "wf-ws").await;
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let wfs = otto_state::WorkflowsRepo::new(ctx.pool.clone());
+    let wf = wfs
+        .create(
+            &"wf-ws".into(),
+            "Long",
+            "",
+            "",
+            &otto_core::workflows::WorkflowGraph::default(),
+            &"u".into(),
+        )
+        .await
+        .unwrap();
+    // An earlier run (a trigger, a manual run) is still in flight.
+    wfs.create_run(&wf.id, &"wf-ws".into(), &json!({}), None)
+        .await
+        .unwrap();
+    let mut new = otto_state::NewScheduledTask::defaults("wf-ws".into(), "Hand-off".into());
+    new.kind = "workflow".into();
+    new.workflow_id = Some(wf.id.clone());
+    new.schedule = json!({"cadence":"interval","every_min":15});
+    let task = ctx.scheduled_tasks.create(new).await.unwrap();
+    let run_id = crate::scheduled_tasks_engine::run_task(&ctx, &task, "manual")
+        .await
+        .unwrap();
+    let run = ctx.scheduled_tasks.get_run(&run_id).await.unwrap();
+    assert_eq!(run.status, "skipped", "{run:?}");
+    assert!(run.error.unwrap_or_default().contains("still in progress"));
+    assert_eq!(
+        ctx.scheduled_tasks.get(&task.id).await.unwrap().last_status.as_deref(),
+        Some("skipped")
+    );
+}
