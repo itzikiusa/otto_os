@@ -19,7 +19,7 @@ use otto_ssh::{SshTunnel, SshTunnelConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_socks::tcp::Socks5Stream;
@@ -33,12 +33,15 @@ use super::protocol::{
 const MAX_FRAME: usize = 256 * 1024 * 1024;
 const DEFAULT_KAFKA_PORT: u16 = 9092;
 
-/// Cap on concurrent in-flight proxy connections per tunnel. librdkafka
+/// Cap on concurrent in-flight upstream DIALS per tunnel. librdkafka
 /// reconnects aggressively (admin + producer + consumer, each × N brokers) when
 /// a broker is unreachable; without a cap every stuck upstream dial pins two
 /// file descriptors and they pile up until the daemon hits its open-files limit
 /// ("Too many open files"). Past the cap we shed the accepted connection
-/// immediately — librdkafka simply retries once a slot frees.
+/// immediately — librdkafka simply retries once a slot frees. The permit is
+/// released as soon as the upstream is established: long-lived broker
+/// connections (a big cluster × producer/consumer/admin clients) must not
+/// count against it, or a healthy tunnel sheds every new connection.
 const MAX_INFLIGHT_CONNS: usize = 64;
 
 /// Upper bound on the upstream dial (SOCKS CONNECT + optional broker TLS
@@ -183,16 +186,16 @@ impl ProxyShared {
             loop {
                 match listener.accept().await {
                     Ok((client, _)) => {
-                        // Bound concurrent proxy connections. The permit is held
-                        // for the life of the connection and released when it
-                        // ends; if none is free we shed this connection (close it)
-                        // instead of piling up fds — librdkafka reconnects when a
-                        // slot opens.
+                        // Bound concurrent upstream dials. `handle_conn` drops the
+                        // permit once the upstream is up; if none is free we shed
+                        // this connection (close it) instead of piling up fds —
+                        // librdkafka reconnects when a slot opens.
                         let permit = match Arc::clone(&shared.sem).try_acquire_owned() {
                             Ok(p) => p,
                             Err(_) => {
-                                tracing::debug!(
-                                    "broker proxy: in-flight cap ({MAX_INFLIGHT_CONNS}) reached — shedding connection"
+                                tracing::warn!(
+                                    broker = %host,
+                                    "broker proxy: {MAX_INFLIGHT_CONNS} upstream dials already in flight — shedding connection"
                                 );
                                 drop(client);
                                 continue;
@@ -201,9 +204,15 @@ impl ProxyShared {
                         let shared = shared.clone();
                         let host = host.clone();
                         tokio::spawn(async move {
-                            let _permit = permit; // released when the connection ends
-                            if let Err(e) =
-                                handle_conn(shared, host, port, client, PROXY_DIAL_TIMEOUT).await
+                            if let Err(e) = handle_conn(
+                                shared,
+                                host,
+                                port,
+                                client,
+                                PROXY_DIAL_TIMEOUT,
+                                Some(permit),
+                            )
+                            .await
                             {
                                 tracing::debug!("broker proxy connection closed: {e}");
                             }
@@ -230,6 +239,9 @@ impl ProxyShared {
 /// a hung bastion→broker path can't pin this connection's file descriptors
 /// indefinitely (the pump itself unwinds on either side's EOF).
 ///
+/// `dial_permit` (see [`MAX_INFLIGHT_CONNS`]) is held only until the upstream
+/// (SOCKS + TLS) is established, then released before the pump runs.
+///
 /// Returns a boxed future: this is part of a recursive cycle (the pump rewrites
 /// `Metadata`, which calls `ensure_listener`, which spawns `handle_conn` again),
 /// and boxing gives the cycle a concrete type so `Send` inference terminates.
@@ -239,6 +251,7 @@ fn handle_conn(
     port: u16,
     client: TcpStream,
     dial_timeout: Duration,
+    dial_permit: Option<OwnedSemaphorePermit>,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
         let socks = tokio::time::timeout(
@@ -260,8 +273,10 @@ fn handle_conn(
                 .await
                 .map_err(|_| Error::Upstream(format!("broker tls handshake {host} timed out")))?
                 .map_err(|e| Error::Upstream(format!("broker tls handshake {host}: {e}")))?;
+            drop(dial_permit);
             pump(client, tls, shared).await
         } else {
+            drop(dial_permit);
             pump(client, socks, shared).await
         }
     })
@@ -722,6 +737,85 @@ mod tests {
         assert_eq!(eps[0].0, "127.0.0.1");
     }
 
+    /// The dial permit is released once the upstream is established, so a
+    /// long-lived broker connection does not count against
+    /// [`MAX_INFLIGHT_CONNS`] for its whole life.
+    #[tokio::test]
+    async fn dial_permit_is_released_once_upstream_is_established() {
+        // Minimal SOCKS5 server: no-auth, accept any CONNECT, then hold the
+        // tunnel open (a live, idle broker connection).
+        let socks = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let socks_addr = socks.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = socks.accept().await {
+                tokio::spawn(async move {
+                    let mut g = [0u8; 2];
+                    s.read_exact(&mut g).await.unwrap();
+                    let mut m = vec![0u8; g[1] as usize];
+                    s.read_exact(&mut m).await.unwrap();
+                    s.write_all(&[5, 0]).await.unwrap();
+                    let mut h = [0u8; 4];
+                    s.read_exact(&mut h).await.unwrap();
+                    let rest = match h[3] {
+                        1 => 4 + 2,
+                        4 => 16 + 2,
+                        _ => {
+                            let mut l = [0u8; 1];
+                            s.read_exact(&mut l).await.unwrap();
+                            l[0] as usize + 2
+                        }
+                    };
+                    let mut r = vec![0u8; rest];
+                    s.read_exact(&mut r).await.unwrap();
+                    s.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                        .await
+                        .unwrap();
+                    let mut sink = [0u8; 64];
+                    while let Ok(n) = s.read(&mut sink).await {
+                        if n == 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let sem = Arc::new(Semaphore::new(MAX_INFLIGHT_CONNS));
+        let shared = Arc::new(ProxyShared {
+            socks_addr,
+            uses_tls: false,
+            tls: None,
+            endpoints: AsyncMutex::new(HashMap::new()),
+            reverse: Mutex::new(HashMap::new()),
+            handles: Mutex::new(Vec::new()),
+            sem: sem.clone(),
+        });
+        let front = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let client = TcpStream::connect(front.local_addr().unwrap())
+            .await
+            .unwrap();
+        let _server_side = front.accept().await.unwrap();
+        let permit = sem.clone().try_acquire_owned().unwrap();
+        assert_eq!(sem.available_permits(), MAX_INFLIGHT_CONNS - 1);
+        let conn = tokio::spawn(handle_conn(
+            shared,
+            "broker.internal".into(),
+            9094,
+            client,
+            Duration::from_secs(5),
+            Some(permit),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while sem.available_permits() < MAX_INFLIGHT_CONNS {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "permit still held by an established connection"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!conn.is_finished(), "the connection itself stays up");
+        conn.abort();
+    }
+
     /// A hung upstream (a "SOCKS" endpoint that accepts but never speaks — like a
     /// bastion whose broker dial stalls) must make `handle_conn` give up within
     /// `dial_timeout` and release its fds, not block forever. This is the leak
@@ -763,6 +857,7 @@ mod tests {
             9094,
             client,
             Duration::from_millis(200),
+            None,
         )
         .await;
         assert!(res.is_err(), "a hung upstream dial must error, not hang");
