@@ -1625,7 +1625,7 @@ configured Jira/Confluence account.
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
-| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount |
+| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |

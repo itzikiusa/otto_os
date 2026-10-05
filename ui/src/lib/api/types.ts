@@ -2817,7 +2817,7 @@ export interface UpdateGitAccountReq {
   api_base_url?: string;
   /** Non-empty rotates the Keychain secret; empty/absent keeps existing. */
   token?: string;
-  /** Set the user-entered token expiry (ISO); absent keeps current. */
+  /** User-entered token expiry (ISO): absent keeps current, `null` clears it. */
   token_expires_at?: string | null;
 }
 

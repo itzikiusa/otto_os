@@ -1101,9 +1101,15 @@ pub struct UpdateIssueAccountReq {
     pub base_url: Option<String>,
     /// Non-empty → rotate Keychain secret; empty/absent → keep existing.
     pub token: Option<String>,
-    /// Set the user-entered token expiry; absent (None) → keep current.
-    #[serde(default)]
-    pub token_expires_at: Option<DateTime<Utc>>,
+    /// Tri-state user-entered token expiry: absent → keep current, `null` →
+    /// clear it, a timestamp → set it. (A plain `Option` read `null` as "keep",
+    /// so the "Token expired" chip could never be cleared.)
+    #[serde(
+        default,
+        deserialize_with = "de_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub token_expires_at: Option<Option<DateTime<Utc>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3895,4 +3901,22 @@ pub struct ApiClientStorage {
     pub run_bytes: i64,
     /// The largest run count held by any one automation.
     pub max_runs_per_automation: i64,
+}
+
+#[cfg(test)]
+mod update_issue_account_tests {
+    use super::*;
+
+    /// S17-18: `token_expires_at` is tri-state — absent keeps, `null` clears.
+    #[test]
+    fn token_expiry_absent_null_and_value_are_distinct() {
+        let absent: UpdateIssueAccountReq = serde_json::from_str(r#"{"label":"x"}"#).unwrap();
+        assert_eq!(absent.token_expires_at, None);
+        let cleared: UpdateIssueAccountReq =
+            serde_json::from_str(r#"{"token_expires_at":null}"#).unwrap();
+        assert_eq!(cleared.token_expires_at, Some(None));
+        let set: UpdateIssueAccountReq =
+            serde_json::from_str(r#"{"token_expires_at":"2026-01-02T00:00:00Z"}"#).unwrap();
+        assert!(matches!(set.token_expires_at, Some(Some(_))));
+    }
 }

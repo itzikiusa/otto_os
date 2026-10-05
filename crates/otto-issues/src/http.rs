@@ -238,8 +238,11 @@ async fn update_account<S: IssuesCtx>(
         account.token_ref.clone()
     };
 
-    // token_expires_at: present → set; absent (None) → keep current.
-    let token_expires_at = req.token_expires_at.or(account.token_expires_at);
+    // token_expires_at: absent → keep current; `null` → clear; value → set.
+    let token_expires_at = match req.token_expires_at {
+        Some(v) => v,
+        None => account.token_expires_at,
+    };
 
     let updated = s
         .issues()
