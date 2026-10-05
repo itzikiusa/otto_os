@@ -461,7 +461,7 @@ impl ReviewsRepo {
         Ok(row.map(|r| r.get("diff")))
     }
 
-    /// Record where this run reviews the code (`XXXX_git2_review_run_context`):
+    /// Record where this run reviews the code (`0176_git2_review_run_context`):
     /// the source branch (scopes local finding resolution), the checkout path
     /// and its head sha (what a Retry re-enters). Upsert; `None`s are stored
     /// as NULL.
