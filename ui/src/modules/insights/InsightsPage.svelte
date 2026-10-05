@@ -295,10 +295,22 @@
   function sameKind(r: InsightReport): InsightReport[] {
     return reports.filter((x) => x.kind === r.kind);
   }
+  /** Report key → the previous report of the same kind, built once per
+   *  `reports` change. `previousOf` used to filter + findIndex over every
+   *  report for each row (twice per row) — O(rows × reports) per render. */
+  const previousByKey = $derived.by(() => {
+    const m = new Map<string, InsightReport | null>();
+    const byKind = new Map<string, InsightReport[]>();
+    for (const r of reports) {
+      const list = byKind.get(r.kind);
+      if (list) list.push(r);
+      else byKind.set(r.kind, [r]);
+    }
+    for (const list of byKind.values()) list.forEach((r, i) => m.set(keyOf(r), list[i + 1] ?? null));
+    return m;
+  });
   function previousOf(r: InsightReport): InsightReport | null {
-    const list = sameKind(r);
-    const i = list.findIndex((x) => keyOf(x) === keyOf(r));
-    return i >= 0 ? (list[i + 1] ?? null) : null;
+    return previousByKey.get(keyOf(r)) ?? null;
   }
 
   function shortDate(iso: string): string {
@@ -742,6 +754,7 @@
                 {#each shownRows as r (keyOf(r))}
                   {@const p = parsedByKey.get(keyOf(r))}
                   {@const acts = actionSummary(r)}
+                  {@const stats = rowStats(r)}
                   <button class="rep-row" class:active={keyOf(r) === selectedKey} aria-current={keyOf(r) === selectedKey ? 'true' : undefined} onclick={() => select(r)}>
                     <div class="row-top">
                       <span class="chip">{kindLabel(r.kind)}</span>
@@ -754,9 +767,9 @@
                     {:else if !r.summary.trim() && !r.html_path}
                       <div class="row-headline dim">No summary yet — the run may still be writing it.</div>
                     {/if}
-                    {#if rowStats(r).length > 0}
+                    {#if stats.length > 0}
                       <div class="row-stats">
-                        {#each rowStats(r) as s (s.key)}
+                        {#each stats as s (s.key)}
                           <span class="stat {s.d?.tone ?? 'neutral'}" title={statTitle(s.key, s.value)}>
                             {statText(s.key, s.value)}
                             {#if s.d && s.d.direction !== 'flat'}<Icon name={s.d.direction === 'up' ? 'arrowUp' : 'arrowDown'} size={12} />{/if}
