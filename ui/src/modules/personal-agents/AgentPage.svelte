@@ -156,14 +156,27 @@
   // Bumped by Retry: clearing the (already empty) session id is no change, so
   // the effect never re-ran and Retry left "Opening…" up forever.
   let chatAttempt = $state(0);
+  // The get-or-create in flight, if any. Chat → Runs → Chat during the first
+  // (multi-second) create used to fire a SECOND create — two Claude sessions,
+  // one orphaned. The server serialises per agent too; this avoids the request.
+  let chatPending: Promise<void> | null = null;
   $effect(() => {
     void chatAttempt;
     if (tab !== 'chat' || chatSessionId) return;
+    const id = agentId;
+    if (chatPending) return;
     chatError = '';
-    personalAgentsApi
-      .chatSession(agentId)
-      .then((r) => (chatSessionId = r.session_id))
-      .catch((e) => (chatError = loadErrorText(e)));
+    chatPending = personalAgentsApi
+      .chatSession(id)
+      .then((r) => {
+        if (id === agentId) chatSessionId = r.session_id;
+      })
+      .catch((e) => {
+        if (id === agentId) chatError = loadErrorText(e);
+      })
+      .finally(() => {
+        chatPending = null;
+      });
   });
 
   // --- Schedules form -------------------------------------------------------

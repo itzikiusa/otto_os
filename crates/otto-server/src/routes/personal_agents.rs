@@ -22,6 +22,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use otto_core::api::CreateSessionReq;
 use otto_core::domain::{SessionKind, User, WorkspaceRole};
@@ -716,6 +717,25 @@ async fn save_context(
 
 // --- Chat -------------------------------------------------------------------
 
+/// One async lock per agent for the chat get-or-create. The handler checks the
+/// pinned session, creates one, submits context, THEN pins it — seconds apart.
+/// Two overlapping calls (Chat → Runs → Chat during the first create) both saw
+/// "no session" and spawned two Claude sessions, orphaning one that kept
+/// burning a PTY and tokens. Serialised per agent, the second call waits and
+/// then reuses the first one's pinned session.
+fn chat_lock(agent_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut map = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    // Drop idle entries (no holder / waiter) so the map stays tiny.
+    map.retain(|_, l| Arc::strong_count(l) > 1);
+    map.entry(agent_id.to_string()).or_default().clone()
+}
+
 /// `POST /personal-agents/{id}/chat-session` — return (creating if absent or
 /// dead) the agent's SINGLE interactive chat session: kind Agent, pinned
 /// provider / `meta.model` / persona cwd, tagged `meta.personal_agent`. The UI
@@ -728,6 +748,10 @@ async fn chat_session(
     let repo = agents(&ctx);
     let agent = repo.get(&id).await.map_err(ApiError)?;
     require_ws_role(&ctx, &user, &agent.workspace_id, WorkspaceRole::Editor).await?;
+    let lock = chat_lock(&agent.id);
+    let _guard = lock.lock().await;
+    // Re-read under the lock: a concurrent call may have just pinned a chat.
+    let agent = repo.get(&id).await.map_err(ApiError)?;
 
     // Reuse the pinned session if it still exists.
     if let Some(sid) = agent.chat_session_id.as_deref().filter(|s| !s.is_empty()) {
@@ -1289,5 +1313,26 @@ mod tests {
         let max = "é".repeat(MAX_ROOM_NAME_CHARS);
         assert_eq!(room_name(&max).unwrap(), max, "the cap counts characters");
         assert!(room_name(&format!("{max}x")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chat_lock_tests {
+    use super::*;
+
+    /// S17-13: concurrent get-or-create calls for ONE agent share a lock (the
+    /// second waits for the first to pin its session); other agents don't.
+    #[tokio::test]
+    async fn chat_lock_serialises_per_agent() {
+        let a1 = chat_lock("agent-a");
+        let a2 = chat_lock("agent-a");
+        let b = chat_lock("agent-b");
+        assert!(Arc::ptr_eq(&a1, &a2));
+        assert!(!Arc::ptr_eq(&a1, &b));
+        let held = a1.lock().await;
+        assert!(a2.try_lock().is_err(), "a second chat create must wait");
+        assert!(b.try_lock().is_ok(), "another agent is not blocked");
+        drop(held);
+        assert!(a2.try_lock().is_ok());
     }
 }
