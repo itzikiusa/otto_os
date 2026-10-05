@@ -22,7 +22,7 @@
      child of the scroller (inside PageHeader's width-capped tab slot) it was
      scrolled/clipped off the edge once a few tabs were open. -->
 <div class="strip" class:inbar>
-  <div class="tabs-scroll">
+  <div class="tabs-scroll scroll-thin">
   {#each browser.tabs as tab (tab.id)}
     <!-- The tab is a wrapper holding TWO real buttons (select + close): a
          close control nested inside the select button was a clickable span
@@ -75,7 +75,6 @@
     flex: 0 1 auto;
     min-width: 0;
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   .tab {
     display: flex;

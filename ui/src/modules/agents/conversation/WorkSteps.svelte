@@ -142,7 +142,7 @@
     color: var(--danger);
     background: var(--danger-soft);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .steps-meta {
     flex-shrink: 0;

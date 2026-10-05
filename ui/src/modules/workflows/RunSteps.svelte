@@ -7,6 +7,7 @@
   import {api} from '../../lib/api/client';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -340,7 +341,7 @@
         <span class="dot {runStatus(ns.status).key}" aria-hidden="true"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
         <StatusBadge status={runStatus(ns.status)} variant="text" dot={false} />
-        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="This step was retried">{plural(ns.attempts ?? 1, 'attempt')}</span>{/if}
+        {#if (ns.attempts ?? 1) > 1}<Badge tone="warn" title="This step was retried" label={plural(ns.attempts ?? 1, 'attempt')} />{/if}
         <span class="sp-grow"></span>
         {#if ns.duration_ms != null}
           <span class="ms">{fmtMs(ns.duration_ms)}</span>
@@ -350,13 +351,11 @@
         {#if ns.status === 'running' && ns.activity && ns.activity.subagents.length}
           {@const running = ns.activity.subagents.filter((s) => s.status === 'running').length}
           {@const done = ns.activity.subagents.filter((s) => s.status === 'done').length}
-          <span
-            class="chip subagents"
-            data-testid="subagent-chip"
+          <Badge
+            testid="subagent-chip"
             title="Sub-agents / background tasks the step launched"
-          >
-            {ns.activity.subagents.length} sub-agent{ns.activity.subagents.length === 1 ? '' : 's'} · {running ? `${running} running` : `${done} done`}
-          </span>
+            label={`${plural(ns.activity.subagents.length, 'sub-agent')} · ${running ? `${running} running` : `${done} done`}`}
+          />
         {/if}
         <button
           class="zoom-btn"
@@ -502,21 +501,9 @@
     font-size: var(--fs-xs);
     font-family: var(--font-mono);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 1px 7px;
+    background: var(--accent-soft);
+    padding: 1px 6px;
     border-radius: 999px;
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    color: var(--warning);
-    background: var(--warning-soft);
-    padding: 1px 7px;
-    border-radius: 999px;
-  }
-  /* Sub-agent chip: neutral, not the warn colour the retry chip uses. */
-  .chip.subagents {
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
   }
   /* Live phase under the step title (or why it's being held). */
   /* Its own row under the title line (the summary wraps), so the phase reads
@@ -568,8 +555,8 @@
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 9px;
-    padding: 9px 12px;
+    gap: 8px;
+    padding: 8px 12px;
     cursor: pointer;
     list-style: none;
     font-size: var(--fs-m);
@@ -600,7 +587,7 @@
     color: var(--danger);
     font-size: var(--fs-s);
     background: var(--danger-soft);
-    padding: 7px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
   }
   .logs,
@@ -679,7 +666,7 @@
   }
   .zoom-btn:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   /* Zoomed step modal (R6): big, readable logs + work product. */
   .zoom {

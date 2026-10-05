@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -366,7 +367,7 @@
     <!-- No workspace selected -->
     <EmptyState
       icon="plug"
-      title="Select a workspace first"
+      title={NO_WORKSPACE}
       body="Integrations are per-workspace. Choose a workspace from the sidebar to configure channels."
     />
   {:else}
@@ -522,7 +523,7 @@
       </div>
       {#if editChannel === 'webhook'}
         <span class="hint">
-          The secret callers must send. Set your own or Generate one — copy it now, it's masked
+          The secret callers must send. Set your own or Generate one — copy it now, it’s masked
           after save (stored only in the Keychain). Leave blank to keep the existing key.
         </span>
       {:else if integrations.find((i) => i.channel === editChannel)?.has_bot_token}

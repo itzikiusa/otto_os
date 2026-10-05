@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { liveQuery } from '../../lib/live';
   import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
@@ -9,6 +11,7 @@
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -359,7 +362,7 @@
       if (requestedRunId !== runId || current?.id !== workflowId || destroyed) return;
       if (result.changed) run = result.run;
       runsOpen = false;
-    } catch (e) {toasts.error('Couldn’t open the run',e instanceof Error ? e.message : String(e));}
+    } catch (e) {toastError('Couldn’t open the run', e);}
   }
 
   // Never open onto an empty "build a workflow" pane when the workspace has
@@ -586,7 +589,7 @@
       open(wf);
       toasts.success(`Created “${wf.name}”`, 'Ready to run.');
     } catch (e) {
-      toasts.error('Couldn’t create the workflow from the template', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the workflow from the template', e);
     }
   }
 
@@ -647,7 +650,7 @@
       prompt = '';
       toasts.success('Workflow generated', 'Tweak it on the canvas, then run.');
     } catch (e) {
-      toasts.error('Couldn’t generate the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t generate the workflow', e);
     } finally {
       generating = false;
     }
@@ -667,7 +670,7 @@
       workflows = [wf, ...workflows];
       open(wf);
     } catch (e) {
-      toasts.error('Couldn’t create the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the workflow', e);
     }
   }
 
@@ -689,7 +692,7 @@
       if (current?.id === workflowId && JSON.stringify($state.snapshot(graph)) === submitted) dirty = false;
       toasts.success('Saved');
     } catch (e) {
-      toasts.error('Couldn’t save the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the workflow', e);
     } finally {
       savingGraph = false;
     }
@@ -707,7 +710,7 @@
       applySavedWorkflow(wf);
       toasts.success('Instructions saved');
     } catch (e) {
-      toasts.error('Couldn’t save the instructions', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the instructions', e);
     } finally {
       savingInstructions = false;
     }
@@ -723,7 +726,7 @@
       });
       applySavedWorkflow(wf);
     } catch (e) {
-      toasts.error('Couldn’t save the restart policy', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save the restart policy', e);
     }
   }
 
@@ -732,7 +735,7 @@
   // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can't be undone.`,
+      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can’t be undone.`,
       { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
     );
     if (!ok) return;
@@ -752,7 +755,7 @@
       }
       toasts.success('Workflow deleted', wf.name);
     } catch (e) {
-      toasts.error('Couldn’t delete the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete the workflow', e);
     }
   }
 
@@ -772,7 +775,7 @@
       toasts.success(`Duplicated → “${copy.name}”`, 'Rename it to trigger it independently.');
       void open(copy);
     } catch (e) {
-      toasts.error('Couldn’t duplicate the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t duplicate the workflow', e);
     }
   }
 
@@ -808,7 +811,7 @@
       if (current?.id === wf.id) current = { ...current, name: updated.name };
       toasts.success(`Renamed to “${updated.name}”`);
     } catch (e) {
-      toasts.error('Couldn’t rename the workflow', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename the workflow', e);
     } finally {
       cancelRename();
     }
@@ -878,7 +881,7 @@
       if (current?.id !== id) return false;
       validationIssues = result.issues;
       return result.valid;
-    } catch (e) { toasts.error('Couldn’t validate the workflow', e instanceof Error ? e.message : String(e)); return false; }
+    } catch (e) { toastError('Couldn’t validate the workflow', e); return false; }
     finally { validating = false; }
   }
 
@@ -906,7 +909,7 @@
       if (ownsView()) { requestedRunId = r.id; run = r; }
       return r;
     } catch (e) {
-      toasts.error('Couldn’t start the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t start the run', e);
       return null;
     } finally {
       running = false;
@@ -922,7 +925,7 @@
       else toasts.error('Run finished with errors', done.error ?? '');
       void loadRuns();
     } catch (e) {
-      toasts.error('Couldn’t follow the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t follow the run', e);
     }
   }
 
@@ -1019,7 +1022,7 @@
       }
       return parsed;
     } catch (e) {
-      runInputError = `Run input isn't valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
+      runInputError = `Run input isn’t valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
       runInputOpen = true;
       return null; // signal: invalid
     }
@@ -1146,7 +1149,7 @@
       await api.post(`/workflow-runs/${run.id}/cancel`, {});
       toasts.info('Stopping the run…', 'Finishes the current step, then halts.');
     } catch (e) {
-      toasts.error('Couldn’t stop the run', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop the run', e);
     }
   }
 
@@ -1288,7 +1291,7 @@
       });
       toasts.success(approved ? 'Approved — run resuming' : 'Denied — the run will stop with an error');
     } catch (e) {
-      toasts.error('Couldn’t record the approval', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t record the approval', e);
     } finally {
       approving = false;
     }
@@ -1660,7 +1663,7 @@
       if (ownsView()) { open(wf); await loadVersions(); }
       toasts.success(`Restored v${v.version}`);
     } catch (e) {
-      toasts.error('Couldn’t restore the version', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t restore the version', e);
     }
   }
 
@@ -1708,7 +1711,7 @@
           title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
           onclick={generate}
         >
-          {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+          {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
         </button>
       </div>
       {#if templates.length > 0}
@@ -1736,7 +1739,7 @@
         title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
         onclick={generate}
       >
-        {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+        {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
       </button>
       <button class="btn ghost full" onclick={createBlank}>
         <Icon name="plus" size={13} /> Start blank
@@ -1816,11 +1819,10 @@
   {/snippet}
   {#snippet titleContent()}
     {#if current && renamingId === current.id && renameInBar}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="wf-title-edit"
         bind:value={renameValue}
-        autofocus
+        use:focusOnMount
         aria-label="Workflow name"
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename(current!);
@@ -1838,7 +1840,7 @@
         <Icon name="edit" size={13} />
       </button>
     {/if}
-    {#if current && dirty}<span class="badge" title="The canvas has changes that aren't saved yet">Unsaved</span>{/if}
+    {#if current && dirty}<Badge tone="accent" label="Unsaved" title="The canvas has changes that aren’t saved yet" />{/if}
   {/snippet}
   {#snippet actions()}
     {#if current}
@@ -1934,12 +1936,11 @@
       {#each workflows as wf (wf.id)}
         <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="row-rename"
               data-testid="wf-rename-input"
               bind:value={renameValue}
-              autofocus
+              use:focusOnMount
               aria-label="Workflow name"
               onkeydown={(e) => {
                 if (e.key === 'Enter') commitRename(wf);
@@ -2148,7 +2149,7 @@
         <div class="instructions-wrap">
           <div class="instructions-h">
             <span>Instructions</span>
-            {#if instructionsDirty}<span class="badge">unsaved</span>{/if}
+            {#if instructionsDirty}<Badge tone="accent" label="Unsaved" />{/if}
             <span class="grow"></span>
             <button class="btn small" disabled={!instructionsDirty || savingInstructions} title={instructionsDirty ? 'Save the instructions' : 'No unsaved changes'} onclick={saveInstructions}>
               {savingInstructions ? 'Saving…' : 'Save instructions'}
@@ -2716,7 +2717,7 @@
                 value={paramStr('expr')}
                 oninput={(e) => onParam('expr', e.currentTarget.value)}
               />
-              <p class="node-hint">Truthy → downstream nodes run; falsy → they're skipped.</p>
+              <p class="node-hint">Truthy → downstream nodes run; falsy → they’re skipped.</p>
             {:else if selectedNode.kind === 'loop'}
               <label for="np-maxiter">Max iterations (1–10)</label>
               <input
@@ -3433,7 +3434,7 @@
     border-color: var(--border-strong);
     color: var(--text);
   }
-  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 5px; border: 1px solid var(--border); }
+  .preflight { padding: 10px; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--border); }
   .wf-root {
     display: flex;
     flex-direction: column;
@@ -3530,7 +3531,7 @@
     font: inherit;
     font-size: var(--fs-m);
     line-height: 1.45;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -3671,7 +3672,7 @@
     align-items: center;
     gap: 8px;
     min-width: 0;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     color: var(--text);
@@ -3711,7 +3712,7 @@
     flex: 1;
     min-width: 0;
     margin: 4px 6px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     font-size: var(--fs-m);
     background: var(--surface-2);
     color: var(--text);
@@ -3743,15 +3744,15 @@
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--text);
   }
   .run-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     padding: 6px 8px;
     background: none;
@@ -3784,8 +3785,8 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 0 5px;
+    background: var(--accent-soft);
+    padding: 0 4px;
     border-radius: 999px;
     flex-shrink: 0;
   }
@@ -3911,14 +3912,8 @@
   }
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    padding: 1px 7px;
-    border-radius: 999px;
   }
   .grow {
     flex: 1;
@@ -3942,14 +3937,14 @@
     border: 1px solid var(--glass-border);
     border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
-    padding: 5px;
+    padding: 4px;
   }
   .pal-item {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     border-radius: var(--radius-s);
@@ -3958,7 +3953,7 @@
     color: var(--text);
   }
   .pal-item:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .pal-ic {
     display: grid;
@@ -4130,7 +4125,7 @@
     width: 100%;
     font: inherit;
     font-size: var(--fs-m);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -4147,7 +4142,7 @@
     width: 100%;
     font: inherit;
     font-size: var(--fs-m);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
@@ -4199,7 +4194,7 @@
   .ctx-files {
     margin: 8px 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
   }
   .ctx-files > summary {
@@ -4233,7 +4228,7 @@
   .final-output {
     margin: 8px 0;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--surface-2);
     flex-shrink: 0;
   }
@@ -4266,7 +4261,7 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    padding: 5px 10px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface-2);
@@ -4330,7 +4325,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding-block: 7px 6px; padding-inline: 10px 8px;
+    padding-block: 6px 6px; padding-inline: 10px 8px;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
     flex-shrink: 0;
@@ -4344,7 +4339,7 @@
   .ctx-tab {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -4352,7 +4347,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: .06em;
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
     border-bottom: 2px solid transparent;
@@ -4370,8 +4365,8 @@
     font-weight: 600;
     letter-spacing: 0;
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    padding: 0 5px;
+    background: var(--accent-soft);
+    padding: 0 4px;
     border-radius: 999px;
   }
   .ctx-pathline {
@@ -4411,14 +4406,14 @@
     border: none;
     background: transparent;
     color: var(--text-dim);
-    padding: 2px 5px;
+    padding: 2px 4px;
     border-radius: var(--radius-s);
     cursor: pointer;
     flex-shrink: 0;
   }
   .np-zoom:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .json-zoom {
     width: 100%;
@@ -4453,7 +4448,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px;
     background: none;
     border: none;
     border-radius: var(--radius-s);
@@ -4472,10 +4467,6 @@
   .run-when {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .btn.danger {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--status-exited) 45%, var(--border));
   }
   .dot {
     width: 8px;
@@ -4508,15 +4499,6 @@
     .dot.running {
       animation: none;
     }
-  }
-  .spin {
-    width: 11px;
-    height: 11px;
-    border: 2px solid currentColor;
-    border-inline-end-color: transparent;
-    border-radius: 50%;
-    display: inline-block;
-    animation: otto-spin 0.8s linear infinite;
   }
   
   /* Triggers panel: collapsible section below the canvas */
@@ -4755,21 +4737,21 @@
   .rv-provs {
     display: flex;
     flex-wrap: wrap;
-    gap: 5px;
+    gap: 4px;
   }
   .rv-chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     cursor: pointer;
     color: var(--text-dim);
   }
   .rv-chip.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--text);
   }

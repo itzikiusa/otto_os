@@ -390,7 +390,7 @@
   .logs-body {
     flex: 1;
     min-height: 0;
-    background: color-mix(in srgb, var(--surface-2) 60%, black 8%);
+    background: var(--term-bg);
   }
   .logs-body :global(.logs-vlist) {
     height: 100%;
@@ -409,9 +409,9 @@
     padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
-    background: hsl(var(--h) 50% 50% / 0.22);
+    background: hsl(var(--h) 50% 50% / 0.22); /* ui-guards: allow — per-pod hue (data colour) */
     /* Mixed toward the scheme's text colour so the tag reads in light AND dark. */
-    color: color-mix(in srgb, hsl(var(--h) 70% 55%) 45%, var(--text));
+    color: color-mix(in srgb, hsl(var(--h) 70% 55%) 45%, var(--text)); /* ui-guards: allow — per-pod hue */
     font: inherit;
     font-size: var(--fs-xs);
     line-height: 16px;
@@ -419,7 +419,7 @@
     vertical-align: middle;
   }
   .podtag:hover {
-    background: hsl(var(--h) 50% 50% / 0.38);
+    background: hsl(var(--h) 50% 50% / 0.38); /* ui-guards: allow — per-pod hue */
   }
   .podtag .ctr {
     opacity: 0.7;
@@ -433,14 +433,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 3px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
     font-size: var(--fs-xs);
   }
   .live {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--success);
   }
   .live-dot {
@@ -448,12 +448,7 @@
     height: 6px;
     border-radius: 50%;
     background: var(--status-working);
-    animation: blink 1s ease-in-out infinite;
-  }
-  @keyframes blink {
-    50% {
-      opacity: 0.3;
-    }
+    animation: otto-pulse 1s ease-in-out infinite;
   }
   .err {
     padding: 8px 10px;

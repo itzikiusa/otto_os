@@ -3,6 +3,8 @@
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
   // Cards support HTML5 drag-and-drop to change status columns.
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import { plural } from '../../lib/plural';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -176,7 +178,7 @@
       await fn();
       return true;
     } catch (e) {
-      toasts.error(failed, e instanceof Error ? e.message : String(e));
+      toastError(failed, e);
       return false;
     }
   }
@@ -189,7 +191,7 @@
     try {
       res = await fn();
     } catch (e) {
-      toasts.error(`Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}`, e instanceof Error ? e.message : String(e));
+      toastError(`Couldn’t ${verb} the ${n === 1 ? 'task' : 'tasks'}`, e);
       return;
     }
     if (res.failed.length === 0) {
@@ -465,7 +467,7 @@
     <span class="grow"></span>
     {#if pid}
       {#if planning}
-        <span class="planning" role="status"><span class="spinner-xs" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
+        <span class="planning" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Planning… <span class="dim">watch live in Runs</span></span>
         <button class="btn small danger" onclick={() => void stopPlan()} title="Stop the planner agents">
           <Icon name="stop" size={12} /> Stop…
         </button>
@@ -507,12 +509,11 @@
 
   {#if adding}
     <div class="add-row">
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
         aria-label="New task title"
         placeholder="Task title…"
-        autofocus
+        use:focusOnMount
         bind:value={newTitle}
         onkeydown={(e) => {
           if (e.key === 'Enter') addTask();
@@ -618,7 +619,7 @@
                     <Icon name="more" size={14} />
                   </button>
                 </div>
-                {#if t.delegated}<span class="tag" title="Handed to this agent by another agent">Delegated</span>{/if}
+                {#if t.delegated}<span class="deleg"><Badge label="Delegated" title="Handed to this agent by another agent" /></span>{/if}
                 {#if t.status === 'todo' && waiting[t.id]}
                   {@const w = waiting[t.id]}
                   <span class="waiting" title="Ready, but not started: {w.detail} (since {rel(w.since)})">
@@ -727,14 +728,6 @@
     gap: 6px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-  }
-  .spinner-xs {
-    width: 11px;
-    height: 11px;
-    border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .field {
@@ -870,14 +863,9 @@
     text-overflow: ellipsis;
     max-width: 120px;
   }
-  .tag {
-    display: inline-block;
+  .deleg {
+    display: inline-flex;
     margin-block-start: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0 6px;
   }
   .vchip {
     font-size: var(--fs-xs);
@@ -889,15 +877,14 @@
   }
   
   @media (prefers-reduced-motion: reduce) {
-    .vchip,
-    .spinner-xs {
+    .vchip {
       animation: none;
     }
   }
   .gchip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: transparent;

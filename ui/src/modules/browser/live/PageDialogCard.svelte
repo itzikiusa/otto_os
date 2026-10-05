@@ -59,7 +59,7 @@
     <p class="msg">{message}</p>
   {/if}
   {#if kind === 'prompt'}
-    <input class="input" bind:value={text} aria-label="Answer to the page" disabled={!canAnswer} />
+    <input class="input answer" bind:value={text} aria-label="Answer to the page" disabled={!canAnswer} />
   {/if}
   <div class="actions">
     {#if !canAnswer}
@@ -109,9 +109,9 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
-  .input {
-    width: 100%;
-    margin-top: 10px;
+  .answer {
+    inline-size: 100%;
+    margin-block-start: 10px;
   }
   .actions {
     display: flex;

@@ -179,13 +179,13 @@
   {#if !film}
     <div class="film-missing" role="status" data-testid="tour-film-missing">
       <span class="film-missing-icon" aria-hidden="true"><Icon name="play" size={14} /></span>
-      <span>The tour film isn't part of this build. The guides below cover everything it shows.</span>
+      <span>The tour film isn’t part of this build. The guides below cover everything it shows.</span>
     </div>
   {:else}
     {#if status === 'failed'}
       <div class="film-frame fallback" role="status" data-testid="tour-film-unavailable">
         <span class="fallback-icon" aria-hidden="true"><Icon name="play" size={18} /></span>
-        <p class="fallback-title">The tour film can't load right now</p>
+        <p class="fallback-title">The tour film can’t load right now</p>
         <p class="fallback-sub">It streams from the internet. Check your connection, then try again. The guides work offline.</p>
         <div class="fallback-actions">
           <button class="btn small" onclick={retry}><Icon name="refresh" size={12} /> Retry</button>
@@ -299,7 +299,7 @@
     overflow: hidden;
     border: 1px solid var(--border);
     /* The letterbox behind the film is black in every theme, like any player. */
-    background: black;
+    background: var(--media-letterbox);
   }
   .film-video {
     display: block;
@@ -313,7 +313,7 @@
     display: grid;
     place-items: center;
     font-size: var(--fs-s);
-    color: color-mix(in srgb, white 70%, transparent);
+    color: color-mix(in srgb, var(--on-scrim) 70%, transparent);
     pointer-events: none;
   }
   .film-frame.fallback {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The Review Findings workflow board. For a completed review it lists the
   // persisted Finding rows (GET /reviews/{id}/findings) as expandable cards — a
   // status chip + severity chip + category + path:Lstart–Lend + reviewer +
@@ -7,7 +8,9 @@
   // (GET /findings/{id}). Filters by status + severity; a header with counts and a
   // Proof Pack button. Subscribes to the finding WS bus and refetches on match —
   // the same pattern ReviewPanel uses for review_changed.
-  import { sentenceCase } from '../../lib/labels';
+  import { sentenceCase, severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
   import { listFindings, getFinding } from '../../lib/api/client';
   import type {
@@ -151,17 +154,27 @@
     if (from && to) return ` · ${statusLabel(from)} → ${statusLabel(to)}`;
     return '';
   }
+
+  /** Finding status / severity → the shared Badge tone. */
+  const STATUS_TONE: Record<string, BadgeTone> = { accepted: 'accent', fixed: 'warn', verified: 'ok' };
+  function statusTone(st: string): BadgeTone {
+    return STATUS_TONE[st] ?? 'neutral';
+  }
+  const SEV_TONE: Record<string, BadgeTone> = { critical: 'bad', high: 'bad', medium: 'warn', low: 'info' };
+  function sevTone(sev: string): BadgeTone {
+    return SEV_TONE[sev] ?? 'neutral';
+  }
 </script>
 
 <div class="fb" data-workspace-id={workspaceId}>
   <!-- Header: counts + Proof Pack -->
   <div class="fb-header">
-    <span class="fb-count">{findings.length} finding{findings.length === 1 ? '' : 's'}</span>
+    <span class="fb-count">{plural(findings.length, 'finding')}</span>
     {#if statusCounts['verified']}
-      <span class="chip status-verified fb-hchip">{statusCounts['verified']} verified</span>
+      <Badge tone="ok" label={`${statusCounts['verified']} verified`} />
     {/if}
     {#if statusCounts['open']}
-      <span class="chip status-open fb-hchip">{statusCounts['open']} open</span>
+      <Badge label={`${statusCounts['open']} open`} />
     {/if}
     <span class="grow"></span>
     <button class="btn small ghost" onclick={() => (showProofPack = true)} disabled={findings.length === 0}>
@@ -230,11 +243,11 @@
             onclick={() => toggle(f.id)}
             aria-expanded={isOpen}
           >
-            <span class="chip sev2-{f.severity}">{f.severity}</span>
-            <span class="chip status-{f.status}">{statusLabel(f.status)}</span>
-            {#if f.regressed}<span class="chip fb-regress-chip">regressed</span>{/if}
+            <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity)} />
+            <Badge tone={statusTone(f.status)} label={statusLabel(f.status)} />
+            {#if f.regressed}<Badge tone="warn" label="Regressed" />{/if}
             {#if f.requires_human_approval && !f.approved_at}
-              <span class="chip fb-gate-chip">needs approval</span>
+              <Badge tone="warn" label="Needs approval" />
             {/if}
             <span class="fb-title" title={f.title || f.body.split('\n')[0]}>{f.title || f.body.split('\n')[0]}</span>
             <span class="grow"></span>
@@ -247,13 +260,13 @@
             {#if f.reviewer}<span class="dim fb-reviewer">· {f.reviewer}</span>{/if}
             {#if f.occurrence_count > 1}<span class="dim">· seen {f.occurrence_count} times</span>{/if}
             <span class="grow"></span>
-            {#if f.linked_commit}<span class="chip fb-artifact">commit {f.linked_commit.slice(0, 9)}</span>{/if}
-            {#if f.linked_test}<span class="chip fb-artifact" title={f.linked_test}>test</span>{/if}
+            {#if f.linked_commit}<Badge tone="ok" label={`commit ${f.linked_commit.slice(0, 9)}`} />{/if}
+            {#if f.linked_test}<Badge tone="ok" label="Test" title={f.linked_test} />{/if}
             {#if f.jira_key}
               {#if f.jira_url}
                 <a class="chip fb-artifact fb-jira" href={f.jira_url} target="_blank" rel="noreferrer">{f.jira_key}</a>
               {:else}
-                <span class="chip fb-artifact">{f.jira_key}</span>
+                <Badge tone="ok" label={f.jira_key} />
               {/if}
             {/if}
           </div>
@@ -286,7 +299,7 @@
               <div class="fb-field">
                 <span class="fb-field-label">Timeline</span>
                 {#if detailLoading[f.id] && !detail}
-                  <p class="dim" style="font-size: var(--fs-xs)">Loading…</p>
+                  <p class="dim" style="font-size: var(--fs-xs)" role="status">Loading the timeline…</p>
                 {:else if detail && detail.events.length > 0}
                   <ul class="fb-timeline">
                     {#each detail.events as ev (ev.id)}
@@ -337,7 +350,6 @@
     flex-wrap: wrap;
   }
   .fb-count { font-size: var(--fs-s); font-weight: 600; }
-  .fb-hchip { font-size: var(--fs-xs); }
   .fb-empty { font-size: var(--fs-s); padding: 12px 0; }
 
   /* Filters */
@@ -345,7 +357,7 @@
   .fb-filter-row {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex-wrap: wrap;
   }
   .fb-filter-label {
@@ -361,7 +373,7 @@
     color: var(--text-dim);
     border-radius: 999px;
     font-size: var(--fs-xs);
-    padding: 2px 9px;
+    padding: 2px 8px;
     cursor: pointer;
     text-transform: capitalize;
     line-height: 1.6;
@@ -399,11 +411,11 @@
     align-items: center;
     gap: 6px;
     flex-wrap: wrap;
-    margin-top: 5px;
+    margin-top: 4px;
     font-size: var(--fs-xs);
   }
   .fb-cat {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 1px 6px;
@@ -424,16 +436,6 @@
   }
   .fb-jira { text-decoration: none; }
   .fb-jira:hover { text-decoration: underline; }
-  .fb-regress-chip {
-    font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
-    color: var(--warning);
-  }
-  .fb-gate-chip {
-    font-size: var(--fs-xs);
-    background: color-mix(in srgb, var(--warning) 20%, transparent);
-    color: var(--warning);
-  }
 
   /* Expanded detail */
   .fb-detail {
@@ -444,7 +446,7 @@
     flex-direction: column;
     gap: 8px;
   }
-  .fb-field { display: flex; flex-direction: column; gap: 3px; }
+  .fb-field { display: flex; flex-direction: column; gap: 2px; }
   .fb-field-label {
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -474,20 +476,7 @@
   .dim { color: var(--text-dim); }
   .mono { font-family: var(--font-mono); }
 
-  /* Status chips (shared vocabulary; high-contrast light-green + black for verified). */
-  .chip.status-open { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .chip.status-accepted { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-text); }
-  .chip.status-fixed { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-  .chip.status-verified { background: var(--success-soft); color: var(--success); font-weight: 600; }
-  .chip.status-false_positive { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
-  .chip.status-waived { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
-  /* Severity chips (red for blocker severities critical/high). */
-  .chip.sev2-critical { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); font-weight: 600; }
-  .chip.sev2-high { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
-  .chip.sev2-medium { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-  .chip.sev2-low { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent-text); }
-  .chip.sev2-info { background: color-mix(in srgb, var(--text-dim) 16%, transparent); color: var(--text-dim); }
 
   /* The filter pills reuse status-/sev2- classes for their idle tint, but the
      .active rule above (green) must win — these are lower specificity by design. */

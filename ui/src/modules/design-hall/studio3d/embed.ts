@@ -118,7 +118,7 @@ async function defaultScene(src: string, version: string | null): Promise<{ doc:
     };
     return { doc, title: a.title, brand: null };
   }
-  if (a.format !== 'scene3d') throw new Error(`Can't embed a ${a.format} design in 3D`);
+  if (a.format !== 'scene3d') throw new Error(`Can’t embed a ${a.format} design in 3D`);
   const c = await fetchContent(a.id, { version: v ?? undefined, asText: true });
   const r = parseScene(c.text ?? '');
   if (!r.ok) throw new Error('The scene document is not valid');

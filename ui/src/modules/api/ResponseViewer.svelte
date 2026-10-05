@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Response viewer shared by the page and the compact panel: status / time /
   // size chips, then Body (Pretty · Raw · Tree · Preview) · Headers · Cookies ·
   // Timeline · Tests. A failed send shows inline with the reason and what to
@@ -15,6 +16,7 @@
   import { apiStream } from '../../lib/stores/apiStream.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
@@ -293,7 +295,7 @@
       await ws.setApiAllowLocal(true);
       toasts.success('Private addresses allowed', 'Send the request again.');
     } catch (e) {
-      toasts.error('Couldn’t change the setting', e instanceof Error ? e.message : 'Only a workspace admin can change it.');
+      toasts.error('Couldn’t allow private addresses', e instanceof Error ? loadErrorText(e) : 'Only a workspace admin can change it.');
     }
   }
 </script>
@@ -310,7 +312,7 @@
     <div class="stream-console">
       <div class="head">
         <span class="chip" class:ok={apiStream.status === 'open'} class:bad={apiStream.status === 'error'}>{STREAM_STATUS[apiStream.status] ?? apiStream.status}</span>
-        <span class="meta">{apiStream.items.length} message{apiStream.items.length === 1 ? '' : 's'}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
+        <span class="meta">{plural(apiStream.items.length, 'message')}{apiStream.dropped ? ` · ${apiStream.dropped} older discarded` : ''}</span>
         <span class="grow"></span>
         <button class="btn small ghost" onclick={() => apiStream.clear()} disabled={apiStream.items.length === 0}>Clear</button>
       </div>
@@ -577,7 +579,7 @@
   kbd {
     font-family: var(--font-ui);
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 4px;
     border: 1px solid var(--border);
     border-bottom-width: 2px;
     border-radius: var(--radius-s);
@@ -650,9 +652,6 @@
     padding: 2px 0 8px;
     flex-wrap: wrap;
   }
-  .chip.ok {
-    color: var(--success);
-  }
   .meta {
     font-size: var(--fs-xs);
     color: var(--text-dim);
@@ -697,13 +696,13 @@
     border-bottom-color: var(--accent);
   }
   .count {
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .segmented.view {
     align-self: center;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
   }
   .rbody {
     flex: 1;
@@ -846,9 +845,9 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-inline-start: 2px solid var(--border);
-    margin-inline-start: 5px;
+    margin-inline-start: 4px;
     font-size: var(--fs-s);
   }
   .trace-dot {
@@ -895,7 +894,7 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .test-item {
     display: flex;
@@ -936,7 +935,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     padding: 4px 0;
   }
   :global(.stream-vlist) {

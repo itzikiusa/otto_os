@@ -107,7 +107,7 @@ test('ui: a run survives a full page reload as history and reopens', async ({ pa
 
   // Run view appears and reaches a terminal state (stubbed → fast).
   await expect(panel.locator('.agent-card').first()).toBeVisible({ timeout: 15_000 });
-  await expect(panel.locator('.run-head .pill')).toContainText(/done|error/i, {
+  await expect(panel.locator('.run-head .badge')).toContainText(/done|error/i, {
     timeout: 30_000,
   });
 

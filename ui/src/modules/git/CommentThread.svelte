@@ -130,15 +130,15 @@
   .cmt-head {
     display: flex;
     align-items: center;
-    gap: 7px;
-    margin-bottom: 3px;
+    gap: 6px;
+    margin-bottom: 2px;
     flex-wrap: wrap;
   }
   .cmt-avatar {
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -154,11 +154,11 @@
   }
   .cmt-body {
     font-size: var(--fs-s);
-    margin-inline-start: 25px;
+    margin-inline-start: 24px;
   }
   .cmt-actions {
     margin: 4px 0;
-    margin-inline-start: 25px;
+    margin-inline-start: 24px;
     display: flex;
     flex-direction: column;
     gap: 6px;

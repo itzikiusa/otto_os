@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // PublishDialog — shared modal for both "Publish as Jira Story" and
   // "Publish as Confluence RFC" actions. Also used for "Convert RFC → Story".
   import Modal from '../../lib/components/Modal.svelte';
@@ -51,7 +52,7 @@
       if (e.status === 401 || e.status === 403) why = ' The account was refused — check its token in Settings → Integrations → Jira.';
       else if (e.status === 404) why = ' The project, space or parent page was not found.';
       else if (e.status === 409) why = ' It conflicts with the current state on the server.';
-    } else if (e instanceof TypeError) why = " Otto can't reach the daemon.";
+    } else if (e instanceof TypeError) why = " Otto can’t reach the daemon.";
     formError = `${what}.${why}`;
     formErrorDetail = raw;
   }
@@ -374,7 +375,7 @@
         {:else}
           <pre class="pd-preview-body">{previewLines.head.join('\n')}</pre>
           {#if previewLines.more > 0}
-            <div class="pd-preview-more">+{previewLines.more} more line{previewLines.more === 1 ? '' : 's'}</div>
+            <div class="pd-preview-more">+{plural(previewLines.more, 'more line')}</div>
           {/if}
         {/if}
         {#if visibility}

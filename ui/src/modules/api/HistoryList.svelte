@@ -247,7 +247,7 @@
     margin-inline: 8px;
     padding: 8px 10px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     background: var(--info-soft);
     font-size: var(--fs-s);
     color: var(--text);
@@ -367,7 +367,7 @@
     color: var(--text);
   }
   .l2 {
-    padding-inline-start: 42px;
+    padding-inline-start: 40px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

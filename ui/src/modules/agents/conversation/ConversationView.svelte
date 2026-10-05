@@ -255,7 +255,7 @@
         router.go('browser');
         await browser.openTab(url);
       } catch (e) {
-        toasts.error('Couldn’t open it in Otto’s browser', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t open it in Otto’s browser', e);
       }
     })();
   }
@@ -716,7 +716,7 @@
       { label: 'Next message of yours', icon: 'chevronDown', hint: '⌥↓', action: () => jumpPrompt(1) },
       { label: 'Jump to latest', icon: 'arrowDown', hint: '⌘↓', action: () => scrollToBottomAll() },
       { separator: true },
-      { label: 'Reload transcript', icon: 'refresh', action: () => void conv.load() },
+      { label: 'Refresh transcript', icon: 'refresh', action: () => void conv.load() },
     ]);
   }
   // ── All changes: every file the loaded conversation edited or wrote ────────
@@ -751,7 +751,7 @@
 <div class="conv" bind:clientWidth={convW} data-session={sessionId} data-path={transcriptPath} data-ws={workspaceId} data-readonly={ctx.readonly} data-loaded={t != null} onkeydown={onConvKey}>
   <header class="conv-head" class:folded={narrowHead && searchOpen}>
     {#if t?.provider && hasProviderIcon(t.provider)}<ProviderIcon provider={t.provider} size={13} />{/if}
-    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading…' : 'Conversation')}</span>
+    <span class="conv-title" title={[t?.title, t?.model, statsText].filter(Boolean).join(' · ')}>{t?.title ?? (conv.loading ? 'Loading conversation…' : 'Conversation')}</span>
     {#if statsText}
       <span class="stats" title="turns · tool calls · cost · tokens in/out · duration">{statsText}</span>
     {/if}
@@ -1019,6 +1019,11 @@
     color: var(--text-dim);
     min-width: 0;
   }
+  /* The field is borderless inside the pill: the pill carries the app ring. */
+  .search:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
+  }
   /* Under the header while searching a partly loaded transcript. */
   .search-scope {
     flex: none;
@@ -1100,7 +1105,7 @@
   .pv-resize {
     flex-shrink: 0;
     width: 6px;
-    margin-inline: -3px;
+    margin-inline: -2px;
     cursor: col-resize;
     position: relative;
     z-index: 2;
@@ -1123,10 +1128,11 @@
     overflow-y: auto;
     overflow-x: hidden;
     overflow-anchor: none;
-    outline: none;
   }
+  /* The app focus ring, drawn inside the scroller so the pane edge can't clip it. */
   .conv-list:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--accent);
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
   }
   /* The message column: the pane's width with gutters that grow with it
      (12 px in a tile → 40 px full-screen); centred only past --chat-measure. */
@@ -1155,7 +1161,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .day::before,
   .day::after {
@@ -1279,7 +1285,7 @@
     padding: 6px 0;
   }
   .live-artifacts .chip {
-    gap: 5px;
+    gap: 4px;
     color: var(--text);
     font: inherit;
     font-size: var(--fs-xs);
@@ -1316,7 +1322,7 @@
     transform: translateX(50%);
   }
   .jump-pill:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .jump-pill:focus-visible {
     outline: 2px solid var(--accent-text);

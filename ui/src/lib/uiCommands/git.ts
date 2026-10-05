@@ -18,6 +18,7 @@ import { toasts } from '../toast.svelte';
 import type { DiffResp, FileChange, PullMode, Repo, RepoStatusResp } from '../api/types';
 import { reportPull } from '../../modules/git/pullFlow';
 import { asUiError, capList, highlightWhenReady } from './pagePort';
+import { plural } from '../plural';
 
 const SUB_TABS = ['graph', 'prs', 'review', 'focus'] as const;
 type SubTab = (typeof SUB_TABS)[number];
@@ -213,7 +214,7 @@ registerUiCommands('git', {
     const verb = args.unstage ? 'Unstage' : 'Stage';
     const list = paths.slice(0, 20).join('\n') + (paths.length > 20 ? `\n… and ${paths.length - 20} more` : '');
     const ok = await ctx.confirmWrite({
-      what: `${verb} ${paths.length} file${paths.length === 1 ? '' : 's'}:\n${list}`,
+      what: `${verb} ${plural(paths.length, 'file')}:\n${list}`,
       where: `${repo.name} (${s.branch})`,
       verb,
       connId: `git:${repo.id}`,
@@ -247,7 +248,7 @@ registerUiCommands('git', {
     await showWip(repo, ctx, { subject, body }, '.wip-panel .wp-composer');
     const files = staged.slice(0, 15).map((c) => c.path).join('\n') + (staged.length > 15 ? `\n… and ${staged.length - 15} more` : '');
     const ok = await ctx.confirmWrite({
-      what: `${args.amend ? 'Amend the last commit' : `Commit ${staged.length} staged file${staged.length === 1 ? '' : 's'}`} on ${s.branch}:\n\n${message}${files ? `\n\nFiles:\n${files}` : ''}`,
+      what: `${args.amend ? 'Amend the last commit' : `Commit ${plural(staged.length, 'staged file')}`} on ${s.branch}:\n\n${message}${files ? `\n\nFiles:\n${files}` : ''}`,
       where: `${repo.name} (${s.branch})`,
       verb: args.amend ? 'Amend' : 'Commit',
       connId: `git:${repo.id}`,
@@ -271,7 +272,7 @@ registerUiCommands('git', {
     ctx.progress(`Fetching ${repo.name}`);
     try {
       const s = await git.fetchRepo(repo.id);
-      toasts.success('Fetched', s.behind > 0 ? `${s.behind} new commit${s.behind === 1 ? '' : 's'} on ${s.upstream ?? 'the upstream'}` : repo.name);
+      toasts.success('Fetched', s.behind > 0 ? `${plural(s.behind, 'new commit')} on ${s.upstream ?? 'the upstream'}` : repo.name);
       return statusResult(repo, s);
     } catch (e) {
       throw asUiError(e);
@@ -286,7 +287,7 @@ registerUiCommands('git', {
     const s = await freshStatus(repo);
     if (!s.upstream) throw new UiCommandError('invalid_args', `${s.branch} has no upstream to pull from.`);
     const ok = await ctx.confirmWrite({
-      what: `Pull ${s.upstream} into ${s.branch}${args.mode ? ` (${args.mode.replace('_', '-')})` : ''}${s.behind ? ` — ${s.behind} incoming commit${s.behind === 1 ? '' : 's'}` : ''}.`,
+      what: `Pull ${s.upstream} into ${s.branch}${args.mode ? ` (${args.mode.replace('_', '-')})` : ''}${s.behind ? ` — ${plural(s.behind, 'incoming commit')}` : ''}.`,
       where: `${repo.name} (${s.branch})`,
       verb: 'Pull',
       connId: `git:${repo.id}`,
@@ -316,7 +317,7 @@ registerUiCommands('git', {
     const n = s.ahead;
     const ok = await ctx.confirmWrite({
       what: `${s.upstream
-        ? `Push ${n} commit${n === 1 ? '' : 's'} from ${s.branch} to ${s.upstream}.`
+        ? `Push ${plural(n, 'commit')} from ${s.branch} to ${s.upstream}.`
         : `Publish the new branch ${s.branch} to the remote${repo.remote_url ? ` (${repo.remote_url})` : ''}.`
       }\n\nWho sees it: everyone with access to the remote repository.`,
       where: `${repo.name} (${s.branch})`,

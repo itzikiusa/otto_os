@@ -5,6 +5,7 @@
 // and both hosts only ever see `AskReply`.
 
 import { api } from './api/client';
+import { NO_WORKSPACE } from './labels';
 import type { Action, Id, Session } from './api/types';
 import type { BarSpace, TurnTone } from './floatingBar';
 import {
@@ -224,7 +225,7 @@ function failure(e: unknown): AskReply {
 
 const noWorkspace: AskReply = {
   tone: 'warn',
-  text: 'Pick a workspace first.',
+  text: `${NO_WORKSPACE}.`,
   detail: 'Choose one for this space (click its number), or select one in Otto.',
   source: SOURCE,
 };

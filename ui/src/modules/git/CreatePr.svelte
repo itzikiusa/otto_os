@@ -294,7 +294,7 @@
   <div class="draft-row">
     <button class="btn small ghost" disabled={drafting || busy || target === ''} onclick={draftWithAgent}>
       {#if drafting}
-        <span class="spinner-xs"></span>Drafting…
+        <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…
       {:else}
         <Icon name="zap" size={12} /> Draft message with agent
       {/if}
@@ -390,7 +390,7 @@
     gap: 4px;
     height: auto;
     min-height: 30px;
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .chips-text {
     flex: 1;
@@ -456,7 +456,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: none;
     background: transparent;
     border-radius: var(--radius-s);
@@ -466,7 +466,7 @@
     color: var(--text);
   }
   .rev-suggest-item:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* Draft toggle sits at the start of the footer, before the buttons. */
   .draft-toggle {
@@ -487,17 +487,6 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 4px;
   }
 
   /* ── Mobile + tablet (≤1024px): stack the branch selectors so each gets full

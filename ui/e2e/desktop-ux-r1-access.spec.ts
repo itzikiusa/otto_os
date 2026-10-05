@@ -39,7 +39,7 @@ for (const variant of variants) {
       localStorage.setItem('otto_direction', v.direction);
     }, variant);
     await page.goto('/#/skills-eval');
-    await page.getByRole('searchbox', { name: 'Search skills' }).fill(skillName);
+    await page.getByRole('searchbox', { name: 'Filter skills' }).fill(skillName);
     await page.getByTestId('skill-row').click();
     const preview = page.getByTestId('skill-preview');
     await expect(preview.locator('pre')).toContainText('./q --help');

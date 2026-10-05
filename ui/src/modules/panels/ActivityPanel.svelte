@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Per-session agent activity: a normalized task tracker + a live trail of
   // what's going on (skills loaded, commands run, files touched, prompts,
   // notes) — by user and by agent. Fed by REST load + the events WS.
@@ -277,10 +278,10 @@
               <span class="task-glyph">{TASK_GLYPH[t.status]}</span>
               <span class="task-title">{t.title}</span>
               {#if t.source === 'user'}
-                <span class="badge board" title="Added from the board / Activity panel">From board</span>
+                <Badge tone="accent" label="From board" title="Added from the board / Activity panel" />
               {/if}
               {#if t.nudge_pending}
-                <span class="badge queued" title="Waiting to be handed to the agent">Queued</span>
+                <Badge tone="warn" label="Queued" title="Waiting to be handed to the agent" />
               {/if}
             </li>
           {/each}
@@ -317,7 +318,7 @@
       <div class="note-add">
         <input
           class="note-input"
-          placeholder="Add a note to this session…"
+          placeholder="Waiting on the staging deploy"
           aria-label="Note"
           bind:value={note}
           onkeydown={onNoteKeydown}
@@ -410,7 +411,7 @@
     color: var(--text-dim);
     background: var(--surface-2);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .empty-line {
     font-size: var(--fs-xs);
@@ -431,7 +432,7 @@
   .add-task-btn {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     height: 18px;
     padding: 0 6px;
     border: 1px solid var(--border);
@@ -452,7 +453,7 @@
   .task-add {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 2px 0 4px;
   }
   .task-input {
@@ -500,25 +501,6 @@
     opacity: 0.5;
     cursor: default;
   }
-  .badge {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    border-radius: 999px;
-    padding: 0 5px;
-    line-height: 14px;
-    align-self: center;
-  }
-  .badge.board {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .badge.queued {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 14%, transparent);
-  }
   .task.nudge-pending .task-glyph {
     animation: otto-pulse 1.4s ease-in-out infinite;
   }
@@ -536,7 +518,7 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width var(--dur-enter) ease-out;
+    /* Data-driven width: no transition (foundations §8). */
   }
   .tasks {
     list-style: none;
@@ -548,12 +530,12 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .task {
     display: flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-s);
     line-height: 1.35;
   }
@@ -603,7 +585,7 @@
   }
   .tab {
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: none;
     border-radius: var(--radius-s);
     background: transparent;
@@ -612,7 +594,7 @@
     cursor: pointer;
   }
   .tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tab.on {
     background: var(--surface-2);
@@ -628,7 +610,7 @@
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     outline: none;
   }
   .search:focus {
@@ -703,7 +685,7 @@
     outline-offset: -2px;
   }
   .row-main:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .row-icon {
     flex-shrink: 0;

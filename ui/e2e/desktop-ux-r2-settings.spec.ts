@@ -13,7 +13,7 @@ async function skill(page: Page) {
     expect((await ctx.put(`${base}/api/v1/library/skills/${name}/file`, { data: { path, content: `# ${path}` } })).ok()).toBeTruthy();
   }
   await page.goto('/#/skills-eval');
-  await page.getByRole('searchbox', { name: 'Search skills' }).fill(name);
+  await page.getByRole('searchbox', { name: 'Filter skills' }).fill(name);
   await page.getByTestId('skill-row').click();
   await page.getByRole('tab', { name: 'Files', exact: true }).click();
   await expect(page.getByTestId('skill-editor')).toContainText('Original text.');
@@ -222,7 +222,7 @@ test('MCP delayed attachment save does not overwrite a newly selected workspace'
   await toggle.uncheck();
   await expect.poll(() => started).toBe(true);
   await page.keyboard.press('Meta+k');
-  await page.getByRole('combobox').fill('Switch workspace: Synthetic Beta');
+  await page.getByRole('combobox').fill('Switch to workspace Synthetic Beta');
   await page.keyboard.press('Enter');
   await expect(page.getByText('Attach to sessions in Synthetic Beta', { exact: true })).toBeVisible();
   const oldSave = page.waitForResponse(r => r.url().includes(`/workspaces/${a}/mcp/session-attach`) && r.request().method() === 'PATCH');
@@ -258,7 +258,7 @@ test('synthetic loaded pages remain readable across five themes and responsive d
     for (const surface of ['appearance', 'plugins', 'mcp', 'skills']) {
       await page.goto(surface === 'mcp' ? '/#/mcp' : surface === 'skills' ? '/#/skills-eval' : `/#/settings/${surface}`);
       if (surface === 'skills') {
-        await page.getByRole('searchbox', { name: 'Search skills' }).fill(name);
+        await page.getByRole('searchbox', { name: 'Filter skills' }).fill(name);
         await page.getByTestId('skill-row').click();
         await page.getByRole('tab', { name: 'Files', exact: true }).click();
         await expect(page.getByTestId('skill-editor')).toContainText('Original text.');

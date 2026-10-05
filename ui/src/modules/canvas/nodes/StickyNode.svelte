@@ -2,6 +2,7 @@
   // Sticky note — a colored card with editable text. Double-click to edit. The
   // sticky color is set via the Inspector. Connectable.
   import { Handle, Position } from '@xyflow/svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
@@ -47,10 +48,9 @@
   <Resizer {id} visible={selected} minWidth={100} minHeight={80} />
   <Handle type="target" position={Position.Left} />
   {#if editing}
-    <!-- svelte-ignore a11y_autofocus -->
     <textarea
       bind:value={draft}
-      autofocus
+      use:focusOnMount
       onblur={commit}
       onkeydown={(e) => {
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -76,7 +76,7 @@
     box-shadow: var(--shadow);
     /* Sticky bodies use a fixed dark ink so colored notes stay readable on both
        schemes regardless of --text. */
-    color: #2a2a1a;
+    color: #2a2a1a; /* ui-guards: allow — sticky-note ink on its fixed paper color */
     font-size: var(--fs-m);
     line-height: 1.4;
     overflow: hidden;

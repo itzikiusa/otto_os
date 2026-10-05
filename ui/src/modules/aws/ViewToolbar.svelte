@@ -82,13 +82,12 @@
   {#if onrefresh}
     <button
       class="icon-btn"
-      class:spin={loading}
       onclick={() => onrefresh()}
       title="Refresh"
       aria-label="Refresh"
       disabled={loading}
     >
-      <Icon name="refresh" size={14} />
+      {#if loading}<span class="spinner" style="--spinner-size: 14px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={14} />{/if}
     </button>
     <label class="auto" title={`Auto-refresh every ${refreshMs / 1000} s${refreshMs > AUTO_REFRESH_MS ? ' (all regions)' : ''}`}>
       <input type="checkbox" bind:checked={auto} />
@@ -163,9 +162,6 @@
     font: inherit;
     font-size: var(--fs-m);
     outline: none;
-  }
-  .icon-btn.spin :global(svg) {
-    animation: otto-spin 0.8s linear infinite;
   }
   .auto {
     display: inline-flex;

@@ -74,7 +74,7 @@
         {/each}
       </div>
     </fieldset>
-    <p class="hint"><Icon name="info" size={13} /> Every colour, type size and spacing step can be changed after. Studios read the kit once you link it.</p>
+    <p class="hint"><Icon name="info" size={13} /> Every color, type size and spacing step can be changed after. Studios read the kit once you link it.</p>
     <button type="submit" hidden aria-hidden="true" tabindex="-1"></button>
   </form>
   {#snippet footer()}

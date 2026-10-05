@@ -5,7 +5,9 @@
   // menu duplicates, deletes, moves to a group or ungroups. The Add ▾ menu offers
   // primitives, lights, a group and "Import GLB…" (the upload itself is the
   // arena's — `onimportGlb`). Every edit is an `ops.ts` call → `onchange(newDoc)`.
+  import { tick } from 'svelte';
   import { ctxMenu, type MenuItem } from '../../../../lib/contextmenu.svelte';
+  import { focusOnMount } from '../../../../lib/focusOnMount';
   import Icon, { type IconName } from '../../../../lib/components/Icon.svelte';
   import { LIGHT_TYPES, PRIMITIVE_TYPES, type LightType, type PrimitiveType, type Scene3dDoc } from './types';
   import {
@@ -140,14 +142,51 @@
     onchange(remove(doc, id));
     if (selectedId === id) selectedId = null;
   }
+  // ── Tree keyboard (WAI-ARIA tree view) ─────────────────────────────────────
+  // One treeitem is in the Tab order (the selection, else the first row);
+  // ↑/↓/Home/End move it, → expands a group or steps into it, ← collapses or
+  // steps out to the parent group (mirrored under RTL). Selection follows
+  // focus, like the viewport's own click-to-select. The eye / ⋯ / disclosure
+  // buttons are pointer shortcuts — every one of their actions is also on the
+  // keyboard (arrows, ContextMenu / ⇧F10 → the row menu, which has Hide/Show).
+  let treeEl = $state<HTMLElement | null>(null);
+  const order = $derived([...visibleRows.map((r) => r.id), ...visibleLights.map((l) => l.id)]);
+  const tabStop = $derived(selectedId && order.includes(selectedId) ? selectedId : (order[0] ?? null));
+
+  function focusItem(id: string | null | undefined): void {
+    if (!id) return;
+    select(id);
+    void tick().then(() => treeEl?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(id)}"]`)?.focus());
+  }
+  function setCollapsed(id: string, value: boolean): void {
+    collapsed = { ...collapsed, [id]: value };
+  }
   function onRowKey(e: KeyboardEvent, id: string): void {
-    if (e.key === 'Enter' || e.key === ' ') {
+    if (e.target !== e.currentTarget) return; // the inline rename input owns its keys
+    const i = order.indexOf(id);
+    const row = visibleRows.find((r) => r.id === id);
+    const rtl = treeEl ? getComputedStyle(treeEl).direction === 'rtl' : false;
+    const key = rtl && e.key === 'ArrowRight' ? 'ArrowLeft' : rtl && e.key === 'ArrowLeft' ? 'ArrowRight' : e.key;
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+      e.preventDefault();
+      const next = key === 'Home' ? 0 : key === 'End' ? order.length - 1 : i + (key === 'ArrowDown' ? 1 : -1);
+      focusItem(order[Math.max(0, Math.min(order.length - 1, next))]);
+    } else if (key === 'ArrowRight') {
+      e.preventDefault();
+      if (row?.hasChildren && row.collapsed) setCollapsed(id, false);
+      else if (row?.hasChildren) focusItem(order[i + 1]);
+    } else if (key === 'ArrowLeft') {
+      e.preventDefault();
+      if (row?.hasChildren && !row.collapsed) setCollapsed(id, true);
+      else focusItem(parentGroup(doc, id)?.id);
+    } else if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       select(id);
     } else if (e.key === 'F2') {
       e.preventDefault();
       startRename(id);
-    } else if (e.key === 'ContextMenu') {
+    } else if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
       rowMenu(e, id);
     }
   }
@@ -156,8 +195,15 @@
     select(id);
     const n = findNode(doc, id);
     if (!n) return;
+    const hiddenNow = n.node.visible === false;
     const items: MenuItem[] = [
       { label: 'Rename', icon: 'edit', disabled: readonly, action: () => startRename(id) },
+      {
+        label: n.kind === 'light' ? (hiddenNow ? 'Turn on' : 'Turn off') : hiddenNow ? 'Show' : 'Hide',
+        icon: 'eye',
+        disabled: readonly,
+        action: () => onchange(setVisible(doc, id, hiddenNow)),
+      },
       { label: 'Duplicate', icon: 'copy', disabled: readonly, action: () => doDuplicate(id) },
       { separator: true },
       { label: 'Move up', icon: 'arrowUp', disabled: readonly, action: () => onchange(reorder(doc, id, -1)) },
@@ -262,15 +308,15 @@
 <div class="s3d-hier">
   <div class="s3d-hier-head">
     <span class="s3d-hier-title">Hierarchy</span>
-    <input class="s3d-hier-filter" placeholder="Filter…" bind:value={filter} aria-label="Filter hierarchy" />
+    <input class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
     {#if !readonly}
-      <button class="s3d-icon-btn" title="Add object, light or group" aria-label="Add" onclick={addMenu}>
+      <button class="s3d-icon-btn" title="Add object, light or group" aria-label="Add object, light or group" onclick={addMenu}>
         <Icon name="plus" size={14} />
       </button>
     {/if}
   </div>
 
-  <div class="s3d-hier-body" role="tree" aria-label="Scene hierarchy">
+  <div class="s3d-hier-body" role="tree" aria-label="Scene hierarchy" bind:this={treeEl}>
     {#if !visibleRows.length && !visibleLights.length}
       <div class="s3d-hier-empty">
         {#if q}
@@ -289,9 +335,10 @@
         class:selected={selectedId === r.id}
         class:dimmed
         role="treeitem"
-        tabindex="0"
+        data-node-id={r.id}
+        tabindex={tabStop === r.id ? 0 : -1}
         aria-selected={selectedId === r.id}
-        aria-expanded={r.node.kind === 'group' ? !r.collapsed : undefined}
+        aria-expanded={r.hasChildren ? !r.collapsed : undefined}
         aria-level={r.depth + 1}
         style="padding-inline-start: {8 + r.depth * 14}px"
         onclick={() => select(r.id)}
@@ -300,7 +347,8 @@
         onkeydown={(e) => onRowKey(e, r.id)}
       >
         {#if r.node.kind === 'group'}
-          <button class="s3d-disclose" tabindex="-1" aria-label={r.collapsed ? 'Expand' : 'Collapse'} title={r.collapsed ? 'Expand' : 'Collapse'} onclick={(e) => toggle(r.id, e)}>
+          <!-- Pointer shortcut for → / ← (the treeitem's aria-expanded states it). -->
+          <button class="s3d-disclose" tabindex="-1" aria-hidden="true" aria-label={r.collapsed ? 'Expand (→)' : 'Collapse (←)'} title={r.collapsed ? 'Expand (→)' : 'Collapse (←)'} onclick={(e) => toggle(r.id, e)}>
             <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
           </button>
         {:else}
@@ -308,11 +356,11 @@
         {/if}
         <span class="s3d-row-icon"><Icon name={iconFor(r.node)} size={13} /></span>
         {#if renaming === r.id}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
             class="s3d-rename"
+            aria-label="Name"
             bind:value={draft}
-            autofocus
+            use:focusOnMount={{ select: true }}
             onblur={commitRename}
             onkeydown={onRenameKey}
             onclick={(e) => e.stopPropagation()}
@@ -340,7 +388,7 @@
         <button
           class="s3d-icon-btn s3d-more"
           tabindex="-1"
-          title="More"
+          title="More actions"
           aria-label="More actions"
           onclick={(e) => {
             e.stopPropagation();
@@ -353,7 +401,7 @@
     {/each}
 
     {#if visibleLights.length}
-      <div class="s3d-section">Lights</div>
+      <div class="s3d-section" role="presentation">Lights</div>
       {#each visibleLights as l (l.id)}
         {@const hidden = l.visible === false}
         <div
@@ -361,7 +409,8 @@
           class:selected={selectedId === l.id}
           class:dimmed={hidden}
           role="treeitem"
-          tabindex="0"
+          data-node-id={l.id}
+          tabindex={tabStop === l.id ? 0 : -1}
           aria-selected={selectedId === l.id}
           aria-level={1}
           style="padding-inline-start: 8px"
@@ -373,11 +422,11 @@
           <span class="s3d-disclose spacer"></span>
           <span class="s3d-row-icon light"><Icon name="zap" size={13} /></span>
           {#if renaming === l.id}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="s3d-rename"
+              aria-label="Name"
               bind:value={draft}
-              autofocus
+              use:focusOnMount={{ select: true }}
               onblur={commitRename}
               onkeydown={onRenameKey}
               onclick={(e) => e.stopPropagation()}
@@ -401,7 +450,7 @@
           <button
             class="s3d-icon-btn s3d-more"
             tabindex="-1"
-            title="More"
+            title="More actions"
             aria-label="More actions"
             onclick={(e) => {
               e.stopPropagation();
@@ -443,7 +492,7 @@
   .s3d-hier-filter {
     flex: 1 1 auto;
     min-width: 0;
-    padding: 3px 6px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -461,7 +510,7 @@
     line-height: 1.5;
   }
   .s3d-section {
-    padding: 8px 8px 3px;
+    padding: 8px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -480,7 +529,7 @@
     outline: none;
   }
   .s3d-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .s3d-row:focus-visible {
     box-shadow: inset 0 0 0 1px var(--accent);
@@ -556,7 +605,7 @@
     flex-shrink: 0;
   }
   .s3d-icon-btn:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .s3d-icon-btn:disabled {

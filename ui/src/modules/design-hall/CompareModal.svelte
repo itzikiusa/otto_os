@@ -66,10 +66,10 @@
       const key = `${s.artifact.id}:${s.versionId}`;
       if (untrack(get)?.key === key) return;
       const asText = isTextFormat(s.artifact.format);
-      let cancelled = false;
+      let canceled = false;
       void fetchContent(s.artifact.id, { version: s.versionId, asText }).then(
         (c) => {
-          if (cancelled) {
+          if (canceled) {
             if (c.blobUrl) URL.revokeObjectURL(c.blobUrl);
             return;
           }
@@ -78,11 +78,11 @@
           set({ key, text: c.text, blobUrl: c.blobUrl, error: null });
         },
         (e) => {
-          if (!cancelled) set({ key, text: null, blobUrl: null, error: e instanceof Error ? e.message : String(e) });
+          if (!canceled) set({ key, text: null, blobUrl: null, error: e instanceof Error ? e.message : String(e) });
         },
       );
       return () => {
-        cancelled = true;
+        canceled = true;
       };
     };
   }
@@ -133,7 +133,7 @@
           <span class="title" title={p.s.artifact.title}>{p.s.artifact.id === currentId ? '' : `${p.s.artifact.title} · `}</span>
           <select class="input" aria-label={`${p.n} version`} value={p.s.versionId} onchange={(e) => p.set((e.currentTarget as HTMLSelectElement).value)}>
             {#each versionsOf[p.s.artifact.id] ?? [] as v (v.id)}<option value={v.id}>{labelOf(p.s, v)}</option>{/each}
-            {#if !(versionsOf[p.s.artifact.id] ?? []).length}<option value={p.s.versionId}>Loading…</option>{/if}
+            {#if !(versionsOf[p.s.artifact.id] ?? []).length}<option value={p.s.versionId}>Loading versions…</option>{/if}
           </select>
         </label>
       {/each}

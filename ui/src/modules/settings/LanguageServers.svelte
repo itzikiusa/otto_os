@@ -1,5 +1,7 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
+  import { plural } from '../../lib/plural';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Language Servers: shows LSP server availability and lets users
@@ -48,7 +50,7 @@
   const wsId = $derived(ws.currentId);
 
   async function installLang(lang: string, command: string): Promise<void> {
-    if (!wsId) { toasts.error("Couldn’t start the install", 'Select a workspace first.'); return; }
+    if (!wsId) { toasts.error("Couldn’t start the install", `${NO_WORKSPACE}.`); return; }
     // It installs software on this Mac: say exactly what runs first.
     const ok = await confirmer.ask(
       `Run “${command}” in a new terminal session? It installs the ${langLabel(lang)} language server on this Mac.`,
@@ -68,10 +70,10 @@
   }
 
   async function installAll(): Promise<void> {
-    if (!wsId) { toasts.error("Couldn’t start the install", 'Select a workspace first.'); return; }
+    if (!wsId) { toasts.error("Couldn’t start the install", `${NO_WORKSPACE}.`); return; }
     const cmds = missingWithInstall.map((s) => s.install_command).join('\n');
     const ok = await confirmer.ask(
-      `Run these in a new terminal session to install ${missingWithInstall.length} missing language server${missingWithInstall.length === 1 ? '' : 's'} on this Mac?\n\n${cmds}`,
+      `Run these in a new terminal session to install ${plural(missingWithInstall.length, 'missing language server')} on this Mac?\n\n${cmds}`,
       { title: 'Install missing servers', confirmLabel: 'Install', danger: false },
     );
     if (!ok) return;
@@ -142,7 +144,7 @@
 
   <LoadState what="language servers" {loading} {error} empty={!caps || caps.servers.length === 0} onretry={() => void load()} rows={5}>
     {#snippet emptyView()}
-      <EmptyState icon="function" title="No language servers configured" body="This daemon doesn't list any supported languages." />
+      <EmptyState icon="function" title="No language servers configured" body="This daemon doesn’t list any supported languages." />
     {/snippet}
     {#if caps}
       <div class="table-wrap card">

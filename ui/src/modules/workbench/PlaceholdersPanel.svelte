@@ -121,7 +121,7 @@
     color: var(--accent-text);
     background: var(--accent-soft);
     border-radius: var(--radius-s);
-    padding-inline: 5px;
+    padding-inline: 4px;
   }
   .ph-count {
     font-size: var(--fs-xs);

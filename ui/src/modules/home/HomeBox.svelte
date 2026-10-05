@@ -228,7 +228,6 @@
     {/if}
   </div>
   {#if !zoomed && !viewport.isPhone}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div
       class="resize"
       role="slider"

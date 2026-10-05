@@ -385,7 +385,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     color: var(--text);
-    padding: 4px 9px;
+    padding: 4px 10px;
     cursor: pointer;
     font-size: var(--fs-s);
     white-space: nowrap;
@@ -418,7 +418,7 @@
   .img-wrap img {
     max-width: 100%;
     max-height: 100%;
-    border-radius: 8px;
+    border-radius: var(--radius-m);
   }
   .d2-wrap {
     /* d2 renders theme-aware (dark themeID in dark mode) — no forced bg. */
@@ -442,7 +442,7 @@
     border: none;
     min-height: 0;
     /* Mockups usually assume a light page; srcdoc iframes are transparent. */
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered HTML file canvas (the page’s own white page) */
   }
   .table-wrap {
     padding: 12px 14px;

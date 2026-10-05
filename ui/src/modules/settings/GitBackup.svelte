@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
+  import { plural } from '../../lib/plural';
   import { api, baseUrl } from '../../lib/api/client';
   import { auth } from '../../lib/stores/auth.svelte';
   import type { GitBackupStatus, GitBackupPreview, RestorePreview, RestoreResult, RestoreConflictPolicy } from '../../lib/api/types';
@@ -139,7 +140,7 @@
     <div class="controls"><button class="btn" disabled={busy} onclick={previewExport}>Preview snapshot</button></div>
     {#if preview}
       <div class="snapshot-preview" aria-label="Git snapshot preview">
-        <strong>{changes.length} changed file{changes.length === 1 ? '' : 's'}</strong>
+        <strong>{plural(changes.length, 'changed file')}</strong>
         <p class="dim">Only Otto's managed .otto-sync files are written. Local edits to those files require review before exporting again.</p>
         <div class="scroll"><ul>{#each changes as change}<li><span class="act">{change.action}</span> <code>{change.path}</code></li>{:else}<li>The snapshot matches this repository.</li>{/each}</ul></div>
         {#if preview.excluded.length}<details><summary>Excluded from Git</summary><ul>{#each preview.excluded as item}<li>{item}</li>{/each}</ul></details>{/if}

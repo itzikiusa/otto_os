@@ -105,7 +105,7 @@
     height: 100%;
     min-height: 320px;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered page canvas (the mockup’s own white page) */
   }
   .live-msg {
     padding: 24px;

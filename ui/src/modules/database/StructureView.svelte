@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Object structure: a columns table (name/type/nullable/default/key), primary
   // key, indexes, foreign keys, and a collapsible DDL block. For Redis keys /
   // Mongo collections (no columns) it renders the `extra` JSON.
@@ -751,7 +752,7 @@
                 <tr>
                   <td class="cn">
                     {f.path}
-                    {#if f.nested}<span class="nested-tag" title="Embedded field path">nested</span>{/if}
+                    {#if f.nested}{' '}<Badge label="Nested" title="Embedded field path" />{/if}
                   </td>
                   <td class="ty">{f.type}</td>
                   <td>
@@ -810,8 +811,8 @@
                   >
                     <Icon name="key" size={12} />
                     <span class="idx-name mono" title={idx.name}>{idx.name}</span>
-                    {#if idx.unique}<span class="tag unique">unique</span>{/if}
-                    {#if idx.method}<span class="tag">{idx.method}</span>{/if}
+                    {#if idx.unique}<Badge tone="accent" label="Unique" />{/if}
+                    {#if idx.method}<Badge variant="outline" label={idx.method} />{/if}
                     <span class="idx-cols mono">({idx.columns.join(', ')})</span>
                     {#if defText != null}
                       <span class="grow"></span>
@@ -826,7 +827,7 @@
                         aria-label="Edit index {idx.name}"
                         disabled={locked || !canSchema}
                         title={locked
-                          ? "MongoDB's _id_ index can't be changed"
+                          ? "MongoDB’s _id_ index can’t be changed"
                           : 'Edit — prepares a drop + recreate for you to review and run'}
                         onclick={() => editIndex(idx)}
                       >
@@ -837,7 +838,7 @@
                         aria-label="Drop index {idx.name}"
                         disabled={locked || !canSchema}
                         title={locked
-                          ? "MongoDB's _id_ index can't be dropped"
+                          ? "MongoDB’s _id_ index can’t be dropped"
                           : 'Drop — prepares the statement for you to review and run'}
                         onclick={() => dropIndex(idx)}
                       >
@@ -993,8 +994,8 @@
                 {/if}
                 {#if idxCondExtraMongo}
                   <div class="ib-warn">
-                    This index has filter terms this builder can't edit
-                    (<span class="mono">{Object.keys(idxCondExtraMongo).join(', ')}</span>) — they're
+                    This index has filter terms this builder can’t edit
+                    (<span class="mono">{Object.keys(idxCondExtraMongo).join(', ')}</span>) — they’re
                     preserved as-is.
                   </div>
                 {/if}
@@ -1117,7 +1118,7 @@
       <div class="block">
         <div class="block-title">Definition</div>
         <div class="ddl-missing">
-          The routine body isn't available — the connected account likely lacks
+          The routine body isn’t available — the connected account likely lacks
           privilege to view routine definitions (needs <code>SHOW_ROUTINE</code>, or
           <code>SELECT</code> on the routine).
         </div>
@@ -1178,7 +1179,7 @@
   .st-title {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 8px;
     color: var(--accent-text);
   }
   .st-title h2 {
@@ -1193,7 +1194,7 @@
     letter-spacing: .06em;
     color: var(--text-dim);
     background: var(--surface-2);
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
   }
   .rowcount {
@@ -1308,10 +1309,10 @@
     cursor: pointer;
   }
   .ib-row:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .ib-row.on {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .ib-fname {
@@ -1352,13 +1353,13 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
     cursor: pointer;
   }
   .ib-dir:hover {
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    background: var(--accent-soft-strong);
   }
   .ib-x {
     display: inline-flex;
@@ -1383,18 +1384,10 @@
   }
   .ib-sep {
     height: 1px;
-    margin: 3px 0;
+    margin: 2px 0;
     background: var(--border);
   }
   /* Mongo fields table */
-  .nested-tag {
-    margin-inline-start: 6px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: var(--radius-s);
-  }
   .fld-act {
     text-align: end;
     white-space: nowrap;
@@ -1451,7 +1444,7 @@
   .ib-warn code {
     font-size: var(--fs-xs);
     background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: var(--radius-s);
   }
   .ib-unique,
@@ -1502,7 +1495,7 @@
     display: flex;
     justify-content: space-between;
     gap: 8px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -1564,7 +1557,7 @@
     white-space: nowrap;
   }
   .tbl td {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     font-size: var(--fs-s);
     vertical-align: top;
@@ -1589,7 +1582,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     padding: 0 4px;
     border-radius: var(--radius-s);
     vertical-align: middle;
@@ -1607,7 +1600,7 @@
   .fk-list {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     margin: 0;
     padding: 0;
     list-style: none;
@@ -1620,7 +1613,7 @@
     font-size: var(--fs-s);
     background: var(--surface-2);
     border: 1px solid var(--border);
-    padding: 2px 9px;
+    padding: 2px 8px;
     border-radius: 999px;
     color: var(--text);
   }
@@ -1631,7 +1624,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 5px 10px;
+    padding: 4px 10px;
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -1681,7 +1674,7 @@
     cursor: pointer;
   }
   .idx-act:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .idx-act.danger:hover:not(:disabled) {
@@ -1744,18 +1737,6 @@
     gap: 4px;
     min-width: 0;
     overflow: hidden;
-  }
-  .tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    padding: 0 5px;
-    border-radius: 999px;
-  }
-  .tag.unique {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
   }
   .ddl {
     margin: 0;

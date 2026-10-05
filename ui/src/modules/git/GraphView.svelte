@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
@@ -276,6 +277,20 @@
    *  leaving the graph silently stale. */
   let refreshFailures = 0;
   let refreshError = $state<string | null>(null);
+  /** The same rule for the quiet `/refs` + side-list re-reads (auto-fetch,
+   *  revalidate, post-action refresh), counted on their own: a miss used to
+   *  vanish into `.catch(() => {})`, leaving branches stale with nothing on
+   *  screen. Any success clears it. */
+  let refsMisses = 0;
+  let refsStaleError = $state<string | null>(null);
+  function noteBackgroundRead(e: unknown | null): void {
+    if (e === null) {
+      refsMisses = 0;
+      refsStaleError = null;
+    } else if (++refsMisses >= 2) {
+      refsStaleError = loadErrorText(e);
+    }
+  }
 
   // ── History paging ────────────────────────────────────────────────────────
   // There is no ceiling on how far back the graph can reach. The page is big
@@ -679,6 +694,10 @@
    *  revalidation re-reads them quietly (each assignment is skipped when
    *  nothing changed). */
   async function reloadSideLists(id: string, withSubmodules: boolean): Promise<void> {
+    let miss: unknown | null = null;
+    const fail = (e: unknown): void => {
+      miss ??= e;
+    };
     await Promise.all([
       api
         .get<StashInfo[]>(`/repos/${id}/stashes`)
@@ -687,22 +706,23 @@
           if (!sameJson(stashes, s)) stashes = s;
           stashesKnown = true;
         })
-        .catch(() => {}),
+        .catch(fail),
       api
         .get<WorktreeInfo[]>(`/repos/${id}/worktrees`)
         .then((w) => {
           if (id === repoId && !sameJson(worktrees, w)) worktrees = w;
         })
-        .catch(() => {}),
+        .catch(fail),
       withSubmodules
         ? api
             .get<SubmoduleInfo[]>(`/repos/${id}/submodules`)
             .then((s) => {
               if (id === repoId && !sameJson(submodules, s)) submodules = s;
             })
-            .catch(() => {})
+            .catch(fail)
         : Promise.resolve(),
     ]);
+    if (id === repoId) noteBackgroundRead(miss);
   }
 
   function sameJson(a: unknown, b: unknown): boolean {
@@ -711,8 +731,10 @@
 
   /** After painting a cached graph: refs first, history only if it moved. */
   async function revalidate(id: string): Promise<void> {
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
+    let miss: unknown | null = null;
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
     if (id !== repoId) return;
+    noteBackgroundRead(miss);
     if (raw && applyRefs(withoutRemoteHeads(raw))) {
       await reloadGraph();
       return;
@@ -777,7 +799,7 @@
     if (!req || req.nonce === refreshSeen) return;
     refreshSeen = req.nonce;
     if (req.repoId !== repoId) return;
-    untrack(() => void refreshAfter().catch(() => {}));
+    untrack(() => void refreshAfter().catch(noteBackgroundRead));
   });
 
   // A graph nobody can see (window hidden, another module/sub-tab covering
@@ -795,7 +817,7 @@
       return;
     }
     resyncPending = false;
-    void resyncRefs().catch(() => {});
+    void resyncRefs().catch(noteBackgroundRead);
   }
   function flushResync(): void {
     if (resyncPending && graphVisible()) requestResync();
@@ -852,8 +874,12 @@
     // response looks "moved" and would discard the in-flight first page.
     await initialLoad;
     if (id !== repoId) return;
-    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null);
-    if (!raw || id !== repoId) return; // transient failure — keep what we have, try next round
+    let miss: unknown | null = null;
+    const raw = await api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null));
+    if (id !== repoId) return;
+    // A miss keeps what we have and tries next round; two in a row say so.
+    noteBackgroundRead(miss);
+    if (!raw) return;
     const next = withoutRemoteHeads(raw);
     if (!historyMoved(refs, next)) {
       setRefs(next);
@@ -938,11 +964,13 @@
   async function refreshAfter(status?: RepoStatusResp): Promise<void> {
     if (status) onstatus(status);
     const id = repoId;
+    let miss: unknown | null = null;
     const [r, g] = await Promise.all([
-      api.get<RefsResp>(`/repos/${id}/refs`).catch(() => null),
+      api.get<RefsResp>(`/repos/${id}/refs`).catch((e: unknown) => ((miss = e), null)),
       fetchGraph(id),
     ]);
     if (id !== repoId) return;
+    noteBackgroundRead(miss);
     if (r) setRefs(withoutRemoteHeads(r));
     applyGraph(g);
   }
@@ -1220,7 +1248,7 @@
     items.push(...gitFlowItems(c.sha));
     items.push(
       { separator: true },
-      { label: 'Revert commit', icon: 'refresh', danger: true, action: () => void revertCommit(c) },
+      { label: 'Revert commit…', icon: 'refresh', danger: true, action: () => void revertCommit(c) },
       { separator: true },
       { label: 'Copy commit SHA', icon: 'note', action: () => void clip(c.sha, c.sha) },
       { label: 'Copy short SHA', icon: 'note', action: () => void clip(c.short_sha, c.short_sha) },
@@ -1239,7 +1267,7 @@
 
   async function revertCommit(c: CommitInfo): Promise<void> {
     const ok = await confirmer.ask(
-      `Revert commit ${c.short_sha} — "${c.subject}"? This creates a new commit undoing its changes.`,
+      `Revert commit ${c.short_sha} — “${c.subject}”? This creates a new commit undoing its changes.`,
       { title: 'Revert commit', confirmLabel: 'Revert', danger: false },
     );
     if (!ok) return;
@@ -1278,7 +1306,7 @@
       if (!message) return;
     }
     // Ask whether to push the new tag straight to origin.
-    const push = await confirmer.ask(`Push tag "${name}" to origin?`, {
+    const push = await confirmer.ask(`Push tag “${name}” to origin?`, {
       title: 'Push tag',
       confirmLabel: 'Push',
       danger: false,
@@ -1344,20 +1372,20 @@
       const localTwin = localNames.has(localName) && localName !== currentBranch;
       items.push({ separator: true });
       items.push({
-        label: `Delete ${b.name}`,
+        label: `Delete ${b.name}…`,
         icon: 'trash',
         danger: true,
         action: () => void deleteRemoteBranch(localName),
       });
       if (localTwin) {
         items.push({
-          label: `Delete ${localName}`,
+          label: `Delete ${localName}…`,
           icon: 'trash',
           danger: true,
           action: () => void deleteLocalBranch(localName, false),
         });
         items.push({
-          label: 'Delete local + remote',
+          label: 'Delete local + remote…',
           icon: 'trash',
           danger: true,
           action: () => void deleteLocalBranch(localName, true),
@@ -1426,20 +1454,20 @@
       if (!isCurrent) {
         items.push({ separator: true });
         items.push({
-          label: `Delete ${b.name}`,
+          label: `Delete ${b.name}…`,
           icon: 'trash',
           danger: true,
           action: () => void deleteLocalBranch(b.name, false),
         });
         if (hasRemote) {
           items.push({
-            label: `Delete origin/${b.name}`,
+            label: `Delete origin/${b.name}…`,
             icon: 'trash',
             danger: true,
             action: () => void deleteRemoteBranch(b.name),
           });
           items.push({
-            label: 'Delete local + remote',
+            label: 'Delete local + remote…',
             icon: 'trash',
             danger: true,
             action: () => void deleteLocalBranch(b.name, true),
@@ -1488,7 +1516,7 @@
   }
 
   async function renameBranch(from: string): Promise<void> {
-    const to = await confirmer.promptText(`Rename branch "${from}" to`, {
+    const to = await confirmer.promptText(`Rename branch “${from}” to`, {
       title: 'Rename branch',
       confirmLabel: 'Rename',
       initial: from,
@@ -1500,8 +1528,8 @@
   async function deleteLocalBranch(name: string, alsoRemote: boolean): Promise<void> {
     const ok = await confirmer.ask(
       alsoRemote
-        ? `Delete branch "${name}" locally AND on origin? This cannot be undone.`
-        : `Delete local branch "${name}"?`,
+        ? `Delete branch “${name}” locally AND on origin? This cannot be undone.`
+        : `Delete local branch “${name}”?`,
       { title: 'Delete branch', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -1520,12 +1548,12 @@
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!/not fully merged/i.test(msg)) {
-        toasts.error(`${okTitle} failed`, msg);
+        toastError(`Couldn’t delete ${name}`, e);
         await refreshAfter().catch(() => {});
         return;
       }
       const force = await confirmer.ask(
-        `"${name}" has commits that aren't merged anywhere else. Force-delete it and DROP those commits? This cannot be undone.`,
+        `“${name}” has commits that aren’t merged anywhere else. Force-delete it and DROP those commits? This cannot be undone.`,
         { title: 'Branch not fully merged', confirmLabel: 'Force delete', danger: true },
       );
       if (!force) return;
@@ -1534,7 +1562,7 @@
   }
 
   async function deleteRemoteBranch(name: string): Promise<void> {
-    const ok = await confirmer.ask(`Delete branch "${name}" on origin? This cannot be undone.`, {
+    const ok = await confirmer.ask(`Delete branch “${name}” on origin? This cannot be undone.`, {
       title: 'Delete remote branch',
       confirmLabel: 'Delete',
       danger: true,
@@ -1560,13 +1588,13 @@
       { separator: true },
       { label: 'Push tag to origin', icon: 'send', action: () => void pushTag(t.name) },
       {
-        label: 'Delete tag',
+        label: 'Delete tag…',
         icon: 'trash',
         danger: true,
         action: () => void deleteTag(t.name, false),
       },
       {
-        label: 'Delete tag on origin',
+        label: 'Delete tag on origin…',
         icon: 'trash',
         danger: true,
         action: () => void deleteTag(t.name, true),
@@ -1589,7 +1617,7 @@
 
   async function deleteTag(name: string, remote: boolean): Promise<void> {
     const ok = await confirmer.ask(
-      remote ? `Delete tag "${name}" on origin?` : `Delete local tag "${name}"?`,
+      remote ? `Delete tag “${name}” on origin?` : `Delete local tag “${name}”?`,
       { title: 'Delete tag', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -1605,7 +1633,7 @@
 
   async function stashDrop(s: StashInfo): Promise<void> {
     const ok = await confirmer.ask(
-      `Drop ${s.ref} — "${stashShortMsg(s)}"? This discards the stash and cannot be undone.`,
+      `Drop ${s.ref} — “${stashShortMsg(s)}”? This discards the stash and cannot be undone.`,
       { title: 'Drop stash', confirmLabel: 'Drop', danger: true },
     );
     if (!ok) return;
@@ -1617,7 +1645,7 @@
     const items: MenuItem[] = [
       { label: 'Apply stash', icon: 'stash', action: () => void stashApply(s) },
       { separator: true },
-      { label: 'Drop stash', icon: 'trash', danger: true, action: () => void stashDrop(s) },
+      { label: 'Drop stash…', icon: 'trash', danger: true, action: () => void stashDrop(s) },
       { separator: true },
       { label: 'Copy message', icon: 'note', action: () => void clip(s.message, s.message) },
     ];
@@ -1701,7 +1729,7 @@
         ? ` It is locked${w.lock_reason ? ` (${w.lock_reason})` : ''}.`
         : '';
     const ok = await confirmer.ask(
-      `Remove worktree "${wtName(w)}" at ${w.path}?${detail} The branch${w.branch ? ` "${w.branch}"` : ''} and its commits are kept.`,
+      `Remove worktree “${wtName(w)}” at ${w.path}?${detail} The branch${w.branch ? ` “${w.branch}”` : ''} and its commits are kept.`,
       { title: 'Remove worktree', confirmLabel: 'Remove', danger: true },
     );
     if (!ok) return;
@@ -1801,7 +1829,7 @@
     } catch (e) {
       if (isDirtyGitRefusal(e)) {
         const ok = await confirmer.ask(
-          `Your uncommitted changes overlap files that differ on "${branch}". Otto will stash them, switch, and restore them on "${branch}". Nothing is pulled or merged.`,
+          `Your uncommitted changes overlap files that differ on “${branch}”. Otto will stash them, switch, and restore them on “${branch}”. Nothing is pulled or merged.`,
           { title: 'Stash, switch & restore', confirmLabel: 'Stash & switch', danger: false },
         );
         if (ok) {
@@ -1823,10 +1851,7 @@
           } catch (e2) {
             // The switch landed but the restore didn't — the daemon's message
             // already ends with "run `git stash pop`".
-            toasts.error(
-              'Switch finished, restore failed',
-              e2 instanceof Error ? e2.message : String(e2),
-            );
+            toastError(`Switched to ${branch}, but couldn’t restore your changes`, e2);
             await refreshAfter().catch(() => {});
           }
         }
@@ -1912,7 +1937,7 @@
       // Preview is advisory — a repo whose daemon predates it still rebases.
     }
     const ok = await confirmer.ask(
-      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${commits} commit${commits === 1 ? '' : 's'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
+      `Rebase \`${currentBranch}\` onto \`${onto}\`? ${typeof commits === 'number' ? plural(commits, 'commit') : '? commits'} will be replayed; conflicts open the resolver. Uncommitted changes are stashed and restored afterwards.`,
       { title: 'Rebase', confirmLabel: 'Rebase', danger: false },
     );
     if (ok) await mutate('/rebase', { onto, auto_stash: true }, 'Rebased', onto);
@@ -2663,7 +2688,7 @@
     try {
       const found = await loadUntil(sha);
       if (!found) {
-        toasts.error('Not in this graph', `${label} points at a commit that isn't reachable here.`);
+        toasts.error('Not in this graph', `${label} points at a commit that isn’t reachable here.`);
         return;
       }
       const c = bySha.get(sha);
@@ -3582,6 +3607,11 @@
         <div class="graph-stale">
           <LoadState what="the graph" error={refreshError} onretry={() => void reloadGraph()} />
         </div>
+      {:else if refsStaleError && commits.length > 0}
+        <!-- Two background ref reads in a row failed: branches may be stale. -->
+        <div class="graph-stale">
+          <LoadState what="branches" error={refsStaleError} onretry={() => void refreshAfter().catch(noteBackgroundRead)} />
+        </div>
       {/if}
       <div class="graph-list">
         <!-- Column header — orients the three zones (which column holds refs,
@@ -3645,12 +3675,12 @@
               </div>
               <div class="ci-meta">
                 <span class="dim">
-                  {status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed{wipStagedCount > 0
+                  {plural(status.changes.length, 'file')} changed{wipStagedCount > 0
                     ? ` · ${wipStagedCount} staged`
                     : ''}
                 </span>
                 {#if wipConflictCount > 0}
-                  <span class="wip-conflicts" title="{wipConflictCount} conflicted file{wipConflictCount === 1 ? '' : 's'} — open the WIP panel to resolve">
+                  <span class="wip-conflicts" title="{plural(wipConflictCount, 'conflicted file')} — open the WIP panel to resolve">
                     <Icon name="warning" size={12} /> {wipConflictCount} conflicted
                   </span>
                 {/if}
@@ -3833,7 +3863,7 @@
               Load older commits
             </button>
           {:else}
-            <span class="dim">{commits.length} commit{commits.length === 1 ? '' : 's'} · beginning of history</span>
+            <span class="dim">{plural(commits.length, 'commit')} · beginning of history</span>
           {/if}
         </div>
       </div>
@@ -3879,9 +3909,9 @@
       <span class="mob-diff-title mono">{wipSelected ? '// WIP' : (selectedCommit?.short_sha ?? 'Diff')}</span>
       <span class="grow"></span>
       {#if wipSelected}
-        <span class="mob-sec-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'}</span>
+        <span class="mob-sec-count">{plural(status.changes.length, 'file')}</span>
       {:else if diffFileCount !== null}
-        <span class="mob-sec-count">{diffFileCount} file{diffFileCount === 1 ? '' : 's'}</span>
+        <span class="mob-sec-count">{plural(diffFileCount, 'file')}</span>
       {/if}
       <span class="mob-close" aria-hidden="true"><Icon name="x" size={14} /></span>
     </button>
@@ -4051,12 +4081,12 @@
      a thin hit-area straddling the border that lights up on hover. */
   .refs-resizer {
     flex: 0 0 6px;
-    margin-inline-start: -3px;
+    margin-inline-start: -2px;
     cursor: col-resize;
     z-index: 1;
   }
   .refs-resizer:hover {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-soft-strong);
   }
   /* Middle-ellipsized branch name: the head span shrinks + ellipsizes while the
      tail (distinguishing suffix) stays pinned and fully visible. */
@@ -4098,7 +4128,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 5px 10px;
+    padding: 6px 10px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -4118,7 +4148,7 @@
     background: var(--surface-2);
     border-radius: 999px;
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 1px 6px;
     font-weight: 600;
     letter-spacing: 0;
   }
@@ -4144,7 +4174,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-folder:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   /* The count pill is surface-2 too — lift it so it doesn't vanish on hover. */
   .ref-folder:hover .ref-count {
@@ -4166,7 +4196,7 @@
   .folder-children {
     /* The guide drops from the centre of the folder's 11px chevron (22 + 5.5),
        and nested rows' dots then line up under the folder icon. */
-    margin-inline-start: 27px;
+    margin-inline-start: 28px;
     border-inline-start: 1.5px solid var(--border);
   }
   .ref-action-row {
@@ -4189,7 +4219,7 @@
   .ref-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
     height: 24px;
     padding-block: 0;
@@ -4217,10 +4247,10 @@
     text-align: start;
   }
   .ref-more-leaves:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .ref-row:hover:not(:disabled) {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .ref-row:disabled {
@@ -4275,7 +4305,7 @@
   }
   /* Accent outline while a valid merge source hovers this local branch. */
   .ref-row.drag-target {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     outline: 1.5px solid var(--accent-text);
     outline-offset: -1.5px;
@@ -4334,7 +4364,7 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     color: var(--worktree-text);
     opacity: 0.85;
     white-space: nowrap;
@@ -4344,7 +4374,7 @@
   }
   .ref-ab {
     display: inline-flex;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -4372,7 +4402,7 @@
     min-width: 0;
     overflow-y: auto;
     overflow-x: auto;
-    transition: flex var(--dur-enter) ease-out;
+    transition: flex var(--dur-fast) ease-out; /* user-driven: the detail pane opening */
   }
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
@@ -4388,11 +4418,11 @@
   }
   .graph-resizer {
     flex: 0 0 6px;
-    margin-inline-start: -3px;
+    margin-inline-start: -2px;
     cursor: col-resize;
   }
   .graph-resizer:hover {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-soft-strong);
   }
   /* Repeated refresh failures: the stale bar rides above the sticky column
      header and stays put while the history scrolls. */
@@ -4422,7 +4452,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     user-select: none;
   }
@@ -4483,13 +4513,13 @@
     transition: background var(--dur-fast) ease-out;
   }
   .graph-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .graph-row-selected,
   .graph-row-selected:hover {
     /* Clear selected state: accent wash + inset accent bar (inset avoids a
        layout shift that a left border would cause on the selected row only). */
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   /* Mirror the inline-start accent rail to the right edge under RTL. */
@@ -4506,13 +4536,14 @@
   .row-pulse {
     animation: row-pulse 1.2s ease-out 1;
   }
-  @keyframes row-pulse {
+  /* A one-shot highlight decay on the jumped-to row — not a live pulse. */
+  @keyframes row-pulse { /* ui-guards: allow */
     0%,
     55% {
       background: color-mix(in srgb, var(--accent) 42%, transparent);
     }
     100% {
-      background: color-mix(in srgb, var(--accent) 18%, transparent);
+      background: var(--accent-soft-strong);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -4547,7 +4578,7 @@
   }
   /* ── WIP row (uncommitted changes, GitKraken-style) ── */
   .wip-row:not(.graph-row-selected) {
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    background: var(--accent-soft);
   }
   .wip-row .wip-subject {
     color: var(--accent-text);
@@ -4560,22 +4591,22 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 5px;
+    padding: 1px 6px;
     border-radius: var(--radius-s);
     border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   /* Conflicted-files chip on the WIP row — conflicts must be visible from the
      graph itself, not only after opening the WIP panel. */
   .wip-conflicts {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 0 5px;
+    padding: 0 6px;
     border-radius: var(--radius-s);
     color: var(--warning);
     background: var(--warning-soft);
@@ -4584,11 +4615,11 @@
   /* The HEAD commit ("you are here") — a leading accent rail + faint wash so the
      checked-out tip is obvious at a glance, even when not selected. */
   .graph-row-head:not(.graph-row-selected) {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
-    box-shadow: inset 2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+    background: var(--accent-soft);
+    box-shadow: inset 2px 0 0 0 var(--accent);
   }
   :global([dir='rtl']) .graph-row-head:not(.graph-row-selected) {
-    box-shadow: inset -2px 0 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow: inset -2px 0 0 0 var(--accent);
   }
   /* "HEAD" badge on the checked-out commit row — a filled accent pill next to the
      branch chip so the HEAD commit is unmistakable. */
@@ -4598,7 +4629,7 @@
     font-weight: 600;
     letter-spacing: 0.06em;
     line-height: 1;
-    padding: 2px 5px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     /* Quiet marker: the checked-out branch chip beside it already carries the
        one solid accent fill in the row. */
@@ -4625,7 +4656,7 @@
   .ci-top {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     overflow: hidden;
   }
   .ci-subject {
@@ -4641,11 +4672,11 @@
   .ref-chip {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 5px;
+    padding: 1px 6px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -4661,7 +4692,7 @@
   }
   /* Local branch — subtle, neutral. */
   .ref-chip.kind-local {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   /* Remote-tracking branch — distinct teal/cyan so it never reads as local. */
@@ -4697,7 +4728,7 @@
     flex-shrink: 0;
     gap: 2px;
     margin-inline-start: 2px;
-    padding-inline-start: 3px;
+    padding-inline-start: 2px;
     border-inline-start: 1px solid color-mix(in srgb, var(--accent-contrast) 45%, transparent);
     font-variant-numeric: tabular-nums;
   }
@@ -4748,7 +4779,7 @@
     gap: 4px;
     overflow: hidden;
     padding-inline: 6px;
-    transition: width var(--dur-enter) ease-out;
+    transition: width var(--dur-fast) ease-out; /* user-driven: detail open/close */
   }
   .chip-label {
     overflow: hidden;
@@ -4784,7 +4815,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     line-height: 1;
-    padding: 2px 5px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     background: var(--surface-2);
     color: var(--text-dim);
@@ -4827,7 +4858,7 @@
     text-transform: uppercase;
     letter-spacing: .06em;
     color: var(--text-dim);
-    padding: 5px 8px 2px;
+    padding: 6px 8px 2px;
   }
   .ref-pop-row {
     display: flex;
@@ -4835,7 +4866,7 @@
     gap: 6px;
     width: 100%;
     text-align: start;
-    padding: 5px 8px;
+    padding: 6px 8px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -4864,7 +4895,7 @@
     letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .ref-pop-row.is-worktree {
@@ -4891,7 +4922,8 @@
     opacity: 0.62;
   }
   .graph-row.on-spine:not(.graph-row-selected):not(.graph-row-head) {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    /* A third of the soft tint: many rows sit on the spine at once. */
+    background: color-mix(in srgb, var(--accent-soft) 33%, transparent);
   }
   /* A stash commit row: muted, italic subject (it's a WIP snapshot, not history). */
   .graph-row.stash-row-commit .ci-subject {
@@ -4903,12 +4935,12 @@
   .on-branch-hint {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     min-width: 0;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
-    padding: 1px 7px;
+    padding: 1px 8px;
     border-radius: 999px;
     background: var(--surface-2);
     white-space: nowrap;
@@ -4920,7 +4952,7 @@
     color: var(--text-dim);
   }
   .stash-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .stash-msg {
@@ -4967,7 +4999,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width var(--dur-enter) ease-out;
+    transition: width var(--dur-fast) ease-out; /* user-driven: open/close */
     border-inline-start: 1px solid var(--border);
     background: var(--surface);
   }
@@ -5035,7 +5067,7 @@
     font-size: var(--fs-xs);
     color: var(--accent-text);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .detail-subject {
     font-size: var(--fs-m);
@@ -5092,7 +5124,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 11px 14px;
+    padding: 12px 14px;
     border: none;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
@@ -5105,18 +5137,18 @@
     -webkit-tap-highlight-color: transparent;
   }
   .mob-sec-head:active {
-    background: color-mix(in srgb, var(--accent) 10%, var(--surface-2));
+    background: linear-gradient(var(--accent-soft), var(--accent-soft)) var(--surface-2);
   }
   .mob-sec-count {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 8px;
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
   }
   .mob-diff-head {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    background: linear-gradient(var(--accent-soft), var(--accent-soft)) var(--surface-2);
     position: sticky;
     top: 0;
     z-index: 3;
@@ -5197,7 +5229,7 @@
     /* Branch/tag column stays a compact, aligned column on phones; chips clip on
        the left and the full refs are available in the detail header on tap. */
     .mobile .graph-panel { --branch-col-w: 108px; }
-    .mobile .branch-cell { gap: 3px; padding-inline: 4px; }
+    .mobile .branch-cell { gap: 2px; padding-inline: 4px; }
     .mobile .branch-cell .ref-chip { max-width: 96px; }
 
     /* Close (✕) for the open commit detail — bump to a ≥40px touch target. */

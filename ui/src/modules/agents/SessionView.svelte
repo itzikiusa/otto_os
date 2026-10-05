@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
   // One pane: a compact, width-adaptive session header (status + title first;
   // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
@@ -774,12 +775,11 @@
     {/if}
     <StatusDot state={paneState} />
     {#if renaming}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="rename-input"
         aria-label="Session name"
         bind:value={draftTitle}
-        autofocus
+        use:focusOnMount
         onblur={commitRename}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename();
@@ -1206,6 +1206,10 @@
     padding: 1px 6px;
     outline: none;
   }
+  .rename-input:focus {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
+  }
   .grow {
     flex: 1 1 0;
     min-width: 0;
@@ -1215,10 +1219,10 @@
   .needs-you-badge {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     flex-shrink: 0;
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -1237,7 +1241,7 @@
   /* Per-session task roll-up "done/total" — matches the sidebar chip. */
   .task-chip {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     height: 16px;
     line-height: 16px;
     border-radius: 999px;
@@ -1301,8 +1305,8 @@
     height: 18px;
     font-size: var(--fs-xs);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    padding: 0 7px;
+    background: var(--accent-soft);
+    padding: 0 6px;
     border-radius: 999px;
     white-space: nowrap;
   }
@@ -1313,11 +1317,11 @@
     flex: 0 100 auto;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 22px;
     max-width: 320px;
     height: 20px;
-    padding: 0 7px;
+    padding: 0 6px;
     border: 1px solid transparent;
     border-radius: 999px;
     background: var(--surface-2);
@@ -1349,7 +1353,7 @@
   }
   .meta-extra::before {
     content: '·';
-    margin-inline: 5px;
+    margin-inline: 4px;
     opacity: 0.6;
   }
   .meta-idle {
@@ -1411,7 +1415,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);

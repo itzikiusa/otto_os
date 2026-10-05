@@ -143,7 +143,7 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding: 5px 6px;
+    padding: 4px 6px;
     border: 0;
     border-radius: var(--radius-s);
     background: transparent;
@@ -153,7 +153,7 @@
     cursor: pointer;
   }
   .item :global(.dot) {
-    margin-top: 5px;
+    margin-top: 4px;
   }
   .item:hover {
     background: var(--hover);

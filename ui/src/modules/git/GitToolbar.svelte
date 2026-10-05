@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // Toolbar row: Fetch / Pull / Push / Branch / Stash / Pop + current branch chip.
   // In the page header Fetch folds into the Pull split menu (≤5 header
@@ -54,7 +55,7 @@
       toasts.success(
         'Fetched',
         s.behind > 0
-          ? `${s.behind} new commit${s.behind === 1 ? '' : 's'} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
+          ? `${plural(s.behind, 'new commit')} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
           : s.upstream
             ? `${s.branch} is up to date with ${s.upstream}`
             : 'Remote branches and tags refreshed',
@@ -221,7 +222,7 @@
       if (conflicts > 0) {
         toasts.warn(
           'Stash popped with conflicts',
-          `${conflicts} file${conflicts === 1 ? '' : 's'} need resolution — open "Resolve conflicts". The stash entry was kept.`,
+          `${plural(conflicts, 'file')} need resolution — open "Resolve conflicts". The stash entry was kept.`,
         );
       } else {
         toasts.success('Stash popped');
@@ -297,7 +298,7 @@
     ? 'HEAD is detached — check out a branch to push'
     : status.upstream
     ? status.ahead > 0
-      ? `Push ${status.ahead} commit${status.ahead === 1 ? '' : 's'} to ${status.upstream}`
+      ? `Push ${plural(status.ahead, 'commit')} to ${status.upstream}`
       : `Nothing to push — ${status.branch} has no commits that ${status.upstream} doesn’t`
     : `Publish ${status.branch} to origin`}
 >
@@ -380,7 +381,7 @@
   .branch-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
     max-width: 200px;
     background: var(--accent-soft);
@@ -420,7 +421,7 @@
   /* Toolbar buttons are global .btn.ghost; only the quieter label tone and
      the tighter toolbar padding are local. */
   .tbtn {
-    padding: 0 9px;
+    padding: 0 8px;
     color: var(--text-dim);
     font-size: var(--fs-s);
   }
@@ -438,12 +439,12 @@
     align-items: center;
   }
   .split .tbtn:first-child {
-    padding-inline-end: 7px;
+    padding-inline-end: 6px;
     border-start-end-radius: 0;
     border-end-end-radius: 0;
   }
   .split .caret {
-    padding: 0 5px;
+    padding: 0 4px;
     border-start-start-radius: 0;
     border-end-start-radius: 0;
     border-inline-start-color: color-mix(in srgb, var(--border) 70%, transparent);
@@ -464,7 +465,7 @@
     }
     .tbtn {
       height: 36px;
-      padding: 0 11px;
+      padding: 0 10px;
       font-size: var(--fs-m);
     }
   }

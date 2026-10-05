@@ -2,6 +2,7 @@
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
+  import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
   import StatusDot from '../lib/components/StatusDot.svelte';
   import { events } from '../lib/events.svelte';
@@ -299,9 +300,11 @@
   const hostsPane = $derived(isEmbedded && !!barEl && embedChrome.owner === barEl);
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
+<!-- The bar's empty space is a pointer-only window-drag region (presentation);
+     every tab inside is its own button. -->
 <div
   bind:this={barEl}
+  role="presentation"
   class="tabbar chrome-material"
   class:tauri-pad={(isTauri && !isEmbedded && !ui.railExpanded && !(sidePane.showing && sidePane.placement === 'leading')) ||
     (hostsPane && embedChrome.padTraffic)}
@@ -324,11 +327,10 @@
       >
         {#if renamingId === id}
           {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
             class="tab-rename"
             bind:value={draft}
-            autofocus
+            use:focusOnMount
             aria-label="Session name"
             onblur={commitRename}
             onkeydown={(e) => {
@@ -458,7 +460,7 @@
     flex-shrink: 0;
   }
   .tabbar.tauri-pad {
-    padding-inline-start: 78px;
+    padding-inline-start: 76px;
   }
   .tabs {
     display: flex;
@@ -469,7 +471,7 @@
     flex: 1;
     min-width: 0;
     height: 100%;
-    padding: 5px 0;
+    padding: 4px 0;
   }
   .tabs::-webkit-scrollbar {
     display: none;
@@ -477,18 +479,19 @@
   /* Overflow affordance: when the strip scrolls, fade both ends so it's clear
      more tabs exist off-screen (the scrollbar itself is hidden). */
   .tabs.overflowing {
+    /* A mask reads only alpha: opaque black = shown, transparent = faded. */
     mask-image: linear-gradient(
       to right,
       transparent 0,
-      #000 14px,
-      #000 calc(100% - 14px),
+      rgb(0 0 0) 14px,
+      rgb(0 0 0) calc(100% - 14px),
       transparent 100%
     );
     -webkit-mask-image: linear-gradient(
       to right,
       transparent 0,
-      #000 14px,
-      #000 calc(100% - 14px),
+      rgb(0 0 0) 14px,
+      rgb(0 0 0) calc(100% - 14px),
       transparent 100%
     );
   }
@@ -511,7 +514,7 @@
     flex-shrink: 0;
   }
   .tab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .tab.active {
     background: var(--surface);
@@ -661,6 +664,10 @@
     padding: 0 6px;
     max-width: 150px;
     outline: none;
+  }
+  .tab-rename:focus {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .view-toggle {
     display: flex;

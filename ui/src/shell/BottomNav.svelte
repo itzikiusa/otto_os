@@ -1,16 +1,15 @@
 <script lang="ts">
   // Phone bottom navigation bar. Shows the first few modules the current user
-  // can view as large tap targets, plus a "More" affordance that opens an
-  // overflow sheet for the rest (and Settings). Tapping a module routes via
-  // router.go(); it draws from the same shared sidebar registry as the Rail and
+  // can view as large tap targets, plus a "More" affordance that opens the
+  // shared shell Drawer with the rest (and Settings). Tapping a module routes
+  // via router.go(); it draws from the same shared sidebar registry as the Rail and
   // Navigator and honours the user's saved order + hidden set, so all three
   // navigations stay in lockstep.
   //
   // Rendered only on phone (App.svelte gates it behind viewport.isPhone), so it
   // adds nothing to the desktop layout.
-  import { untrack } from 'svelte';
   import Icon from '../lib/components/Icon.svelte';
-  import { dialogFocus } from '../lib/dialogFocus';
+  import Drawer from './Drawer.svelte';
   import { router } from '../lib/router.svelte';
   import { navPending } from '../lib/navPending.svelte';
   import { ui } from '../lib/stores/ui.svelte';
@@ -66,21 +65,9 @@
     return count > 0 ? { count, needs } : null;
   });
 
+  // The overflow opens in the shell Drawer, which owns the modal plumbing
+  // (pushModal, focus trap, Esc, backdrop, ✕).
   let moreOpen = $state(false);
-
-  // The sheet is a modal dialog: register it as an open overlay (native webview
-  // hides, global shortcuts stand down) exactly like Modal/Drawer do. untrack:
-  // pushModal reads modalCount, so the effect may depend only on `moreOpen`.
-  $effect(() => {
-    if (!moreOpen) return;
-    untrack(() => ui.pushModal());
-    return () => untrack(() => ui.popModal());
-  });
-
-  /** Focus, Esc and Tab-trapping for the sheet (lib/dialogFocus). */
-  function sheetFocus(node: HTMLElement) {
-    return dialogFocus(node, () => (moreOpen = false));
-  }
 
   function go(id: string): void {
     router.openModule(id);
@@ -119,16 +106,7 @@
   </button>
 </nav>
 
-{#if moreOpen}
-  <!-- Overflow sheet: the remaining modules + Settings as a bottom sheet. -->
-  <div class="sheet-backdrop" role="presentation" onclick={() => (moreOpen = false)}></div>
-  <div class="more-sheet" role="dialog" aria-modal="true" aria-label="More modules" use:sheetFocus>
-    <div class="sheet-header">
-      <div class="sheet-grip"></div>
-      <button class="icon-btn sheet-close" onclick={() => (moreOpen = false)} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
-        <Icon name="x" size={14} />
-      </button>
-    </div>
+<Drawer bind:open={moreOpen} side="right" title="More" width="min(86vw, 360px)">
     <div class="sheet-grid">
       <button
         class="sheet-item"
@@ -173,8 +151,7 @@
         <span>Settings</span>
       </button>
     </div>
-  </div>
-{/if}
+</Drawer>
 
 <style>
   .bottomnav {
@@ -244,7 +221,7 @@
     inset-inline-end: 4px;
     min-width: 15px;
     height: 15px;
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: 999px;
     /* Count-chip language (tint + semantic text), opaque over the bar —
        white on the bright working-green was ~2:1. */
@@ -268,53 +245,11 @@
   .sheet-badge.needs {
     background: color-mix(in srgb, var(--warning) 24%, var(--surface));
   }
-  .sheet-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--scrim);
-    z-index: calc(var(--z-drawer) + 2);
-  }
-  .more-sheet {
-    position: fixed;
-    inset-inline-start: 0;
-    inset-inline-end: 0;
-    bottom: 0;
-    z-index: calc(var(--z-drawer) + 3);
-    background: var(--bg);
-    border-top: 1px solid var(--border);
-    border-radius: var(--radius-l) var(--radius-l) 0 0;
-    box-shadow: var(--shadow);
-    padding: 8px 12px calc(16px + env(safe-area-inset-bottom, 0));
-    /* The grid is data-driven (all overflow modules + every installed plugin):
-       cap the sheet so it never grows past the top edge and scroll inside. */
-    max-height: calc(100% - 48px); /* % of the window — vh is the screen's in WKWebView */
-    display: flex;
-    flex-direction: column;
-  }
-  .sheet-header {
-    position: relative;
-    flex-shrink: 0;
-  }
-  .sheet-grip {
-    width: 36px;
-    height: 4px;
-    border-radius: 999px;
-    background: var(--text-dim);
-    opacity: 0.4;
-    margin: 4px auto 12px;
-  }
-  .sheet-close {
-    position: absolute;
-    inset-block-start: -2px;
-    inset-inline-end: 0;
-  }
   .sheet-grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
     gap: 8px;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    -webkit-overflow-scrolling: touch;
+    padding: 12px 12px calc(16px + env(safe-area-inset-bottom, 0));
   }
   .sheet-item {
     position: relative;

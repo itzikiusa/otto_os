@@ -194,7 +194,7 @@
   .title {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     font-size: var(--fs-m);
     font-weight: 600;
   }
@@ -204,7 +204,7 @@
     color: var(--text);
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     cursor: pointer;
     text-transform: capitalize;
   }

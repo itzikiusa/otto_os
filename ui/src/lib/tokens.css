@@ -31,6 +31,18 @@
   /* Wordmark / boot screen only — never body or page titles. */
   --fs-hero: 28px;
 
+  /* Spacing scale (foundations.md §3): 2 px steps to 24, 4 px above. Every
+     padding/margin/gap value sits on it; ui-guards ratchets off-grid px. */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-9: 32px;
+
   --radius-s: 5px;
   --radius-m: 8px;
   --radius-l: 12px;
@@ -42,7 +54,7 @@
   --z-sticky: 10; /* in-pane: sticky headers, resize handles */
   --z-floating-bar: 40; /* FloatingBar over the content column */
   --z-mobile-nav: 60; /* BottomNav */
-  --z-drawer: 90; /* Drawer (+1 panel), BottomNav "More" sheet (+2/+3) */
+  --z-drawer: 90; /* Drawer (+1 panel) — also the phone "More" overflow and DockedDrawer sheets */
   --z-command: 150; /* Palette, ShortcutsOverlay */
   --z-modal: 200; /* Modal (and ConfirmDialog) */
   --z-toast: 300; /* Toasts */
@@ -67,11 +79,12 @@
   /* Status INDICATOR colours (dots, bars, rails). Dark-scheme values here;
      the light scheme swaps in darker ones below so they also pass as text. */
   --status-working: #28c840;
-  --status-idle: #98989f;
+  /* Idle reads as the dimmed text colour of the active theme, never a near-miss grey. */
+  --status-idle: var(--text-dim);
   --status-exited: #ff5f57;
   /* Amber "warning/attention" status (ahead-behind, dirty, pending, warn
-     severity). */
-  --status-warn: #e0a000;
+     severity): one amber with the --warning tone, so the two can't drift. */
+  --status-warn: var(--warning);
 
   /* Semantic tones (dark-scheme defaults; light values below). The bare name
      is TEXT-SAFE: >= 4.5:1 on --bg, --surface, --surface-2 and on its own
@@ -168,7 +181,7 @@ html[data-scheme='light']:not([data-theme='pro-dark']) {
   --success: #17702f;
   --info: #0858b8;
   --status-working: var(--success);
-  --status-idle: #69696e;
+  --status-idle: var(--text-dim);
   --status-exited: var(--danger);
   --status-warn: var(--warning);
   --worktree: #7c3aed;
@@ -323,6 +336,11 @@ html[data-theme='warm'][data-scheme='dark'] {
   /* Text and icons ON a scrim / media veil (captions, lightbox controls) —
      the backdrop is always dark, so this is white in every scheme. */
   --on-scrim: #ffffff;
+  /* The letterbox behind a video, black in every theme like any player. */
+  --media-letterbox: #000000;
+  /* The page a user's own document paints on (an HTML report preview):
+     white in every scheme, as its author designed it. */
+  --paper: #ffffff;
 }
 html[data-scheme='dark'],
 html[data-theme='pro-dark'] {
@@ -362,9 +380,10 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --success: #56d06c;
   --info: #6cb2ff;
   --status-working: #28c840;
-  --status-idle: #98989f;
+  --status-idle: var(--text-dim);
   --status-exited: #ff5f57;
-  --status-warn: #e0a000;
+  --status-warn: var(--warning);
+  --status-warn-soft: color-mix(in srgb, var(--status-warn) 14%, transparent);
   --danger-soft: color-mix(in srgb, var(--danger) 14%, transparent);
   --warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
   --success-soft: color-mix(in srgb, var(--success) 14%, transparent);

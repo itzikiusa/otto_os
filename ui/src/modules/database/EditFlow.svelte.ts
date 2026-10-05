@@ -38,6 +38,7 @@ import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, wh
 import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
 import { applyPatchAtPath, flattenPaths, valueKind } from './expansion-plan';
 import { toastError } from '../../lib/toastError';
+import { plural } from '../../lib/plural';
 
 export type { TypedKind, TypedValue, RowPatch, DiffLine } from './edit-types';
 export { SET_NULL, SET_EMPTY } from './results-format';
@@ -836,7 +837,7 @@ export class EditFlow {
     toasts.success(
       'Generated',
       this.engine === 'mongodb'
-        ? `insertMany with ${n} document${n === 1 ? '' : 's'}`
+        ? `insertMany with ${plural(n, 'document')}`
         : `${n} INSERT statement${n === 1 ? '' : 's'}`,
     );
   }
@@ -864,7 +865,7 @@ export class EditFlow {
       where = idxs.map((i) => `(${whereByPk(ctx, i)})`).join(' OR ');
     }
     void copyText(where);
-    toasts.success('Copied', `WHERE for ${idxs.length} row${idxs.length === 1 ? '' : 's'}`);
+    toasts.success('Copied', `WHERE for ${plural(idxs.length, 'row')}`);
   }
 
   // ── Cell viewer ────────────────────────────────────────────────────────────

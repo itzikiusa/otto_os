@@ -18,6 +18,7 @@
 </script>
 
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The right-hand pane of Insights → Reports: one report, rendered.
   //
   //   header   — period chip · date · generated-at, the one-line headline, and
@@ -39,6 +40,8 @@
   import { renderMarkdownGfm } from '../../lib/md';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { badgeTone } from '../../lib/status';
   import Sparkline from '../../lib/components/Sparkline.svelte';
   import {
     itemStatus,
@@ -170,7 +173,7 @@
 <article class="report" data-testid="insight-report">
   <header class="r-head">
     <div class="r-meta">
-      <span class="chip">{kindLabel(report.kind)}</span>
+      <Badge label={kindLabel(report.kind)} />
       <span class="r-period">{periodText}</span>
       {#if report.created_at}
         <span class="dim r-created" title={new Date(report.created_at).toLocaleString()}>· generated {rel(report.created_at)}</span>
@@ -264,7 +267,7 @@
           <div class="r-section-head">
             <h3 id="ap-title" class="section-title">Action plan</h3>
             <span class="dim r-vs">
-              {parsed.actions.length} item{parsed.actions.length === 1 ? '' : 's'}{#if regressed > 0}{' · '}<span class="warn-text">{regressed} regressed</span>{/if}
+              {plural(parsed.actions.length, 'item')}{#if regressed > 0}{' · '}<span class="warn-text">{regressed} regressed</span>{/if}
             </span>
           </div>
           <ol class="actions" data-testid="action-plan">
@@ -280,10 +283,10 @@
                     <span class="a-title">{a.title}</span>
                     <span class="a-chips">
                       {#each a.statuses.length ? a.statuses : st ? [st] : [] as s (s)}
-                        <span class="chip tone-{statusTone(s)}">{statusLabel(s)}</span>
+                        <Badge tone={badgeTone(statusTone(s))} label={statusLabel(s)} />
                       {/each}
                       {#if a.effort}
-                        <span class="chip" title="Effort: {a.effort === 'S' ? 'small' : a.effort === 'M' ? 'medium' : 'large'}">Effort {a.effort}</span>
+                        <Badge title="Effort: {a.effort === 'S' ? 'small' : a.effort === 'M' ? 'medium' : 'large'}" label="Effort {a.effort}" />
                       {/if}
                     </span>
                   </div>
@@ -310,7 +313,7 @@
                       {#each entries as e (e.id)}
                         <dl class="ledger-row">
                           <div><dt>Entry</dt><dd class="mono">{e.id}</dd></div>
-                          <div><dt>Status</dt><dd><span class="chip tone-{statusTone(e.status)}">{statusLabel(e.status)}</span></dd></div>
+                          <div><dt>Status</dt><dd><Badge tone={badgeTone(statusTone(e.status))} label={statusLabel(e.status)} /></dd></div>
                           {#if e.openedPeriod}<div><dt>Opened</dt><dd>{periodKeyLabel(e.openedPeriod)}{#if e.openedValue}{' · '}{e.openedValue}{/if}</dd></div>{/if}
                           {#if e.latestValue}<div><dt>Latest</dt><dd>{e.latestValue}</dd></div>{/if}
                           {#if e.targetValue}<div><dt>Target</dt><dd>{e.targetValue}</dd></div>{/if}
@@ -530,21 +533,6 @@
     gap: 4px;
     flex-wrap: wrap;
   }
-  .chip.tone-warning {
-    color: var(--warning);
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
-  }
-  .chip.tone-success {
-    color: var(--success);
-    background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
-  }
-  .chip.tone-info {
-    color: var(--info);
-    background: var(--info-soft);
-    border-color: color-mix(in srgb, var(--info) 35%, transparent);
-  }
   .a-metric {
     display: flex;
     align-items: baseline;
@@ -630,7 +618,7 @@
     padding-inline-start: 22px;
   }
   .report-md :global(li) {
-    margin: 3px 0;
+    margin: 2px 0;
   }
   .report-md :global(table) {
     border-collapse: collapse;
@@ -681,7 +669,7 @@
     width: 100%;
     border: none;
     /* User content preview: the report paints its own page. */
-    background: white;
+    background: var(--paper);
   }
   .r-loading {
     padding: 20px;

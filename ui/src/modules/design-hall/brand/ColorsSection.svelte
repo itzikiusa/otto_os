@@ -272,7 +272,7 @@
   }
   .hex:hover:not(:disabled) {
     border-color: var(--border);
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .hex:focus {
     border-color: var(--accent-text);

@@ -343,8 +343,15 @@
     outline: none;
     visibility: hidden;
   }
+  /* Shown once positioned (ctx-ready), with the shared entrance fade. */
+  /* Focus rests on the menu itself only until an item takes it (keyboard open
+     with nothing selected): a hairline ring says where keys go. */
+  .ctx-menu:focus-visible {
+    box-shadow: var(--glass-shadow), inset 0 0 0 1px var(--accent-text);
+  }
   .ctx-menu.ctx-ready {
     visibility: visible;
+    animation: otto-fade-in var(--dur-enter) var(--ease-out);
   }
 
   .ctx-item {
@@ -373,7 +380,7 @@
     background: var(--hover);
   }
   .ctx-item:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--accent);
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 
   .ctx-item.danger {
@@ -458,6 +465,10 @@
     color: var(--text);
     font-size: var(--fs-m);
     outline: none;
+  }
+  /* The search field is borderless in its row; the row shows the focus. */
+  .ctx-search:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent-text);
   }
   .ctx-more {
     padding: 4px 8px;

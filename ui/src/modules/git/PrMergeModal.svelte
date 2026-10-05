@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Merge confirmation for a hosted PR. Nothing merges until the user clicks
   // Merge here — and the modal first shows everything that argues against it:
   // per-check CI, approvals, mergeability, open blocker findings, and the two
@@ -83,7 +84,7 @@
     [
       checks?.ci.state === 'failure' ? 'CI failing' : null,
       mergeable === false ? 'Not mergeable' : null,
-      blockers > 0 ? `${blockers} blocker finding${blockers === 1 ? '' : 's'}` : null,
+      blockers > 0 ? plural(blockers, 'blocker finding') : null,
       checksError || readinessError ? 'Unable to verify CI / readiness' : null,
     ].filter((r): r is string => r !== null),
   );
@@ -325,7 +326,7 @@
     display: flex;
     align-items: baseline;
     gap: 10px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     font-size: var(--fs-s);
   }
   .row-item + .row-item {
@@ -366,7 +367,7 @@
   }
   .glyph {
     display: inline-flex;
-    margin-inline-end: 3px;
+    margin-inline-end: 2px;
   }
   .ok {
     color: var(--success);
@@ -451,7 +452,7 @@
   @media (max-width: 1024px) {
     .row-item {
       flex-direction: column;
-      gap: 3px;
+      gap: 2px;
     }
     .rlabel {
       flex: none;

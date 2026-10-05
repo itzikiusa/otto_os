@@ -233,7 +233,7 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
     min-width: 0;
@@ -251,7 +251,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 3px 10px;
+    padding: 2px 10px;
     border-radius: var(--radius-s);
     cursor: pointer;
   }
@@ -281,7 +281,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-radius: var(--radius-s);
     cursor: pointer;
   }
@@ -295,7 +295,7 @@
   .pv-src-note {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    padding: 5px 12px;
+    padding: 4px 12px;
     border-bottom: 1px solid var(--border);
     background: var(--info-soft);
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Settings → Trust & safety → "Secret storage" (root only).
   // Shows which store holds integration secrets (GET /admin/secrets/status)
   // and, while they sit in the PLAINTEXT secrets.json, a warning banner plus
@@ -51,7 +52,7 @@
     if (!status) return;
     const n = status.plaintext_entries;
     const ok = await confirmer.ask(
-      `Encrypt ${n} stored secret${n === 1 ? '' : 's'} (connection passwords, Slack/Telegram tokens, accounts)? ` +
+      `Encrypt ${plural(n, 'stored secret')} (connection passwords, Slack/Telegram tokens, accounts)? ` +
         'Otto creates one encryption key in your macOS Keychain — macOS may ask you to allow access; choose “Always Allow”. ' +
         'Every secret is checked to read back from the encrypted store before the plaintext file is wiped and deleted. ' +
         'If anything fails, nothing changes. Integrations keep working; no restart needed.',
@@ -62,7 +63,7 @@
     actionError = '';
     try {
       const r = await api.post<SecretsMigrationReport>('/admin/secrets/secure', { confirm: true });
-      toasts.success('Secrets encrypted', `${r.migrated} secret${r.migrated === 1 ? '' : 's'} moved; the plaintext file was deleted.`);
+      toasts.success('Secrets encrypted', `${plural(r.migrated, 'secret')} moved; the plaintext file was deleted.`);
       await load();
     } catch (e) {
       // A failure AFTER the switch (final live check) leaves the daemon on the

@@ -25,7 +25,7 @@ async function showList(ctx: UiCommandCtx): Promise<void> {
   if (!wsId) throw new UiCommandError('failed', 'No workspace is selected in Otto.');
   if (router.parts[0] !== 'loops') router.go('loops');
   await loops.loadList(wsId);
-  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   if (loops.listError) throw new UiCommandError('failed', loops.listError);
 }
 
@@ -97,7 +97,7 @@ registerUiCommands('loops', {
       ctx.progress(`Waiting for you to confirm: Stop “${l.name}”`, true);
       ok = await dismissOnAbort(
         ctx.signal,
-        confirmer.ask(`${who} wants to stop the goal loop “${l.name}”. It can't be resumed — a new run must be started.`, {
+        confirmer.ask(`${who} wants to stop the goal loop “${l.name}”. It can’t be resumed — a new run must be started.`, {
           title: 'Stop goal loop',
           confirmLabel: 'Stop loop',
           danger: true,

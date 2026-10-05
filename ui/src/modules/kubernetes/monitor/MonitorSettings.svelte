@@ -501,7 +501,7 @@
   .field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-s);
     min-width: 0;
   }

@@ -178,8 +178,11 @@
               {@const st = chipState(a, s.id)}
               {@const rbac = resourceAccess.can('aws_account', a.id, s.id === 's3' ? 'discover' : `${s.id}_view`, `aws_${s.id}` as Feature, 'view')}
               <a
-                class="chip {st}"
-                class:norbac={!rbac}
+                class="chip perm"
+                class:ok={st === 'allowed'}
+                class:perm-denied={st === 'denied'}
+                class:perm-unknown={st === 'unknown'}
+                class:perm-off={!rbac}
                 href={rbac ? `#/aws/${a.id}/${s.id}` : undefined}
                 title={!rbac ? `${s.label}: you lack View on this feature` : st === 'denied' ? `${s.label}: AccessDenied for this account` : st === 'unknown' ? `${s.label}: not probed yet` : s.label}
                 aria-disabled={!rbac}
@@ -190,13 +193,12 @@
             {/each}
             <button
               class="chip-refresh"
-              class:spin={loadingP}
               onclick={() => void aws.loadPermissions(a.id, true)}
               title="Re-check permissions"
               aria-label="Re-check permissions"
               disabled={loadingP || !resourceAccess.can('aws_account', a.id, 'configure', 'aws', 'view')}
             >
-              <Icon name="refresh" size={12} />
+              {#if loadingP}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={12} />{/if}
             </button>
           </div>
           {#if p?.login_required}
@@ -300,7 +302,7 @@
   .meta {
     display: grid;
     grid-template-columns: auto 1fr;
-    gap: 3px 10px;
+    gap: 2px 10px;
     margin: 0;
     font-size: var(--fs-s);
   }
@@ -328,33 +330,19 @@
     gap: 6px;
     flex-wrap: wrap;
   }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    font-size: var(--fs-s);
+  /* Service links ride the global `.chip` (with its `ok` tone when the
+     account's probe allowed the service); only the per-state marks are local. */
+  .perm {
     text-decoration: none;
-    border: 1px solid var(--border);
-    color: var(--text);
   }
-  .chip.allowed {
-    border-color: color-mix(in srgb, var(--status-working) 55%, transparent);
-    background: color-mix(in srgb, var(--status-working) 14%, transparent);
-    color: var(--success);
-  }
-  .chip.denied {
-    background: var(--surface-2);
-    color: var(--text-dim);
+  .perm-denied {
     text-decoration: line-through;
   }
-  .chip.unknown {
+  .perm-unknown {
     background: transparent;
-    color: var(--text-dim);
     border-style: dashed;
   }
-  .chip.norbac {
+  .perm-off {
     opacity: 0.45;
     pointer-events: none;
   }
@@ -368,9 +356,6 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-  }
-  .chip-refresh.spin :global(svg) {
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .login-row {
@@ -403,9 +388,6 @@
     .cards {
       grid-template-columns: 1fr;
       padding: 8px 10px 24px;
-    }
-    .head {
-      padding: 12px 10px 4px;
     }
   }
 </style>

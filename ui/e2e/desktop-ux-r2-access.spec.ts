@@ -64,7 +64,7 @@ for(const variant of variants) test(`Long Markdown and short sheet: ${variant.na
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.addInitScript(({id,v})=>{localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');localStorage.setItem('otto_theme',v.theme);localStorage.setItem('otto_scheme',v.scheme);localStorage.setItem('otto_direction',v.direction);},{id,v:variant});
   await page.goto('/#/skills-eval');
-  await page.getByRole('searchbox',{name:'Search skills'}).fill(name);
+  await page.getByRole('searchbox',{name:'Filter skills'}).fill(name);
   await page.getByTestId('skill-row').click();
   const preview=page.getByTestId('skill-preview'); await expect(preview.locator('table')).toBeVisible();
   await preview.scrollIntoViewIfNeeded();

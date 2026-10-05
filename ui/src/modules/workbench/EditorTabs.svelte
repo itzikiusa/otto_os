@@ -5,7 +5,7 @@
   import { workbench } from './workbench.svelte';
 
   function nameOf(id: string): string {
-    return workbench.open[id]?.doc?.name ?? workbench.metaOf(id)?.name ?? 'Loading…';
+    return workbench.open[id]?.doc?.name ?? workbench.metaOf(id)?.name ?? 'Loading file…';
   }
 
   function onAux(e: MouseEvent, id: string): void {
@@ -30,7 +30,7 @@
 </script>
 
 {#if workbench.tabs.length > 0}
-  <div class="wb-tabs" role="tablist" aria-label="Open files" tabindex="-1" onkeydown={onKey}>
+  <div class="wb-tabs scroll-thin" role="tablist" aria-label="Open files" tabindex="-1" onkeydown={onKey}>
     {#each workbench.tabs as id (id)}
       {@const active = workbench.active === id}
       <div class="wb-tab" class:active data-testid="wb-tab" data-doc-id={id} onauxclick={(e) => onAux(e, id)}>
@@ -66,7 +66,6 @@
     overflow-x: auto;
     border-block-end: 1px solid var(--border);
     background: var(--surface-2);
-    scrollbar-width: thin;
     flex: none;
   }
   .wb-tab {
@@ -88,7 +87,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    padding-block: 7px;
+    padding-block: 6px;
     padding-inline: 12px 4px;
     border: 0;
     background: transparent;

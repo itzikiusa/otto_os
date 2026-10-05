@@ -1294,7 +1294,7 @@
   .where {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -1429,7 +1429,7 @@
   .vv {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     overflow: hidden;
@@ -1672,7 +1672,7 @@
   .gql-type > summary {
     cursor: pointer;
     font-size: var(--fs-s);
-    padding: 3px 4px;
+    padding: 2px 4px;
   }
   .gql-kind {
     font-size: var(--fs-xs);
@@ -1869,7 +1869,7 @@
       flex-wrap: wrap;
     }
     .tab {
-      padding: 0 7px;
+      padding: 0 6px;
     }
     .send {
       padding: 0 12px;

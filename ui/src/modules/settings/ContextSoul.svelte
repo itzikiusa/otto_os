@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -250,7 +251,7 @@
     <EmptyState
       variant="page"
       icon="folder"
-      title="No workspace selected"
+      title={NO_WORKSPACE}
       body="Workspace context belongs to a workspace. Pick one from the workspace menu at the top of the sidebar to edit its shared project context."
     />
   {:else if (loading && !cfg) || (!cfg && loadError)}
@@ -345,7 +346,7 @@
           spellcheck="false"
           placeholder="Always run the tests before committing."
         ></textarea>
-        <span class="hint">Markdown, added to the context Otto hands each new or restarted agent session (kept outside the repo — your CLAUDE.md / AGENTS.md aren't edited).</span>
+        <span class="hint">Markdown, added to the context Otto hands each new or restarted agent session (kept outside the repo — your CLAUDE.md / AGENTS.md aren’t edited).</span>
       </div>
 
       <div class="field">

@@ -10,6 +10,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import ConflictFilePane from './ConflictFilePane.svelte';
   import { canCompleteOperation } from './operationState';
 
@@ -210,7 +211,7 @@
     <Icon name="merge" size={14} />
     <span class="head-title">Resolve {opName ?? 'file'} conflicts</span>
     {#if sourceLabel}
-      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono chip">{sourceLabel}</span></span>
+      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono"><Badge tone="accent" label={sourceLabel} /></span></span>
     {:else if op === null}
       <span class="head-source">from a stash pop or squash — resolutions are staged as you go</span>
     {/if}
@@ -343,14 +344,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .chip {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
-    color: var(--accent-text);
-  }
   .head-count {
     font-size: var(--fs-xs);
     font-weight: 600;
@@ -361,7 +354,7 @@
   }
   .head-count.done {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
   }
   .grow {
     flex: 1;
@@ -380,7 +373,7 @@
     padding: 6px 0;
   }
   .files-head {
-    padding: 5px 12px;
+    padding: 4px 12px;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: 0.06em;
@@ -394,9 +387,9 @@
   .file-row {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     width: 100%;
-    padding: 5px 12px;
+    padding: 4px 12px;
     border: none;
     background: transparent;
     color: var(--text-dim);
@@ -406,7 +399,7 @@
     transition: background var(--dur-fast), color var(--dur-fast);
   }
   .file-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .file-row.active {
@@ -474,7 +467,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 11px 14px;
+    padding: 10px 14px;
     border: none;
     border-bottom: 1px solid var(--border);
     background: var(--surface-2);
@@ -492,7 +485,7 @@
   .mob-sec-count {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
@@ -512,7 +505,7 @@
   .mob-back {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     flex-shrink: 0;
@@ -548,7 +541,7 @@
     }
     .mobile .file-row {
       font-size: var(--fs-m);
-      padding: 9px 12px;
+      padding: 8px 12px;
       min-height: 40px;
     }
     .mobile .file-name {

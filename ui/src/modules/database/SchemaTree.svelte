@@ -569,7 +569,7 @@
   {/if}
   {#if database.schemaLoading || database.activeConnStatus?.phase === 'connecting'}
     <div class="tree-loading" role="status">
-      <span class="spin"><Icon name="refresh" size={13} /></span>
+      <span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span>
       <span>Loading schema…</span>
     </div>
   {:else if database.activeConnStatus?.phase === 'error'}
@@ -586,7 +586,7 @@
     <!-- Server-side results: a flat list, each hit labelled with its schema so
          you can tell two same-named tables apart. -->
     {#if database.objectSearching && hits.length === 0}
-      <div class="tree-loading" role="status"><span class="spin"><Icon name="refresh" size={13} /></span><span>Searching…</span></div>
+      <div class="tree-loading" role="status"><span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span><span>Searching…</span></div>
     {:else if hits.length === 0}
       <div class="tree-empty">
         No object matching "{database.objectSearchQuery}"{database.objectSearchScope === 'schema'
@@ -685,7 +685,7 @@
     {#if node.has_children}
       <button class="caret" tabindex="-1" onclick={() => expandNode(node)} aria-label={open ? `Collapse ${node.label}` : `Expand ${node.label}`}>
         {#if database.isLoadingNode(node.id)}
-          <span class="spin"><Icon name="refresh" size={10} /></span>
+          <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
         {:else}
           <Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} />
         {/if}
@@ -732,7 +732,7 @@
   .tree-error-head {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     color: var(--danger);
     font-weight: 600;
   }
@@ -761,7 +761,7 @@
   }
   .node:focus-visible {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
   }
   /* Active database = bold, like Workbench's default schema. */
@@ -787,11 +787,6 @@
     width: 15px;
     flex-shrink: 0;
   }
-  .spin {
-    display: grid;
-    place-items: center;
-    animation: otto-spin 0.8s linear infinite;
-  }
   
   .node-icon {
     display: grid;
@@ -816,7 +811,7 @@
   .node-label {
     display: flex;
     align-items: baseline;
-    gap: 7px;
+    gap: 6px;
     min-width: 0;
     flex: 1;
     border: none;
@@ -881,7 +876,7 @@
   .node-failed {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--danger);
     padding-top: 2px;
@@ -909,7 +904,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 0 8px 5px;
+    padding: 0 8px 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
@@ -938,7 +933,7 @@
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    padding: 1px 5px;
+    padding: 1px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface-2);
@@ -970,7 +965,7 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 3px 8px;
+    padding: 4px 8px;
     background: none;
     border: none;
     color: var(--text);
@@ -983,7 +978,7 @@
     color: var(--text);
   }
   .hit:hover {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .hit-name {
     flex: 1;
@@ -1006,7 +1001,7 @@
   .tree-search {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     padding: 4px 6px;
     border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
     color: var(--text-dim);
@@ -1020,6 +1015,10 @@
     font-size: var(--fs-s);
     outline: none;
     min-width: 0;
+  }
+  /* The bare input drops its outline; the search row shows focus instead. */
+  .tree-search:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent-text);
   }
   .tree-search-input::placeholder {
     color: var(--text-dim);
@@ -1045,7 +1044,7 @@
       height: 36px;
     }
     .nl-text {
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
     .nl-detail {
       font-size: var(--fs-s);
@@ -1055,7 +1054,7 @@
       font-size: var(--fs-m);
     }
     .tree-search-input {
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
   }
 </style>

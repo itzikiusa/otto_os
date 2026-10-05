@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluralNoun } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // ── Large-batch streaming export to a local file ─────────────────────────────
   // Runs the statement uncapped on the daemon and STREAMS the result straight to
@@ -167,7 +168,7 @@
         onclose();
         toasts.success(
           'Exported',
-          `${r.rows.toLocaleString()} row${r.rows === 1 ? '' : 's'} · ${fmtBytes(r.bytes)} → ${r.local_path}`,
+          `${r.rows.toLocaleString()} ${pluralNoun(r.rows, 'row')} · ${fmtBytes(r.bytes)} → ${r.local_path}`,
         );
       }
     } catch (e) {
@@ -248,7 +249,7 @@
 
     {#if exportingPath}
       <div class="exp-progress" role="status" aria-live="polite">
-        <div class="exp-bar"><div class="exp-bar-fill"></div></div>
+        <div class="indeterminate" role="progressbar" aria-label="Exporting"></div>
         <div class="exp-prog-text mono">
           {exportProgress ? fmtBytes(exportProgress.bytes) : '0 B'} written…
         </div>
@@ -320,7 +321,7 @@
   .exp-input {
     flex: 1;
     min-width: 0;
-    padding: 6px 9px;
+    padding: 6px 8px;
     font-size: var(--fs-m);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -345,7 +346,7 @@
   .exp-dest {
     font-size: var(--fs-s);
     color: var(--text-dim);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
     overflow: hidden;
@@ -357,39 +358,10 @@
   .exp-progress {
     display: flex;
     flex-direction: column;
-    gap: 5px;
-  }
-  .exp-bar {
-    position: relative;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-3);
-    overflow: hidden;
-  }
-  .exp-bar-fill {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: 100%;
-    width: 35%;
-    border-radius: 999px;
-    background: var(--accent);
-    animation: exp-sweep 1.1s ease-in-out infinite;
-  }
-  @keyframes exp-sweep {
-    0% { left: -35%; }
-    100% { left: 100%; }
+    gap: 4px;
   }
   .exp-prog-text {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .exp-bar-fill {
-      animation: none;
-      left: 0;
-      width: 100%;
-      opacity: 0.5;
-    }
   }
 </style>

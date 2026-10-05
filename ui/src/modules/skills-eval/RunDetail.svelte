@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // One evaluation run: header summary + per-iteration report. Each iteration
   // shows the implementation (+ diff), every validation's issues & suggested
   // fixes, the score, before/after regression vs the previous round, and the
@@ -24,6 +25,9 @@
   import { loadErrorText } from '../../lib/loadError';
   import { toastError } from '../../lib/toastError';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../lib/status';
+  import { severityLabel } from '../../lib/labels';
   import { runStatus, sentenceCase, type StatusInfo } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import Scorecard from './Scorecard.svelte';
@@ -159,9 +163,10 @@
     return next;
   }
 
-  function scoreClass(n: number): string {
-    if (n >= 85) return 'good';
-    if (n >= 60) return 'ok';
+  /** Composite score → the shared Badge tone (≥85 good, ≥60 fair, else poor). */
+  function scoreTone(n: number): BadgeTone {
+    if (n >= 85) return 'ok';
+    if (n >= 60) return 'warn';
     return 'bad';
   }
 
@@ -439,14 +444,14 @@
       <p class="rd-task">{run.task}</p>
       <div class="rd-meta">
         {#if run.best_score != null}
-          <span class="chip score {scoreClass(run.best_score)}" title="Best composite score">
+          <Badge tone={scoreTone(run.best_score)} title="Best composite score">
             Best {run.best_score.toFixed(0)}{run.best_iteration ? ` · iteration ${run.best_iteration}` : ''}
-          </span>
+          </Badge>
         {/if}
         {#if run.impl_cli}<span class="chip" title="Implementation agent">{run.impl_cli}</span>{/if}
-        <span class="chip">{run.target_iterations} iteration{run.target_iterations === 1 ? '' : 's'}</span>
+        <span class="chip">{plural(run.target_iterations, 'iteration')}</span>
         {#each run.iterations as it (it.id)}
-          <span class="chip score {scoreClass(it.score)}">Iteration {it.iter}: {it.score.toFixed(0)}</span>
+          <Badge tone={scoreTone(it.score)} label={`Iteration ${it.iter}: ${it.score.toFixed(0)}`} />
         {/each}
       </div>
       {#if run.summary}<p class="rd-summary">{run.summary}</p>{/if}
@@ -458,8 +463,8 @@
       <section class="iter card">
         <div class="iter-head">
           <span class="iter-num">Iteration {it.iter}</span>
-          {#if it.base_iter}<span class="chip subtle">Improved from iteration {it.base_iter}</span>{/if}
-          <span class="chip subtle mono">{it.skill_name}</span>
+          {#if it.base_iter}<Badge label={`Improved from iteration ${it.base_iter}`} />{/if}
+          <span class="mono"><Badge label={it.skill_name} /></span>
           {#if reg}
             <span class="reg" class:bad={reg.introduced > reg.fixed}>
               fixed {reg.fixed} · introduced {reg.introduced}
@@ -467,7 +472,7 @@
           {/if}
           <span class="grow"></span>
           {#if it.status === 'done'}
-            <span class="score-badge {scoreClass(it.score)}">{it.score.toFixed(0)}</span>
+            <Badge tone={scoreTone(it.score)} label={it.score.toFixed(0)} title="Iteration score" />
           {/if}
           <StatusBadge status={evalStatus(it.status)} />
         </div>
@@ -496,7 +501,7 @@
           {/if}
           {#if openImplDiffs.has(it.id)}
             {#if implDiffLoading.has(it.id)}
-              <p class="muted"><span class="spinner-xs"></span> Loading diff…</p>
+              <p class="muted"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Loading diff…</p>
             {:else if implDiffs[it.id]}
               {#if implDiffs[it.id].diff.trim()}
                 <pre class="diff">{#each implDiffs[it.id].diff.split('\n') as line, li (li)}<span class="dl {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : 'ctx'}">{line || ' '}</span>{'\n'}{/each}</pre>
@@ -511,7 +516,7 @@
         <!-- Score-only runs have no validation agents: no empty heading. -->
         {#if it.agents.length > 0}
         <div class="vals">
-          <div class="vals-head">Validations · {findingCount(it)} issue{findingCount(it) === 1 ? '' : 's'} found</div>
+          <div class="vals-head">Validations · {plural(findingCount(it), 'issue')} found</div>
           {#each it.agents as a, ai (valKey(it.id, a, ai))}
             {@const key = valKey(it.id, a, ai)}
             {@const rk = `${it.id}:${ai}`}
@@ -521,7 +526,7 @@
                 <span class="chip mono">{a.provider}{a.model ? ' · ' + a.model : ''}</span>
                 {#if a.status === 'done'}
                   <span class="pf {a.passed ? 'pass' : 'fail'}">{a.passed ? 'Passed' : 'Failed'}</span>
-                  <span class="score-badge sm {scoreClass(a.score)}">{a.score.toFixed(0)}</span>
+                  <Badge tone={scoreTone(a.score)} label={a.score.toFixed(0)} title="Validation score" />
                 {/if}
                 <span class="grow"></span>
                 {#if a.session_id}
@@ -534,7 +539,7 @@
                 </button>
                 {#if a.findings.length > 0}
                   <button class="btn small ghost" aria-expanded={openFindings.has(key)} onclick={() => (openFindings = toggle(openFindings, key))}>
-                    {openFindings.has(key) ? 'Hide issues' : `${a.findings.length} issue${a.findings.length === 1 ? '' : 's'}`}
+                    {openFindings.has(key) ? 'Hide issues' : `${plural(a.findings.length, 'issue')}`}
                   </button>
                 {/if}
                 <StatusBadge status={evalStatus(a.status)} />
@@ -551,11 +556,11 @@
                   {#each a.findings as f, fi (key + ':' + fi)}
                     <li class="finding">
                       <div class="finding-head">
-                        <span class="sev sev-{f.severity}">{f.severity}</span>
+                        <Badge tone={f.severity === 'fail' ? 'bad' : f.severity === 'warn' ? 'warn' : 'info'} label={severityLabel(f.severity)} />
                         {#if f.location}<span class="mono loc">{f.location}</span>{/if}
                       </div>
-                      <p class="issue"><span class="tag">Issue</span> {f.issue}</p>
-                      {#if f.suggestion}<p class="fix"><span class="tag fix-tag">Fix</span> {f.suggestion}</p>{/if}
+                      <p class="issue"><span class="note-lbl">Issue</span> {f.issue}</p>
+                      {#if f.suggestion}<p class="fix"><span class="note-lbl fix-tag">Fix</span> {f.suggestion}</p>{/if}
                     </li>
                   {/each}
                 </ul>
@@ -635,7 +640,7 @@
     {/each}
 
     {#if run.iterations.length === 0}
-      <div class="rd-loading"><span class="spinner-xs"></span> Preparing first iteration…</div>
+      <div class="rd-loading"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Preparing first iteration…</div>
     {/if}
   </div>
 {/if}
@@ -666,7 +671,7 @@
       <!-- Promote gate: score + proof must pass, else show why. -->
       <div class="gate" data-testid="promote-gate">
         {#if gateLoading}
-          <p class="muted"><span class="spinner-xs"></span> Checking the promote gate…</p>
+          <p class="muted"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Checking the promote gate…</p>
         {:else if gateError}
           <p class="muted">Couldn’t check the promote gate here — Otto checks it again when you promote.</p>
         {:else if promoteGate}
@@ -794,7 +799,7 @@
     font-size: var(--fs-s);
   }
   .rd-loading {
-    padding: 30px;
+    padding: 28px;
     text-align: center;
   }
   .rd-head {
@@ -877,7 +882,7 @@
     padding-inline-start: 10px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .impl-top,
   .improve-top,
@@ -936,12 +941,12 @@
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .val-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex-wrap: wrap;
   }
   .val-name {
@@ -975,7 +980,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .issue,
   .fix {
@@ -983,15 +988,15 @@
     font-size: var(--fs-xs);
     line-height: 1.45;
   }
-  .tag {
+  .note-lbl {
     display: inline-block;
     font-size: var(--fs-xs);
     font-weight: 600;
     letter-spacing: .06em;
     text-transform: uppercase;
-    padding: 1px 5px;
+    padding-inline: 4px;
     border-radius: var(--radius-s);
-    margin-inline-end: 5px;
+    margin-inline-end: 4px;
     background: var(--danger-soft);
     color: var(--danger);
     vertical-align: middle;
@@ -1057,58 +1062,8 @@
     color: var(--danger);
   }
 
-  .score-badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 999px;
-  }
-  .score-badge.sm {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-  }
-  .score-badge.good,
-  .chip.score.good {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .score-badge.ok,
-  .chip.score.ok {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .score-badge.bad,
-  .chip.score.bad {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
 
-  .sev {
-    display: inline-block;
-    padding: 2px 7px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-  }
-  .sev-info {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent-text);
-  }
-  .sev-warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .sev-fail {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
 
-  .chip.subtle {
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
-    color: var(--text-dim);
-  }
 
   .modal-lede {
     margin: 0 0 10px;
@@ -1140,21 +1095,11 @@
     cursor: pointer;
   }
   .chip-toggle.on {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
     color: var(--accent-text);
   }
 
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-  }
   
   .grow {
     flex: 1;

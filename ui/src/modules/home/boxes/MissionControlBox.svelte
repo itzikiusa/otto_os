@@ -3,6 +3,8 @@
   // / total / spend) plus the most recently updated items. Reloads on every
   // live `work_graph_updated` tick and on a 30s cadence as a safety net.
   import { untrack } from 'svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
+  import { sentenceCase } from '../../../lib/labels';
   import Icon from '../../../lib/components/Icon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
@@ -109,9 +111,9 @@
     <div class="chips">
       {#each summary.by_status as b (b.key)}
         {#if b.count > 0}
-          <span class="chip" style:--c={statusColor(b.key as WorkItem['status'])}>
-            <i></i>{STATUS_LABEL[b.key as WorkItem['status']] ?? b.key} {b.count}
-          </span>
+          <Badge variant="outline">
+            <i class="sdot" style:background={statusColor(b.key as WorkItem['status'])}></i>{STATUS_LABEL[b.key as WorkItem['status']] ?? sentenceCase(b.key)} {b.count}
+          </Badge>
         {/if}
       {/each}
     </div>
@@ -187,21 +189,11 @@
     flex-wrap: wrap;
     gap: 4px;
   }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 1px 7px;
-    font-size: var(--fs-xs);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    color: var(--text-dim);
-  }
-  .chip i {
+  .sdot {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--c);
+    flex: none;
   }
   .rows {
     list-style: none;
@@ -216,7 +208,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 5px 8px;
+    padding: 4px 8px;
     border: none;
     background: transparent;
     color: var(--text);

@@ -353,7 +353,7 @@
   .picker-field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     margin-bottom: 10px;
   }
   .picker-label {
@@ -390,7 +390,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
-    padding: 9px 10px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -400,7 +400,7 @@
     width: 100%;
   }
   .issue-row:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .issue-left {
@@ -436,7 +436,7 @@
   }
   .load-more-btn {
     width: 100%;
-    padding: 7px 0;
+    padding: 6px 0;
     margin-top: 2px;
     font-size: var(--fs-s);
     font-weight: 600;

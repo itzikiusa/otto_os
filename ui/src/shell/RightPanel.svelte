@@ -511,7 +511,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 7px 8px 6px;
+    padding: 6px 8px 6px;
     border-bottom: 1px solid var(--border);
   }
   .rpanel-tabs {
@@ -547,7 +547,7 @@
     transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rtab:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .rtab.active {
     background: var(--surface-2);

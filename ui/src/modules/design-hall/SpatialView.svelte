@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Spatial Hall (beta) — a showcase view, not the way to browse: one gallery
   // wall with a bay per project (framed thumbnails, 3D work on plinths). Pure
   // CSS in Phase 0 (the three.js room is v3). Click-to-open only; the bay chips
@@ -46,7 +47,7 @@
       out.push({
         id: p.id,
         name: p.name,
-        sub: `${mine.length} artifact${mine.length === 1 ? '' : 's'}`,
+        sub: `${plural(mine.length, 'artifact')}`,
         flat: mine.filter((a) => a !== plinth).slice(0, 4),
         plinth,
       });

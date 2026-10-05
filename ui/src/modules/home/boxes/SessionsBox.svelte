@@ -3,6 +3,7 @@
   // fetch of its own — `ws` is already kept current by the daemon WS), with
   // working / needs-you / idle counts and a click-to-open row per session.
   import Icon from '../../../lib/components/Icon.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import StatusDot from '../../../lib/components/StatusDot.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -62,7 +63,7 @@
             <StatusDot state={stateOf(s)} />
             <ProviderIcon provider={s.provider} size={12} />
             <span class="title ellipsis">{s.title}</span>
-            {#if ws.needsYou[s.id]}<span class="pill needs">needs you</span>{/if}
+            {#if ws.needsYou[s.id]}<Badge tone="warn" label="Needs you" />{/if}
             <span class="ago" title={new Date(s.last_active_at).toLocaleString()}>{now() && relTime(s.last_active_at)}</span>
             <span class="go" aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
           </button>
@@ -179,16 +180,6 @@
   .title {
     flex: 1;
     min-width: 0;
-  }
-  .pill {
-    flex: none;
-    padding: 0 6px;
-    border-radius: 999px;
-    font-size: var(--fs-xs);
-  }
-  .pill.needs {
-    color: var(--warning);
-    background: var(--status-warn-soft);
   }
   .ago {
     color: var(--text-dim);

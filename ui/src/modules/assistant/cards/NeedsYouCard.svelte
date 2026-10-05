@@ -11,7 +11,7 @@
   //  • memory   — a suggested memory to accept or reject.
   // A decided card stays in the thread with its outcome.
   import ActionCard from './ActionCard.svelte';
-  import StatePill from './StatePill.svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import ApprovalActions from '../../../lib/components/ApprovalActions.svelte';
   import DenySheet from '../../../lib/components/DenySheet.svelte';
   import Icon, { type IconName } from '../../../lib/components/Icon.svelte';
@@ -112,9 +112,9 @@
 <ActionCard icon={ICON[kind] ?? 'hand'} heading={headKind} summary={pending ? (kind === 'approval' ? ny?.prompt || task.title : task.title) : task.title} attention={pending} testid={`card-needs-${kind}`}>
   {#snippet pill()}
     {#if pending}
-      <StatePill tone="warn" label="Needs you" />
+      <Badge tone="warn" label="Needs you" />
     {:else if outcome}
-      <StatePill tone={outcome.tone} label={outcome.label} />
+      <Badge tone={outcome.tone} label={outcome.label} />
     {/if}
   {/snippet}
 

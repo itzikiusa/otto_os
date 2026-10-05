@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Scene list — the workspace's canvas scenes grouped into collapsible SECTIONS
   // (a folder path like "Platform/Staging" → sections + sub-sections), with
   // search, New, click-to-open, inline RENAME, MOVE-to-section, and delete.
@@ -67,7 +68,7 @@
     try {
       await canvas.updateMeta(s.id, { title: t.trim() });
     } catch (err) {
-      toasts.error('Couldn’t rename', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t rename', err);
     }
   }
 
@@ -83,7 +84,7 @@
     try {
       await canvas.updateMeta(s.id, { section: sec.trim() || null });
     } catch (err) {
-      toasts.error('Couldn’t move', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t move', err);
     }
   }
 
@@ -109,7 +110,7 @@
       await canvas.loadScenes().catch(() => {});
       toasts.success('Scene duplicated', `${row.title} (copy)`);
     } catch (err) {
-      toasts.error('Couldn’t duplicate', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t duplicate', err);
     }
   }
 
@@ -125,7 +126,7 @@
       await canvas.del(s.id);
       toasts.success('Scene deleted', s.title);
     } catch (err) {
-      toasts.error('Couldn’t delete', err instanceof Error ? err.message : String(err));
+      toastError('Couldn’t delete', err);
     }
   }
 </script>

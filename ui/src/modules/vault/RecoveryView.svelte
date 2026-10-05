@@ -161,10 +161,10 @@
   .recovery { padding: 18px; overflow: auto; min-height: 0; height: 100%; color: var(--text); }
   header, .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; } header { justify-content: space-between; }
   h2 { margin: 0; font-size: var(--fs-xl); } h3 { overflow-wrap: anywhere; font-size: var(--fs-m); } p, small, label { font-size: var(--fs-s); color: var(--text-dim); }
-  .rev, input { padding: 7px 9px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: var(--radius-s); font: inherit; }
+  .rev, input { padding: 6px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: var(--radius-s); font: inherit; }
   .rev { cursor: pointer; } .rev:hover { background: var(--hover); } input { min-width: 0; max-width: 100%; box-sizing: border-box; }
   .trash-entry { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  .trash-entry > div { flex: 1; min-width: 180px; overflow-wrap: anywhere; } small { display: block; margin-top: 5px; }
+  .trash-entry > div { flex: 1; min-width: 180px; overflow-wrap: anywhere; } small { display: block; margin-top: 4px; }
   label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .history-layout { display: grid; grid-template-columns: minmax(190px, 30%) minmax(0, 1fr); gap: 16px; margin-top: 14px; }
   nav { display: flex; flex-direction: column; gap: 6px; } nav .rev { text-align: start; overflow-wrap: anywhere; }

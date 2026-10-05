@@ -34,7 +34,7 @@ A swarm is a small autonomous team: a CTO, a couple of developers, a designer, Q
 **Projects and tasks**
 - Several projects per swarm, each with its own board, optional repo path and goal. **Set goal** / **Edit goal** and **Project** settings (name, repo, goal, skills).
 - **Plan from goal** runs several planner agents plus a summarizer and wires task dependencies so independent work runs in parallel. **Stop** stops waiting for it.
-- Board columns: Backlog, To do, In progress, In review, Blocked, Done, Cancelled. Drag cards to change status.
+- Board columns: Backlog, To do, In progress, In review, Blocked, Done, Canceled. Drag cards to change status.
 - Card menu: **Run now**, **Goals…**, **Move to**, **Assign to**, **Delete**.
 - Tick several cards to **Move to…**, **Assign…** or **Delete** them together. **Clear board** deletes every task on the board.
 - Per-task **goals**: a title, what the verifier checks, an optional metric with a comparator (≤, ≥, =, contains, absent), target and block values, a verify command, max retries, and a blocking flag. The coordinator verifies them before a task counts as done.

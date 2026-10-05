@@ -36,9 +36,11 @@
     /** Skeleton rows on first load. */
     rows?: number;
     emptyView?: Snippet;
+    /** Secondary recovery next to Retry on the error view (e.g. "Reload Otto"). */
+    errorActions?: Snippet;
     children?: Snippet;
   }
-  let { what, loading = false, error = null, empty = false, onretry, variant = 'panel', rows = 4, emptyView, children }: Props = $props();
+  let { what, loading = false, error = null, empty = false, onretry, variant = 'panel', rows = 4, emptyView, errorActions, children }: Props = $props();
 
   // First-load skeleton waits ~150 ms so a fast response never flashes it; the
   // block keeps its height meanwhile so nothing below jumps when it appears.
@@ -63,17 +65,23 @@
     <div class="ls-compact" role="alert" data-testid="load-error">
       <span class="ls-compact-text"><Icon name="warning" size={12} /> Couldn’t load {what}. <span class="ls-detail">{error}</span></span>
       {#if onretry}<button class="btn small" onclick={onretry} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>{/if}
+      {#if errorActions}{@render errorActions()}{/if}
     </div>
   {:else}
     <div class="ls-error" class:page={variant === 'page'} role="alert" data-testid="load-error">
       <div class="ls-icon"><Icon name="warning" size={variant === 'page' ? 26 : 22} /></div>
       <h3>Couldn’t load {what}</h3>
       <p class="ls-detail">{error}</p>
-      {#if onretry}
-        <button class="btn ls-retry" onclick={onretry} disabled={loading}>
-          <Icon name="refresh" size={13} />
-          {loading ? 'Retrying…' : 'Retry'}
-        </button>
+      {#if onretry || errorActions}
+        <div class="ls-actions">
+          {#if onretry}
+            <button class="btn ls-retry" onclick={onretry} disabled={loading}>
+              <Icon name="refresh" size={13} />
+              {loading ? 'Retrying…' : 'Retry'}
+            </button>
+          {/if}
+          {#if errorActions}{@render errorActions()}{/if}
+        </div>
       {/if}
     </div>
   {/if}
@@ -136,8 +144,14 @@
     line-height: 1.5;
     overflow-wrap: anywhere;
   }
-  .ls-retry {
+  .ls-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
     margin-top: 8px;
+  }
+  .ls-retry {
     display: inline-flex;
     align-items: center;
     gap: 6px;

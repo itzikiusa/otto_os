@@ -8,6 +8,7 @@
   // Each session expands to a live <Terminal> attached in place — no navigation
   // to the global Agents panel. Nothing here is a general/all-workflows list.
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
@@ -233,11 +234,11 @@
 </script>
 
 {#if groups.length === 0}
-  <div class="empty">
-    No agent sessions for this run yet.{#if runActive}
-      <br />They’ll appear here as steps spawn them.
-    {/if}
-  </div>
+  <EmptyState
+    icon="terminal"
+    title="No agent sessions for this run yet"
+    body={runActive ? 'They’ll appear here as steps spawn them.' : undefined}
+  />
 {:else}
   <div class="agents" data-testid="run-agents">
     {#each groups as g (g.id)}
@@ -296,12 +297,6 @@
 {/if}
 
 <style>
-  .empty {
-    padding: 16px 12px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    line-height: 1.5;
-  }
   .agents {
     display: flex;
     flex-direction: column;
@@ -319,8 +314,8 @@
   .grp-h {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 3px 4px;
+    gap: 6px;
+    padding: 2px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -346,7 +341,7 @@
     font-family: var(--font-mono);
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     padding: 0 6px;
     border-radius: 999px;
   }

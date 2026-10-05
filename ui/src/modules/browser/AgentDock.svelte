@@ -166,7 +166,7 @@
             {/each}
           </select>
         {/if}
-        <button class="btn small" onclick={pick} disabled={creating} title="Attach an agent session that's already running">
+        <button class="btn small" onclick={pick} disabled={creating} title="Attach an agent session that’s already running">
           <Icon name="link" size={12} /> Attach…
         </button>
         <button class="btn small" onclick={() => void createAgent()} disabled={creating} title="Start a new agent session for this page">
@@ -251,7 +251,7 @@
   .state {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;

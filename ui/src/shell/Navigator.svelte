@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../lib/plural';
+  import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
@@ -123,7 +125,7 @@
     const ids = agentSelIds;
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `Delete ${ids.length} session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      `Delete ${plural(ids.length, 'session')} and their entire history? This cannot be undone.`,
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -159,7 +161,7 @@
     const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `Delete ${ids.length} archived session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      `Delete ${plural(ids.length, 'archived session')} and their entire history? This cannot be undone.`,
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -396,7 +398,7 @@
       if (!(await ws.archiveWorkspace(w.id))) return;
       toasts.info('Workspace removed', w.name);
     } catch (e) {
-      toasts.error('Couldn’t remove the workspace', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove the workspace', e);
     }
   }
 
@@ -1296,8 +1298,9 @@
          group in every workspace and with none. Plain `sessionRow`s — they are
          already in `ws.sessions`, so open / rename / archive work as above. -->
     {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
       <div
+        role="presentation"
         class="ws-group-label"
         title="Sessions not tied to any workspace"
         data-testid="scratch-group"
@@ -1432,8 +1435,9 @@
               {#if ws.canEditSession(s)}
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
               {/if}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
               <div
+                role="presentation"
                 class="nav-item nested-item archived"
                 title={s.title}
                 oncontextmenu={(e) => ctxMenu.show(e, [
@@ -1470,7 +1474,7 @@
               <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
             </div>
           {:else if ws.archivedLoading}
-            <div class="arch-state" aria-live="polite">Loading…</div>
+            <div class="arch-state" aria-live="polite">Loading archived sessions…</div>
           {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
             <div class="arch-state">No archived sessions.</div>
           {:else if ws.archivedHasMore}
@@ -1507,11 +1511,10 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="nav-rename"
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         onblur={commitRename}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename();
@@ -1647,7 +1650,7 @@
     margin-inline-start: 6px;
   }
   .nav-logo {
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     display: block;
     flex-shrink: 0;
   }
@@ -1829,7 +1832,7 @@
     opacity: 1;
   }
   .group-head-row .row-action:last-child {
-    margin-inline-end: 27px;
+    margin-inline-end: 28px;
   }
   /* The module list is a size container so edit mode can make room for the
      label in a narrow (resized) sidebar: the module glyph (the grip + label
@@ -1846,7 +1849,7 @@
       width: 20px;
     }
     .group-head-row .row-action:last-child {
-      margin-inline-end: 25px;
+      margin-inline-end: 24px;
     }
   }
   .group-head-row .row-action:disabled {
@@ -2036,7 +2039,7 @@
   /* Agents' sub-content hangs off one hairline guide under the Agents icon
      (8px row padding + half the 14px icon), outline-view style. */
   .agents-sub {
-    margin-inline-start: 15px;
+    margin-inline-start: 14px;
     padding-inline-start: 4px;
     border-inline-start: 1px solid color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
@@ -2045,7 +2048,7 @@
   .ws-chip {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     max-width: calc(100% - 4px);
     margin: 1px 0 2px;
     padding: 2px 6px;
@@ -2077,7 +2080,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 8px 2px;
+    padding: 4px 8px 2px;
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
@@ -2181,7 +2184,7 @@
     opacity: 1;
   }
   .row-action:hover {
-    background: var(--surface-2);
+    background: var(--hover);
     color: var(--text);
   }
   .row-action.danger:hover {
@@ -2192,7 +2195,7 @@
      wrapped under the icon and spilled past the sidebar edge. */
   .arch-tools .row-action {
     display: inline-flex; align-items: center; gap: 4px; width: auto; height: 22px;
-    padding: 0 7px; flex-shrink: 0; opacity: 1;
+    padding: 0 6px; flex-shrink: 0; opacity: 1;
     border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
   .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
@@ -2285,7 +2288,7 @@
      green when all complete. */
   .task-chip {
     flex-shrink: 0;
-    padding: 0 5px;
+    padding: 0 4px;
     height: 16px;
     line-height: 16px;
     border-radius: 999px;
@@ -2399,7 +2402,7 @@
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;

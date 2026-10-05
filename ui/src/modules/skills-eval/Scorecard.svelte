@@ -183,7 +183,7 @@
   .meta { display: flex; align-items: center; gap: 8px; }
   .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
   .done { font-variant-numeric: tabular-nums; }
-  .signals { display: flex; flex-direction: column; gap: 5px; }
+  .signals { display: flex; flex-direction: column; gap: 4px; }
   .row { display: grid; grid-template-columns: 54px 1fr 28px; align-items: center; gap: 8px; }
   .row.dim { opacity: 0.55; }
   .track { position: relative; height: 7px; border-radius: 999px; overflow: hidden; background: var(--surface-2); }
@@ -196,7 +196,7 @@
   .proofpack-btn { align-self: flex-start; }
   .pack { display: flex; flex-direction: column; gap: 8px; }
   .artifact { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 6px 8px; }
-  .ahead { display: flex; align-items: center; gap: 5px; font-size: var(--fs-xs); color: var(--text); }
+  .ahead { display: flex; align-items: center; gap: 4px; font-size: var(--fs-xs); color: var(--text); }
   .adot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
   .akind { font-weight: 600; }
   .sep, .atitle, .astatus { color: var(--text-dim); }

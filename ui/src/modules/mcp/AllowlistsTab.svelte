@@ -161,7 +161,7 @@
     grid-template-columns: minmax(160px, 1fr) minmax(160px, 1.4fr) 110px 40px;
     align-items: center;
     gap: 8px;
-    padding: 7px 14px;
+    padding: 6px 14px;
   }
   .thead {
     border-bottom: 1px solid var(--border);

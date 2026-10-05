@@ -85,7 +85,7 @@ registerUiCommands('home', {
       throw new UiCommandError('invalid_args', `Unknown box kind “${args.kind}” (one of ${HOME_KINDS.map((k) => k.kind).join(', ')}).`);
     }
     const def = kindDef(args.kind);
-    if (!can(def.feature)) throw new UiCommandError('forbidden', `The user can't view ${def.label}.`);
+    if (!can(def.feature)) throw new UiCommandError('forbidden', `The user can’t view ${def.label}.`);
     const v = viewFor(args.view);
     if (v.boxes.length >= MAX_BOXES) throw new UiCommandError('failed', `“${v.name}” already has ${MAX_BOXES} boxes.`);
     home.goTo(home.views.indexOf(v));

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Canvas Studio entry. Left: scene list. Right: an infinite Mermaid board that
   // renders the scene's agent-edited `.mermaid` source (full rich diagrams), or a
   // hero to start a new canvas. You never write Mermaid — you describe what you
@@ -162,7 +163,7 @@
       const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
-      toasts.error('Couldn’t create canvas', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create canvas', e);
     }
   }
 </script>
@@ -191,7 +192,7 @@
   {#snippet actions()}
     <!-- One primary per page: with no scenes yet the hero's mode cards own "new". -->
     {#if ws.currentId && !noScenes}
-      <button class="btn primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
+      <button class="btn small primary" onclick={newSceneMenu} aria-haspopup="menu" data-testid="canvas-new-scene">
         <Icon name="plus" size={13} /> New scene <Icon name="chevronDown" size={11} />
       </button>
     {/if}
@@ -295,7 +296,7 @@
           <h2>Start a new canvas</h2>
           <p class="sub">
             Describe a diagram in plain English — the agent draws it and keeps refining it as you
-            chat. Pick how it's drawn:
+            chat. Pick how it’s drawn:
           </p>
           <div class="modes">
             <button class="mode" onclick={() => createBlank('excalidraw')}>

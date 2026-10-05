@@ -229,7 +229,7 @@
     rows="2"
     aria-label="Source or description"
     aria-describedby="rwo-detect"
-    placeholder="Paste a Jira key, a GitHub/Confluence URL, or a finding/story/test id… or describe what you want"
+    placeholder="e.g. PAY-142, https://github.com/acme/api/pull/7, or “add rate limiting to the login endpoint”"
   ></textarea>
 
   <!-- what Otto will run + THE button, right under the input it acts on -->
@@ -281,7 +281,7 @@
     </div>
 
     <div class="ctl">
-      <label for="rwo-repo">Repo</label>
+      <label for="rwo-repo">Repository</label>
       <select id="rwo-repo" class="input" bind:value={repoId} aria-label="Repository"
         title={repos.find((r) => r.id === repoId)?.path ?? 'Auto: the repo named by the source, else the first registered repo'}>
         <option value="">Auto (from source)</option>
@@ -367,11 +367,11 @@
   .src-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font: inherit;
     font-size: var(--fs-xs);
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     cursor: pointer;
     color: var(--text-dim);
@@ -427,7 +427,7 @@
     color: var(--accent-text);
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     white-space: nowrap;
     flex: none;
   }
@@ -440,7 +440,7 @@
     color: var(--text-dim);
     font-family: var(--font-ui);
     line-height: 1;
-    padding: 3px 5px;
+    padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     flex: none;

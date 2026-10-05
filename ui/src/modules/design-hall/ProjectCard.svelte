@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // A project in the lobby grid: a 2×2 mosaic of its newest artifacts, the
   // bound epic, counts, and a one-line review summary. Links to the project.
   import Icon from '../../lib/components/Icon.svelte';
@@ -34,8 +35,7 @@
       <span class="chip epic" title={epicLabel}><Icon name="ticket" size={12} /> <span class="epic-t">{epicLabel}</span></span>
     {/if}
     <div class="meta">
-      {stats.artifacts} artifact{stats.artifacts === 1 ? '' : 's'} · {stats.studios.length}
-      studio{stats.studios.length === 1 ? '' : 's'} · updated {rel(stats.updatedAt)}
+      {plural(stats.artifacts, 'artifact')} · {plural(stats.studios.length, 'studio')} · updated {rel(stats.updatedAt)}
     </div>
     <div class="summary tone-{summary.tone}">{summary.text}</div>
   </div>

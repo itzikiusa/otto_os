@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Snipping: the system-wide capture shortcut (desktop app only —
@@ -106,7 +107,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('snipping')} subtitle="One-gesture screenshots: capture, annotate, paste" />
   <PageBody width="readable">
-  <SectionIntro>Capture a screen region, annotate it (text, boxes, arrows, colours), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</SectionIntro>
+  <SectionIntro>Capture a screen region, annotate it (text, boxes, arrows, colors), and the result is <strong>already on your clipboard</strong> at every step — paste it straight into an agent session.</SectionIntro>
 
   {#if isTauri}
     <div class="card snip-card">
@@ -121,10 +122,9 @@
         </div>
         <div class="row-controls">
           {#if recording}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="input recorder"
-              autofocus
+              use:focusOnMount
               readonly
               aria-label="Press the new shortcut"
               placeholder="Press keys… (Esc cancels)"

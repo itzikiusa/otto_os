@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   // Site credentials for the in-app browser: list/add/edit/delete + a
   // confirm-gated reveal. The password is NEVER in the list/edit payload —
@@ -192,9 +193,7 @@
             <div class="domain-line">
               <span class="domain">{c.domain}</span>
               {#if c.allow_agent_use}
-                <span class="badge" title="Agent sessions may autofill this credential">
-                  agent-use
-                </span>
+                <Badge tone="accent" label="Agents may use" title="Agent sessions may autofill this credential" />
               {/if}
             </div>
             <div class="username">{c.username}</div>
@@ -263,7 +262,7 @@
         {#if fAllowAgentUse}
           <p class="warning">
             An unattended agent session running in this workspace will be able to use this
-            credential to sign in on your behalf. Only enable this for accounts you're
+            credential to sign in on your behalf. Only enable this for accounts you’re
             comfortable an agent acting autonomously could access.
           </p>
         {/if}
@@ -338,15 +337,6 @@
     font-weight: 600;
     font-size: var(--fs-m);
     color: var(--text);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 0.1rem 0.35rem;
-    border-radius: var(--radius-s);
-    background: var(--accent-solid);
-    color: var(--accent-contrast);
   }
   .username {
     font-size: var(--fs-s);

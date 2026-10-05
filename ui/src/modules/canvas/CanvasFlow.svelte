@@ -319,7 +319,7 @@
     color: var(--text);
   }
   .editor :global(.svelte-flow__controls-button:hover) {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .editor :global(.svelte-flow__controls-button svg) {
     fill: var(--text);

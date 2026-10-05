@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The "new evaluation" form: pick a skill (library / provider / a path or
   // archive), describe the task, choose the implementation CLI + iterations,
   // add validation dimensions (each fanned across one or more agent CLIs), and
@@ -216,20 +217,18 @@
   {#if loadError}
     <!-- The form stays usable (custom path), so the failure is one compact
          line + Retry above it, not a page-level error. -->
-    <div class="load-err">
-      <LoadState
-        what="the evaluator defaults"
-        variant="compact"
-        error={`${loadError} The skill list and saved validations stay missing until they load.`}
-        empty
-        onretry={() => void load()}
-      />
-    </div>
+    <LoadState
+      what="the evaluator defaults"
+      variant="compact"
+      error={`${loadError} The skill list and saved validations stay missing until they load.`}
+      empty
+      onretry={() => void load()}
+    />
   {/if}
 
   <!-- What to test: the skill and the task (the fields every run needs). -->
   <section class="card block">
-    <div class="fld">
+    <div class="field">
       <label class="field-label" for="se-source">Skill under test</label>
       <select id="se-source" class="input" bind:value={sourceSel} disabled={!loaded}>
         {#if !loaded}<option value="custom">Loading skills…</option>{/if}
@@ -256,7 +255,7 @@
       {/if}
     </div>
 
-    <div class="fld">
+    <div class="field">
       <label class="field-label" for="se-task">Task to implement</label>
       <textarea
         id="se-task"
@@ -268,13 +267,13 @@
     </div>
 
     <div class="grid2">
-      <div class="fld">
+      <div class="field">
         <label class="field-label" for="se-cli">Implementation agent</label>
         <select id="se-cli" class="input" bind:value={implCli}>
           {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
         </select>
       </div>
-      <div class="fld">
+      <div class="field">
         <label class="field-label" for="se-iter">Iterations</label>
         <input id="se-iter" class="input" type="number" min="1" max="10" bind:value={iterations} />
       </div>
@@ -334,26 +333,26 @@
     {#if advancedOpen}
       <div class="block adv-body" id="se-advanced">
         <div class="grid2">
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-test">Test command <span class="hint-inline">scored and added to the proof pack</span></label>
             <input id="se-test" class="input" bind:value={testCmd} placeholder={testDefault ? `Default: ${testDefault}` : 'e.g. cargo test  /  npm test'} data-testid="eval-test-cmd" />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-lint">Lint command <span class="hint-inline">optional</span></label>
             <input id="se-lint" class="input" bind:value={lintCmd} placeholder={lintDefault ? `Default: ${lintDefault}` : 'e.g. cargo clippy  /  npm run check'} data-testid="eval-lint-cmd" />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-passes">Validation passes</label>
             <input id="se-passes" class="input" type="number" min="1" max="3" bind:value={validatorPasses} />
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="se-imp">Improver agent</label>
             <select id="se-imp" class="input" bind:value={improverProvider}>
               {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
             </select>
           </div>
         </div>
-        <div class="fld">
+        <div class="field">
           <label class="field-label" for="se-base">Base git ref</label>
           <input id="se-base" class="input" placeholder="HEAD" bind:value={baseRef} />
           <p class="hint">
@@ -368,7 +367,7 @@
 
   <div class="actions">
     <span class="cost" title="Approximate — improver runs are skipped on a perfect score">
-      ≈ {estAgents} agent session{estAgents === 1 ? '' : 's'}
+      ≈ {plural(estAgents, 'agent session')}
     </span>
     <span class="grow"></span>
     <button class="btn primary" disabled={!canStart} onclick={submit} title={canStart ? undefined : blockReason}>
@@ -426,10 +425,9 @@
     flex-direction: column;
     gap: 12px;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  /* Shared .field (app.css); the block's gap spaces the rows. */
+  .field {
+    margin-bottom: 0;
     min-width: 0;
   }
   .grid2 {
@@ -531,8 +529,8 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    padding: 3px 9px;
+    gap: 4px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: 999px;
     font-size: var(--fs-xs);
@@ -577,11 +575,6 @@
   }
   .grow {
     flex: 1;
-  }
-  .load-err {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
   }
   .dim {
     color: var(--text-dim);

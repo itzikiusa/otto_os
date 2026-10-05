@@ -4,6 +4,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus } from '../../lib/status';
+  import { plural } from '../../lib/plural';
+  import Badge from '../../lib/components/Badge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -585,7 +587,7 @@
   }
 
   async function remove(t: ScheduledTask): Promise<void> {
-    const ok = await confirmer.ask(`Delete “${t.name}”? It stops running and can't be restored.`, {
+    const ok = await confirmer.ask(`Delete “${t.name}”? It stops running and can’t be restored.`, {
       title: 'Delete scheduled task',
     });
     if (!ok) return;
@@ -731,7 +733,7 @@
       {#if error}<div class="err" role="alert"><Icon name="warning" size={12} /> {error}</div>{/if}
 
       {#if !editId && presets.length}
-        <label class="fld">
+        <label class="field">
           <span>Start from a preset</span>
           <select class="input" onchange={(e) => applyPreset((e.currentTarget as HTMLSelectElement).value)}>
             <option value="">Blank task</option>
@@ -740,13 +742,13 @@
         </label>
       {/if}
 
-      <label class="fld">
+      <label class="field">
         <span>Name</span>
         <input class="input" bind:value={fName} placeholder="Nightly ticket review" required />
       </label>
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Type</span>
           <select class="input" bind:value={fKind}>
             <option value="agent_prompt">Run an agent</option>
@@ -754,7 +756,7 @@
           </select>
         </label>
         {#if fKind === 'agent_prompt'}
-          <label class="fld">
+          <label class="field">
             <span>Provider</span>
             <select
               class="input"
@@ -766,7 +768,7 @@
             </select>
           </label>
         {:else}
-          <label class="fld">
+          <label class="field">
             <span>Workflow</span>
             <select class="input" bind:value={fWorkflowId} disabled={wfLoading}>
               <option value="">{wfLoading ? 'Loading workflows…' : wfOptions.length ? 'Choose a workflow…' : 'No workflows in this workspace'}</option>
@@ -776,7 +778,7 @@
               {/if}
             </select>
             {#if wfError}
-              <small class="fld-hint bad">Couldn’t load workflows. {wfError}
+              <small class="field-hint bad">Couldn’t load workflows. {wfError}
                 <button type="button" class="btn small ghost" onclick={loadWorkflowOptions}>Retry</button></small>
             {/if}
           </label>
@@ -784,7 +786,7 @@
       </div>
 
       {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
-        <label class="fld">
+        <label class="field">
           <span>Custom provider slug</span>
           <input class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
@@ -798,19 +800,19 @@
       {#if fKind === 'workflow'}
         <p class="hint">The task launches this workflow on its cadence and reports the run outcome.</p>
       {:else if fProvider === 'shell'}
-        <label class="fld">
+        <label class="field">
           <span>Shell command</span>
           <textarea class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
         </label>
       {:else}
-        <label class="fld">
+        <label class="field">
           <span>Prompt (the agent's instructions)</span>
           <textarea class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
         </label>
       {/if}
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Cadence</span>
           <select class="input" bind:value={fCadence}>
             <option value="interval">Interval</option>
@@ -821,32 +823,32 @@
           </select>
         </label>
         {#if fCadence === 'interval'}
-          <label class="fld">
+          <label class="field">
             <span>Every (minutes, min 5)</span>
             <input class="input" type="number" min="5" bind:value={fEveryMin} />
           </label>
         {:else if fCadence === 'once'}
-          <label class="fld">
+          <label class="field">
             <span>Runs once at (in the timezone)</span>
             <input class="input" type="datetime-local" bind:value={fRunAt} aria-invalid={!fRunAt} />
           </label>
         {:else if fCadence === 'cron'}
-          <label class="fld">
+          <label class="field">
             <span>Cron expression (5 fields)</span>
             <input class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
-            <small class="fld-hint" class:bad={cronFieldCount !== 5}>
+            <small class="field-hint" class:bad={cronFieldCount !== 5}>
               {cronFieldCount === 5
                 ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
                 : `Needs 5 fields (minute hour day month weekday) — has ${cronFieldCount}`}
             </small>
           </label>
         {:else}
-          <label class="fld">
+          <label class="field">
             <span>At (24h, in the timezone)</span>
             <input class="input" type="time" bind:value={fAt} />
           </label>
           {#if fCadence === 'weekly'}
-            <label class="fld">
+            <label class="field">
               <span>Weekday</span>
               <select class="input" bind:value={fWeekday}>
                 {#each ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as d, i}
@@ -857,10 +859,10 @@
           {/if}
         {/if}
         {#if fCadence !== 'interval'}
-          <label class="fld">
+          <label class="field">
             <span>Timezone</span>
             <input class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
-            {#if !tzOk}<small class="fld-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
+            {#if !tzOk}<small class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
             {#if tzNames.length}
               <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
             {/if}
@@ -869,7 +871,7 @@
       </div>
 
       <div class="frow">
-        <label class="fld">
+        <label class="field">
           <span>Destination</span>
           <select class="input" bind:value={fDestType}>
             <option value="none">None (store only)</option>
@@ -880,17 +882,17 @@
           </select>
         </label>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
-          <label class="fld">
+          <label class="field">
             <span>Chat / channel id (optional)</span>
             <input class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
           </label>
         {:else if fDestType === 'email'}
-          <label class="fld">
+          <label class="field">
             <span>Send to (email)</span>
             <input class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
           </label>
         {:else if fDestType === 'webhook'}
-          <label class="fld">
+          <label class="field">
             <span>Webhook URL</span>
             <input class="input" type="url" bind:value={fUrl} placeholder="https://…" />
           </label>
@@ -898,7 +900,7 @@
       </div>
 
       {#if fProvider === 'shell' && fKind === 'agent_prompt'}
-        <label class="fld">
+        <label class="field">
           <span>Working dir (optional)</span>
           <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
         </label>
@@ -915,25 +917,25 @@
       <div class="adv-body" id="sched-advanced">
       {#if fKind === 'agent_prompt' && fProvider !== 'shell'}
         <div class="frow">
-          <label class="fld">
+          <label class="field">
             <span>Skill (optional, inlined)</span>
             <input class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
           </label>
-          <label class="fld">
+          <label class="field">
             <span>Working dir (optional)</span>
             <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
           </label>
         </div>
 
         <div class="frow">
-          <label class="fld">
+          <label class="field">
             <span>Sandbox</span>
             <select class="input" bind:value={fSandbox}>
               <option value="none">Run in working dir</option>
               <option value="worktree">Isolated git worktree</option>
             </select>
           </label>
-          <label class="fld">
+          <label class="field">
             <span>Retries on failure (0–5)</span>
             <input class="input" type="number" min="0" max="5" bind:value={fMaxRetries} />
           </label>
@@ -1045,12 +1047,12 @@
                     {#if r.status === 'running'}
                       <button class="btn small danger" title="Stop this run (its agent session, shell command or workflow run is stopped)" onclick={() => void stopRun(r, t)}>Stop…</button>
                     {/if}
-                    {#if (r.attempts ?? 1) > 1}<span class="pill warn">{r.attempts} attempts</span>{/if}
-                    {#if r.delivered}<span class="pill ok">Delivered</span>{/if}
-                    {#if r.skipped_delivery}<span class="pill" title="Not delivered: the report is unchanged since the last run">No change</span>{/if}
-                    {#if r.delivery_error}<span class="pill warn" title={r.delivery_error}>Delivery failed</span>{/if}
-                    {#if r.proof_pack_id}<span class="pill ok" title="A proof pack is attached to this run">Proof</span>{/if}
-                    {#if r.workflow_run_id}<span class="pill" title="Workflow run {r.workflow_run_id}">Workflow run</span>{/if}
+                    {#if (r.attempts ?? 1) > 1}<Badge tone="warn" label={plural(r.attempts ?? 1, 'attempt')} />{/if}
+                    {#if r.delivered}<Badge tone="ok" label="Delivered" />{/if}
+                    {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
+                    {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
+                    {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
+                    {#if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
@@ -1134,7 +1136,7 @@
   .name { font-size: var(--fs-m); font-weight: 600; color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: var(--text-dim); font-size: var(--fs-s); min-width: 0; }
   .dest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 36ch; }
-  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 5px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
+  .cron { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 0 4px; border-radius: var(--radius-s); background: var(--surface-2); color: var(--text); direction: ltr; }
   .task-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .runs { margin-block-start: 10px; border-block-start: 1px solid var(--border); padding-block-start: 8px; display: flex; flex-direction: column; gap: 6px; }
   .run { display: flex; align-items: center; gap: 8px; font-size: var(--fs-s); flex-wrap: wrap; color: var(--text); min-height: 26px; }
@@ -1143,18 +1145,16 @@
   .run-sum.none { color: var(--text-dim); font-style: italic; }
   .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
   .run-err.warn { color: var(--warning); }
-  .pill { font-size: var(--fs-xs); padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim); white-space: nowrap; }
-  .pill.ok { background: var(--success-soft); color: var(--success); border-color: transparent; }
-  .pill.warn { background: var(--warning-soft); color: var(--warning); border-color: transparent; }
   .form { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
   .frow { display: flex; gap: 12px; flex-wrap: wrap; }
-  .frow .fld { flex: 1; min-width: 180px; }
-  .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-s); color: var(--text); min-width: 0; }
-  .fld > span { color: var(--text-dim); font-weight: 500; }
-  .fld :global(.input) { width: 100%; }
-  .fld :global(.mono) { font-family: var(--font-mono); }
-  .fld .fld-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .fld .fld-hint.bad { color: var(--danger); }
+  /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
+  .frow .field { flex: 1; min-width: 180px; }
+  .field { margin-bottom: 0; font-size: var(--fs-s); color: var(--text); min-width: 0; }
+  .field > span { color: var(--text-dim); font-weight: 500; }
+  .field :global(.input) { width: 100%; }
+  .field :global(.mono) { font-family: var(--font-mono); }
+  .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .field .field-hint.bad { color: var(--danger); }
   .toggles { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
   .adv { border-block-start: 1px solid var(--border); padding-block-start: 10px; }
   .adv-toggle {

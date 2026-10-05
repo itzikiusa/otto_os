@@ -82,7 +82,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    padding: 9px 12px;
+    padding: 8px 12px;
     color: var(--text);
     cursor: pointer;
     transition: border-color var(--dur-fast), background var(--dur-fast);
@@ -123,7 +123,7 @@
     color: var(--text-dim);
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -151,7 +151,7 @@
   .chip-risk {
     font-size: var(--fs-xs);
     font-weight: 500;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
     white-space: nowrap;
     color: var(--c);
@@ -161,7 +161,7 @@
   .badge-approve {
     font-size: var(--fs-xs);
     font-weight: 600;
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: 999px;
     background: var(--warning-soft);
     color: var(--warning);
@@ -187,7 +187,7 @@
       display: none;
     }
     .wi-meta {
-      gap: 5px;
+      gap: 4px;
     }
   }
 </style>

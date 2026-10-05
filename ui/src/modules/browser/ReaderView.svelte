@@ -242,8 +242,10 @@
       </button>
     </div>
 
+    <!-- Delegated handlers: in mark mode each top-level block is a
+         role="button" with tabindex (see the effect above) and the article
+         routes its clicks and Enter/Space/arrows to it. -->
     <!-- eslint-disable-next-line svelte/no-static-element-interactions -->
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <article
       class="page md-body"
@@ -263,7 +265,7 @@
         <p class="composer-excerpt">{pending.text.slice(0, 140)}</p>
         <textarea
           bind:value={noteText}
-          placeholder="Add a note for the agent (optional)"
+          placeholder="Check this price against last week’s"
           aria-label="Note for this mark"
           rows="2"
           spellcheck="false"

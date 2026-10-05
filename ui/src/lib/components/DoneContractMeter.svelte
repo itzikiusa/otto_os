@@ -3,6 +3,7 @@
   // plus an itemized checklist. Each item shows satisfied ✓ / missing ✗, its
   // label, a required/optional tag, and the human-readable detail text.
   import Icon from './Icon.svelte';
+  import Badge from './Badge.svelte';
   import type { DoneContract } from '../api/types';
 
   interface Props {
@@ -62,7 +63,7 @@
             <div class="item-body">
               <div class="item-top">
                 <span class="item-label">{it.label}</span>
-                <span class="tag {it.required ? 'req' : 'opt'}">{it.required ? 'required' : 'optional'}</span>
+                <Badge tone={it.required ? 'accent' : 'neutral'} variant="outline" label={it.required ? 'Required' : 'Optional'} />
               </div>
               {#if it.detail}
                 <span class="item-detail">{it.detail}</span>
@@ -203,24 +204,6 @@
   }
   .item.miss .item-label {
     color: var(--text-dim);
-  }
-  .tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    border-radius: 999px;
-    padding: 0 6px;
-    line-height: 14px;
-    border: 1px solid transparent;
-  }
-  .tag.req {
-    color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  }
-  .tag.opt {
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 10%, transparent);
   }
   .item-detail {
     font-size: var(--fs-xs);

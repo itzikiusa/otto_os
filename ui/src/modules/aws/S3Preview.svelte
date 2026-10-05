@@ -137,7 +137,7 @@
     <div class="pv-media"><img src={mediaUrl} alt={`Preview of ${obj.key}`} /></div>
   {:else if mediaUrl}
     <object class="pv-pdf" data={mediaUrl} type="application/pdf" title={`PDF preview of ${obj.key}`}>
-      <p class="pv-dim">This PDF can't be shown inline. <button class="btn small" onclick={ondownload}>Download</button></p>
+      <p class="pv-dim">This PDF can’t be shown inline. <button class="btn small" onclick={ondownload}>Download</button></p>
     </object>
   {/if}
 {:else if kind === 'binary'}

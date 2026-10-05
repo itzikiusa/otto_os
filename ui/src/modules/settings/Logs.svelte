@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import { pollWhileVisible } from '../../lib/poll';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
@@ -68,7 +69,7 @@
       ? `${nf.format(shownCount)} of ${nf.format(lineCount)} lines match`
       : `${nf.format(lineCount)} lines`;
     const clip = clipped ? ` (newest ${nf.format(mode === 'tail' ? Math.min(tailLines, MAX_LINES) : MAX_LINES)} kept)` : '';
-    return `${lines}${clip} · ${fileCount} file${fileCount === 1 ? '' : 's'} in the log folder`;
+    return `${lines}${clip} · ${plural(fileCount, 'file')} in the log folder`;
   });
 
   $effect(() => {
@@ -450,7 +451,7 @@
   .live {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .live-dot {
     width: 6px;

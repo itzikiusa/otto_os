@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { focusOnMount } from '../../lib/focusOnMount';
   // Floating "describe it and I'll draw it" prompt, anchored top-center over the
   // canvas. One agent turn → blocks inserted near the existing content. Stays
   // open after a run so you can refine/regenerate; Esc or the ✕ closes it.
@@ -48,7 +50,7 @@
       const { x, y } = insertOrigin();
       const n = canvas.insertAssist(res, x, y);
       if (n > 0) {
-        toasts.success('Added to canvas', `${n} block${n === 1 ? '' : 's'} inserted.`);
+        toasts.success('Added to canvas', `${plural(n, 'block')} inserted.`);
         prompt = '';
       } else {
         toasts.info('Nothing to add', res.note || 'The agent did not return a diagram.');
@@ -66,15 +68,15 @@
   }
 </script>
 
-<div class="pill-wrap">
+<div class="prompt-wrap">
   <!-- keydown on the wrapper so Esc closes even when a mode/Draw button is focused -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="pill" class:busy onkeydown={onkeydown}>
+  <div class="prompt-bar" class:busy onkeydown={onkeydown}>
     <Icon name="zap" />
-    <!-- svelte-ignore a11y_autofocus -->
     <input
       bind:value={prompt}
-      autofocus
+      use:focusOnMount
+      aria-label="Describe a diagram or blocks"
       disabled={busy}
       placeholder="Describe a diagram or blocks… e.g. 'service A calls B; B does 10 things'"
       {onkeydown}
@@ -92,7 +94,7 @@
 </div>
 
 <style>
-  .pill-wrap {
+  .prompt-wrap {
     position: absolute;
     top: 12px;
     left: 50%;
@@ -100,23 +102,24 @@
     z-index: var(--z-sticky);
     width: min(720px, 92%);
   }
-  .pill {
+  .prompt-bar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 6px 10px;
     background: var(--surface);
     border: 1px solid var(--accent);
     border-radius: 999px;
     box-shadow: var(--glass-shadow);
   }
-  .pill:focus-within {
+  .prompt-bar:focus-within {
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px var(--accent-soft), var(--glass-shadow);
   }
-  .pill.busy {
+  .prompt-bar.busy {
     opacity: 0.9;
   }
-  .pill input {
+  .prompt-bar input {
     flex: 1 1 auto;
     border: none;
     background: none;
@@ -131,7 +134,7 @@
   }
   .modes button {
     font-size: var(--fs-xs);
-    padding: 3px 7px;
+    padding: 2px 6px;
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text-dim);
@@ -144,7 +147,7 @@
     color: var(--accent-contrast);
   }
   .run {
-    padding: 5px 12px;
+    padding: 4px 12px;
     border: none;
     background: var(--accent-solid);
     color: var(--accent-contrast);

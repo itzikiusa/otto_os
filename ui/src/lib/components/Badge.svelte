@@ -24,18 +24,30 @@
     live?: boolean;
     title?: string;
     testid?: string;
+    /** The domain state key, exposed as `data-status` for tests and styling hooks. */
+    status?: string;
     children?: Snippet;
   }
-  let { tone = 'neutral', variant = 'soft', label, dot = false, live = false, title, testid, children }: Props = $props();
+  let { tone = 'neutral', variant = 'soft', label, dot = false, live = false, title, testid, status, children }: Props = $props();
 </script>
 
-<span class="chip badge {tone}" class:outline={variant === 'outline'} {title} data-tone={tone} data-testid={testid}>
-  {#if dot || live}<span class="badge-dot" class:live aria-hidden="true"></span>{/if}{#if children}{@render children()}{:else}{label}{/if}
+<span class="chip badge {tone}" class:outline={variant === 'outline'} {title} data-tone={tone} data-status={status} data-testid={testid}>
+  {#if dot || live}<span class="badge-dot" class:live aria-hidden="true"></span>{/if}{#if children}{@render children()}{:else}<span class="badge-label">{label}</span>{/if}
 </span>
 
 <style>
+  /* Never wider than its row: a long label (a user tag, a path) ends in an
+     ellipsis instead of pushing the page sideways — set `title` for the full text. */
   .badge {
     flex-shrink: 0;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .badge-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   /* `.chip` (app.css) supplies shape, type and the soft tone fills; outline
      keeps the tone's text + border and drops the fill. */

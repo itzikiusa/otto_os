@@ -75,7 +75,7 @@
         ? [
             { label: 'Edit account…', icon: 'edit', action: () => onedit(a) },
             { separator: true },
-            { label: 'Delete account', icon: 'trash', danger: true, action: () => ondelete(a) },
+            { label: 'Delete account…', icon: 'trash', danger: true, action: () => ondelete(a) },
           ]
         : []),
     ]);
@@ -204,7 +204,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding-block: 3px;
+    padding-block: 2px;
     padding-inline: 8px 6px;
     color: var(--text);
     border-inline-start: 2px solid transparent;
@@ -227,7 +227,7 @@
     cursor: pointer;
   }
   .acct-row:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .dot {
     width: 8px;
@@ -274,7 +274,7 @@
     border-inline-start: 2px solid transparent;
   }
   .svcs a:hover {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .svcs a.active {
     background: var(--accent-soft);

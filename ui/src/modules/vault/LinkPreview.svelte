@@ -53,7 +53,7 @@
   .lp-type {
     font-size: var(--fs-xs);
     font-weight: 400;
-    padding: 1px 7px;
+    padding: 1px 6px;
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--text-dim);
@@ -63,7 +63,6 @@
   p { margin: 0; overflow-wrap: anywhere; }
   .lp-dim { color: var(--text-dim); }
   @media (prefers-reduced-motion: no-preference) {
-    .lp { animation: lp-in 120ms ease-out; }
+    .lp { animation: otto-fade-in var(--dur-enter) var(--ease-out); }
   }
-  @keyframes lp-in { from { opacity: 0; } to { opacity: 1; } }
 </style>

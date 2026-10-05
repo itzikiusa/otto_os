@@ -111,7 +111,7 @@ function landing(title: string): SiteDoc {
         {
           items: [
             quote('I hit Gold in five weeks without changing how I shop. Free delivery alone paid for itself.', 'Noa Peretz', 'Gold member'),
-            quote('Weekend double points are my favourite thing. I plan my big shop around them now.', 'James Okafor', 'Silver member'),
+            quote('Weekend double points are my favorite thing. I plan my big shop around them now.', 'James Okafor', 'Silver member'),
           ],
         },
       ),
@@ -199,7 +199,7 @@ function launch(title: string): SiteDoc {
             faq('When will it ship?', 'Pre-orders ship from October 14, in the order they were placed.'),
             faq('Does it work with my phone?', 'Yes — iOS and Android, plus any Bluetooth 5.3 device.'),
             faq('Can I cancel my pre-order?', 'Anytime before it ships, with a full refund.'),
-            faq('What colours are there?', 'Graphite, Chalk and a limited Sunset edition.'),
+            faq('What colors are there?', 'Graphite, Chalk and a limited Sunset edition.'),
           ],
         },
       ),
@@ -213,7 +213,7 @@ function launch(title: string): SiteDoc {
 
 function event(title: string): SiteDoc {
   const name = title.trim() || 'Frontier Summit 2026';
-  return site(name, 'frontier-summit.example', `${name} — two days on what's next in product design. Lisbon, October 14–15.`, [
+  return site(name, 'frontier-summit.example', `${name} — two days on what’s next in product design. Lisbon, October 14–15.`, [
     page('home', 'Home', '', [
       sec('nav', 'nav/bar', { logo: name, cta_label: 'Get tickets', cta_href: '#tickets' }, { items: [link('Agenda', '#agenda'), link('Tickets', '#tickets'), link('FAQ', '#faq')] }),
       sec(

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusOnMount } from '../../lib/focusOnMount';
   // The expandable cell viewer: full value in a modal, SQL formatting toggle,
   // Copy, and — when the cell belongs to an editable column — an in-viewer
   // editor whose Save hands the draft to the normal cell-edit review flow.
@@ -59,12 +60,11 @@
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
       {/if}
       {#if flow.viewerEditing}
-        <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="cv-edit mono"
           bind:value={flow.viewerDraft}
           spellcheck="false"
-          autofocus
+          use:focusOnMount
           onkeydown={(e) => {
             if (e.key === 'Escape') { e.stopPropagation(); flow.viewerEditing = false; flow.viewerErr = null; }
             if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) flow.saveViewerEdit();

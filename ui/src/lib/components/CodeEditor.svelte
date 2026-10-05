@@ -1183,7 +1183,7 @@
     top: 6px;
     inset-inline-end: 10px;
     z-index: var(--z-sticky);
-    padding: 3px 10px;
+    padding: 2px 10px;
     font-size: var(--fs-xs);
     font-family: var(--font-ui);
     font-weight: 500;
@@ -1221,5 +1221,10 @@
   /* One-dark background matches the app dark theme */
   .code-editor-wrap :global(.cm-editor.cm-focused) {
     outline: none;
+  }
+  /* CodeMirror's dotted focus outline is replaced by the app ring, inset so
+     the editor's own edge never clips it. */
+  .code-editor-wrap:focus-within {
+    box-shadow: inset 0 0 0 1px var(--accent-text);
   }
 </style>

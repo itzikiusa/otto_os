@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PathField from '../../lib/components/PathField.svelte';
   import { toastError } from '../../lib/toastError';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
@@ -37,6 +38,8 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
   import { kindLabel, runStateLabel, severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../lib/status';
   import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
   import type { Poller } from '../../lib/poll';
@@ -461,6 +464,15 @@
     if (r && isActive(r)) startPoll();
     return () => stopPoll();
   });
+
+  /** Run / agent / review state → the shared Badge tone. */
+  function stTone(state: string): BadgeTone {
+    if (state === 'running' || state === 'summarizing' || state === 'reviewing' || state === 'revising') return 'accent';
+    if (state === 'done' || state === 'clean' || state === 'revised') return 'ok';
+    if (state === 'done_with_findings' || state === 'exhausted') return 'warn';
+    if (state === 'error') return 'bad';
+    return 'neutral';
+  }
 </script>
 
 <div class="docs-agents">
@@ -650,13 +662,11 @@
     {:else}
       <!-- ── run view ──────────────────────────────────────────────────────── -->
       <div class="run-head">
-        <span
-          class="pill st-{run.state}"
-          title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
-        >
-          {#if active}<span class="spinner-xs"></span>{/if}
+        <Badge tone={stTone(run.state)}
+          title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}>
+          {#if active}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
           {displayState(run.state)}
-        </span>
+        </Badge>
         <span class="kind-chip">{kindLabel(run.kind)}</span>
         <span class="run-meta" title={run.prompt}>
           {#if run.kind === 'refine'}
@@ -671,7 +681,7 @@
         <span class="grow"></span>
         {#if active && run.kind === 'docs'}
           <button class="ghost" disabled={cancelling} onclick={() => void cancel()}>
-            {cancelling ? 'Cancelling…' : 'Cancel'}
+            {cancelling ? 'Canceling…' : 'Cancel'}
           </button>
         {/if}
         {#if run.state === 'done_with_findings'}
@@ -707,7 +717,7 @@
           <div class="agent-card">
             <div class="agent-top">
               <span class="agent-name">{agent.name}</span>
-              <span class="chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
+              <Badge variant="outline">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</Badge>
               <span class="grow"></span>
               {#if agent.session_id}
                 <button class="ghost small" onclick={() => void toggleTerminal(agent.session_id)}>
@@ -729,17 +739,17 @@
                   {retrying[String(agent.index)] ? 'Retrying…' : 'Retry'}
                 </button>
               {/if}
-              <span class="pill st-{agent.state}">
-                {#if agent.state === 'running'}<span class="spinner-xs"></span>{/if}
+              <Badge tone={stTone(agent.state)}>
+                {#if agent.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                 {runStateLabel(agent.state)}
-              </span>
+              </Badge>
             </div>
             {#if agent.error}
               <p class="agent-err">{agent.error}</p>
             {/if}
             {#if agent.drafts.length > 0 && active}
               <p class="drafts">
-                {agent.drafts.length} draft{agent.drafts.length === 1 ? '' : 's'}:
+                {plural(agent.drafts.length, 'draft')}:
                 <span class="mono">{agent.drafts.join(' · ')}</span>
               </p>
             {/if}
@@ -759,9 +769,9 @@
           <div class="agent-card">
           <div class="agent-top">
             <span class="agent-name">summarizer</span>
-            <span class="chip">
+            <Badge variant="outline">
               {run.summarizer.provider}{run.summarizer.model ? ' · ' + run.summarizer.model : ''}
-            </span>
+            </Badge>
             <span class="grow"></span>
             {#if run.summarizer.session_id}
               <button
@@ -781,10 +791,10 @@
                 {retrying['sum'] ? 'Retrying…' : 'Retry'}
               </button>
             {/if}
-            <span class="pill st-{run.summarizer.state}">
-              {#if run.summarizer.state === 'running'}<span class="spinner-xs"></span>{/if}
+            <Badge tone={stTone(run.summarizer.state)}>
+              {#if run.summarizer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
               {runStateLabel(run.summarizer.state)}
-            </span>
+            </Badge>
           </div>
           {#if run.summarizer.error}
             <p class="agent-err">{run.summarizer.error}</p>
@@ -807,12 +817,12 @@
               <span class="review-eyebrow">Independent review</span>
               <strong>{reviewStateLabel(run)}</strong>
             </div>
-            <span class="pill st-{run.review.state}">
+            <Badge tone={stTone(run.review.state)}>
               {#if run.review.state === 'reviewing' || run.review.state === 'revising'}
-                <span class="spinner-xs"></span>
+                <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
               {/if}
               {runStateLabel(run.review.state)}
-            </span>
+            </Badge>
           </div>
 
           {#if run.review.state === 'clean'}
@@ -821,8 +831,7 @@
             </div>
           {:else if run.review.state === 'exhausted'}
             <div class="review-outcome exhausted">
-              <strong>Review limit reached.</strong> Findings remain after {run.review.max_iterations}
-              iteration{run.review.max_iterations === 1 ? '' : 's'}; the run kept the latest revisions
+              <strong>Review limit reached.</strong> Findings remain after {plural(run.review.max_iterations, 'iteration')}; the run kept the latest revisions
               and evidence below.
             </div>
           {:else if run.review.outcome}
@@ -837,11 +846,11 @@
                   <div>
                     <strong>Round {round.iteration}</strong>
                     <span>
-                      {round.reviewers.length} reviewer{round.reviewers.length === 1 ? '' : 's'}
+                      {plural(round.reviewers.length, 'reviewer')}
                     </span>
                   </div>
                   <span class="grow"></span>
-                  <span class="pill st-{round.state}">{runStateLabel(round.state)}</span>
+                  <Badge tone={stTone(round.state)}>{runStateLabel(round.state)}</Badge>
                 </header>
 
                 <div class="reviewer-list">
@@ -849,9 +858,9 @@
                     <div class="reviewer-card">
                       <div class="agent-top">
                         <span class="agent-name">{reviewer.skill}</span>
-                        <span class="chip">
+                        <Badge variant="outline">
                           {reviewer.provider}{reviewer.model ? ' · ' + reviewer.model : ''}
-                        </span>
+                        </Badge>
                         <span class="grow"></span>
                         {#if reviewer.session_id}
                           <button
@@ -875,10 +884,10 @@
                               : 'Retry reviewer'}
                           </button>
                         {/if}
-                        <span class="pill st-{reviewer.state}">
-                          {#if reviewer.state === 'running'}<span class="spinner-xs"></span>{/if}
+                        <Badge tone={stTone(reviewer.state)}>
+                          {#if reviewer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                           {runStateLabel(reviewer.state)}
-                        </span>
+                        </Badge>
                       </div>
                       {#if reviewer.focus}
                         <p class="review-focus-label">Focus: {reviewer.focus}</p>
@@ -947,10 +956,10 @@
                           {retrying[`revision-${round.iteration}`] ? 'Retrying…' : 'Retry revision'}
                         </button>
                       {/if}
-                      <span class="pill st-{round.revision.state}">
-                        {#if round.revision.state === 'running'}<span class="spinner-xs"></span>{/if}
+                      <Badge tone={stTone(round.revision.state)}>
+                        {#if round.revision.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                         {runStateLabel(round.revision.state)}
-                      </span>
+                      </Badge>
                     </div>
                     {#if round.revision.error}
                       <p class="agent-err">{round.revision.error}</p>
@@ -980,7 +989,7 @@
       {#if run.written.length > 0}
         <div class="written">
           <span class="written-title">
-            {run.written.length} note{run.written.length === 1 ? '' : 's'} written
+            {plural(run.written.length, 'note')} written
           </span>
           {#each run.written as p (p)}
             <button class="written-link" onclick={() => void vault.open(p)}>{p}</button>
@@ -1002,13 +1011,11 @@
               onclick={() => selectRun(r)}
               title={r.prompt}
             >
-              <span
-                class="pill st-{r.state}"
-                title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
-              >
-                {#if isActive(r)}<span class="spinner-xs"></span>{/if}
+              <Badge tone={stTone(r.state)}
+                title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}>
+                {#if isActive(r)}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                 {displayState(r.state)}
-              </span>
+              </Badge>
               <span class="kind-chip">{kindLabel(r.kind)}</span>
               <span class="run-row-text">
                 {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
@@ -1047,7 +1054,7 @@
     max-width: 760px;
     width: 100%;
     margin: 0 auto;
-    padding: 18px 26px 60px;
+    padding: 18px 24px 60px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -1077,7 +1084,7 @@
   }
   .tpl-use {
     border: 1px solid var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-radius: var(--radius-s);
     padding: 6px 12px;
@@ -1117,13 +1124,13 @@
   .skill-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text);
     background: var(--hover);
     border: 1px solid var(--border);
     border-radius: 999px;
-    padding: 3px 10px;
+    padding: 2px 10px;
     cursor: pointer;
   }
   .skill-chip:hover {
@@ -1178,7 +1185,7 @@
   }
   .review-config-head {
     min-height: 48px;
-    padding: 9px 12px;
+    padding: 8px 12px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1216,7 +1223,7 @@
   .iteration-field {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
   }
   .iteration-input {
     width: 56px;
@@ -1234,7 +1241,7 @@
     display: inline-grid;
     place-items: center;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     font: 600 var(--fs-xs) var(--font-mono);
   }
@@ -1243,12 +1250,12 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .reviewer-main-fields {
     display: grid;
     grid-template-columns: minmax(90px, 0.8fr) minmax(100px, 0.9fr) minmax(180px, 1.6fr) auto;
-    gap: 5px;
+    gap: 4px;
   }
   .reviewer-main-fields > select,
   .reviewer-main-fields > input,
@@ -1260,7 +1267,7 @@
     box-sizing: border-box;
   }
   .review-hint {
-    margin-block: 0; margin-inline: 30px 0;
+    margin-block: 0; margin-inline: 28px 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.4;
@@ -1272,7 +1279,7 @@
     border-radius: var(--radius-s);
     color: var(--text-dim);
     font-size: var(--fs-s);
-    padding: 5px 12px;
+    padding: 4px 12px;
     cursor: pointer;
   }
   .add-agent:hover {
@@ -1287,7 +1294,7 @@
     background: var(--accent-solid);
     border: none;
     color: var(--accent-contrast);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 8px 18px;
     font-size: var(--fs-m);
     cursor: pointer;
@@ -1320,13 +1327,13 @@
     background: var(--surface-2);
     color: var(--text);
     border-radius: var(--radius-s);
-    padding: 5px 12px;
+    padding: 4px 12px;
     cursor: pointer;
     font-size: var(--fs-s);
     white-space: nowrap;
   }
   .ghost.small {
-    padding: 3px 10px;
+    padding: 2px 10px;
     font-size: var(--fs-xs);
   }
   .ghost:hover:not(:disabled) {
@@ -1344,7 +1351,7 @@
   .agent-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 8px 12px;
   }
   .agent-top {
@@ -1357,13 +1364,6 @@
     font-size: var(--fs-s);
     font-weight: 600;
   }
-  .chip {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px 8px;
-  }
   .agent-err {
     margin: 6px 0 0;
     font-size: var(--fs-xs);
@@ -1372,7 +1372,7 @@
     word-break: break-word;
   }
   .drafts {
-    margin: 5px 0 0;
+    margin: 4px 0 0;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     line-height: 1.4;
@@ -1385,7 +1385,7 @@
     height: min(360px, 60vh);
     margin: 8px 0 2px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     overflow: hidden;
     overscroll-behavior: contain;
   }
@@ -1403,7 +1403,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 11px 13px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--border);
   }
   .review-progress > div {
@@ -1425,7 +1425,7 @@
     margin: 10px 12px 0;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 7px 9px;
+    padding: 6px 8px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.45;
@@ -1448,7 +1448,7 @@
   }
   .review-round {
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     overflow: hidden;
     background: var(--surface-2);
   }
@@ -1484,7 +1484,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);
-    padding: 8px 9px;
+    padding: 8px 8px;
   }
   .revision-card {
     margin: 0 8px 8px;
@@ -1493,11 +1493,11 @@
   .revision-mark {
     width: 20px;
     height: 20px;
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     display: inline-grid;
     place-items: center;
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .review-focus-label,
   .clean-verdict {
@@ -1516,24 +1516,24 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-top: 7px;
+    margin-top: 6px;
   }
   .finding {
     border-inline-start: 2px solid var(--border);
-    padding-block: 3px; padding-inline: 8px 0;
+    padding-block: 2px; padding-inline: 8px 0;
   }
   .finding-head {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-bottom: 3px;
+    margin-bottom: 2px;
   }
   .finding > strong {
     font-size: var(--fs-xs);
     line-height: 1.4;
   }
   .finding p {
-    margin: 3px 0 0;
+    margin: 2px 0 0;
     color: var(--text-dim);
     font-size: var(--fs-xs);
     line-height: 1.4;
@@ -1544,7 +1544,7 @@
   }
   .severity {
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -1572,7 +1572,7 @@
   .evidence,
   .changed-paths span {
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-s);
     padding: 2px 6px;
     color: var(--text-dim);
     background: color-mix(in srgb, var(--text-dim) 5%, transparent);
@@ -1580,62 +1580,6 @@
     overflow-wrap: anywhere;
   }
 
-  /* status pills */
-  .pill {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-    padding: 2px 7px;
-    border-radius: 5px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .st-pending,
-  .st-skipped,
-  .st-cancelled,
-  .st-interrupted {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .st-interrupted {
-    border: 1px dashed color-mix(in srgb, var(--text-dim) 45%, transparent);
-  }
-  .st-running,
-  .st-summarizing,
-  .st-reviewing,
-  .st-revising {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent-text);
-  }
-  .st-done {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .st-done_with_findings,
-  .st-exhausted {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .st-clean,
-  .st-revised {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .st-error {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-  }
 
   .err {
     color: var(--danger);
@@ -1652,7 +1596,7 @@
     flex-direction: column;
     gap: 4px;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--radius-m);
     padding: 10px 12px;
   }
   .written-title {
@@ -1740,7 +1684,7 @@
     background: none;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
-    padding: 5px 8px;
+    padding: 4px 8px;
     cursor: pointer;
     text-align: start;
     min-width: 0;
@@ -1773,11 +1717,11 @@
     flex: none;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
-    padding: 1px 7px;
+    padding: 1px 6px;
   }
   .note-link {
     background: none;

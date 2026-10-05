@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -554,7 +557,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error("Couldn’t update the config", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t update the config", e);
     } finally {
       cfgSaving = false;
     }
@@ -568,7 +571,7 @@
     if (typed === null) return;
     if (typed !== topic) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Topic not deleted', `The name you typed didn't match "${topic}".`);
+      toasts.warn('Topic not deleted', `The name you typed didn’t match "${topic}".`);
       return;
     }
     try {
@@ -578,7 +581,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error("Couldn’t delete the topic", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t delete the topic", e);
     }
   }
 
@@ -596,7 +599,7 @@
         const full: ConsumeReq = { ...lastReq, preview: false };
         messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
       } catch (e) {
-        toasts.error("Couldn’t export the messages", e instanceof Error ? e.message : String(e));
+        toastError("Couldn’t export the messages", e);
         return;
       } finally {
         exporting = false;
@@ -773,7 +776,7 @@
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
         {/if}
         {#if result?.masked}
-          <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
+          <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && (tailOffsets.size > 0 || tailError)}
           <p class="muted pad small tail-note" role="status">
@@ -793,17 +796,15 @@
             <span class="mono">P{selected.partition} · offset {selected.offset}</span>
             <span class="muted">{fmtTs(selected.timestamp_ms)}</span>
             {#if selected.value?.format}
-              <span class="badge">{selected.value.format}{selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}</span>
+              <Badge tone="accent" label={`${selected.value.format}${selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}`} />
             {/if}
             {#if selected.headers.length > 0}
-              <span class="badge muted-badge">{selected.headers.length} header{selected.headers.length === 1 ? '' : 's'}</span>
+              <Badge label={plural(selected.headers.length, 'header')} />
             {/if}
             {#if result}
               {@const pct = offsetPct(selected, result.partitions)}
               {#if pct !== null}
-                <span class="badge pos-badge" title="Offset position within partition watermarks">
-                  {pct.toFixed(1)}%
-                </span>
+                <Badge label={`${pct.toFixed(1)}%`} title="Offset position within partition watermarks" />
               {/if}
             {/if}
             {#if selected.value?.raw_base64}
@@ -1055,7 +1056,7 @@
   }
   .consume-bar select,
   .consume-bar input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1069,7 +1070,7 @@
   .filter-group {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     flex: 1;
     min-width: 100px;
   }
@@ -1088,7 +1089,7 @@
   .auto {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     white-space: nowrap;
@@ -1098,7 +1099,7 @@
     color: var(--accent-text);
   }
   /* Server-side PII masking active badge — shown below the message list. */
-  .masked-badge {
+  .masked-note {
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -1143,7 +1144,7 @@
     background: var(--surface);
   }
   tbody td {
-    padding: 5px 10px;
+    padding: 4px 10px;
     border-top: 1px solid var(--border);
   }
   .message-open {
@@ -1182,7 +1183,7 @@
   /* Offset-position bar cell */
   .pos-cell {
     width: 56px;
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
   .pos-bar-wrap {
     width: 48px;
@@ -1198,10 +1199,6 @@
     min-width: 2px;
   }
   /* Offset-position badge in the detail pane */
-  .pos-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .tail-note {
     padding-top: 4px;
     padding-bottom: 6px;
@@ -1225,15 +1222,6 @@
     gap: 8px;
     flex-wrap: wrap;
     margin-bottom: 8px;
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
   }
   h5 {
     margin: 12px 0 4px;
@@ -1270,7 +1258,7 @@
     border-bottom: 1px solid var(--border);
   }
   .cfg-set input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1293,7 +1281,7 @@
   .chk-opt {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
@@ -1302,7 +1290,7 @@
   .headers-section {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
   }
   .headers-title {
     display: flex;
@@ -1315,12 +1303,12 @@
   }
   .header-row {
     display: flex;
-    gap: 5px;
+    gap: 4px;
     align-items: center;
   }
   .header-key {
     width: 140px;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1329,7 +1317,7 @@
   }
   .header-val {
     flex: 1;
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -1343,10 +1331,6 @@
     font-size: var(--fs-xs);
     color: var(--danger);
   }
-  .muted-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .field {
     display: flex;
     flex-direction: column;
@@ -1359,7 +1343,7 @@
   .field input,
   .field select,
   .field textarea {
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);

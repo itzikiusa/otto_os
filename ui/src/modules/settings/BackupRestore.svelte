@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
@@ -65,7 +66,7 @@
       toasts.success(
         'Settings exported',
         excCount > 0
-          ? `${excCount} secret key${excCount === 1 ? '' : 's'} excluded`
+          ? `${plural(excCount, 'secret key')} excluded`
           : 'No secrets in export',
       );
     } catch (e) {
@@ -86,13 +87,13 @@
     try {
       parsed = JSON.parse(await file.text()) as SettingsExportResp;
     } catch {
-      toasts.error('Couldn’t import settings', `“${file.name}” isn't valid JSON.`);
+      toasts.error('Couldn’t import settings', `“${file.name}” isn’t valid JSON.`);
       return;
     }
 
     const keyCount = Object.keys(parsed.settings ?? {}).length;
     const ok = await confirmer.ask(
-      `Merge ${keyCount} setting${keyCount === 1 ? '' : 's'} from “${file.name}” into this Otto? Matching settings are overwritten; secret-keyed entries are rejected automatically.`,
+      `Merge ${plural(keyCount, 'setting')} from “${file.name}” into this Otto? Matching settings are overwritten; secret-keyed entries are rejected automatically.`,
       { title: 'Import settings', confirmLabel: 'Import', danger: false },
     );
     if (!ok) return;
@@ -118,7 +119,7 @@
     try {
       const resp = await api.get<StateBackupResp>('/state/backup');
       downloadJson(resp, `otto-state-backup-${dateSlug()}.json`);
-      toasts.success('Settings backup downloaded', `${resp.manifest.workspace_count} workspace${resp.manifest.workspace_count === 1 ? '' : 's'} in manifest.`);
+      toasts.success('Settings backup downloaded', `${plural(resp.manifest.workspace_count, 'workspace')} in manifest.`);
     } catch (e) {
       toastError('Couldn’t download the settings backup', e);
     } finally {
@@ -136,14 +137,14 @@
     try {
       backup = JSON.parse(await file.text()) as StateBackupResp;
     } catch {
-      toasts.error('Couldn’t restore settings', `“${file.name}” isn't a valid settings backup.`);
+      toasts.error('Couldn’t restore settings', `“${file.name}” isn’t a valid settings backup.`);
       return;
     }
 
     const keyCount = Object.keys(backup.settings ?? {}).length;
     const snap = backup.manifest?.snapshot_at ? new Date(backup.manifest.snapshot_at).toLocaleString() : 'an unknown date';
     const ok = await confirmer.ask(
-      `Overwrite ${keyCount} setting${keyCount === 1 ? '' : 's'} with the values in “${file.name}” (taken ${snap}, daemon ${backup.manifest?.daemon_version ?? 'unknown'})? The database, workspaces, sessions and credentials are not touched.`,
+      `Overwrite ${plural(keyCount, 'setting')} with the values in “${file.name}” (taken ${snap}, daemon ${backup.manifest?.daemon_version ?? 'unknown'})? The database, workspaces, sessions and credentials are not touched.`,
       { title: 'Restore settings', confirmLabel: 'Restore', danger: true },
     );
     if (!ok) return;
@@ -151,7 +152,7 @@
     restoring = true;
     try {
       await api.post('/state/restore', { backup, confirm: true });
-      toasts.success('Settings restored', `${keyCount} setting${keyCount === 1 ? '' : 's'} applied.`);
+      toasts.success('Settings restored', `${plural(keyCount, 'setting')} applied.`);
     } catch (err) {
       toastError('Couldn’t restore settings', err);
     } finally {
@@ -207,7 +208,7 @@
     {#if lastExport}
       <div class="hint-line">
         Last export: {lastExport.excluded_keys.length > 0
-          ? `${lastExport.excluded_keys.length} secret key${lastExport.excluded_keys.length === 1 ? '' : 's'} excluded`
+          ? `${plural(lastExport.excluded_keys.length, 'secret key')} excluded`
           : 'no secrets present'}
       </div>
     {/if}

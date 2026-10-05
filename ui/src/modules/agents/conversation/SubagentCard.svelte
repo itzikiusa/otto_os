@@ -66,7 +66,7 @@
       {:else}
         {#if body?.has_earlier}
           <button class="btn small ghost" disabled={body.loading} onclick={() => ctx.conv.loadSubagentEarlier(agentId)}>
-            {body.loading ? 'Loading…' : 'Load earlier'}
+            {body.loading ? 'Loading earlier turns…' : 'Load earlier'}
           </button>
         {/if}
         {#each items as item (item.id)}

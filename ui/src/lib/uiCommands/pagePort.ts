@@ -28,7 +28,7 @@ export function waitFor<T>(
     let timer: ReturnType<typeof setTimeout> | null = null;
     const onAbort = (): void => {
       if (timer) clearTimeout(timer);
-      reject(new UiCommandError('cancelled_by_user', 'Cancelled'));
+      reject(new UiCommandError('cancelled_by_user', 'Canceled'));
     };
     const tick = (): void => {
       if (signal.aborted) return onAbort();

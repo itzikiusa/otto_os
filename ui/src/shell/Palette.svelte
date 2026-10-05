@@ -6,6 +6,7 @@
   // is ≥ 2 chars and a workspace is active; cross-module hits appear as a
   // second "Results" section below commands.
   import { dialogFocus } from '../lib/dialogFocus';
+  import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
   import { api, isAbortError } from '../lib/api/client';
   import type { Action, SearchHit } from '../lib/api/types';
@@ -330,7 +331,7 @@
   async function submitEnglish(): Promise<void> {
     if (englishText.trim() === '' || busy) return;
     if (!ws.currentId) {
-      toasts.error('No workspace selected', 'Pick a workspace in the navigator first.');
+      toasts.error(NO_WORKSPACE, 'Pick one in the navigator, then try again.');
       return;
     }
     busy = true;
@@ -532,7 +533,6 @@
             </div>
           {/if}
           {#each searchHits as hit, h (hit.kind + ':' + hit.id)}
-            <!-- svelte-ignore a11y_click_events_have_key_events (keyboard: ↑/↓ + Enter in the input) -->
             <div
               class="pal-hit"
               class:selected={selected === hitBase + h}
@@ -551,12 +551,13 @@
                 <span class="grow"></span>
                 <span class="pal-group pal-hit-kind">{hit.kind.replace('_', ' ')}</span>
               </div>
-              <!-- The pills are a mouse shortcut only (an option holds no interactive
-                   children); the keyboard path is ⏎ / ⌥⏎ / ⇧⏎ on the selected hit. -->
+              <!-- The pills are a mouse shortcut only: out of the tab order and
+                   hidden from AT (an option holds no interactive children); the
+                   keyboard path is ⏎ / ⌥⏎ / ⇧⏎ on the selected hit. mousedown
+                   keeps focus in the palette input. -->
               <div class="pal-hit-actions" aria-hidden="true">
                 {#each hitActions(hit) as action (action)}
-                  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <span class="pal-hit-btn" onclick={() => void hitAction(hit, action)}>{HIT_ACTION_LABEL[action]}{selected === hitBase + h ? ` ${HIT_ACTION_KEY[action]}` : ''}</span>
+                  <button type="button" class="pal-hit-btn" tabindex="-1" onmousedown={(e) => e.preventDefault()} onclick={() => void hitAction(hit, action)}>{HIT_ACTION_LABEL[action]}{selected === hitBase + h ? ` ${HIT_ACTION_KEY[action]}` : ''}</button>
                 {/each}
               </div>
             </div>
@@ -587,7 +588,7 @@
               class="pill-toggle"
               class:on={aiFallback}
               aria-pressed={aiFallback}
-              title="When the request isn't a known command, ask the AI planner for a plan (you still confirm it)"
+              title="When the request isn’t a known command, ask the AI planner for a plan (you still confirm it)"
               onclick={() => setFallback(!aiFallback)}
             >
               <Icon name="sparkle" size={12} /> AI planner fallback
@@ -746,7 +747,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 1px 5px;
+    padding: 1px 4px;
   }
   .pal-ask {
     border-top: 1px solid var(--border);
@@ -777,7 +778,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface-2);
-    padding: 9px 11px;
+    padding: 8px 10px;
     font-size: var(--fs-m);
     line-height: 1.5;
     resize: vertical;
@@ -854,7 +855,7 @@
     border-radius: var(--radius-s);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .pal-hit:hover {
     background: var(--hover);
@@ -894,6 +895,7 @@
   }
   .pal-hit-btn {
     padding: 1px 6px;
+    font-family: inherit;
     font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -903,7 +905,7 @@
     line-height: 1.6;
   }
   .pal-hit-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
   }

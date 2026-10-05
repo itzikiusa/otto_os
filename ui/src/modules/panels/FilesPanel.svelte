@@ -91,7 +91,7 @@
   .fp-count {
     font-size: var(--fs-xs);
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
 
   .fp-add-btn {

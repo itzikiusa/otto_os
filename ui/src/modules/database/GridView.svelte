@@ -897,7 +897,7 @@
                 type="text"
                 spellcheck="false"
                 autocomplete="off"
-                placeholder="filter"
+                placeholder="Filter…"
                 value={colFilters[ci] ?? ''}
                 aria-label="Filter {c.name}"
                 title="Contains · =exact · >n <n · NULL · !NULL"
@@ -1096,7 +1096,7 @@
   .th-line {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     min-width: 0;
   }
   th.num .th-line {
@@ -1276,7 +1276,7 @@
   }
   .grid tbody tr.odd td.rownum,
   .grid tbody tr:not(.spacer):hover td.rownum {
-    background: var(--surface-2);
+    background: var(--hover);
   }
   .grid thead .rownum {
     z-index: 3;
@@ -1347,7 +1347,7 @@
     color: var(--text-dim);
     font-style: italic;
     font-size: var(--fs-xs);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
   }
   .grid :global(.cell.bool) {
     color: var(--text);
@@ -1417,6 +1417,10 @@
     background: var(--surface) !important;
     box-shadow: inset 0 0 0 1.5px var(--accent);
   }
+  /* The editor input drops its outline for an inset ring of its own. */
+  .grid :global(.cell-input:focus-visible) {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
+  }
   /* A parked (pending) cell draft: visibly different until reviewed & applied. */
   .grid :global(.cell.dirty) {
     background: var(--warning-soft) !important;
@@ -1427,7 +1431,7 @@
   .grid :global(.cell-input) {
     width: 100%;
     height: 100%;
-    border: none;
+    border: none; /* ui-guards: allow (next line) — ring: .cell-input:focus-visible below; the guard can’t see into :global */
     outline: none;
     background: transparent;
     color: var(--text);

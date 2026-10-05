@@ -28,10 +28,10 @@
   {#if meta.attestedComputation}<p class="hint">Computation definition only. Otto has not run or attested this computation.</p>{/if}
 </div>
 <style>
-  .knowledge { padding: 5px 8px; font-size: var(--fs-xs); overflow-wrap: anywhere; }
-  .badges { display: flex; flex-wrap: wrap; gap: 5px; }
+  .knowledge { padding: 4px 8px; font-size: var(--fs-xs); overflow-wrap: anywhere; }
+  .badges { display: flex; flex-wrap: wrap; gap: 4px; }
   .badges span { border: 1px solid var(--border); padding: 2px 6px; border-radius: var(--radius-s); }
-  p { margin: 7px 0; } .hint, small { color: var(--text-dim); }
+  p { margin: 6px 0; } .hint, small { color: var(--text-dim); }
   .warning { color: var(--warning); } summary { cursor: pointer; }
-  .source { border-inline-start: 2px solid var(--border); padding-inline-start: 7px; margin-block: 8px; }
+  .source { border-inline-start: 2px solid var(--border); padding-inline-start: 6px; margin-block: 8px; }
 </style>

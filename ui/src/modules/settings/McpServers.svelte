@@ -1,5 +1,6 @@
 <script lang="ts">
   import PageHeader from '../../lib/components/PageHeader.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
   import SectionIntro from './SectionIntro.svelte';
@@ -286,7 +287,7 @@
       label="Attach the Connections MCP to agent sessions"
       checked={ottoEnabled}
       disabled={!wsId || !ottoLoaded || ottoSaving || !!ottoError}
-      title={!wsId ? 'Select a workspace first' : ottoError ? "Couldn’t read the current value — Retry below" : undefined}
+      title={!wsId ? NO_WORKSPACE : ottoError ? "Couldn’t read the current value — Retry below" : undefined}
       onchange={toggleOtto}
     >
       Otto's own <code>otto</code> server, <strong>read-only</strong>: agents can list your database
@@ -306,7 +307,7 @@
   {#if !wsId}
     <EmptyState
       icon="server"
-      title="Select a workspace first"
+      title={NO_WORKSPACE}
       body="MCP servers are per-workspace. Choose a workspace from the sidebar to configure them."
     />
   {:else}
@@ -328,8 +329,9 @@
       <div class="server-list">
         {#each servers as s (s.id)}
           {@const locked = busyId === s.id || !canConfigure(s.id)}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- Right-click is a pointer shortcut; Edit / Remove are buttons on the card. -->
           <div
+            role="presentation"
             class="card server"
             class:off={!s.enabled}
             oncontextmenu={(e) => ctxMenu.show(e, [
@@ -356,7 +358,7 @@
             </div>
             <div class="server-actions">
               <!-- The same inline "Enabled" switch as a Channels row. -->
-              <label class="checkbox-row srv-enabled" title={!canConfigure(s.id) ? "You can't configure this server" : s.enabled ? `Stop writing ${s.name} to .mcp.json` : `Write ${s.name} to .mcp.json for new sessions`}>
+              <label class="checkbox-row srv-enabled" title={!canConfigure(s.id) ? "You can’t configure this server" : s.enabled ? `Stop writing ${s.name} to .mcp.json` : `Write ${s.name} to .mcp.json for new sessions`}>
                 <input
                   type="checkbox"
                   checked={s.enabled}
@@ -373,7 +375,7 @@
               <button
                 class="icon-btn srv-tool"
                 disabled={locked}
-                title={!canConfigure(s.id) ? "You can't configure this server" : `Edit ${s.name}`}
+                title={!canConfigure(s.id) ? "You can’t configure this server" : `Edit ${s.name}`}
                 aria-label="Edit {s.name}"
                 onclick={() => openEdit(s)}
               >

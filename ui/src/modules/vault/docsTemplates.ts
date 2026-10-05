@@ -30,7 +30,7 @@ export interface DocsTemplate {
 const QUALITY_BAR = `
 Quality bar (read twice):
 - ELABORATE but NOT BLOATED: every sentence must carry information a reader acts on. Prefer tables, real examples and diagrams over paragraphs. No boilerplate, no restating code line-by-line — turning 1M lines of code into 500k lines of docs is failure; nobody reads that.
-- A note a reader can't consume in ~5 minutes must be split or tightened.
+- A note a reader can’t consume in ~5 minutes must be split or tightened.
 - Every factual claim cites the source file path (backticked, relative to the repo).
 - Realistic examples lifted from code/tests/fixtures — sanitize secrets.
 - Cross-link liberally with markdown links; every note must be reachable from the bundle's index.md.
@@ -64,7 +64,7 @@ CROSS-REPO LINKS + DEPENDENCY DEEP-DIVE — the vault is a graph, connect this r
 const INFRA_SCOPE = `
 INFRA / LIBRARY REPO — scope pivot (this repository is a library or infrastructure component, NOT a deployed service):
 - It exposes NO HTTP API of its own. Document the EXPORTED surface instead: every public package/module with its exported types, functions, interfaces and their signatures (a table per package); skip internal helpers.
-- Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don't exist.
+- Where the deliverables below ask for api.md / api-openapi.yaml, produce the LIBRARY API reference instead (per-package exported-surface tables + usage examples) — do NOT fabricate an OpenAPI spec for routes that don’t exist.
 - Add consumers.md: how downstream services are meant to use this library — the intended integration patterns, with realistic usage snippets lifted from tests and real consumers. When the vault already documents an app repo that imports this library, LINK to that app's bundle (its flow/data note when one names this library, else its index.md) so the app↔infra edge exists in both directions.
 - Config surface: every option / env var / parameter the library reads, its default and its effect.`;
 

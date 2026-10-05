@@ -19,7 +19,7 @@
   import { assistant, describeError } from '../../lib/stores/assistant.svelte';
   import { PROVIDER_NAME, ROUTE_ROWS, loadShare, parseKeywords, type Provider } from '../assistant/model';
   import { whenLabel } from '../assistant/format';
-  import StatePill from '../assistant/cards/StatePill.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import type { AssistantRouteKind, AssistantRouteTarget, AssistantRoutingSettings } from '../../lib/api/types';
 
   $effect(() => {
@@ -138,7 +138,7 @@
                   <ProviderIcon provider={p} size={16} />
                   <strong>{PROVIDER_NAME[p]}</strong>
                   <span class="push">
-                    {#if lim}<StatePill tone="warn" label={lim.until ? `Limit until ${whenLabel(lim.until)}` : 'Limit reached'} />{:else}<StatePill tone="ok" label="No limit hit" />{/if}
+                    {#if lim}<Badge tone="warn" label={lim.until ? `Limit until ${whenLabel(lim.until)}` : 'Limit reached'} />{:else}<Badge tone="ok" label="No limit hit" />{/if}
                   </span>
                 </div>
                 <div class="meter" role="meter" aria-label={`${PROVIDER_NAME[p]} share of this week’s load`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={s?.pct ?? 0}>
@@ -403,7 +403,7 @@
   .segmented > button {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
   }
   .model-cell {
     min-width: 200px;
@@ -430,7 +430,7 @@
     cursor: pointer;
   }
   .radio input {
-    margin-top: 3px;
+    margin-top: 2px;
   }
   .radio > span {
     display: flex;

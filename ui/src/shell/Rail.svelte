@@ -98,9 +98,7 @@
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
       { label: sub && sub !== name ? `${name} (${sub})` : name, icon: 'user', disabled: true },
       { separator: true },
-      { label: 'Help', icon: 'info', action: () => router.go('walkthroughs') },
-      { label: 'Settings', icon: 'gear', action: () => router.go('settings/appearance') },
-      { separator: true },
+      // Help and Settings are the rail buttons right above this one.
       { label: 'Sign out', icon: 'logout', action: () => auth.logout() },
     ]);
   }
@@ -235,7 +233,7 @@
     scrollbar-width: none;
     /* A scroller clips: room for the first/last icon's focus ring and the
        count badge that overhangs the icon's top edge. */
-    padding-block: 3px;
+    padding-block: 2px;
   }
   .rail-modules::-webkit-scrollbar {
     display: none;
@@ -308,7 +306,7 @@
     inset-inline-end: -3px;
     min-width: 15px;
     height: 15px;
-    padding: 0 3px;
+    padding: 0 2px;
     border-radius: 999px;
     /* The Navigator's count-chip language (tinted fill, semantic text), made
        opaque over the sidebar so the icon under the badge doesn't show
@@ -329,7 +327,7 @@
     width: 22px;
     height: 22px;
     border-radius: 50%;
-    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
     font-size: var(--fs-xs);
     font-weight: 600;

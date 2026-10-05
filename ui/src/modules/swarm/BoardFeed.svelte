@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // The shared surface: a live feed of agent + user board posts, with a composer.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import AgentChip from '../../lib/components/AgentChip.svelte';
@@ -91,7 +92,7 @@
       if (draft === submitted) draft = '';
     } catch (e) {
       // Keep the draft so nothing typed is lost; say why it didn't post.
-      toasts.error("Couldn’t post to the board", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t post to the board", e);
     } finally {
       posting = false;
     }
@@ -185,11 +186,6 @@
     padding: 6px 12px;
     border-block-end: 1px solid var(--border);
     flex-wrap: wrap;
-  }
-  button.chip {
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
   }
   /* Kind chips: neutral by default; a tone only where the kind means one. */
   .kind-chip {

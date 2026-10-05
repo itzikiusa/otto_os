@@ -15,6 +15,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import { runStatus } from '../../lib/status';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -219,7 +220,7 @@
           </span>
           <span class="src-name">{sourceLabel(v.source)}</span>
           <span class="grow dim mono ellipsis" dir="ltr" title={location(v.source)}>{location(v.source)}</span>
-          {#if group.driftedSources.includes(v.source)}<span class="chip tone-warning">Drifted</span>{/if}
+          {#if group.driftedSources.includes(v.source)}<Badge tone="warn" label="Drifted" />{/if}
           {#if v.source === 'bundled'}
             <span class="chip">v{v.bundledVersion}{v.bundledState === 'not_installed' ? ' · not installed' : ''}</span>
           {/if}
@@ -261,7 +262,7 @@
         <div class="stat-sub dim">{myGolden.length ? 'Regression cases pinned to it' : 'None pinned to this skill'}</div>
       </div>
     </div>
-    <p class="dim note"><Icon name="info" size={12} /> Otto doesn't record when an agent loads a skill during a session, so there's no "last used by an agent" yet — these counts are Otto's own reviews and evaluations of it.</p>
+    <p class="dim note"><Icon name="info" size={12} /> Otto doesn’t record when an agent loads a skill during a session, so there’s no "last used by an agent" yet — these counts are Otto’s own reviews and evaluations of it.</p>
   </section>
 {/if}
 
@@ -408,11 +409,6 @@
   .note :global(svg) {
     margin-top: 2px;
     flex: none;
-  }
-  .chip.tone-warning {
-    color: var(--warning);
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   }
   @media (max-width: 640px) {
     .rowi .mono {

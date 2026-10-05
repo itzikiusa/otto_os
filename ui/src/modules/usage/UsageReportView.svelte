@@ -179,7 +179,7 @@
   }
   th,
   td {
-    padding: 5px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid var(--separator);
     text-align: start;
     white-space: nowrap;

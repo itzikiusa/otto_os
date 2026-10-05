@@ -40,7 +40,7 @@ type Args = Record<string, unknown>;
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
 
-const cancelled = (): UiCommandError => new UiCommandError('cancelled_by_user', 'Cancelled');
+const canceled = (): UiCommandError => new UiCommandError('cancelled_by_user', 'Canceled');
 
 function str(args: Args, key: string): string | undefined {
   const v = args[key];
@@ -80,7 +80,7 @@ function waitFor<T>(
   return new Promise<T>((resolve, reject) => {
     const started = Date.now();
     const tick = (): void => {
-      if (signal.aborted) return reject(cancelled());
+      if (signal.aborted) return reject(canceled());
       let v: T | null | undefined | false;
       try {
         v = pred();
@@ -152,7 +152,7 @@ function resolveConn(key: string | undefined): Connection {
     throw new UiCommandError('invalid_args', `More than one connection is named "${k}" — pass its id.`);
   }
   if (database.otherConnections.some((c) => c.id === k || c.name.toLowerCase() === lower)) {
-    throw new UiCommandError('invalid_args', `"${k}" isn't a database connection (SSH / custom profiles open as terminals).`);
+    throw new UiCommandError('invalid_args', `"${k}" isn’t a database connection (SSH / custom profiles open as terminals).`);
   }
   throw new UiCommandError('not_found', `No database connection "${k}" in this workspace`);
 }
@@ -185,7 +185,7 @@ async function focusTab(tabId: number, ctx: UiCommandCtx): Promise<QueryTab> {
       `No open query tab ${tabId} (it was closed, or the window reloaded) — open one with otto.ui_db_new_tab.`,
     );
   }
-  if (ctx.signal.aborted) throw cancelled();
+  if (ctx.signal.aborted) throw canceled();
   await whenMounted(`[data-db-tab-id="${tabId}"]`, ctx.signal).catch(() => null);
   return t;
 }
@@ -334,7 +334,7 @@ async function runActive(
   } finally {
     ctx.signal.removeEventListener('abort', onAbort);
   }
-  if (ctx.signal.aborted) throw cancelled();
+  if (ctx.signal.aborted) throw canceled();
   return { t, outcome };
 }
 
@@ -607,7 +607,7 @@ registerUiCommands('connections', {
     } finally {
       ctx.signal.removeEventListener('abort', onAbort);
     }
-    if (ctx.signal.aborted) throw cancelled();
+    if (ctx.signal.aborted) throw canceled();
     if (database.planOpen && database.queryPlan) {
       ctx.highlight('.db-root');
       return { tab_id: String(t.id), statement: t.statement, plan: database.queryPlan.root, engine: database.queryPlan.engine };

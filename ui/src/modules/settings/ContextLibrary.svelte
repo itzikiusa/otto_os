@@ -142,7 +142,7 @@
   async function okToLeave(): Promise<boolean> {
     if (!dirty) return true;
     return confirmer.ask(
-      `Your changes to ${isNew ? `the new ${meta.singular}` : `“${loadedName}”`} haven't been saved.`,
+      `Your changes to ${isNew ? `the new ${meta.singular}` : `“${loadedName}”`} haven’t been saved.`,
       { title: 'Discard changes?', confirmLabel: 'Discard' },
     );
   }

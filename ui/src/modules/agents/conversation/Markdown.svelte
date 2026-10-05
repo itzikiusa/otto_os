@@ -297,7 +297,7 @@
     flex-shrink: 0;
     font-weight: 600;
     color: var(--text);
-    letter-spacing: 0.01em;
+    letter-spacing: .06em;
   }
   .md :global(.code-file) {
     min-width: 0;
@@ -335,7 +335,7 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     cursor: pointer;
     flex-shrink: 0;
   }
@@ -365,7 +365,7 @@
     width: 100%;
     border-top: 1px solid var(--border);
     border-radius: 0;
-    padding: 5px 10px;
+    padding: 4px 10px;
     text-align: center;
   }
   /* A narrow pane drops the line count and the file name first. */
@@ -404,7 +404,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
     background: var(--accent-soft);
@@ -424,7 +424,7 @@
     border: 1.5px solid currentColor;
   }
   .md :global(a.ref-chip:hover) {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
   }
   .md :global(a:focus-visible) {
     outline: 2px solid var(--accent-text);
@@ -464,7 +464,7 @@
   .md :global(td) {
     border-bottom: 1px solid var(--border);
     border-inline-end: 1px solid var(--border);
-    padding: 5px 10px;
+    padding: 4px 10px;
     text-align: start;
     vertical-align: top;
   }

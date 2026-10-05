@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
@@ -22,6 +23,7 @@
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -334,7 +336,7 @@
           `${left.length} file${left.length === 1 ? ' still has' : 's still have'} changes: ${left.slice(0, 3).join(', ')}${left.length > 3 ? '…' : ''}`,
         );
       } else {
-        toasts.info(`Discarded ${paths.length} file${paths.length === 1 ? '' : 's'}`);
+        toasts.info(`Discarded ${plural(paths.length, 'file')}`);
       }
     } catch (e) {
       toastError('Couldn’t discard the changes', e);
@@ -368,7 +370,7 @@
   ): void {
     e.preventDefault();
     const paths = node.files.map((f) => f.path);
-    const n = `${paths.length} file${paths.length === 1 ? '' : 's'}`;
+    const n = `${plural(paths.length, 'file')}`;
     ctxMenu.show(e, [
       {
         label: `${section === 'staged' ? 'Unstage' : 'Stage'} ${node.name}/ (${n})`,
@@ -655,7 +657,7 @@
       <span class="mono wp-fname">{file.name}</span>
       {#if partial.has(file.change.path)}
         <!-- Same path in both trees: some hunks staged, some not. -->
-        <span class="chip partial" title="Partially staged">partial</span>
+        <Badge tone="accent" variant="outline" label="Partial" title="Partially staged" testid="wip-partial" />
       {/if}
     </button>
     <button
@@ -686,7 +688,7 @@
         type="checkbox"
         checked={section === 'staged'}
         onchange={() => stagePaths(node.files.map((f) => f.path), section === 'unstaged')}
-        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({node.files.length} file{node.files.length === 1 ? '' : 's'})"
+        title="{section === 'staged' ? 'Unstage' : 'Stage'} {node.path}/ ({plural(node.files.length, 'file')})"
         aria-label="{section === 'staged' ? 'Unstage' : 'Stage'} folder {node.path}"
       />
       <button
@@ -709,7 +711,7 @@
         onclick={() =>
           void discardPaths(
             node.files.map((f) => f.path),
-            `${node.path}/ (${node.files.length} file${node.files.length === 1 ? '' : 's'})`,
+            `${node.path}/ (${plural(node.files.length, 'file')})`,
             section,
           )}
       >
@@ -740,7 +742,7 @@
 <div class="wip-panel">
   <div class="wp-head">
     <span class="wp-title mono">// WIP</span>
-    <span class="wp-count">{status.changes.length} file{status.changes.length === 1 ? '' : 's'} changed</span>
+    <span class="wp-count">{plural(status.changes.length, 'file')} changed</span>
     <span class="grow"></span>
     <button class="icon-btn wp-close" onclick={onclose} title="Close WIP panel" aria-label="Close WIP panel"><Icon name="x" size={14} /></button>
   </div>
@@ -820,7 +822,7 @@
           <p class="wp-untracked-cap" role="note">
             <Icon name="info" size={12} />
             <span
-              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they’re
+              >{hiddenUntracked.toLocaleString()} more untracked {hiddenUntracked === 1 ? 'file' : 'files'} not shown. If they’re
               build output or dependencies, add them to <code>.gitignore</code>.</span
             >
           </p>
@@ -938,7 +940,7 @@
           : 'Stage a file first — drafting can’t see untracked files'}
       >
         {#if drafting}
-          <span class="spinner-xs"></span>Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
+          <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
           <Icon name="zap" size={11} /> Draft
         {/if}
@@ -1070,13 +1072,13 @@
     align-items: center;
     gap: 6px;
     width: 100%;
-    padding: 7px 10px;
+    padding: 6px 10px;
     border: none;
     background: var(--surface-2);
     color: var(--text);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
   }
   .wp-sec-toggle {
     flex: 1;
@@ -1097,7 +1099,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     min-width: 16px;
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
     background: var(--surface);
     color: var(--text-dim);
@@ -1113,11 +1115,11 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--accent-text);
-    padding: 2px 7px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
   }
   .wp-sec-head .wp-sec-action:hover {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .wp-sec-head .wp-sec-action.danger {
     color: var(--danger);
@@ -1146,7 +1148,7 @@
   .wp-name {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 6px;
     flex: 1;
     min-width: 0;
     height: 26px;
@@ -1168,7 +1170,7 @@
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
-    padding: 3px 5px;
+    padding: 2px 4px;
     border-radius: var(--radius-s);
     line-height: 1;
     opacity: 0;
@@ -1257,7 +1259,7 @@
   }
   .wp-side:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--hover);
   }
 
   .kind {
@@ -1284,7 +1286,7 @@
     color: var(--danger);
   }
   .k-renamed {
-    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .k-conflicted {
@@ -1337,7 +1339,7 @@
   .subject-input {
     width: 100%;
     height: 30px;
-    padding-inline-end: 78px;
+    padding-inline-end: 76px;
     font-weight: 600;
   }
   .body-input {
@@ -1348,17 +1350,6 @@
     position: absolute;
     top: 4px;
     inset-inline-end: 6px;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 4px;
   }
   
   .sign-err {
@@ -1395,19 +1386,9 @@
     color: var(--text-dim);
     cursor: pointer;
   }
-  /* "partial" = the path sits in BOTH trees (some hunks staged). Quiet — it
-     annotates a row that is already busy with a kind badge and a name. */
-  .chip.partial {
-    height: 15px;
-    padding: 0 5px;
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-    flex-shrink: 0;
-  }
   .wp-target > button {
     height: 18px;
-    padding: 0 7px;
+    padding: 0 6px;
     font-size: var(--fs-xs);
   }
   .dim {
@@ -1436,7 +1417,7 @@
     }
     .wp-discard {
       opacity: 1;
-      padding: 6px 7px;
+      padding: 6px 6px;
     }
     .subject-input {
       font-size: 16px;

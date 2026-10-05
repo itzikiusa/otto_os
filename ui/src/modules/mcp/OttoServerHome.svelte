@@ -258,7 +258,7 @@
       if (wsId !== id || generation !== attachGeneration) return;
       // Put the box back: the daemon still has the old value.
       input.checked = attach?.attached ?? true;
-      toasts.error(enabled ? 'Could not attach to sessions' : 'Could not detach from sessions', e instanceof Error ? e.message : String(e));
+      toastError(enabled ? 'Couldn’t attach to sessions' : 'Couldn’t detach from sessions', e);
     } finally {
       if (wsId === id && generation === attachGeneration) attachBusy = false;
     }
@@ -375,7 +375,7 @@
     <div>
       <h4 class="sec">External tool catalog</h4>
       <p class="muted small catalog-note">
-        Enabled tools are served to external clients, and to Otto sessions (for tools that aren't
+        Enabled tools are served to external clients, and to Otto sessions (for tools that aren’t
         built in, e.g. <code>otto_create_pr</code>) through the same gate. A mutating tool asks a
         person before each call unless an <em>Auto-approve</em> rule covers it; every call is
         audited. Policies govern registered external servers, not these tools.
@@ -572,7 +572,7 @@
   .switchcopy {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
   }
   .switchcopy strong {
     font-size: var(--fs-m);
@@ -657,7 +657,7 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
-    margin-inline-start: 23px;
+    margin-inline-start: 22px;
     font-size: var(--fs-s);
     color: var(--text);
   }
@@ -675,7 +675,7 @@
     color: var(--danger);
     background: var(--danger-soft);
     border-radius: 999px;
-    padding: 0 7px;
+    padding: 0 6px;
   }
   .grp-ask {
     display: flex;
@@ -704,7 +704,7 @@
     color: var(--warning);
     background: var(--warning-soft);
     border-radius: 999px;
-    padding: 0 7px;
+    padding: 0 6px;
   }
   .t-desc {
     font-size: var(--fs-s);
@@ -730,7 +730,7 @@
   }
   .gateway-list code {
     font-size: var(--fs-xs);
-    padding: 2px 5px;
+    padding: 2px 4px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -744,7 +744,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 11px 12px;
+    padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);

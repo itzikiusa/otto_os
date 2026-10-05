@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import StatusBadge from '../../lib/components/StatusBadge.svelte';
   // Insights view — two tabs:
   //   • Reports: list/detail. Left = a timeline of generated reports (period
   //     chips, date, the one-line headline, KPI deltas, action-item status);
@@ -84,7 +86,7 @@
       downloadJson(bundle, `otto-support-bundle-${ts}.json`);
       toasts.success(
         'Support bundle downloaded',
-        `${bundle.redaction_hits} secret value${bundle.redaction_hits !== 1 ? 's' : ''} redacted.`,
+        `${plural(bundle.redaction_hits, 'secret value')} redacted.`,
       );
     } catch (e) {
       toastError('Couldn’t download the support bundle', e);
@@ -540,8 +542,8 @@
   function statText(k: MetricKey, v: number): string {
     const n = Math.round(v);
     if (k === 'achievement') return `${n}% achieved`;
-    if (k === 'toolErrors') return `${n.toLocaleString()} error${n === 1 ? '' : 's'}`;
-    return `${n.toLocaleString()} session${n === 1 ? '' : 's'}`;
+    if (k === 'toolErrors') return `${n.toLocaleString()} ${n === 1 ? 'error' : 'errors'}`;
+    return `${n.toLocaleString()} ${n === 1 ? 'session' : 'sessions'}`;
   }
   function statTitle(k: MetricKey, v: number): string {
     return `${METRIC_LABEL[k]}: ${k === 'achievement' ? `${Math.round(v)}%` : Math.round(v).toLocaleString()}`;
@@ -628,7 +630,7 @@
           {#if pollRunId}
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
-              <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it's done.</span>
+              <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
               <span class="dim">{Math.floor((pollCount * 3) / 60)}:{String((pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
             </div>
           {/if}
@@ -648,7 +650,7 @@
           variant="page"
           icon="gauge"
           title="No insight reports yet"
-          body="An agent reads your recent sessions and writes an action-first report: what's working, what's slowing you down, and five things to change. Scheduled reports are off until you turn them on."
+          body="An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. Scheduled reports are off until you turn them on."
           actionLabel={running ? 'Starting…' : "Run yesterday's report"}
           actionIcon="play"
           onaction={() => runNow('day:1')}
@@ -694,10 +696,10 @@
                     {/if}
                     {#if acts.total > 0}
                       <div class="row-actions">
-                        <span class="dim">{acts.total} action{acts.total === 1 ? '' : 's'}</span>
-                        {#if acts.regressed}<span class="tag warning"><span class="dot"></span>{acts.regressed} regressed</span>{/if}
-                        {#if acts.improved}<span class="tag success"><span class="dot"></span>{acts.improved} improved</span>{/if}
-                        {#if acts.fresh}<span class="tag info"><span class="dot"></span>{acts.fresh} new</span>{/if}
+                        <span class="dim">{plural(acts.total, 'action')}</span>
+                        {#if acts.regressed}<StatusBadge variant="text" tone="warning" label="{acts.regressed} regressed" />{/if}
+                        {#if acts.improved}<StatusBadge variant="text" tone="success" label="{acts.improved} improved" />{/if}
+                        {#if acts.fresh}<StatusBadge variant="text" tone="info" label="{acts.fresh} new" />{/if}
                       </div>
                     {/if}
                   </button>
@@ -706,7 +708,7 @@
                 {/each}
                 {#if filtered.length > shownRows.length || hasMoreReports}
                   <button class="btn small ghost more-reports" onclick={loadOlderReports} disabled={loadingMore}>
-                    {loadingMore ? 'Loading…' : 'Show older reports'}
+                    {loadingMore ? 'Loading older reports…' : 'Show older reports'}
                   </button>
                 {/if}
               </div>
@@ -733,7 +735,7 @@
                 ondownloadhtml={() => downloadHtml(selected)}
               />
             {:else if routeKey}
-              <EmptyState variant="page" icon="gauge" title="This report isn't on disk" body="It may have been removed from the insights folder. Open the list to pick another period.">
+              <EmptyState variant="page" icon="gauge" title="This report isn’t on disk" body="It may have been removed from the insights folder. Open the list to pick another period.">
                 <button class="btn ghost" onclick={() => router.go('insights')}>Show all reports</button>
               </EmptyState>
             {/if}
@@ -823,9 +825,9 @@
   .filter-chip {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: transparent;
@@ -864,8 +866,8 @@
     flex-direction: column;
     align-items: stretch;
     width: 100%;
-    gap: 5px;
-    padding: 9px 10px;
+    gap: 4px;
+    padding: 8px 10px;
     border: 1px solid transparent;
     border-radius: var(--radius-m);
     background: transparent;
@@ -931,26 +933,6 @@
     gap: 8px;
     flex-wrap: wrap;
     font-size: var(--fs-xs);
-  }
-  .tag {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .tag .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: currentColor;
-  }
-  .tag.warning {
-    color: var(--warning);
-  }
-  .tag.success {
-    color: var(--success);
-  }
-  .tag.info {
-    color: var(--info);
   }
   .more-reports {
     align-self: center;

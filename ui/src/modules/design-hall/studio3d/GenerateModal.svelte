@@ -6,6 +6,7 @@
   // prompt goes and what it costs. Nothing is sent before the person presses
   // Generate, and cloud providers never run without a key.
   import { untrack } from 'svelte';
+  import Badge from '../../../lib/components/Badge.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import { toasts } from '../../../lib/toast.svelte';
@@ -154,7 +155,7 @@
           <span class="prov-main">
             <span class="prov-name">
               {p.label}
-              {#if p.where === 'cloud'}<span class="pill">opt-in</span>{/if}
+              {#if p.where === 'cloud'}<Badge label="Opt-in" />{/if}
             </span>
             <span class="prov-note">{p.privacy}</span>
             {#if p.cost}<span class="prov-note">Cost: {p.cost}</span>{/if}
@@ -215,7 +216,7 @@
   select {
     font: inherit;
     font-size: var(--fs-m);
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -258,7 +259,7 @@
     display: flex;
     gap: 10px;
     align-items: flex-start;
-    padding: 9px 10px;
+    padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     cursor: pointer;
@@ -272,7 +273,7 @@
     color: var(--text-dim);
   }
   .prov input {
-    margin-block-start: 3px;
+    margin-block-start: 2px;
     accent-color: var(--accent);
   }
   .prov-main {
@@ -287,14 +288,6 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-  }
-  .pill {
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
   }
   .prov-note {
     font-size: var(--fs-xs);

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // The automations list (left pane). Selecting one opens its editor in the
   // main area (AutomationEditor) — the sidebar only lists and creates.
   import Icon from '../../lib/components/Icon.svelte';
@@ -49,7 +50,7 @@
           <button class="auto-pick" class:active={a.id === selectedId} onclick={() => onselect(a.id)} aria-current={a.id === selectedId ? 'true' : undefined}>
             <Icon name="zap" size={14} />
             <span class="aname">{a.name}</span>
-            <span class="acount">{a.steps.length} step{a.steps.length === 1 ? '' : 's'}</span>
+            <span class="acount">{plural(a.steps.length, 'step')}</span>
           </button>
         </li>
       {/each}

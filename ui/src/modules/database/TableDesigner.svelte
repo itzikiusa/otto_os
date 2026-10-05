@@ -460,11 +460,11 @@
   .td-add {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     align-self: flex-start;
     margin-top: 4px;
     height: 26px;
-    padding: 0 9px;
+    padding: 0 8px;
     border: 1px dashed var(--border);
     border-radius: var(--radius-s);
     background: transparent;

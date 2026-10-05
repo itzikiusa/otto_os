@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
   import { toastError } from '../../lib/toastError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -278,7 +280,7 @@
             evolveResult = changed;
             if (changed.length > 0) {
               toasts.success(
-                `${changed.length} skill${changed.length === 1 ? '' : 's'} updated`,
+                `${plural(changed.length, 'skill')} updated`,
                 changed.slice(0, 3).join(', ') + (changed.length > 3 ? '…' : ''),
               );
             } else {
@@ -352,7 +354,7 @@
     <EmptyState
       variant="page"
       icon="folder"
-      title="No workspace selected"
+      title={NO_WORKSPACE}
       body="Self-improvement is per workspace. Pick one from the workspace menu at the top of the sidebar to configure it."
     />
   {:else if !cfg}
@@ -374,7 +376,7 @@
           {#if evolveResult.length === 0}
             Evolve finished — no skill changes this session.
           {:else}
-            {evolveResult.length} skill{evolveResult.length === 1 ? '' : 's'} updated:
+            {plural(evolveResult.length, 'skill')} updated:
             <span class="evolve-skills mono">{evolveResult.join(', ')}</span>
           {/if}
         </span>
@@ -530,7 +532,7 @@
             <div class="run-head">
               <StatusBadge status={runStatus(r.status)} />
               <span class="run-meta dim">
-                {sentenceCase(r.trigger)} · {r.sessions_reviewed} session{r.sessions_reviewed === 1 ? '' : 's'} · {r.applied} applied · {r.pending} pending
+                {sentenceCase(r.trigger)} · {plural(r.sessions_reviewed, 'session')} · {r.applied} applied · {r.pending} pending
               </span>
               <span class="grow"></span>
               <span class="run-time dim" title={fmtDate(r.started_at)}>{rel(r.started_at)}</span>
@@ -579,7 +581,7 @@
   }
   /* Sub-controls line up with the toggle's label text (15px box + 10px gap). */
   .indent {
-    margin-inline-start: 25px;
+    margin-inline-start: 24px;
   }
   .form .field {
     margin: 0;

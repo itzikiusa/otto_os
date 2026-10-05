@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // All runs/iterations as a filterable list (per assignee / project / status).
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -60,7 +61,7 @@
     try {
       await swarm.stopRun(r.id);
     } catch (e) {
-      toasts.error("Couldn’t stop the run", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t stop the run", e);
     }
   }
 
@@ -186,11 +187,6 @@
     display: flex;
     gap: 4px;
     flex-wrap: wrap;
-  }
-  .chip {
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
   }
   .table {
     display: flex;

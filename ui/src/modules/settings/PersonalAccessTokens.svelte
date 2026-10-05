@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
@@ -144,14 +145,14 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('tokens')} subtitle="For scripts, CI and the Otto CLI" />
   <PageBody width="readable">
-  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions can't create tokens.</SectionIntro>
+  <SectionIntro>Tokens are scoped to your account and <strong>inherit your permissions</strong> — anyone holding one can do what you can. Impersonation sessions can’t create tokens.</SectionIntro>
 
   <!-- ── One-time secret reveal ── -->
   {#if freshSecret && freshInfo}
     <div class="secret-banner" role="status">
       <div class="secret-header">
         <Icon name="key" size={14} />
-        <span class="secret-title">Copy your new token now — it won't be shown again.</span>
+        <span class="secret-title">Copy your new token now — it won’t be shown again.</span>
         <button class="btn small" onclick={copySecret}><Icon name="copy" size={12} /> Copy</button>
         <button class="btn small ghost" onclick={dismissSecret}>Done</button>
       </div>
@@ -204,7 +205,7 @@
     {/snippet}
     {#if orphaned.length}
       <div class="orphan-note">
-        <span>{orphaned.length} token{orphaned.length === 1 ? '' : 's'} belong to sessions that no longer exist.</span>
+        <span>{plural(orphaned.length, 'token')} belong to sessions that no longer exist.</span>
         <button class="btn small danger" disabled={revoking.size > 0} onclick={revokeOrphaned}>Revoke deleted-session tokens…</button>
       </div>
     {/if}

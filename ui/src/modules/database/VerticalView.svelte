@@ -403,7 +403,7 @@
       },
     );
     if (sqlColumn && canEdit) {
-      items.push({ separator: true }, { label: "Columns can't be removed from a row", disabled: true });
+      items.push({ separator: true }, { label: "Columns can’t be removed from a row", disabled: true });
     }
     ctxMenu.show(e, items);
   }
@@ -570,7 +570,7 @@
   .vrec-more {
     font-size: var(--fs-m);
     line-height: 1;
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .vrec {
     border: 1px solid var(--border);

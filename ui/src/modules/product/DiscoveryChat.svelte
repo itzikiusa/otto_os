@@ -15,6 +15,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { renderMarkdown } from '../../lib/md';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ActionCard from './ActionCard.svelte';
@@ -170,10 +171,10 @@
       <div class="empty-wrap">
         <EmptyState
           icon="zap"
-          title="Let's figure out what to build"
-          body="Tell me the rough idea or a problem you're chasing. I'll research, ask the right questions, and turn it into a story — no need to write anything first."
+          title="Let’s figure out what to build"
+          body="Tell me the rough idea or a problem you’re chasing. I’ll research, ask the right questions, and turn it into a story — no need to write anything first."
         />
-        <div class="starters" class:scroll-row={viewport.isPhone}>
+        <div class="starters" class:scroll-row={viewport.isPhone} class:scroll-thin={viewport.isPhone}>
           {#each STARTERS as s (s)}
             <button class="starter-chip" onclick={() => useStarter(s)} title="Prefill the composer">
               {s.trim()}
@@ -215,9 +216,9 @@
       <!-- Thinking indicator while a turn is in flight -->
       {#if sending}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking">
-            <span class="bubble-role">Agent</span>
-            <span class="thinking-dots">thinking…</span>
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="bubble-header"><AgentByline {provider} model={chatModel} /></div>
+            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
           </div>
         </div>
       {/if}
@@ -298,7 +299,7 @@
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 7px;
+    gap: 6px;
     padding: 4px 8px 2px;
   }
   /* On phone the chips become a single horizontal-scroll row. */
@@ -308,11 +309,10 @@
     overflow-x: auto;
     width: 100%;
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
   }
   .starter-chip {
     flex-shrink: 0;
-    padding: 5px 11px;
+    padding: 4px 10px;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--surface);
@@ -324,7 +324,7 @@
     transition: background var(--dur-fast), border-color var(--dur-fast);
   }
   .starter-chip:hover {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   }
   .see-hint {
@@ -349,13 +349,13 @@
   .bubble {
     max-width: 80%;
     border-radius: var(--radius-s);
-    padding: 8px 11px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
     gap: 4px;
   }
   .bubble-user {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-bottom-right-radius: 3px;
   }
@@ -419,8 +419,7 @@
 
   /* Thinking bubble */
   .thinking {
-    opacity: 0.7;
-    font-style: italic;
+    color: var(--text-dim);
   }
   .thinking-dots {
     font-size: var(--fs-s);
@@ -444,13 +443,13 @@
     flex-basis: 100%;
   }
   .dc-provider select {
-    padding: 3px 6px;
+    padding: 2px 6px;
   }
   .msg-input {
     flex: 1;
     min-width: 0;
     resize: none;
-    padding: 7px 9px;
+    padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--surface);

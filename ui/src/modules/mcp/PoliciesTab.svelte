@@ -98,7 +98,7 @@
     try {
       parsed = JSON.parse(importText);
     } catch (e) {
-      toasts.error('Invalid JSON', e instanceof Error ? e.message : String(e));
+      toastError('Invalid JSON', e);
       return;
     }
     // Accept either the exported {version, policies} doc or a bare policies array.
@@ -429,9 +429,6 @@
     gap: 6px;
     font-size: var(--fs-m);
     color: var(--text);
-  }
-  .btn.danger {
-    color: var(--danger);
   }
   .cl {
     position: absolute;

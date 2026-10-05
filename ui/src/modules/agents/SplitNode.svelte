@@ -4,14 +4,15 @@
   import { layout as layoutStore, type Preset as PresetOp } from '../../lib/stores/splitLayout.svelte';
   import type { MenuItem as PresetMenuItem } from '../../lib/contextmenu.svelte';
 
-  /** The five layout presets as flat ctxMenu rows (the menu has no submenus). */
+  /** The five layout presets as flat ctxMenu rows (the menu has no submenus);
+   *  worded like their ⌘K commands in Splits.svelte ("Use grid layout"). */
   export function presetItems(): PresetMenuItem[] {
     const rows: [PresetOp, string][] = [
-      ['cols', 'Layout: equal columns'],
-      ['rows', 'Layout: equal rows'],
-      ['one-two-below', 'Layout: one above two'],
-      ['one-two-beside', 'Layout: one beside two'],
-      ['grid', 'Layout: grid'],
+      ['cols', 'Use equal-columns layout'],
+      ['rows', 'Use equal-rows layout'],
+      ['one-two-below', 'Use one-above-two layout'],
+      ['one-two-beside', 'Use one-beside-two layout'],
+      ['grid', 'Use grid layout'],
     ];
     return rows.map(([p, label]) => ({ label, icon: 'split', action: () => layoutStore.applyPreset(p) }));
   }
@@ -289,7 +290,7 @@
     position: absolute;
     top: 6px;
     inset-inline-end: 8px;
-    z-index: 25;
+    z-index: 9;
     width: 20px;
     height: 20px;
     border: 1px solid var(--border);
@@ -309,10 +310,13 @@
      its HIT AREA does: `::before` reaches 6px into each neighbour's edge, so
      the frame between two panes grabs like a window border (a 20px target),
      while the drawn line stays thin. Pseudo-element areas hit-test as the
-     gutter itself, and z-index 10 keeps it above both pane frames. */
+     gutter itself, and z-index 8 keeps it above both pane frames (pane chrome
+     stays ≤ 5; the terminal is its own stacking context via `contain`). The
+     panes are NOT `isolation: isolate`: they host non-portalled Modals and the
+     image Lightbox, which must still rise above the app chrome. */
   .gutter {
     position: relative;
-    z-index: 10;
+    z-index: 8;
   }
   .gutter::before {
     content: '';
@@ -364,7 +368,7 @@
   .drop-veil {
     position: absolute;
     inset: 0;
-    z-index: 30;
+    z-index: 10; /* top of the in-pane range: over the pane and its close button */
     display: flex;
     align-items: center;
     justify-content: center;
@@ -380,7 +384,7 @@
   }
   .drop-ind {
     position: absolute;
-    background: color-mix(in srgb, var(--accent) 26%, transparent);
+    background: var(--accent-soft-strong);
     border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
     border-radius: var(--radius-s);
     pointer-events: none;

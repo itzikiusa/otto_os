@@ -27,7 +27,7 @@ The graph builds itself from the other modules. You add approvals, notes and ris
 
 **Filters and views**
 - **Kind:** Session, Swarm Project, Goal Loop, Workflow Run, PR Review, Product Story, Pull Request, External Trigger.
-- **Status:** Pending, Running, Waiting, Blocked, Succeeded, Failed, Cancelled, Done. Each module's own states are mapped onto these 8.
+- **Status:** Pending, Running, Waiting, Blocked, Succeeded, Failed, Canceled, Done. Each module's own states are mapped onto these 8.
 - **Risk:** Low, Medium, High, Critical.
 - **Search** by title. **Clear** resets every filter.
 - The list and the graph always show the same filtered set (up to 300 items).

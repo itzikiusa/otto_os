@@ -67,7 +67,7 @@ export async function confirmProd(o: ProdConfirm): Promise<boolean> {
     });
     if (v === null) return false;
     if (v !== o.typed) {
-      toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was cancelled.');
+      toasts.info('Nothing was changed', 'What you typed didn’t match, so the action was canceled.');
       return false;
     }
     return true;

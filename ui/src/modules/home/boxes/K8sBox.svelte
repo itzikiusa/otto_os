@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // Kubernetes box: one row per registered cluster from the Monitor overview
   // (health, pods, restarts, memory, rps, error %). Falls back to the plain
   // cluster list (name + env + version) when the monitor is not collecting
@@ -107,7 +108,7 @@
        the empty / off states below stand alone. -->
   {#if k8s.clusters.length > 0 && !k8s.unavailable}
     <div class="bar">
-      <span class="dim">{k8s.clusters.length} cluster{k8s.clusters.length === 1 ? '' : 's'}</span>
+      <span class="dim">{plural(k8s.clusters.length, 'cluster')}</span>
       <span class="spacer"></span>
       <div class="seg" role="radiogroup" aria-label="Window">
         {#each WINDOWS as w (w)}
@@ -195,11 +196,11 @@
     color: var(--text-dim);
     font: inherit;
     font-size: var(--fs-xs);
-    padding: 2px 7px;
+    padding: 2px 6px;
     cursor: pointer;
   }
   .seg button.on {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft-strong);
     color: var(--accent-text);
   }
   .note {
@@ -207,7 +208,7 @@
     align-items: center;
     gap: 4px;
     align-self: flex-start;
-    padding: 1px 7px;
+    padding: 1px 6px;
     font-size: var(--fs-xs);
     color: var(--warning);
     background: var(--status-warn-soft);
@@ -253,7 +254,7 @@
   }
   .health {
     font-size: var(--fs-xs);
-    padding: 0 7px;
+    padding: 0 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);
@@ -284,7 +285,7 @@
   .m em {
     font-style: normal;
     font-size: var(--fs-xs);
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
   }
   .warn {

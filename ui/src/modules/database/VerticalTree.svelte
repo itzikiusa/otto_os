@@ -341,7 +341,7 @@
     display: grid;
     grid-template-columns: minmax(120px, 0.3fr) 1fr auto;
     gap: 10px;
-    padding: 3px 8px;
+    padding: 2px 8px;
     font-size: var(--fs-s);
     min-width: 0;
   }

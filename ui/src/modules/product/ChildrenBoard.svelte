@@ -137,7 +137,7 @@
   .cb-col-head {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
@@ -151,7 +151,7 @@
   .cb-card {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 4px;
     padding: 8px 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);

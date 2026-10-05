@@ -158,7 +158,7 @@
   .boot-mark {
     font-size: var(--fs-hero);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     background: linear-gradient(120deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--text)));
     -webkit-background-clip: text;
     background-clip: text;

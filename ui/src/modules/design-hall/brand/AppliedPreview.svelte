@@ -165,13 +165,13 @@
     font-weight: var(--pv-display-weight);
     font-size: 17px;
     line-height: 1.08;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
     color: var(--pv-ink);
   }
   .cta {
     align-self: flex-start;
     font: 600 10px/1 var(--pv-font-body);
-    padding: 6px 9px;
+    padding: 6px 8px;
     border-radius: calc(var(--pv-radius) / 2);
     background: var(--pv-primary);
     color: var(--pv-on-primary);

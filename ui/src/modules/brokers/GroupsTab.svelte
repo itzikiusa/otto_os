@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { untrack } from 'svelte';
@@ -173,7 +175,7 @@
     groupsTw.findRows(
       () => groupsEl,
       () => groups,
-      (g) => `${g.group_id}\n${g.state}\n${g.members} member${g.members === 1 ? '' : 's'}`,
+      (g) => `${g.group_id}\n${g.state}\n${plural(g.members, 'member')}`,
       '.grow-row',
     ),
   );
@@ -237,7 +239,7 @@
       );
       if (current()) dryRunResult = preview;
     } catch (e) {
-      if (current()) toasts.error("Couldn’t preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toastError("Couldn’t preview the reset", e);
     } finally {
       if (request === detailRequest) dryRunLoading = false;
     }
@@ -264,7 +266,7 @@
     if (typed === null || !current()) return;
     if (typed !== groupId) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
+      toasts.warn('Offsets not reset', `The name you typed didn’t match "${selected}".`);
       return;
     }
 
@@ -277,7 +279,7 @@
       if (current()) detail = updated;
       toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
-      toasts.error("Couldn’t reset offsets", e instanceof Error ? e.message : String(e));
+      toastError("Couldn’t reset offsets", e);
     } finally {
       resetting = false;
     }
@@ -300,7 +302,7 @@
         <p class="muted">{accessMsg}</p>
         <p class="muted">
           Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
-          Otto probed once and won't keep retrying (so it stops hitting the broker with denied
+          Otto probed once and won’t keep retrying (so it stops hitting the broker with denied
           requests); grant the ACL and re-test the cluster, and this tab will populate.
         </p>
       </div>
@@ -315,7 +317,7 @@
           <span class="gid" title={g.group_id}>{g.group_id}</span>
           <span class="badges">
             <span class="state {stateClass(g.state)}">{g.state}</span>
-            <span class="muted">{g.members} member{g.members === 1 ? '' : 's'}</span>
+            <span class="muted">{plural(g.members, 'member')}</span>
           </span>
         </button>
       {/each}
@@ -486,7 +488,7 @@
             → <strong class:ok={dryRunResult.total_lag_after < dryRunResult.total_lag_before}
                        class:warn={dryRunResult.total_lag_after > dryRunResult.total_lag_before}>
               {dryRunResult.total_lag_after.toLocaleString()}</strong>
-            ({dryRunResult.partitions.length} partition{dryRunResult.partitions.length === 1 ? '' : 's'} affected)
+            ({plural(dryRunResult.partitions.length, 'partition')} affected)
             </span>
             <button
               class="icon-btn close-dry"
@@ -551,10 +553,10 @@
     text-align: start;
     border: none;
     background: transparent;
-    padding: 9px 12px;
+    padding: 8px 12px;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     cursor: pointer;
     border-inline-start: 2px solid transparent;
   }
@@ -650,7 +652,7 @@
   .sort-toggle {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
     cursor: pointer;
@@ -684,7 +686,7 @@
   }
   .reset-bar select,
   .reset-bar input {
-    padding: 5px 7px;
+    padding: 4px 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: var(--bg);
@@ -714,7 +716,7 @@
     font-weight: 500;
     color: var(--text-dim);
     font-size: var(--fs-xs);
-    padding: 5px 8px;
+    padding: 4px 8px;
   }
   td {
     padding: 4px 8px;
@@ -791,7 +793,7 @@
     border-bottom: 1px solid var(--border);
   }
   .dryrun-table td {
-    padding: 3px 8px;
+    padding: 2px 8px;
     border-top: 1px solid var(--border);
   }
   .dryrun-table td.ok {
@@ -801,7 +803,7 @@
     color: var(--warning);
   }
   .dryrun-preview p {
-    padding: 5px 10px;
+    padding: 4px 10px;
     margin: 0;
   }
 

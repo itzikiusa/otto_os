@@ -98,13 +98,13 @@ async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
   const module = typeof args.module === 'string' ? args.module.trim() : '';
   if (!module) throw new UiCommandError('invalid_args', '`module` is required');
   if (!openableModules().has(module)) {
-    throw new UiCommandError('not_found', `There's no ${module} module you can open in Otto`);
+    throw new UiCommandError('not_found', `There’s no ${module} module you can open in Otto`);
   }
   const route = restorableRoute(typeof args.route === 'string' && args.route.trim() ? args.route : module);
-  if (!route) throw new UiCommandError('invalid_args', `Can't open route ${String(args.route)}`);
+  if (!route) throw new UiCommandError('invalid_args', `Can’t open route ${String(args.route)}`);
   const key = paneKey(route);
   if (key !== paneKey(module)) {
-    throw new UiCommandError('invalid_args', `Route ${route} isn't part of ${module}`);
+    throw new UiCommandError('invalid_args', `Route ${route} isn’t part of ${module}`);
   }
   const placement = args.placement === 'main' ? 'main' : 'side';
   const label = labelFor(route);
@@ -142,7 +142,7 @@ async function open(args: OpenArgs, ctx: UiCommandCtx): Promise<unknown> {
   if (!sidePane.supported) {
     throw new UiCommandError(
       'failed',
-      `This Otto window can't show a side pane (it needs the desktop layout). Ask the user to open ${label}, or use placement: main.`,
+      `This Otto window can’t show a side pane (it needs the desktop layout). Ask the user to open ${label}, or use placement: main.`,
     );
   }
   if (!sidePane.fits && !sidePane.detached) {

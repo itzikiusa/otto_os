@@ -97,8 +97,8 @@ export function localPrompt(kind: Gen3dKind, prompt: string, quality: Gen3dQuali
   const detail =
     quality === 'draft'
       ? 'Keep it a quick blockout: 3–8 primitives.'
-      : 'Aim for a clean, readable model: up to ~30 primitives, rounded boxes (radius) where edges should soften, physical material presets (glossy-plastic, brushed-metal, frosted-glass, matte-paper, satin) and brand token colours (token:color.<name>) when the brief mentions the brand.';
-  const image = kind === 'image' && imageRef ? ` Match the shape and colours of the reference image [${imageRef}].` : '';
+      : 'Aim for a clean, readable model: up to ~30 primitives, rounded boxes (radius) where edges should soften, physical material presets (glossy-plastic, brushed-metal, frosted-glass, matte-paper, satin) and brand token colors (token:color.<name>) when the brief mentions the brand.';
+  const image = kind === 'image' && imageRef ? ` Match the shape and colors of the reference image [${imageRef}].` : '';
   return (
     `Add ${what} to this scene.${image} Build it as a NEW group of scene3d objects placed beside the existing ` +
     `objects (don’t move or change anything else). ${detail} If the Blender MCP tools are available you may ` +

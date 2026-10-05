@@ -218,7 +218,7 @@
     }
   }
   async function remove(): Promise<void> {
-    if (!(await confirmer.ask(`Delete "${group.name}" from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
+    if (!(await confirmer.ask(`Delete “${group.name}” from the Otto library? Its files are removed; copies in ${group.variants.filter((v) => v.source !== 'library').map((v) => sourceLabel(v.source)).join(', ') || 'other places'} are not touched.`, { title: 'Delete skill' }))) return;
     try {
       await skillLabApi.remove(group.name);
       toasts.success('Skill deleted', group.name);
@@ -481,7 +481,7 @@
   .variant {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     height: 22px;
     padding: 0 8px;
     border: 1px solid var(--border);
@@ -510,7 +510,7 @@
   .sync {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }

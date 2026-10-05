@@ -344,7 +344,7 @@
   }
   .seg button {
     border: 0;
-    padding: 3px 10px;
+    padding: 2px 10px;
     background: transparent;
     color: var(--text-dim);
     font-size: var(--fs-xs);

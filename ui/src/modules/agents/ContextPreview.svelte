@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { sentenceCase } from '../../lib/labels';
   // Dry-run preview of what a session spawn would materialize for a workspace
   // + provider — the exact skill files, soul, generated AGENTS.md / CLAUDE.md
   // content and runtime hooks — WITHOUT spawning a session or touching disk.
@@ -102,9 +105,9 @@
     {:else}
       <!-- Advisory vs enforced legend -->
       <div class="legend">
-        <span class="badge advisory">advisory</span>
+        <Badge label="Advisory" />
         <span class="legend-text">instructions &amp; skills — guidance the model may ignore</span>
-        <span class="badge enforced">enforced</span>
+        <Badge tone="accent" label="Enforced" />
         <span class="legend-text">hooks &amp; settings — imposed by the runtime</span>
       </div>
 
@@ -113,11 +116,11 @@
         <div class="summary-row">
           <span class="summary-lbl">Soul</span>
           {#if result.soul}
-            <span class="chip mono">{result.soul}</span>
+            <Badge><span class="mono">{result.soul}</span></Badge>
           {:else}
             <span class="dim">none</span>
           {/if}
-          <span class="badge advisory" title="The model reads the soul but may ignore it">advisory</span>
+          <Badge label="Advisory" title="The model reads the soul but may ignore it" />
         </div>
         <div class="summary-row">
           <span class="summary-lbl">Skills</span>
@@ -126,17 +129,17 @@
           {:else}
             <span class="chips">
               {#each result.skills as s (s.name)}
-                <span class="chip mono" title={s.description}>{s.name}<span class="ver">v{s.version}</span></span>
+                <Badge title={s.description}><span class="mono">{s.name}</span><span class="ver">v{s.version}</span></Badge>
               {/each}
             </span>
           {/if}
-          <span class="badge advisory">advisory</span>
+          <Badge label="Advisory" />
         </div>
       </div>
 
       <!-- Files the spawn would write -->
       <div class="files-head">
-        <span class="files-title">{result.files.length} file{result.files.length === 1 ? '' : 's'}</span>
+        <span class="files-title">{plural(result.files.length, 'file')}</span>
       </div>
       <ul class="files">
         {#each result.files as f (f.path)}
@@ -149,7 +152,7 @@
             >
               <span class="file-kind kind-{f.kind}">{kindLabels[f.kind] ?? f.kind}</span>
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
-              <span class="badge {f.enforcement}">{f.enforcement}</span>
+              <Badge tone={f.enforcement === 'enforced' ? 'accent' : 'neutral'} label={sentenceCase(f.enforcement)} />
               <span class="file-size dim">{fmtBytes(f.size)}</span>
               <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" noflip size={10} /></span>
             </button>
@@ -165,7 +168,7 @@
         <details class="generated">
           <summary>
             Generated {result.instructions_file_name}
-            <span class="badge advisory">advisory</span>
+            <Badge label="Advisory" />
           </summary>
           <pre class="mono">{result.generated_instructions}</pre>
         </details>
@@ -176,7 +179,7 @@
         <details class="generated">
           <summary>
             Generated hooks / settings
-            <span class="badge enforced">enforced</span>
+            <Badge tone="accent" label="Enforced" />
           </summary>
           <pre class="mono">{result.generated_hooks}</pre>
         </details>
@@ -223,26 +226,6 @@
     color: var(--text-dim);
     margin-inline-end: 8px;
   }
-  .badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    flex-shrink: 0;
-  }
-  .badge.advisory {
-    background: color-mix(in srgb, var(--text-dim) 18%, transparent);
-    color: var(--text-dim);
-    border: 1px solid color-mix(in srgb, var(--text-dim) 30%, transparent);
-  }
-  .badge.enforced {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
-    color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  }
-
   .summary {
     display: flex;
     flex-direction: column;
@@ -264,14 +247,7 @@
     gap: 4px;
     flex-wrap: wrap;
   }
-  .chip {
-    font-size: var(--fs-xs);
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
-  }
-  .chip .ver {
+  .ver {
     margin-inline-start: 4px;
     color: var(--text-dim);
     font-size: var(--fs-xs);
@@ -306,7 +282,7 @@
     align-items: center;
     gap: 8px;
     width: 100%;
-    padding: 6px 9px;
+    padding: 6px 8px;
     background: none;
     border: none;
     cursor: pointer;

@@ -5,7 +5,8 @@
   // route yet, so this page says what is true today instead of showing
   // controls that do nothing.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
-  import StatePill, { type Tone } from './cards/StatePill.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { Tone } from './model';
 
   const TODAY: { icon: IconName; resource: string; mode: string; tone: Tone; note: string }[] = [
     { icon: 'send', resource: 'Send, post, publish or submit', mode: 'Ask', tone: 'warn', note: 'An approval card shows where it goes, what is sent and who sees it' },
@@ -43,8 +44,13 @@
         <tbody>
           {#each TODAY as r (r.resource)}
             <tr>
-              <td><span class="res"><Icon name={r.icon} size={14} />{r.resource}</span></td>
-              <td><StatePill tone={r.tone} label={r.mode} /></td>
+              <td>
+                <span class="res"><Icon name={r.icon} size={14} />{r.resource}</span>
+                <!-- Phone: the Details column folds under the action, so the
+                     exceptions ("Never Always allow", incognito retention) stay readable. -->
+                <span class="note-stack dim">{r.note}</span>
+              </td>
+              <td><Badge tone={r.tone} label={r.mode} /></td>
               <td class="note-col dim">{r.note}</td>
             </tr>
           {/each}
@@ -127,12 +133,26 @@
   .dim {
     color: var(--text-dim);
   }
+  .note-stack {
+    display: none;
+  }
   @media (max-width: 640px) {
     .perm {
       padding: 12px 12px 24px;
     }
     .note-col {
       display: none;
+    }
+    .note-stack {
+      display: block;
+      margin-top: 2px;
+      padding-inline-start: 22px;
+      line-height: 1.4;
+    }
+    td {
+      height: auto;
+      padding-block: 8px;
+      vertical-align: top;
     }
   }
 </style>

@@ -175,7 +175,7 @@
   .score {
     display: inline-flex;
     align-items: center;
-    gap: 3px;
+    gap: 2px;
     min-width: 28px;
     padding: 2px 8px;
     border-radius: 999px;

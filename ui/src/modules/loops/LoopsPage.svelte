@@ -121,7 +121,7 @@
           variant="page"
           icon="refresh"
           title="No goal loops yet"
-          body="Define a goal and a budget — agents iterate on an isolated branch until it's met."
+          body="Define a goal and a budget — agents iterate on an isolated branch until it’s met."
           actionLabel="New goal loop"
           actionIcon="plus"
           onaction={() => (creating = true)}
