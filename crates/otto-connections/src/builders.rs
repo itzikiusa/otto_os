@@ -232,7 +232,10 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 env.push(("MYSQL_PWD".to_string(), pw.to_string()));
             }
             if let Some(db) = opt_str(p, "db") {
-                args.push(db.into());
+                // One `--database=` token, never a bare positional: profiles
+                // are imported from third-party configs, and a positional
+                // `db = "--execute=system …"` would be parsed as an option.
+                args.push(format!("--database={db}"));
             }
             let spec = maybe_wrap_ssh_tunnel(
                 p,
@@ -281,6 +284,14 @@ pub fn build_command(conn: &Connection, secret: Option<&str>) -> Result<(Command
                 Some(t) => t,
                 None => return Ok((login_shell(), false)),
             };
+            // mongosh's only positional is the connection string; one that
+            // starts with `-` (`--eval=require('child_process')…` from an
+            // imported profile) would run as an option instead.
+            if template.trim_start().starts_with('-') {
+                return Err(Error::Invalid(
+                    "mongodb: param 'conn_string' must not start with '-'".into(),
+                ));
+            }
             let conn_string = if template.contains("{secret}") {
                 let secret = secret.ok_or_else(|| {
                     Error::Invalid(
@@ -540,32 +551,40 @@ mod tests {
                 "{params}"
             );
         }
-        assert!(build_command(
-            &conn(
+        assert!(
+            build_command(
+                &conn(
+                    ConnectionKind::Mysql,
+                    json!({"host":"db","jump":"-oProxyCommand=x"})
+                ),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            validate_params(
                 ConnectionKind::Mysql,
-                json!({"host":"db","jump":"-oProxyCommand=x"})
-            ),
-            None
-        )
-        .is_err());
-        assert!(validate_params(
-            ConnectionKind::Mysql,
-            &json!({"host":"db","ssh":{"host":"-oProxyCommand=x"}}),
-            false
-        )
-        .is_err());
-        assert!(validate_params(
-            ConnectionKind::Mysql,
-            &json!({"host":"db","ssh":{"host":"bastion","user":"-l"}}),
-            false
-        )
-        .is_err());
-        assert!(validate_params(
-            ConnectionKind::Mysql,
-            &json!({"host":"db","ssh":{"host":"bastion.internal","user":"ec2-user"}}),
-            false
-        )
-        .is_ok());
+                &json!({"host":"db","ssh":{"host":"-oProxyCommand=x"}}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            validate_params(
+                ConnectionKind::Mysql,
+                &json!({"host":"db","ssh":{"host":"bastion","user":"-l"}}),
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            validate_params(
+                ConnectionKind::Mysql,
+                &json!({"host":"db","ssh":{"host":"bastion.internal","user":"ec2-user"}}),
+                false
+            )
+            .is_ok()
+        );
     }
 
     /// F15: keep-alive options are added unless the user's ssh_config sets
@@ -585,10 +604,12 @@ mod tests {
             keepalive_opts(Some("Host *\n  serveraliveinterval 60\n")),
             vec!["-o", "ServerAliveCountMax=2"]
         );
-        assert!(keepalive_opts(Some(
-            "ServerAliveInterval=0\nHost x\n\tServerAliveCountMax 9\n"
-        ))
-        .is_empty());
+        assert!(
+            keepalive_opts(Some(
+                "ServerAliveInterval=0\nHost x\n\tServerAliveCountMax 9\n"
+            ))
+            .is_empty()
+        );
         // A comment or an unrelated key doesn't count.
         assert_eq!(
             keepalive_opts(Some("# ServerAliveInterval 5\nServerAliveIntervalX 1\n")).len(),
@@ -631,7 +652,15 @@ mod tests {
         assert_eq!(spec.program, "mysql");
         assert_eq!(
             spec.args,
-            vec!["-h", "127.0.0.1", "-P", "3306", "-u", "root", "app_db"]
+            vec![
+                "-h",
+                "127.0.0.1",
+                "-P",
+                "3306",
+                "-u",
+                "root",
+                "--database=app_db"
+            ]
         );
         assert_eq!(
             spec.env,
@@ -720,6 +749,23 @@ mod tests {
         assert_eq!(spec.program, "mongosh");
         assert_eq!(spec.args, vec!["mongodb://app:pw@m1:27017/db"]);
         assert!(!warn);
+    }
+
+    /// S6-13: an imported profile's positional values never become options.
+    #[test]
+    fn imported_positional_values_cannot_inject_client_options() {
+        let c = conn(
+            ConnectionKind::Mysql,
+            json!({"host":"h","user":"u","db":"--execute=system id"}),
+        );
+        let (spec, _) = build_command(&c, None).unwrap();
+        assert_eq!(spec.args.last().unwrap(), "--database=--execute=system id");
+        assert!(!spec.args.iter().any(|a| a.starts_with("--execute")));
+        let m = conn(
+            ConnectionKind::Mongodb,
+            json!({"conn_string":"--eval=require('child_process').execSync('id')"}),
+        );
+        assert!(matches!(build_command(&m, None), Err(Error::Invalid(_))));
     }
 
     #[test]
@@ -868,7 +914,7 @@ mod tests {
                 "-u",
                 "root",
                 "-p",
-                "mydb",
+                "--database=mydb",
             ]
         );
         // The password never reaches argv, and isn't parked in the local ssh
