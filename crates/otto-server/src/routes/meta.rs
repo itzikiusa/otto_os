@@ -27,7 +27,11 @@ pub async fn health() -> Json<Value> {
 const TOOLS_TTL: Duration = Duration::from_secs(60);
 
 /// The last tool probe: when, for which `name → program` specs, and the result.
-type ToolsCache = Option<(std::time::Instant, std::collections::BTreeMap<String, String>, Vec<ToolStatus>)>;
+type ToolsCache = Option<(
+    std::time::Instant,
+    std::collections::BTreeMap<String, String>,
+    Vec<ToolStatus>,
+)>;
 
 /// Probe every tool at most once per [`TOOLS_TTL`] (S8-04). The async mutex is
 /// held across the probe, so concurrent callers single-flight onto one run
@@ -45,7 +49,9 @@ async fn probe_tools_cached(specs: std::collections::BTreeMap<String, String>) -
     #[cfg(test)]
     PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tools = futures_util::future::join_all(
-        specs.iter().map(|(name, program)| detect_tool(name, program)),
+        specs
+            .iter()
+            .map(|(name, program)| detect_tool(name, program)),
     )
     .await;
     *slot = Some((std::time::Instant::now(), specs, tools.clone()));
@@ -320,10 +326,9 @@ mod walkthrough_tests {
             "/bin/sh".to_string(),
         )]);
         let before = PROBE_RUNS.load(Ordering::Relaxed);
-        let all = futures_util::future::join_all(
-            (0..50).map(|_| probe_tools_cached(specs.clone())),
-        )
-        .await;
+        let all =
+            futures_util::future::join_all((0..50).map(|_| probe_tools_cached(specs.clone())))
+                .await;
         assert!(all.iter().all(|t| t.len() == 1 && t[0].found));
         assert_eq!(
             PROBE_RUNS.load(Ordering::Relaxed) - before,

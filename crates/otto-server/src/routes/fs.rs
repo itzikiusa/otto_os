@@ -1073,18 +1073,31 @@ mod tests {
             let secret = dir.path().join(name);
             std::fs::write(&secret, "token=hunter2").unwrap();
             let err = super::read_file_sync(secret.to_str().unwrap(), true).unwrap_err();
-            assert!(matches!(err.0, otto_core::Error::Forbidden(_)), "{name} must be refused");
+            assert!(
+                matches!(err.0, otto_core::Error::Forbidden(_)),
+                "{name} must be refused"
+            );
             #[cfg(unix)]
             {
-                let link = dir.path().join(format!("notes-{}.txt", name.trim_start_matches('.')));
+                let link = dir
+                    .path()
+                    .join(format!("notes-{}.txt", name.trim_start_matches('.')));
                 std::os::unix::fs::symlink(&secret, &link).unwrap();
                 let err = super::read_file_sync(link.to_str().unwrap(), true).unwrap_err();
-                assert!(matches!(err.0, otto_core::Error::Forbidden(_)), "a link to {name} must be refused");
+                assert!(
+                    matches!(err.0, otto_core::Error::Forbidden(_)),
+                    "a link to {name} must be refused"
+                );
             }
         }
         let ok = dir.path().join("readme.md");
         std::fs::write(&ok, "hi").unwrap();
-        assert_eq!(super::read_file_sync(ok.to_str().unwrap(), true).unwrap().content, "hi");
+        assert_eq!(
+            super::read_file_sync(ok.to_str().unwrap(), true)
+                .unwrap()
+                .content,
+            "hi"
+        );
     }
 
     #[test]

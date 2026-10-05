@@ -174,9 +174,7 @@ async fn try_login(ctx: &ServerCtx, req: &LoginReq) -> ApiResult<LoginResp> {
 /// password matches, verified against for an unknown username (S8-10).
 fn dummy_password_hash() -> &'static str {
     static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        otto_rbac::hash_password(&otto_core::new_id()).unwrap_or_default()
-    })
+    HASH.get_or_init(|| otto_rbac::hash_password(&otto_core::new_id()).unwrap_or_default())
 }
 
 /// `POST /api/v1/auth/logout` — revokes the presented token.

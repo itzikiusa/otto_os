@@ -6193,10 +6193,7 @@ const PROXY_BODY_CAP: usize = 20 * 1024 * 1024;
 /// Read an upstream body chunk by chunk, refusing it once it passes `cap` —
 /// a ticketed take-over of a multi-GB URL must never be buffered whole in
 /// daemon memory (the 15 s timeout alone does not bound the size).
-async fn read_capped(
-    mut resp: reqwest::Response,
-    cap: usize,
-) -> Result<axum::body::Bytes, String> {
+async fn read_capped(mut resp: reqwest::Response, cap: usize) -> Result<axum::body::Bytes, String> {
     if resp.content_length().is_some_and(|n| n > cap as u64) {
         return Err(format!("page too large (over {} MB)", cap / (1024 * 1024)));
     }
@@ -6230,10 +6227,17 @@ mod proxy_cap_tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let get = |p: &str| reqwest::get(format!("http://{addr}{p}"));
-        assert!(super::read_capped(get("/big").await.unwrap(), 1024).await.is_err());
-        assert!(super::read_capped(get("/chunked").await.unwrap(), 1024).await.is_err());
+        assert!(super::read_capped(get("/big").await.unwrap(), 1024)
+            .await
+            .is_err());
+        assert!(super::read_capped(get("/chunked").await.unwrap(), 1024)
+            .await
+            .is_err());
         assert_eq!(
-            super::read_capped(get("/big").await.unwrap(), 8192).await.unwrap().len(),
+            super::read_capped(get("/big").await.unwrap(), 8192)
+                .await
+                .unwrap()
+                .len(),
             4096
         );
     }

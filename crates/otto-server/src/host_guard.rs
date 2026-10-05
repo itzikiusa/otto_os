@@ -98,7 +98,9 @@ fn own_mdns_names() -> &'static [String] {
             .args(["--get", "LocalHostName"])
             .output()
         {
-            let name = String::from_utf8_lossy(&out.stdout).trim().to_ascii_lowercase();
+            let name = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_ascii_lowercase();
             if out.status.success() && !name.is_empty() {
                 names.push(format!("{name}.local"));
             }

@@ -2908,20 +2908,29 @@ mod tests {
         let owner = seed_user(&pool, "owner").await;
         let sid = Id::from("S1");
         let (raw, _otp, _) = repo
-            .issue_share_otp_token(&owner, &sid, WorkspaceRole::Viewer, 3600, None, "g@example.com")
+            .issue_share_otp_token(
+                &owner,
+                &sid,
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "g@example.com",
+            )
             .await
             .unwrap();
         let set_times = |created: chrono::DateTime<Utc>, expires: chrono::DateTime<Utc>| {
             let pool = pool.clone();
             let raw = raw.clone();
             async move {
-                sqlx::query("UPDATE auth_sessions SET created_at = ?, expires_at = ? WHERE token_hash = ?")
-                    .bind(created.to_rfc3339())
-                    .bind(expires.to_rfc3339())
-                    .bind(token_hash(&raw))
-                    .execute(&pool)
-                    .await
-                    .unwrap();
+                sqlx::query(
+                    "UPDATE auth_sessions SET created_at = ?, expires_at = ? WHERE token_hash = ?",
+                )
+                .bind(created.to_rfc3339())
+                .bind(expires.to_rfc3339())
+                .bind(token_hash(&raw))
+                .execute(&pool)
+                .await
+                .unwrap();
             }
         };
         let now = Utc::now();
@@ -2930,7 +2939,11 @@ mod tests {
         // — and the fresh window never runs past the absolute lifetime.
         set_times(now - Duration::days(1), now - Duration::hours(1)).await;
         let listed = repo.list_shares_for_user(&owner).await.unwrap();
-        assert_eq!(listed.len(), 1, "a revivable lapsed share must stay visible");
+        assert_eq!(
+            listed.len(),
+            1,
+            "a revivable lapsed share must stay visible"
+        );
         assert!(listed[0].dormant);
         assert!(repo.list_shares_for_session(&sid).await.unwrap()[0].dormant);
         assert!(repo.extend_share_otp(&raw).await.unwrap().is_some());

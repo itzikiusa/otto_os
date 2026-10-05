@@ -135,7 +135,11 @@ pub struct ClientIp {
 /// ONLY when both hold: the peer is loopback (cloudflared runs on this Mac) and
 /// the request named the tunnel host (`share_base_url`) — a LAN/tailnet peer
 /// or a loopback request for `127.0.0.1` can never pick its own key with it.
-pub fn resolve_client_ip(peer: IpAddr, via_tunnel_host: bool, cf_connecting_ip: Option<&str>) -> IpAddr {
+pub fn resolve_client_ip(
+    peer: IpAddr,
+    via_tunnel_host: bool,
+    cf_connecting_ip: Option<&str>,
+) -> IpAddr {
     if peer.is_loopback() && via_tunnel_host {
         if let Some(ip) = cf_connecting_ip.and_then(|v| v.trim().parse::<IpAddr>().ok()) {
             return ip;

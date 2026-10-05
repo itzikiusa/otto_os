@@ -287,7 +287,10 @@ mod tests {
             "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
             "'unsafe-eval' is only for the D2 worker; never add 'unsafe-inline'"
         );
-        assert_eq!(directive("frame-src "), "frame-src 'self' blob: data: https: http:");
+        assert_eq!(
+            directive("frame-src "),
+            "frame-src 'self' blob: data: https: http:"
+        );
         assert_eq!(directive("object-src "), "object-src 'none'");
         assert_eq!(directive("frame-ancestors "), "frame-ancestors 'self'");
         assert!(!SPA_CSP.contains('*'), "no wildcard sources");
