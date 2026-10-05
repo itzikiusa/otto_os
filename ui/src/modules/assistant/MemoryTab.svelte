@@ -487,9 +487,6 @@
   .link:hover {
     text-decoration: underline;
   }
-  .dim {
-    color: var(--text-dim);
-  }
   .sr-only {
     position: absolute;
     width: 1px;

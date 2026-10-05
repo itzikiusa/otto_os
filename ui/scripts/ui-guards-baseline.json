@@ -109,7 +109,7 @@
     "src/modules/git/PrDetail.svelte": 4,
     "src/modules/git/PrList.svelte": 1,
     "src/modules/git/ReviewAgents.svelte": 2,
-    "src/modules/git/ReviewPanel.svelte": 10,
+    "src/modules/git/ReviewPanel.svelte": 2,
     "src/modules/git/WipPanel.svelte": 2,
     "src/modules/home/HomeBox.svelte": 4,
     "src/modules/home/boxes/InsightsBox.svelte": 2,
