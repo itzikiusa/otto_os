@@ -216,10 +216,14 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/share/whoami" {
         return Exempt;
     }
-    // Host filesystem access: authenticated; OS permissions enforced by I/O.
-    // Share/MCP endpoint scopes are still checked before this exemption.
+    // Host filesystem access (browse + read anywhere the daemon's OS account
+    // can). There is no separate "Files" feature: reading the host disk is the
+    // same power as running an agent/shell session (which can `cat` anything),
+    // so it requires Agents/Edit — a Viewer can no longer read the host disk.
+    // Root bypasses; non-root callers additionally hit the secret deny list in
+    // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
     if matches!(p, "/fs/browse" | "/fs/read") {
-        return Exempt;
+        return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
     // and not feature-gated HERE because it spans many features — every lookup
@@ -2090,6 +2094,12 @@ mod tests {
     // ---- Self-owned / cross-cutting exemptions -------------------------------
 
     #[test]
+    fn host_filesystem_requires_agents_edit_not_any_signed_in_user() {
+        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Require(Agents, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Require(Agents, Edit));
+    }
+
+    #[test]
     fn self_owned_routes_exempt() {
         assert_eq!(pol(Method::GET, "/api/v1/auth/me"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/auth/logout"), Exempt);
@@ -2100,8 +2110,6 @@ mod tests {
         assert_eq!(pol(Method::GET, "/api/v1/auth/capabilities"), Exempt);
         assert_eq!(pol(Method::GET, "/api/v1/notifications"), Exempt);
         assert_eq!(pol(Method::POST, "/api/v1/notifications/{id}/read"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Exempt);
-        assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Exempt);
         // Agent discovery: every lookup is a self-call re-authorized by the
         // listed kind's own route, so the discovery route itself is exempt.
         assert_eq!(pol(Method::GET, "/api/v1/refs/directory"), Exempt);

@@ -1,9 +1,10 @@
 //! `GET /api/v1/fs/browse` — daemon-side filesystem browser for folder pickers.
 //! `GET /api/v1/fs/read`   — read a file's contents (read-only, ~400KB cap).
 //!
-//! Both endpoints require an authenticated caller and use the filesystem permissions
-//! of the OS account running ottod. Paths are canonicalized; there is no additional
-//! root allow-list or secret-name deny-list for these two routes. Existing token
+//! Both endpoints require root or Agents/Edit (see `policy.rs`) and use the
+//! filesystem permissions of the OS account running ottod. Paths are
+//! canonicalized; non-root callers are additionally refused Otto's data dir and
+//! the credential locations in [`sandbox`] (see `non_root_fs_denied`). Existing token
 //! endpoint scopes remain enforced by the server middleware. Browsing returns
 //! metadata; reading returns bounded regular-file content, never device/FIFO data.
 
@@ -16,8 +17,8 @@ use crate::error::{ApiError, ApiResult};
 use otto_core::Error;
 
 pub(crate) mod sandbox {
-    //! Secret-store checks retained for the separate session artifact endpoint.
-    //! The general `/fs/browse` and `/fs/read` endpoints do not use this policy.
+    //! Secret-store checks for the session artifact endpoint, also applied to
+    //! NON-root callers of `/fs/browse` and `/fs/read` (`non_root_fs_denied`).
     //! Input paths have already been canonicalized (symlinks + `..` resolved).
 
     use std::path::{Path, PathBuf};
@@ -273,11 +274,56 @@ fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
     }
 }
 
+/// Secret locations a NON-root caller may never browse into or read through
+/// `/fs/*`, even when the daemon's OS account can: Otto's own data dir (the
+/// state DB, `secrets.json`, TLS keys, logs, tokens), the default data dir even
+/// when `$OTTO_DATA_DIR` points elsewhere, the home credential dirs (`~/.ssh`,
+/// `~/.aws`, …) and system secret prefixes, plus key-like file names. Root keeps
+/// unrestricted (OS-permission) access. `raw` is the caller's path; it is
+/// expanded + canonicalized here so `..`/symlinks can't dodge the prefixes.
+fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
+    use std::path::{Path, PathBuf};
+    let expanded = expand_home(if raw.is_empty() { "~" } else { raw });
+    // A path that doesn't resolve is left to the handler's own error.
+    let Ok(canonical) = Path::new(&expanded).canonicalize() else {
+        return Ok(());
+    };
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    let mut data_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::var_os("OTTO_DATA_DIR").filter(|d| !d.is_empty()) {
+        data_dirs.push(PathBuf::from(d));
+    }
+    if let Some(h) = &home {
+        data_dirs.push(h.join("Library/Application Support/Otto"));
+    }
+    if in_otto_data_dir(&canonical, &data_dirs)
+        || sandbox::is_denied_dir(&canonical)
+        || sandbox::is_denied_file(&canonical)
+    {
+        return Err(ApiError(Error::Forbidden(format!(
+            "{} holds credentials or Otto's own state; only the root user can open it",
+            canonical.display()
+        ))));
+    }
+    Ok(())
+}
+
+/// True when the CANONICAL `path` is (inside) one of Otto's data dirs.
+fn in_otto_data_dir(path: &std::path::Path, data_dirs: &[std::path::PathBuf]) -> bool {
+    data_dirs.iter().any(|d| {
+        let d = d.canonicalize().unwrap_or_else(|_| d.clone());
+        path.starts_with(&d)
+    })
+}
+
 /// `GET /api/v1/fs/browse?path=<abs-or-~-path>[&files=true]`
 pub async fn browse(
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Query(params): Query<BrowseParams>,
 ) -> ApiResult<Json<FsBrowse>> {
+    let restricted = !user.is_root;
     static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let admission = ADMISSION
@@ -286,7 +332,12 @@ pub async fn browse(
     filesystem_work(
         admission,
         std::time::Duration::from_secs(10),
-        move |cancel| browse_sync(params, &cancel),
+        move |cancel| {
+            if restricted {
+                non_root_fs_denied(params.path.as_deref().unwrap_or(""))?;
+            }
+            browse_sync(params, &cancel)
+        },
     )
     .await
     .map(Json)
@@ -397,9 +448,10 @@ const BINARY_PROBE_BYTES: usize = 8 * 1024;
 
 /// `GET /api/v1/fs/read?path=<abs-or-~-path>`
 pub async fn read_file(
-    CurrentUser(_user): CurrentUser,
+    CurrentUser(user): CurrentUser,
     Query(params): Query<ReadParams>,
 ) -> ApiResult<Json<FsRead>> {
+    let restricted = !user.is_root;
     static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let admission = ADMISSION
@@ -410,6 +462,9 @@ pub async fn read_file(
         std::time::Duration::from_secs(10),
         move |cancel| {
             browse_canceled(&cancel)?;
+            if restricted {
+                non_root_fs_denied(&params.path)?;
+            }
             let result = read_file_sync(&params.path);
             browse_canceled(&cancel)?;
             result
@@ -895,6 +950,55 @@ mod tests {
                 otto_core::Error::Forbidden(_)
             ));
         }
+    }
+
+    #[test]
+    fn non_root_deny_covers_otto_data_dir_and_its_secrets() {
+        let data = tempfile::tempdir().unwrap();
+        let dirs = vec![data.path().to_path_buf()];
+        let canon = data.path().canonicalize().unwrap();
+        for rel in [
+            "",
+            "secrets.json",
+            "otto.db",
+            "tls/key.pem",
+            "logs/ottod.log",
+        ] {
+            assert!(
+                super::in_otto_data_dir(&canon.join(rel), &dirs),
+                "{rel} must be denied"
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        assert!(!super::in_otto_data_dir(
+            &other.path().canonicalize().unwrap(),
+            &dirs
+        ));
+    }
+
+    #[test]
+    fn non_root_deny_covers_ssh_and_key_files_through_dotdot() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() || !std::path::Path::new(&home).join(".ssh").is_dir() {
+            return; // no ~/.ssh on this host — the prefix check is covered below
+        }
+        let sneaky = format!("{home}/Desktop/../.ssh");
+        assert!(matches!(
+            super::non_root_fs_denied(&sneaky).unwrap_err().0,
+            otto_core::Error::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn non_root_deny_refuses_key_like_files_anywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("server.pem");
+        std::fs::write(&key, "synthetic fixture, not a key").unwrap();
+        let ok = dir.path().join("notes.txt");
+        std::fs::write(&ok, "hello").unwrap();
+        assert!(super::non_root_fs_denied(key.to_str().unwrap()).is_err());
+        assert!(super::non_root_fs_denied(ok.to_str().unwrap()).is_ok());
+        assert!(super::non_root_fs_denied(dir.path().to_str().unwrap()).is_ok());
     }
 
     #[test]
