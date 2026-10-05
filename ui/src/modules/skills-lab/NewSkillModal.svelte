@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   // "New skill" sheet with a small template picker:
   //   • Blank           — a SKILL.md scaffold (frontmatter + When to use / Method)
   //   • From bundled    — start from a bundled skill's SKILL.md under a new name
@@ -101,8 +102,8 @@
       }
       oncreated(s);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      error = /409|exists|conflict/i.test(msg) ? `A skill with that name already exists. Choose another name.` : msg;
+      const conflict = (e as { status?: unknown })?.status === 409 || /already exists/i.test(e instanceof Error ? e.message : '');
+      error = conflict ? `A skill with that name already exists. Choose another name.` : loadErrorText(e);
     } finally {
       busy = false;
     }

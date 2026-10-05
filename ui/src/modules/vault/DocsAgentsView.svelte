@@ -2,6 +2,7 @@
   import { plural } from '../../lib/plural';
   import PathField from '../../lib/components/PathField.svelte';
   import { toastError } from '../../lib/toastError';
+  import { loadErrorText } from '../../lib/loadError';
   // Docs agents — fan 1-4 writer agents out over a prompt to author notes into
   // the vault (a summarizer consolidates drafts when >1 writer), plus the
   // vault's RUN HISTORY (docs runs + per-note refine turns, server-persisted
@@ -215,6 +216,12 @@
     });
   }
 
+  // Status refresh failures were swallowed forever: the run then looked frozen.
+  // One miss is transient (the next tick retries); three in a row are shown
+  // inline until a refresh succeeds again.
+  let pollFailures = 0;
+  let pollError = $state('');
+
   async function poll(): Promise<void> {
     const r = vault.docsRun;
     try {
@@ -231,8 +238,11 @@
       // Keep the history list in step (it also carries refine turns that
       // complete server-side without this view's involvement).
       await vault.refreshDocsRuns();
-    } catch {
-      /* transient — next tick retries */
+      pollFailures = 0;
+      pollError = '';
+    } catch (e) {
+      // Transient misses retry on the next tick; a streak is surfaced.
+      if (++pollFailures >= 3) pollError = loadErrorText(e);
     }
     if (!anyActive) stopPoll();
   }
@@ -478,6 +488,13 @@
 <div class="docs-agents">
   <div class="inner">
     <h2><Icon name="zap" size={15} /> Docs agent</h2>
+    {#if pollError}
+      <div class="poll-err" role="alert">
+        <Icon name="warning" size={13} />
+        <span>Couldn’t refresh the docs agent’s status — it may still be running. {pollError}</span>
+        <button class="btn small" onclick={() => void poll()}>Retry</button>
+      </div>
+    {/if}
 
     {#if !run}
       <!-- ── form ─────────────────────────────────────────────────────────── -->
@@ -1046,6 +1063,19 @@
 {/if}
 
 <style>
+  .poll-err {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    margin-block-end: 10px;
+    border: 1px solid var(--danger);
+    border-radius: 6px;
+    background: var(--danger-soft);
+    font-size: var(--fs-s);
+  }
+  .poll-err > span { flex: 1 1 220px; min-width: 0; }
   .docs-agents {
     overflow-y: auto;
     min-height: 0;
