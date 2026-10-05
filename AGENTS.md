@@ -64,7 +64,9 @@ Otto.app (Tauri / otto-desktop)
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Jira/Confluence product workflows |
 | `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor |
+| `otto-agent-run` | Agent-run primitives for PTY-driven CLI agents: result-file watcher + recovery (`agent_run`), transcript turn oracle, off-runtime blocking IO |
+| `otto-review` | Multi-agent code-review engine — reviewer sessions, managed summarizer + deterministic fallback, and the pure core (diff render/caps, configs/budgets, lens expansion, prompts, draft parsing); routes + ctx-bound orchestration stay in `otto-server` |
+| `otto-server` | Axum routes wiring the crates together; also hosts the code-review routes + orchestration, swarm runtime, workflow engine & plugin supervisor |
 | `ottod` | The daemon binary |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,

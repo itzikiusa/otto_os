@@ -5,7 +5,7 @@
 use std::{future::Future, path::PathBuf, time::Duration};
 use tokio::sync::oneshot;
 
-pub(crate) struct Attempt {
+pub struct Attempt {
     dir: tempfile::TempDir,
     pub provider: String,
     pub meta: serde_json::Value,
@@ -47,8 +47,8 @@ The final file is the completion signal; a chat reply alone does not complete th
     }
 }
 
-pub(crate) fn valid_result(text: &str) -> bool {
-    serde_json::from_str::<Vec<crate::modules::DraftComment>>(text).is_ok()
+pub fn valid_result(text: &str) -> bool {
+    serde_json::from_str::<Vec<crate::engine::DraftComment>>(text).is_ok()
 }
 
 #[cfg(test)]
@@ -62,7 +62,7 @@ async fn read_result(path: &std::path::Path) -> Option<String> {
 /// `ready` is delivered by the managed runner's synchronous on_ready callback.
 /// Publication is awaited here, never spawned, so completion cannot race a
 /// detached DB write. The deadline includes startup AND publication.
-pub(crate) async fn drive<T, C, P, PF, S, SF>(
+pub async fn drive<T, C, P, PF, S, SF>(
     turn: T,
     mut ready: oneshot::Receiver<String>,
     budget: Duration,

@@ -11,8 +11,8 @@ fix them.
 This document is the authoritative end-user + operator reference for the
 feature. Where it describes wire-level behaviour, the source of truth is the
 contract files in `docs/contracts/` (`api.md`, `ws.md`); the Rust handlers in
-`crates/otto-server/src/modules.rs` + `crates/otto-server/src/review_session.rs`
-and the Svelte UI in `ui/src/modules/git/` implement it.
+the `otto-review` crate (`crates/otto-review/`) + the ctx-bound orchestration
+and routes in `crates/otto-server/src/modules.rs`, and the Svelte UI in `ui/src/modules/git/` implement it.
 
 ---
 
@@ -60,7 +60,9 @@ Key properties (all implemented):
 | Shared per-agent cards | `ui/src/modules/git/ReviewAgents.svelte` | Open / Retry / per-agent findings; used by both panels |
 | Configure-agents modal | inside `ReviewPanel.svelte` ("⚙ Configure") | Edits the persisted `ReviewConfig` |
 | Orchestration engine | `crates/otto-server/src/modules.rs` (`run_review_core`, route handlers) | Fan-out, summarizer, draft-comment storage |
-| Per-agent session lifecycle | `crates/otto-server/src/review_session.rs` | Spawn, prompt injection, watch, recovery/retry |
+| Engine pure core | `crates/otto-review/src/engine.rs` | Diff rendering + caps, config defaults + budgets, fan-out / orchestrator expansion, reviewer prompts, draft-comment parsing |
+| Summarizer lifecycle + deterministic fallback | `crates/otto-review/src/summarizer.rs`, `crates/otto-review/src/fallback.rs` | Managed summarizer attempt; the dedupe/rank floor when it cannot run |
+| Per-agent session lifecycle | `crates/otto-review/src/session.rs` | Spawn, prompt injection, watch, recovery/retry |
 | Summarizer / drafting agent runner | `crates/otto-orchestrator` (`Orchestrator::run_agent`) | A headless claude turn driven via a PTY |
 | Lenses (skills) | `crates/otto-skills/assets/skills/review/*` | `review`-category bundled skills |
 | Findings + merge-readiness store | `crates/otto-state/src/review_findings.rs`, migrations `0006`, `0007`, `0049`, `0054` | Persistent fingerprinted findings + state |
@@ -150,7 +152,7 @@ What happens:
 ## 4. How agents are spawned (the fan-out)
 
 Implemented in `run_review_core` (`modules.rs`) + `run_agent_session*`
-(`review_session.rs`):
+(`otto-review/src/session.rs`):
 
 1. **Load `ReviewConfig`** (§7) — the stored config or the built-in default.
 2. **Expand (lens × provider) into runs.** For each configured agent, its

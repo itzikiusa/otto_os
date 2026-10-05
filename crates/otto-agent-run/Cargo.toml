@@ -1,0 +1,24 @@
+[package]
+name = "otto-agent-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Agent-run primitives shared by every engine that drives a CLI agent through a
+# PTY session (code review, workflows, swarm, goal loops, product runs…): the
+# result-file watcher + recovery loop (`agent_run`), the transcript-based turn
+# oracle (`turn_oracle`), off-runtime blocking IO (`offload`) and screen text
+# helpers (`screen`). Leaf crate: depends on no otto-server code.
+
+[dependencies]
+otto-core.workspace = true
+otto-sessions.workspace = true
+otto-orchestrator.workspace = true
+otto-telemetry.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

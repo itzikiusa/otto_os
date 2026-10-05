@@ -10,7 +10,7 @@
 //! real session via the SessionManager mechanism, so all three CLIs are honored
 //! per-lens (the old `Orchestrator::run_agent` was claude-only).
 //!
-//! Concurrency approach mirrors `review_session.rs`: each agent is independent;
+//! Concurrency approach mirrors `otto_review::session`: each agent is independent;
 //! one failure never aborts the others (errors are isolated per-agent). Sessions
 //! are NOT killed when done — they stay live/openable so the PO can inspect
 //! each lens's terminal afterward.
