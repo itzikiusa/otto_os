@@ -624,7 +624,29 @@ impl super::GitProvider for Gitlab {
         strategy: MergeStrategy,
         delete_source_branch: bool,
     ) -> Result<()> {
+        self.merge_pinned(r, number, strategy, delete_source_branch, None)
+            .await
+    }
+
+    /// GitLab takes the pin natively: `sha` in the merge body makes the forge
+    /// refuse (409 "SHA does not match HEAD of source branch") when the MR's
+    /// head moved — atomic, unlike a read-then-merge.
+    async fn merge_pinned(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        expected_head_sha: Option<&str>,
+    ) -> Result<()> {
+        let pin = expected_head_sha.map(str::trim).filter(|s| !s.is_empty());
         if strategy == MergeStrategy::Rebase {
+            // A rebase REWRITES the head, so GitLab's `sha` pin would always
+            // miss afterwards: check the reviewed head before rebasing instead.
+            if let Some(want) = pin {
+                let pr = self.get_pr(r, number).await?;
+                super::check_head(pr.summary.head_sha.as_deref(), want)?;
+            }
             // Rebase the source branch first (async on GitLab's side), give it
             // a moment, then merge fast-forward style.
             self.http
@@ -641,8 +663,15 @@ impl super::GitProvider for Gitlab {
                     reqwest::Method::PUT,
                     &Self::mr_path(r, &format!("/{number}/merge")),
                 )
-                .json(&merge_body(strategy, delete_source_branch)))
+                .json(&{
+                    let mut body = merge_body(strategy, delete_source_branch);
+                    if let Some(sha) = pin.filter(|_| strategy != MergeStrategy::Rebase) {
+                        body["sha"] = serde_json::json!(sha);
+                    }
+                    body
+                }))
             .await
+            .map_err(super::pinned_merge_err)
     }
 
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()> {

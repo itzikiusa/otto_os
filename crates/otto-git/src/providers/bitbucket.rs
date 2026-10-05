@@ -738,6 +738,33 @@ impl super::GitProvider for Bitbucket {
         .map(|_| ())
     }
 
+    /// Bitbucket's merge endpoint takes no expected-head pin, so read the PR
+    /// UNCACHED (a 15 s cached detail could hide the very push the pin is
+    /// for) and compare its abbreviated `source.commit.hash` by prefix first.
+    async fn merge_pinned(
+        &self,
+        r: &RemoteRef,
+        number: u64,
+        strategy: MergeStrategy,
+        delete_source_branch: bool,
+        expected_head_sha: Option<&str>,
+    ) -> Result<()> {
+        if let Some(want) = expected_head_sha.map(str::trim).filter(|s| !s.is_empty()) {
+            let pr = self
+                .send_json(
+                    reqwest::Method::GET,
+                    &Self::pr_path(r, &format!("/{number}")),
+                    None,
+                )
+                .await?;
+            super::check_head(
+                vstr_opt(&pr, &["source", "commit", "hash"]).as_deref(),
+                want,
+            )?;
+        }
+        self.merge(r, number, strategy, delete_source_branch).await
+    }
+
     async fn decline(&self, r: &RemoteRef, number: u64) -> Result<()> {
         self.send(
             reqwest::Method::POST,

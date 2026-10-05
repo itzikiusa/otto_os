@@ -1710,6 +1710,21 @@ pub fn exclude_otto_dir(repo: &std::path::Path) -> std::io::Result<()> {
 mod exclude_tests {
     use super::*;
 
+    /// otto-git writes the untracked-file omission marker; `diff_is_partial`
+    /// keys on this one. They must never drift apart (S2-09).
+    #[test]
+    fn untracked_omission_marker_matches_the_partial_diff_marker() {
+        assert_eq!(
+            otto_git::local::UNTRACKED_OMITTED_MARKER,
+            DIFF_OMITTED_MARKER
+        );
+        let diff = format!(
+            "--- a/big.log\n+++ b/big.log\n{}too many untracked files — read the file on disk)\n",
+            otto_git::local::UNTRACKED_OMITTED_MARKER
+        );
+        assert!(diff_is_partial(&diff));
+    }
+
     #[test]
     fn otto_dir_is_excluded_once_in_main_and_linked_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
