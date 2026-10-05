@@ -7,8 +7,10 @@
 // `contextmenu` event on it — so the handler (usually `ctxMenu.show(e, …)`)
 // stays the single source of the menu:
 //
-//   • keyboard — the ContextMenu ("Menu") key or ⇧F10 while the element
-//     itself has focus (not a field inside it). The menu opens under the
+//   • keyboard — the ContextMenu ("Menu") key or ⇧F10 while focus is on the
+//     element or any non-editable control inside it (a column header's sort
+//     button, a row's link) — a text field keeps the chord for its own menu.
+//     The nearest host wins (stopPropagation). The menu opens under the
 //     element's start edge, as for a ⋯ button.
 //   • touch / pen — a long press (500 ms, < 10 px of movement). The click
 //     that ends the press is swallowed so the row doesn't also open.
@@ -33,6 +35,20 @@ export function keyboardMenuPoint(rect: { left: number; right: number; top: numb
   return { x: Math.round(rtl ? rect.right - 8 : rect.left + 8), y: Math.round(Math.min(rect.bottom, rect.top + 24)) };
 }
 
+const EDITABLE = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+
+/** Does a menu chord on `target` belong to the row menu on `node`? The host
+ *  itself, or any descendant that is not an editable field. */
+export function ownsMenuKey(
+  node: { contains(other: unknown): boolean },
+  target: { closest?(sel: string): unknown } | null,
+): boolean {
+  if (!target) return false;
+  if ((target as unknown) === node) return true;
+  if (!node.contains(target)) return false;
+  return !target.closest?.(EDITABLE);
+}
+
 function fire(node: HTMLElement, x: number, y: number): void {
   node.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 2 }));
 }
@@ -50,7 +66,7 @@ export function rowMenu(node: HTMLElement): { destroy(): void } {
   };
 
   function onKeydown(e: KeyboardEvent): void {
-    if (e.target !== node || !isMenuKey(e)) return;
+    if (!isMenuKey(e) || !ownsMenuKey(node, e.target as Element | null)) return;
     e.preventDefault();
     e.stopPropagation();
     const rtl = getComputedStyle(node).direction === 'rtl';
