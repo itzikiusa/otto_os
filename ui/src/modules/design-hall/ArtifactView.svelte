@@ -145,7 +145,14 @@
 
   async function load(target: string): Promise<void> {
     const my = ++loadSeq;
-    phase = detail?.artifact.id === target ? phase : 'loading';
+    const same = detail?.artifact.id === target;
+    // Snapshot the editor: a live >64 KB `content` event or a resync reloads
+    // while the user may keep typing. If the text moved during the fetch, the
+    // fetched head must NOT replace it — flag it as a newer version instead
+    // (S18-09). An explicit discard/"load theirs" sets `source` BEFORE calling,
+    // so its snapshot matches and the load applies.
+    const typedAt = same ? source : null;
+    phase = same ? phase : 'loading';
     try {
       const d = await api.getArtifact(target, { content: true });
       if (my !== loadSeq) return;
@@ -162,6 +169,13 @@
           return;
         }
         setBlob(c.blobUrl);
+      }
+      if (same && source !== typedAt) {
+        detail = d;
+        newerHead = d.content_version_id ?? d.head?.id ?? null;
+        phase = 'ready';
+        loadError = null;
+        return;
       }
       detail = d;
       source = text;
