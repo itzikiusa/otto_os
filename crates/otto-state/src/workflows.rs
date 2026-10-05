@@ -2508,7 +2508,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
-        let repo = WorkflowsRepo::new(pool.into());
+        let repo = WorkflowsRepo::new(DbPool::from(pool));
         let wf = repo
             .create(
                 &"ws".into(),

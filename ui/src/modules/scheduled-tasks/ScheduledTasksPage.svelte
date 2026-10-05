@@ -29,7 +29,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { api } from '../../lib/api/client';
   import { loadErrorText } from '../../lib/loadError';
-  import type { Workflow } from '../../lib/api/types';
+  import type { EmailSenderResp, Integration, Workflow } from '../../lib/api/types';
   import { renderMarkdownGfm } from '../../lib/md';
   import { copyText } from '../../lib/clipboard';
 
@@ -113,8 +113,34 @@
    *  few fields most people need); editing a task that uses them opens it. */
   let showAdvanced = $state(false);
 
-  // Set after a successful "Convert to workflow" — surfaces a link to Workflows.
+  // Set after a successful "Convert to workflow" — surfaces a link that opens
+  // the new workflow (`#/workflows/<id>`).
   let convertedWfId = $state<string | null>(null);
+
+  /** Which delivery destinations are set up (null = unknown — offer them all).
+   *  Slack/Telegram need an enabled workspace integration with a bot token
+   *  (Settings → Channels); email needs the owner's verified sender (Settings →
+   *  Sharing). Offering an unconfigured one only failed at the first run. */
+  let destReady = $state<{ slack: boolean; telegram: boolean; email: boolean } | null>(null);
+  async function loadDestReady(): Promise<void> {
+    const wsId = ws.currentId;
+    if (!wsId) return;
+    const [intg, sender] = await Promise.all([
+      api.get<Integration[]>(`/workspaces/${wsId}/integrations`).catch(() => null),
+      api.get<EmailSenderResp>('/email-sender').catch(() => null),
+    ]);
+    const chan = (c: string) =>
+      intg ? intg.some((i) => i.channel === c && i.enabled && i.has_bot_token) : true;
+    destReady = { slack: chan('slack'), telegram: chan('telegram'), email: sender ? sender.verified === true : true };
+  }
+  /** A destination that is known NOT to be set up (the current pick of an
+   *  edited task stays selectable so its form still reads true). */
+  function destBlocked(d: 'slack' | 'telegram' | 'email'): boolean {
+    return destReady !== null && !destReady[d] && fDestType !== d;
+  }
+  $effect(() => {
+    if (creating || editId) untrack(() => void loadDestReady());
+  });
 
   /** The browser's IANA timezone, e.g. "Europe/London" (default for new tasks). */
   const browserTz = (() => {
@@ -897,11 +923,23 @@
           <span>Destination</span>
           <select class="input" bind:value={fDestType}>
             <option value="none">None (store only)</option>
-            <option value="slack">Slack</option>
-            <option value="telegram">Telegram</option>
-            <option value="email">Email</option>
+            <option value="slack" disabled={destBlocked('slack')}>Slack{destBlocked('slack') ? ' — not set up' : ''}</option>
+            <option value="telegram" disabled={destBlocked('telegram')}>Telegram{destBlocked('telegram') ? ' — not set up' : ''}</option>
+            <option value="email" disabled={destBlocked('email')}>Email{destBlocked('email') ? ' — not set up' : ''}</option>
             <option value="webhook">HTTP webhook</option>
           </select>
+          {#if destReady && (!destReady.slack || !destReady.telegram)}
+            <span class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
+              {fDestType === 'slack' && !destReady.slack ? 'Slack isn’t set up for this workspace.' : fDestType === 'telegram' && !destReady.telegram ? 'Telegram isn’t set up for this workspace.' : 'Slack / Telegram need a workspace integration.'}
+              <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Channels</button>
+            </span>
+          {/if}
+          {#if destReady && !destReady.email}
+            <span class="field-hint" class:bad={fDestType === 'email'}>
+              Email needs a verified sender.
+              <button type="button" class="btn small ghost" onclick={() => router.go('settings/sharing')}>Set up in Settings → Sharing</button>
+            </span>
+          {/if}
         </label>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
@@ -984,7 +1022,7 @@
       <div class="notice" role="status">
         <span>Created a workflow from this task.</span>
         <span class="grow"></span>
-        <button class="btn small" onclick={() => { convertedWfId = null; router.go('workflows'); }}>Open Workflows</button>
+        <button class="btn small" onclick={() => { const id = convertedWfId; convertedWfId = null; router.go(id ? `workflows/${id}` : 'workflows'); }}>Open workflow</button>
         <button class="btn small" onclick={() => (convertedWfId = null)}>Dismiss</button>
       </div>
     {/if}
@@ -1074,7 +1112,9 @@
                     {#if r.skipped_delivery}<Badge label="No change" title="Not delivered: the report is unchanged since the last run" />{/if}
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
                     {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
-                    {#if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
+                    {#if r.workflow_run_id && t.workflow_id}
+                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => router.go(`workflows/${t.workflow_id}`)}>Workflow run</button>
+                    {:else if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}

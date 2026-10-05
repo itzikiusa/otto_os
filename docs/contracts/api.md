@@ -295,7 +295,7 @@ workspace from the row.
 | 64 | GET /api/v1/swarm/presets | member | — | `SwarmPreset[]` |
 | 65 | GET /api/v1/swarm/swarms/{sid}/agents | ws viewer | — | `SwarmAgent[]` |
 | 66 | POST /api/v1/swarm/swarms/{sid}/agents | ws editor | CreateAgentReq | SwarmAgent |
-| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent |
+| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent — present fields apply; `schedule: null` clears the schedule, an absent `schedule` keeps it. The schedule's `last_run` / `armed_at` keys are server-owned: an edit carries the stored ones (client values ignored); `armed_at` is re-stamped on create, resume (`enabled` false→true) or a change to `cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`, and the scheduler fires from `max(last_run, armed_at)`. `at` is read in the schedule's IANA `timezone` (absent = UTC); `every_min` floors at 5 |
 | 68 | DELETE /api/v1/swarm/agents/{aid} | ws editor | — | 204 |
 | 69 | POST /api/v1/workspaces/{id}/swarm/recruit | ws editor | RecruitReq | RecruitedAgent |
 | 70 | GET /api/v1/swarm/swarms/{sid}/projects | ws viewer | — | `SwarmProject[]` |

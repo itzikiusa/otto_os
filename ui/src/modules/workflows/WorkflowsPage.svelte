@@ -1417,6 +1417,36 @@
     dirty = true;
   }
 
+  // swarm_task node: pick the swarm / project instead of pasting raw ids.
+  // Loaded on demand when such a node is selected (null = not loaded / failed —
+  // the inputs fall back to free text so a saved id is still editable).
+  let swarmOpts = $state<{ id: string; name: string }[] | null>(null);
+  let swarmProjectOpts = $state<Record<string, { id: string; name: string }[]>>({});
+  let swarmOptsWs: string | null = null;
+  $effect(() => {
+    const wsId = current?.workspace_id;
+    if (selectedNode?.kind !== 'swarm_task' || !wsId) return;
+    const sid = paramStr('swarm_id');
+    untrack(() => {
+      if (swarmOptsWs !== wsId) {
+        swarmOptsWs = wsId;
+        swarmOpts = null;
+      }
+      if (swarmOpts === null) {
+        api
+          .get<{ id: string; name: string }[]>(`/workspaces/${wsId}/swarm/swarms`)
+          .then((l) => (swarmOpts = l.map((x) => ({ id: x.id, name: x.name }))))
+          .catch(() => {});
+      }
+      if (sid && !swarmProjectOpts[sid]) {
+        api
+          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${sid}`)
+          .then((d) => (swarmProjectOpts = { ...swarmProjectOpts, [sid]: d.projects.map((x) => ({ id: x.id, name: x.name })) }))
+          .catch(() => {});
+      }
+    });
+  });
+
   function paramStr(field: string): string {
     const p = selectedNode?.params as Record<string, unknown> | undefined;
     const v = p?.[field];
@@ -2722,22 +2752,51 @@
               />
               <p class="node-hint">Pauses the run until an operator calls the resume endpoint or clicks Approve above.</p>
             {:else if selectedNode.kind === 'swarm_task'}
-              <label for="np-swarm">Swarm ID</label>
-              <input
-                id="np-swarm"
-                type="text"
-                placeholder="Swarm id"
-                value={paramStr('swarm_id')}
-                oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
-              />
-              <label for="np-proj">Project ID</label>
-              <input
-                id="np-proj"
-                type="text"
-                placeholder="Swarm project id"
-                value={paramStr('project_id')}
-                oninput={(e) => onParam('project_id', e.currentTarget.value)}
-              />
+              {@const sid = paramStr('swarm_id')}
+              {@const projOpts = sid ? swarmProjectOpts[sid] : undefined}
+              <label for="np-swarm">Swarm</label>
+              {#if swarmOpts}
+                <select
+                  id="np-swarm"
+                  value={sid}
+                  onchange={(e) => { onParam('swarm_id', e.currentTarget.value); onParam('project_id', ''); }}
+                >
+                  <option value="">Choose a swarm…</option>
+                  {#each swarmOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
+                  {#if sid && !swarmOpts.some((o) => o.id === sid)}<option value={sid}>Unknown swarm ({sid})</option>{/if}
+                </select>
+                {#if swarmOpts.length === 0}<p class="node-hint">No swarms in this workspace yet — create one on the Swarm page.</p>{/if}
+              {:else}
+                <input
+                  id="np-swarm"
+                  type="text"
+                  placeholder="Swarm id"
+                  value={sid}
+                  oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
+                />
+              {/if}
+              <label for="np-proj">Project</label>
+              {#if projOpts}
+                <select
+                  id="np-proj"
+                  value={paramStr('project_id')}
+                  onchange={(e) => onParam('project_id', e.currentTarget.value)}
+                >
+                  <option value="">Choose a project…</option>
+                  {#each projOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
+                  {#if paramStr('project_id') && !projOpts.some((o) => o.id === paramStr('project_id'))}
+                    <option value={paramStr('project_id')}>Unknown project ({paramStr('project_id')})</option>
+                  {/if}
+                </select>
+              {:else}
+                <input
+                  id="np-proj"
+                  type="text"
+                  placeholder={sid ? 'Swarm project id' : 'Choose a swarm first'}
+                  value={paramStr('project_id')}
+                  oninput={(e) => onParam('project_id', e.currentTarget.value)}
+                />
+              {/if}
               <label for="np-title">Task title</label>
               <input
                 id="np-title"
