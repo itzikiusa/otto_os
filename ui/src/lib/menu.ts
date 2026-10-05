@@ -9,8 +9,14 @@ import { selectAllInFocus } from './selectall';
 import { sidePane } from './stores/sidePane.svelte';
 import { nativePane } from './nativePane';
 import { isEmbedded } from './desktop';
+import { dismissTopDialog, modalKeyVerdict } from './keys';
 
 export function handleMenu(id: string): void {
+  // A dialog is up in this window: Close Tab closes it, and New Session /
+  // End Session / … never act on the window behind it.
+  const verdict = modalKeyVerdict(id, ui.modalCount > 0);
+  if (verdict === 'dismiss') return dismissTopDialog();
+  if (verdict === 'drop') return;
   // The window's menu while its side-by-side pane has focus: ⌘A / ⌘W / the
   // session items act on that pane (or ⌘W closes it) — not on the main pane
   // behind it. The pane runs the forwarded id through this same function.

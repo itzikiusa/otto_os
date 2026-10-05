@@ -184,7 +184,7 @@ pub struct Session {
 /// kept byte-identical, and every engine that stamps a `meta.source` on the
 /// sessions it owns must list that source here — otherwise its sessions render
 /// as foreground agents AND become durable (exempt from volume cleanup).
-pub const BACKGROUND_SESSION_SOURCES: [&str; 24] = [
+pub const BACKGROUND_SESSION_SOURCES: [&str; 26] = [
     "channel",
     "review",
     "review_summarizer",
@@ -211,6 +211,10 @@ pub const BACKGROUND_SESSION_SOURCES: [&str; 24] = [
     // Otto Assistant threads: resumed on demand, reached through the
     // Assistant module (never the sidebar's Agents group).
     "assistant",
+    // Design Hall's agent-assist runs and the in-app browser's one-turn page
+    // summaries: throwaway sessions owned by their page, like `db_assist`.
+    "design_assist",
+    "browser_summarize",
 ];
 
 impl Session {
@@ -2835,37 +2839,116 @@ mod tests {
     #[test]
     fn background_sources_cover_every_engine() {
         use super::BACKGROUND_SESSION_SOURCES;
-        for src in [
-            "channel",
-            "review",
-            "review_summarizer",
-            "skilleval",
-            "skillreview",
-            "product-analysis",
-            "product_refine",
-            "swarm",
-            "canvas_assist",
-            "canvas_assist_preview",
-            "mockup_assist",
-            "db_assist",
-            "workflow",
-            "vault-docs",
-            "vault-docs-review",
-            "pr-draft",
-            "commit-draft",
-            "insights",
-            "run_with_otto",
-            "goal_loop",
-            "discovery_chat",
-            "scheduled_task",
-            "finding",
-            "assistant",
-        ] {
+        // Sources that are NOT a background engine's session, each reviewed:
+        // anything else stamped as a `"source": "<x>"` literal anywhere in the
+        // workspace sources must be in BACKGROUND_SESSION_SOURCES, so a new
+        // engine can't ship its sessions as durable foreground agents
+        // (2026-10 review: design_assist / browser_summarize were missed).
+        const NOT_BACKGROUND: &[&str] = &[
+            // Deliberately listed in the Agents tab (engine-owned via
+            // `work.origin`, see personal_agents_engine.rs).
+            "personal_agent",
+            // A Connection-kind sign-in terminal, never an agent session.
+            "provider-login",
+            // Not session meta: canvas/excalidraw document `source`, API
+            // history request origin, state-row fixtures.
+            "otto",
+            "automation_run",
+            "agent",
+            "manual",
+            // Connection / cluster import origins (otto-connections, otto-k8s).
+            "mysql_workbench",
+            "kubeconfig",
+            "eks",
+            // Test fixtures (incl. a case-sensitivity probe: "Review") (workflow edges, refs, foreground probes).
+            "a",
+            "abc",
+            "b",
+            "main",
+            "preview",
+            "gate",
+            "someday-new",
+            "Review",
+        ];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates dir");
+        let mut found = std::collections::BTreeMap::<String, String>::new();
+        let mut stack = vec![crates.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                if path.is_dir() {
+                    if name != "target" && name != "node_modules" {
+                        stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for lit in source_literals(&text) {
+                    found
+                        .entry(lit)
+                        .or_insert_with(|| path.display().to_string());
+                }
+            }
+        }
+        assert!(
+            found.contains_key("db_assist"),
+            "the scan must see the engine call sites (found {found:?})"
+        );
+        for (src, file) in &found {
             assert!(
-                BACKGROUND_SESSION_SOURCES.contains(&src),
-                "{src} missing from BACKGROUND_SESSION_SOURCES"
+                BACKGROUND_SESSION_SOURCES.contains(&src.as_str())
+                    || NOT_BACKGROUND.contains(&src.as_str()),
+                "`\"source\": \"{src}\"` ({file}) is neither in BACKGROUND_SESSION_SOURCES \
+                 nor reviewed as NOT_BACKGROUND — classify it"
             );
         }
-        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 24);
+        for src in [
+            "design_assist",
+            "browser_summarize",
+            "db_assist",
+            "assistant",
+        ] {
+            assert!(BACKGROUND_SESSION_SOURCES.contains(&src), "{src}");
+        }
+        assert_eq!(BACKGROUND_SESSION_SOURCES.len(), 26);
+    }
+
+    /// Every `"source": "<literal>"` / `"source":"<literal>"` in `text`.
+    fn source_literals(text: &str) -> Vec<String> {
+        const KEY: &str = "\"source\"";
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(i) = rest.find(KEY) {
+            rest = &rest[i + KEY.len()..];
+            let t = rest.trim_start();
+            let Some(t) = t.strip_prefix(':') else {
+                continue;
+            };
+            let t = t.trim_start();
+            let Some(t) = t.strip_prefix('"') else {
+                continue;
+            };
+            let Some(end) = t.find('"') else { continue };
+            let lit = &t[..end];
+            if !lit.is_empty()
+                && lit
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                out.push(lit.to_string());
+            }
+        }
+        out
     }
 }

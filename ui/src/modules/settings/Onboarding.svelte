@@ -5,6 +5,8 @@
   import type { LoginResp, Workspace } from '../../lib/api/types';
   import { auth } from '../../lib/stores/auth.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import FolderPicker from '../../lib/components/FolderPicker.svelte';
+  import type { FsBrowse } from '../../lib/api/types';
 
   let step = $state(0);
   let card = $state<HTMLElement | null>(null);
@@ -45,42 +47,86 @@
   // after setup, since it needs an authenticated session).
   const clickhouse = $derived(auth.meta?.tools?.find((t) => t.name === 'clickhouse'));
 
-  // Detected agent CLIs (claude / codex). Otto can't run an agent session
+  // Detected agent CLIs (claude / codex / agy). Otto can't run an agent session
   // without one, so the tool-check step calls this out specifically — the
   // first-run coach on the Agents page then walks the user to a launched agent.
   const agentTools = $derived(
-    (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex'),
+    (auth.meta?.tools ?? []).filter((t) => t.name === 'claude' || t.name === 'codex' || t.name === 'agy'),
   );
   const hasAgentCli = $derived(agentTools.some((t) => t.found));
+
+  /** Create the root account (once) and authenticate with it. Runs when the
+   *  password step is confirmed, so the workspace step can browse and check
+   *  folders on the daemon (`/fs/browse` needs a signed-in user). */
+  async function ensureRoot(): Promise<LoginResp> {
+    if (!rootLogin) {
+      try {
+        rootLogin = await api.post<LoginResp>('/onboarding/root', {
+          password,
+          display_name: displayName.trim() === '' ? null : displayName.trim(),
+        });
+      } catch (e) {
+        // The account may exist even if its response was lost. Authenticate
+        // with the just-entered credentials; never replace an existing root.
+        if (e instanceof ApiError && e.status !== 409 && e.status < 500) throw e;
+        try {
+          rootLogin = await api.post<LoginResp>('/auth/login', { username: 'root', password });
+        } catch {
+          throw e;
+        }
+      }
+    }
+    setToken(rootLogin.token);
+    return rootLogin;
+  }
+
+  let pwError = $state('');
+  async function confirmPassword(): Promise<void> {
+    if (busy || !pwValid) return;
+    busy = true;
+    pwError = '';
+    try {
+      await ensureRoot();
+      step = 2;
+    } catch (e) {
+      pwError = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Workspace folder: picked from the daemon's file system, and checked
+  // before moving on — a typo used to surface only as a failed "Finish".
+  let browsing = $state(false);
+  let pathError = $state('');
+  let checkingPath = $state(false);
+  async function confirmWorkspace(): Promise<void> {
+    if (checkingPath) return;
+    checkingPath = true;
+    pathError = '';
+    try {
+      const view = await api.get<FsBrowse>(`/fs/browse?path=${encodeURIComponent(wsPath.trim())}`);
+      wsPath = view.path;
+      skipWorkspace = false;
+      step = 3;
+    } catch (e) {
+      pathError = `Otto can’t open that folder: ${e instanceof Error ? e.message : String(e)}. Check the path, or choose it with Browse.`;
+    } finally {
+      checkingPath = false;
+    }
+  }
 
   async function finish(): Promise<void> {
     if (busy) return;
     busy = true;
     error = '';
     try {
-      if (!rootLogin) {
-        try {
-          rootLogin = await api.post<LoginResp>('/onboarding/root', {
-            password,
-            display_name: displayName.trim() === '' ? null : displayName.trim(),
-          });
-        } catch (e) {
-          // The account may exist even if its response was lost. Authenticate
-          // with the just-entered credentials; never replace an existing root.
-          if (e instanceof ApiError && e.status !== 409 && e.status < 500) throw e;
-          try {
-            rootLogin = await api.post<LoginResp>('/auth/login', { username: 'root', password });
-          } catch {
-            throw e;
-          }
-        }
-      }
-      setToken(rootLogin.token);
+      const login = await ensureRoot();
       if (!skipWorkspace && wsName.trim() !== '' && wsPath.trim() !== '') {
         await api.post<Workspace>('/workspaces', { name: wsName.trim(), root_path: wsPath.trim() });
       }
       if (auth.meta) auth.meta.needs_onboarding = false;
-      await auth.acceptLogin(rootLogin);
+      await auth.acceptLogin(login);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       busy = false;
@@ -139,9 +185,13 @@
           <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don’t match" : ''}</span>
         </div>
 
+        {#if pwError}<div class="hint err" role="alert">{pwError}</div>{/if}
+
         <div class="ob-actions">
-          <button class="btn" onclick={() => (step = 0)}>Back</button>
-          <button class="btn primary" disabled={!pwValid} onclick={() => (step = 2)}>Continue</button>
+          <button class="btn" disabled={busy} onclick={() => (step = 0)}>Back</button>
+          <button class="btn primary" disabled={!pwValid || busy} onclick={confirmPassword}>
+            {busy ? 'Creating the account…' : 'Create account'}
+          </button>
         </div>
       </div>
     {:else if step === 2}
@@ -155,7 +205,21 @@
         </div>
         <div class="field">
           <label for="ob-wspath">Directory</label>
-          <input id="ob-wspath" dir="ltr" class="input mono" bind:value={wsPath} placeholder="/Users/you/code/my-project" spellcheck="false" />
+          <div class="ob-path-row">
+            <input
+              id="ob-wspath"
+              dir="ltr"
+              class="input mono ob-path-input"
+              bind:value={wsPath}
+              oninput={() => (pathError = '')}
+              placeholder="/Users/you/code/my-project"
+              spellcheck="false"
+              aria-invalid={pathError !== ''}
+              aria-describedby="ob-path-err"
+            />
+            <button class="btn" onclick={() => (browsing = true)}>Browse…</button>
+          </div>
+          <span id="ob-path-err" class="hint err" role="status">{pathError}</span>
         </div>
 
         <div class="ob-actions">
@@ -163,10 +227,10 @@
           <button class="btn ghost" onclick={() => { skipWorkspace = true; step = 3; }}>Skip</button>
           <button
             class="btn primary"
-            disabled={wsName.trim() === '' || wsPath.trim() === ''}
-            onclick={() => { skipWorkspace = false; step = 3; }}
+            disabled={wsName.trim() === '' || wsPath.trim() === '' || checkingPath}
+            onclick={confirmWorkspace}
           >
-            Continue
+            {checkingPath ? 'Checking…' : 'Continue'}
           </button>
         </div>
       </div>
@@ -248,7 +312,29 @@
   </div>
 </div>
 
+{#if browsing}
+  <FolderPicker
+    title="Choose the workspace folder"
+    start={wsPath.trim()}
+    onpick={(path) => {
+      wsPath = path;
+      pathError = '';
+      if (wsName.trim() === '') wsName = path.split('/').filter(Boolean).pop() ?? '';
+      browsing = false;
+    }}
+    onclose={() => (browsing = false)}
+  />
+{/if}
+
 <style>
+  .ob-path-row {
+    display: flex;
+    gap: 6px;
+  }
+  .ob-path-input {
+    flex: 1;
+    min-width: 0;
+  }
   .ob-wrap {
     height: 100%;
     display: grid;

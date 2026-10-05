@@ -13,6 +13,7 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { allProviders, providerReadiness } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -380,11 +381,27 @@
     }
   }
 
+  /** Esc / backdrop / ✕: an opening message or title typed here must not
+   *  vanish on a stray key — ask first when something was entered. */
+  async function requestClose(): Promise<void> {
+    const edited = prompt.trim() !== '' || title.trim() !== '' || extraDirs.length > 0;
+    if (edited) {
+      const ok = await confirmer.ask('The title, opening message and folders you entered will be lost.', {
+        title: 'Discard this new session?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
+
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" {onclose}>
+<Modal title="New session" onclose={requestClose} dismissable={!busy}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->

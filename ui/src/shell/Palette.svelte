@@ -370,13 +370,23 @@
         const n = out.ids.length;
         const shown = out.titles.slice(0, 5).map((t) => `• ${t}`).join('\n');
         const more = out.titles.length > 5 ? `\n…and ${out.titles.length - 5} more` : '';
-        const ok = await confirmer.ask(
-          `Permanently delete ${plural(n, 'session')} and ${n === 1 ? 'its' : 'their'} history?\n\n${shown}${more}`,
-          { title: n === 1 ? 'Delete session?' : 'Delete sessions?', confirmLabel: 'Delete' },
-        );
+        const busyNote =
+          out.working > 0 ? `\n\n${plural(out.working, 'session')} ${out.working === 1 ? 'is' : 'are'} working right now and will stop mid-turn.` : '';
+        const ok = out.permanent
+          ? await confirmer.ask(
+              `Permanently delete ${plural(n, 'session')} and ${n === 1 ? 'its' : 'their'} history?\n\n${shown}${more}${busyNote}`,
+              { title: n === 1 ? 'Delete session?' : 'Delete sessions?', confirmLabel: 'Delete', danger: true },
+            )
+          : await confirmer.ask(
+              `Archive ${plural(n, 'session')}? ${n === 1 ? 'It stops and keeps its' : 'They stop and keep their'} history (resumable from the Archived list).\n\n${shown}${more}${busyNote}`,
+              { title: n === 1 ? 'Archive session?' : `Archive ${n} sessions?`, confirmLabel: n === 1 ? 'Archive session' : `Archive ${n} sessions` },
+            );
         if (!ok || !ws.currentId) return;
-        const count = await applyClose(storeContext(ws.currentId), out.ids, true);
-        toasts.success('Sessions deleted', `${plural(count, 'session')} removed`);
+        const count = await applyClose(storeContext(ws.currentId), out.ids, out.permanent);
+        toasts.success(
+          out.permanent ? 'Sessions deleted' : 'Sessions closed',
+          `${plural(count, 'session')} ${out.permanent ? 'removed' : 'archived'}`,
+        );
         return done();
       }
       case 'closed':

@@ -36,8 +36,10 @@ export interface BarTurn {
   source?: string;
   /** Planned actions awaiting a person (never persisted: a reload drops them). */
   plan?: unknown[];
-  /** Sessions a permanent delete would remove (confirm first; never persisted). */
+  /** Sessions a close would end (confirm first; never persisted). */
   closeIds?: string[];
+  /** That close deletes for good (else archives); never persisted. */
+  closePermanent?: boolean;
 }
 
 export interface BarSpace {

@@ -335,6 +335,7 @@
       source: r.source,
       plan: r.plan,
       closeIds: r.closeIds,
+      closePermanent: r.closePermanent,
     };
   }
 
@@ -374,7 +375,7 @@
     busy[turn.id] = true;
     const reply = turn.plan
       ? await confirmPlan(turn.plan as Action[], sp, askHost)
-      : await confirmClose(turn.closeIds ?? [], sp, askHost);
+      : await confirmClose(turn.closeIds ?? [], sp, askHost, turn.closePermanent !== false);
     barStore.updateTurn(idx, turn.id, { ...replyPatch(reply), plan: undefined, closeIds: undefined });
     delete busy[turn.id];
   }
@@ -840,11 +841,11 @@
                         <button class="btn small" disabled={busy[t.id]} onclick={() => void resolveTurn(t, false)}>Cancel</button>
                         <button
                           class="btn small"
-                          class:primary={!t.closeIds}
-                          class:danger={!!t.closeIds}
+                          class:primary={!t.closeIds || t.closePermanent === false}
+                          class:danger={!!t.closeIds && t.closePermanent !== false}
                           disabled={busy[t.id]}
                           onclick={() => void resolveTurn(t, true)}
-                        >{busy[t.id] ? 'Running…' : t.closeIds ? 'Delete' : 'Run plan'}</button>
+                        >{busy[t.id] ? 'Running…' : t.closeIds ? (t.closePermanent !== false ? 'Delete' : 'Archive') : 'Run plan'}</button>
                       </div>
                     {/if}
                     <footer class="meta">

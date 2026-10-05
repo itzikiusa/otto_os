@@ -232,9 +232,25 @@
       phase = '';
     }
   }
+
+  /** Esc / backdrop / ✕: a stray key must not throw away a typed (or agent-
+   *  drafted) title, description or reviewer list — ask first. */
+  async function requestClose(): Promise<void> {
+    const edited = title.trim() !== '' || description.trim() !== '' || reviewers.length > 0 || revQuery.trim() !== '';
+    if (edited) {
+      const ok = await confirmer.ask('The title, description and reviewers you entered will be lost.', {
+        title: 'Discard this pull request?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
 </script>
 
-<Modal title="New pull request" width={520} {onclose}>
+<Modal title="New pull request" width={520} onclose={requestClose} dismissable={!busy && !drafting}>
   <div class="createpr-form">
   {#if branchesError}
     <div class="cp-error" role="alert">
@@ -391,6 +407,12 @@
     height: auto;
     min-height: 30px;
     padding: 2px 6px;
+  }
+  /* The bare inner field drops its outline: the chip box carries the ring,
+     like `.input:focus` / `.input-group:focus-within`. */
+  .chips-input:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .chips-text {
     flex: 1;

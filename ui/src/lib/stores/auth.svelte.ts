@@ -183,8 +183,17 @@ class AuthStore {
       }
       this.phase = 'ready';
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setToken(null);
-      this.phase = 'login';
+      // Only a rejected token means "sign in again". A timeout / 5xx / dropped
+      // connection on /auth/me (daemon restarting, sleep/wake) used to land on
+      // the login screen with a perfectly valid token: stay offline instead —
+      // App polls boot(true) every 2 s — or, for an in-place re-boot of a
+      // running app, keep the shell up.
+      if (e instanceof ApiError && e.status === 401) {
+        setToken(null);
+        this.phase = 'login';
+      } else if (this.phase !== 'ready') {
+        this.phase = 'offline';
+      }
     }
   }
 

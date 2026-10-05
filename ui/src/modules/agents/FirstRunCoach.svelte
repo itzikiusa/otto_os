@@ -132,7 +132,7 @@
       toasts.success('Skill installed', s.name);
       await loadSkills();
     } catch (e) {
-      toastError('Couldn’t install the CLI', e);
+      toastError('Couldn’t install the skill', e);
     } finally {
       setSkillBusy(s.name, false);
     }
@@ -218,13 +218,13 @@
         {#if hasAgentCli}<Icon name="check" size={12} />{:else}<span class="num">1</span>{/if}
       </span>
       <div class="step-body">
-        <div class="step-title">Agent CLI detected</div>
+        <div class="step-title">{hasAgentCli ? 'Agent CLI detected' : 'Install an agent CLI'}</div>
         {#if hasAgentCli}
           <div class="tool-chips">
             {#each agentTools as t (t.name)}
               <Badge tone={t.found && t.checked ? 'ok' : 'neutral'} title={providerReadiness(t.name).message}>
                 <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={10} />
-                {t.name}{!t.checked ? ' · unchecked' : t.found && t.version ? ` ${t.version}` : ''}
+                {t.name}{!t.checked ? ' · not checked yet' : t.found && t.version ? ` ${t.version}` : ''}
               </Badge>
             {/each}
             {#if agentTools.length === 0}
