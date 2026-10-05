@@ -205,11 +205,11 @@
         </div>
         <div class="field">
           <label for="ob-wspath">Directory</label>
-          <div class="path-row">
+          <div class="ob-path-row">
             <input
               id="ob-wspath"
               dir="ltr"
-              class="input mono"
+              class="input mono ob-path-input"
               bind:value={wsPath}
               oninput={() => (pathError = '')}
               placeholder="/Users/you/code/my-project"
@@ -327,11 +327,11 @@
 {/if}
 
 <style>
-  .path-row {
+  .ob-path-row {
     display: flex;
     gap: 6px;
   }
-  .path-row .input {
+  .ob-path-input {
     flex: 1;
     min-width: 0;
   }

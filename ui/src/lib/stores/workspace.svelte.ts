@@ -1395,11 +1395,19 @@ class WorkspaceStore {
         this.navigateToSession(id);
         return;
       }
+      const row = await this.ensureSession(id);
+      if (!row) continue; // deleted (or no longer visible) — try the next one
       try {
-        await this.unarchiveAndOpen(id);
+        if (row.archived) await this.unarchiveSession(id);
+        if (row.workspace_id !== this.currentId && !this.belongsHere(row.workspace_id)) {
+          await this.openInWorkspace(row.workspace_id, id);
+        } else {
+          this.navigateToSession(id);
+        }
         return;
-      } catch {
-        // deleted (or not ours any more) — try the next one
+      } catch (e) {
+        toastError('Couldn’t reopen the session', e);
+        return;
       }
     }
   }
