@@ -82,7 +82,7 @@ function setup() {
   let sock: any = null;
   const require = (p: string): unknown => {
     if (p === './lazyModule') return lazy;
-    if (p === './api/client') return { api, wsConnect: () => (sock = {}), resumeAltLoopback() {}, suspendAltLoopback() {} };
+    if (p === './api/client') return { api, getToken: () => 'tok', wsConnect: () => (sock = {}), resumeAltLoopback() {}, suspendAltLoopback() {} };
     if (p === './uiCommands') return { ...inert, handleUiFrame: () => false };
     const store = byPath.get(p);
     if (store) {

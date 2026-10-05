@@ -1,7 +1,7 @@
 // Events WS client (/ws/events) with auto-reconnect + exponential backoff.
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
-import { resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
+import { getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
 import { inLane } from './api/lane';
 import { invalidateMissionSummary } from './api/missionControl';
 import { auth } from './stores/auth.svelte';
@@ -420,6 +420,12 @@ class EventsClient {
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private presenceWired = false;
   private lastPresence = '';
+  // The bearer the open socket authenticated with. The daemon binds the
+  // identity at upgrade, so after impersonate / stop-impersonating / a
+  // re-login the socket kept streaming the OLD user's events until it
+  // happened to drop — reconnect as soon as the stored token changes.
+  private socketToken: string | null = null;
+  private authWired = false;
 
   /** Send a client frame on the open socket (dropped while disconnected —
    *  the next `hello` carries the current state anyway). */
@@ -469,14 +475,42 @@ class EventsClient {
     });
   }
 
+  private wireAuth(): void {
+    if (this.authWired || typeof window === 'undefined') return;
+    this.authWired = true;
+    window.addEventListener('otto:auth-changed', () => this.onAuthChanged());
+  }
+
+  /** The stored token changed (login / logout / impersonation): a socket of
+   *  the previous identity must not keep feeding this document. The next
+   *  open is a FIRST connect for the new identity (pages reload their own
+   *  data), not a resync of the old one. */
+  private onAuthChanged(): void {
+    if (this.stopped || getToken() === this.socketToken) return;
+    this.everConnected = false;
+    // Between sockets (backoff): the next connect already sends the new token.
+    if (this.sock === null) return;
+    // reconnectNow() is a no-op while connecting — that handshake carries the
+    // old token too, so drop it first.
+    if (this.state === 'connecting') this.state = 'offline';
+    this.reconnectNow();
+  }
+
   start(): void {
     this.stopped = false;
+    this.wireAuth();
     this.connect();
   }
 
   stop(): void {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    // Pending debounced work belongs to the stopped stream.
+    if (this.lagResyncTimer) clearTimeout(this.lagResyncTimer);
+    this.lagResyncTimer = null;
+    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presenceTimer = null;
     uiSocketClosed();
     this.sock?.close();
     this.sock = null;
@@ -590,6 +624,7 @@ class EventsClient {
     this.state = 'connecting';
     try {
       // Bearer token travels in Sec-WebSocket-Protocol, not the URL query.
+      this.socketToken = getToken();
       this.sock = wsConnect('/ws/events');
     } catch {
       this.scheduleReconnect();
