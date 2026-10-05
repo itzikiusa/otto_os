@@ -118,7 +118,7 @@
         <div class="fh-pad fh-more">
           <span class="dim">Showing the latest {commits.length} commits.</span>
           <button class="btn small" disabled={moreBusy} onclick={() => void loadMore()}>
-            {moreBusy ? 'Loading…' : 'Load more'}
+            {moreBusy ? 'Loading older commits…' : 'Load more'}
           </button>
           {#if moreError}<span class="fh-more-err" role="alert">Couldn’t load more: {moreError}</span>{/if}
         </div>

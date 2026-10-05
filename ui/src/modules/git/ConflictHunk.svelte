@@ -181,7 +181,7 @@
       <button class="edit-btn" onclick={cancelEdit} title="Discard this edit and go back to picking">
         Cancel edit
       </button>
-      <button class="edit-done" onclick={stopEdit} title="Use the edited text as this conflict's resolution">
+      <button class="edit-done" onclick={stopEdit} title="Use the edited text as this conflict’s resolution">
         <Icon name="check" size={12} /> Apply edit
       </button>
     {:else}

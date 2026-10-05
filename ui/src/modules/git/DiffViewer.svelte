@@ -1415,7 +1415,7 @@
     {:else if r.kind === 'line'}
       {@const lang = langOf(r.file.path)}
       {@const pick = !!wip && r.line.origin !== 'context'}
-      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line, r.hunk.lines) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
+      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line, (vs.loaded.get(r.file.path) ?? r.file).hunks[r.hi]?.lines) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
       {@const picked = pick ? isSelected(r.file.path, r.hi, r.li) : undefined}
       <div
         class="vrow dline {r.line.origin}"
