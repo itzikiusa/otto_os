@@ -705,25 +705,21 @@ mod tests {
 
     #[test]
     fn governed_sql_accounts_for_nested_writes_and_rejects_session_commands() {
-        assert!(
-            operations(
-                Engine::Postgres,
-                "WITH gone AS (DELETE FROM orders RETURNING *) SELECT * FROM gone"
-            )
-            .is_err()
-        );
+        assert!(operations(
+            Engine::Postgres,
+            "WITH gone AS (DELETE FROM orders RETURNING *) SELECT * FROM gone"
+        )
+        .is_err());
         assert!(operations(Engine::Postgres, "SELECT 1; SET ROLE owner").is_err());
         assert!(operations(Engine::Postgres, "SELECT lo_create(0)").is_err());
         assert!(operations(Engine::Postgres, "SELECT * FROM pg_catalog.pg_class").is_err());
         assert!(operations(Engine::Postgres, "SELECT set_config('role','owner',false)").is_err());
-        assert!(
-            operations(
-                Engine::Mysql,
-                "SELECT * FROM shop.orders; UPDATE shop.orders SET total=2"
-            )
-            .unwrap()
-            .contains(&"db_data")
-        );
+        assert!(operations(
+            Engine::Mysql,
+            "SELECT * FROM shop.orders; UPDATE shop.orders SET total=2"
+        )
+        .unwrap()
+        .contains(&"db_data"));
         assert_eq!(
             operations(
                 Engine::Postgres,

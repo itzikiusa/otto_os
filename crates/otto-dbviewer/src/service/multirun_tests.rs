@@ -264,11 +264,10 @@ async fn targets_times_values_each_run_separately_and_land_in_history() {
     assert_eq!(fx.svc.list_history(&stg, 10).await.unwrap().len(), 2);
     assert_eq!(fx.svc.list_history(&dev, 10).await.unwrap().len(), 2);
     // Another user cannot see the job.
-    assert!(
-        fx.svc
-            .multi_run_get(&"someone-else".to_string(), false, &job.id)
-            .is_err()
-    );
+    assert!(fx
+        .svc
+        .multi_run_get(&"someone-else".to_string(), false, &job.id)
+        .is_err());
     assert_eq!(fx.svc.multi_run_list(&fx.user, false).len(), 1);
 }
 
@@ -364,13 +363,11 @@ async fn guarded_writes_are_refused_up_front_without_confirmation() {
         assert!(plan.warnings.iter().any(|w| w.contains("access-enforced")));
         assert_eq!(done.items[0].status, RunStatus::Ok);
         assert_eq!(done.items[1].status, RunStatus::Failed);
-        assert!(
-            done.items[1]
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("review_required")
-        );
+        assert!(done.items[1]
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("review_required"));
         assert_eq!(stub.ran().len(), 1);
     } else {
         assert_eq!(done.summary.ok, 2);

@@ -402,7 +402,7 @@ async fn run_issues_one_driver_execution_and_no_catalog_calls() {
 /// A synthetic `rows × cols` page shaped like a wide real table: ints, short
 /// text, a decimal string, a timestamp string, nulls and a small JSON object.
 pub(crate) fn synthetic_result(rows: usize, cols: usize) -> QueryResult {
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     let columns = (0..cols)
         .map(|c| crate::types::Column::typed(format!("col_{c}"), "VARCHAR"))
         .collect();

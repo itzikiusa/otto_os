@@ -270,12 +270,10 @@ async fn lifecycle_native_cancel_deadline_releases_old_ownership() {
         .unwrap()
         .unwrap();
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    assert!(
-        service
-            .resolve(&conn, &user, None, "db_query")
-            .await
-            .is_ok()
-    );
+    assert!(service
+        .resolve(&conn, &user, None, "db_query")
+        .await
+        .is_ok());
 }
 
 /// A Stop with no native handle (a mongosh script, a Mongo write, a Redis
@@ -430,13 +428,11 @@ async fn completion_reuses_a_recent_secret_read_and_fresh_reads_refresh_it() {
         .await
         .unwrap();
     assert_eq!(secrets.reads.load(Ordering::SeqCst), 4);
-    assert!(
-        !service
-            .completion_secrets
-            .lock()
-            .unwrap()
-            .contains_key("other")
-    );
+    assert!(!service
+        .completion_secrets
+        .lock()
+        .unwrap()
+        .contains_key("other"));
 }
 
 /// A driver whose completion blocks until released, counting finished runs.

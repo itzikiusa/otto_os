@@ -11,10 +11,10 @@ use super::*;
 use crate::multirun::cluster::{self, ClusterRow};
 use crate::multirun::params::{self, PlaceholderMode};
 use crate::multirun::{
-    ClusterMode, ClusterSource, DEFAULT_RUN_ROWS, JobStatus, MAX_CONCURRENCY, MAX_RUN_ROWS,
-    MAX_RUNS, MAX_TARGETS, MultiRunItemDetail, MultiRunItemView, MultiRunJobBrief, MultiRunJobView,
-    MultiRunPlan, MultiRunSpec, MultiRunSummary, PlannedRun, PlannedTarget, RunStatus,
-    StartMultiRunReq, TargetCluster, expand_values, plan_hash, preview, values_label,
+    expand_values, plan_hash, preview, values_label, ClusterMode, ClusterSource, JobStatus,
+    MultiRunItemDetail, MultiRunItemView, MultiRunJobBrief, MultiRunJobView, MultiRunPlan,
+    MultiRunSpec, MultiRunSummary, PlannedRun, PlannedTarget, RunStatus, StartMultiRunReq,
+    TargetCluster, DEFAULT_RUN_ROWS, MAX_CONCURRENCY, MAX_RUNS, MAX_RUN_ROWS, MAX_TARGETS,
 };
 use crate::types::Scope;
 use tokio::sync::watch;

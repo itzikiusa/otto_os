@@ -13,9 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::Extension;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::Extension;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use otto_aws::AwsCtx;
@@ -683,12 +683,10 @@ async fn s3_list_and_streamed_download() {
     assert_eq!(o["objects"][0]["key"], "logs/app.log");
     assert_eq!(o["is_truncated"], false);
     // Region override reached the CLI env.
-    assert!(
-        calls_log()
-            .lines()
-            .any(|l| l.contains("PROFILE=s3-profile REGION=ap-southeast-2")
-                && l.contains("list-objects-v2"))
-    );
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=s3-profile REGION=ap-southeast-2")
+            && l.contains("list-objects-v2")));
 
     let (st, body, h) = call(
         &ctx,
@@ -816,12 +814,10 @@ async fn rds_list_and_describe_are_read_only() {
     assert_eq!(b["instances"][0]["port"], 5432);
     assert_eq!(b["instances"][0]["multi_az"], true);
     assert_eq!(b["instances"][0]["tags"]["env"], "prod");
-    assert!(
-        calls_log()
-            .lines()
-            .any(|l| l.contains("PROFILE=rds-profile REGION=us-east-1")
-                && l.contains("ARGS=rds describe-db-instances"))
-    );
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=rds-profile REGION=us-east-1")
+            && l.contains("ARGS=rds describe-db-instances")));
 
     let (st, d, _) = call(
         &ctx,
@@ -885,13 +881,11 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
         .find(|s| s["id"] == "messages_delayed")
         .unwrap();
     assert!(delayed["current"].is_null());
-    assert!(
-        delayed["points"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|p| p["v"].is_null())
-    );
+    assert!(delayed["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["v"].is_null()));
 
     // Exactly one get-metric-data call, with the whole catalog in ONE
     // file:// document keyed on the queue name.
@@ -1322,13 +1316,11 @@ async fn all_regions_spawn_counts_cold_and_cached() {
         "creds exported at most once"
     );
     // Exported creds reach the region calls.
-    assert!(
-        calls_log()
-            .lines()
-            .any(|l| l.contains("PROFILE=regions-spawn ")
-                && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
-                && l.contains("ARGS=ec2 describe-instances"))
-    );
+    assert!(calls_log()
+        .lines()
+        .any(|l| l.contains("PROFILE=regions-spawn ")
+            && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
+            && l.contains("ARGS=ec2 describe-instances")));
 
     // Within the TTL: zero new children.
     let before = calls_log().lines().count();
@@ -1707,11 +1699,9 @@ async fn logs_tail_and_ec2_list_are_native_with_static_creds() {
         Some(1),
         "{ath}"
     );
-    assert!(
-        calls_log()
-            .lines()
-            .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query"))))
-    );
+    assert!(calls_log()
+        .lines()
+        .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query")))));
 
     // A CLI-minted token cannot be resumed natively: it stays on the CLI path.
     let (st, _, _) = call(

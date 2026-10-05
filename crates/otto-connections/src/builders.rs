@@ -551,40 +551,32 @@ mod tests {
                 "{params}"
             );
         }
-        assert!(
-            build_command(
-                &conn(
-                    ConnectionKind::Mysql,
-                    json!({"host":"db","jump":"-oProxyCommand=x"})
-                ),
-                None
-            )
-            .is_err()
-        );
-        assert!(
-            validate_params(
+        assert!(build_command(
+            &conn(
                 ConnectionKind::Mysql,
-                &json!({"host":"db","ssh":{"host":"-oProxyCommand=x"}}),
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            validate_params(
-                ConnectionKind::Mysql,
-                &json!({"host":"db","ssh":{"host":"bastion","user":"-l"}}),
-                false
-            )
-            .is_err()
-        );
-        assert!(
-            validate_params(
-                ConnectionKind::Mysql,
-                &json!({"host":"db","ssh":{"host":"bastion.internal","user":"ec2-user"}}),
-                false
-            )
-            .is_ok()
-        );
+                json!({"host":"db","jump":"-oProxyCommand=x"})
+            ),
+            None
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"-oProxyCommand=x"}}),
+            false
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"bastion","user":"-l"}}),
+            false
+        )
+        .is_err());
+        assert!(validate_params(
+            ConnectionKind::Mysql,
+            &json!({"host":"db","ssh":{"host":"bastion.internal","user":"ec2-user"}}),
+            false
+        )
+        .is_ok());
     }
 
     /// F15: keep-alive options are added unless the user's ssh_config sets
@@ -604,12 +596,10 @@ mod tests {
             keepalive_opts(Some("Host *\n  serveraliveinterval 60\n")),
             vec!["-o", "ServerAliveCountMax=2"]
         );
-        assert!(
-            keepalive_opts(Some(
-                "ServerAliveInterval=0\nHost x\n\tServerAliveCountMax 9\n"
-            ))
-            .is_empty()
-        );
+        assert!(keepalive_opts(Some(
+            "ServerAliveInterval=0\nHost x\n\tServerAliveCountMax 9\n"
+        ))
+        .is_empty());
         // A comment or an unrelated key doesn't count.
         assert_eq!(
             keepalive_opts(Some("# ServerAliveInterval 5\nServerAliveIntervalX 1\n")).len(),

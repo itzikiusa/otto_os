@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use crate::resource_cache::ResourceCache;
 use async_trait::async_trait;
-use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use otto_core::Result;
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode};
@@ -27,7 +27,7 @@ use sqlx::{Column as _, Connection as _, Executor as _, Row, TypeInfo};
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
-use crate::split::{SqlDialect, StatementSpan, split_statements};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
@@ -123,7 +123,7 @@ impl Driver for PostgresDriver {
         &self,
         cfg: &ResolvedConfig,
     ) -> Result<Vec<crate::native_access::NativeGrant>> {
-        use crate::native_access::{NativeGrant, setup_error};
+        use crate::native_access::{setup_error, NativeGrant};
         let pool = self.pool(cfg).await?;
         let elevated: bool = sqlx::query_scalar("SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls FROM pg_roles WHERE rolname = current_user")
             .fetch_one(&pool).await.map_err(types::upstream)?;

@@ -38,10 +38,10 @@ use crate::registry::Registry;
 #[cfg(test)]
 use crate::types::QueryHandle;
 use crate::types::{
-    CancelToken, Capabilities, CompletionContext, CompletionResponse, DbQueryPlan, Engine,
-    GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail, ObjectSearchReq,
-    ObjectSearchResult, QueryRequest, QueryResult, QueryStatus, ResolvedConfig, SchemaGraph,
-    SchemaNode, TestResult, statement_is_write,
+    statement_is_write, CancelToken, Capabilities, CompletionContext, CompletionResponse,
+    DbQueryPlan, Engine, GraphColumn, GraphEdge, GraphTable, NodeKind, NodePath, ObjectDetail,
+    ObjectSearchReq, ObjectSearchResult, QueryRequest, QueryResult, QueryStatus, ResolvedConfig,
+    SchemaGraph, SchemaNode, TestResult,
 };
 use otto_core::redact;
 use otto_ssh::SshTunnel;
@@ -3963,7 +3963,7 @@ mod tests {
         assert!(md.contains("- id int [PK, NOT NULL]"));
         assert!(md.contains("- customer_id int [FK, NOT NULL]"));
         assert!(md.contains("- note text\n")); // nullable, no flags
-        // FK section resolves to schema.table(cols).
+                                               // FK section resolves to schema.table(cols).
         assert!(md.contains("## Foreign keys"));
         assert!(md.contains("orders(customer_id) -> shop.customers(id)"));
     }

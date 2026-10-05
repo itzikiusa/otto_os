@@ -782,10 +782,10 @@ mod tests {
             workgroup_output_location(&d).as_deref(),
             Some("s3://athena-results/primary/")
         );
-        assert!(
-            workgroup_output_location(&serde_json::json!({"WorkGroup": {"Configuration": {}}}))
-                .is_none()
-        );
+        assert!(workgroup_output_location(
+            &serde_json::json!({"WorkGroup": {"Configuration": {}}})
+        )
+        .is_none());
     }
 
     #[test]

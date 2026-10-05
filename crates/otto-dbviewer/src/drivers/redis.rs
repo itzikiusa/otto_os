@@ -20,7 +20,7 @@ use redis::{
     Client, ConnectionAddr, ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo,
     TlsCertificates, Value as RedisValue,
 };
-use serde_json::{Value as JsonValue, json};
+use serde_json::{json, Value as JsonValue};
 
 use crate::driver::Driver;
 use crate::types::{

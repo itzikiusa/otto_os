@@ -16,8 +16,8 @@
 //! truncation, and completion logic are shared between them.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::resource_cache::ResourceCache;
@@ -29,7 +29,7 @@ use serde_json::Value;
 
 use crate::driver::Driver;
 use crate::export::{ExportCounts, ExportFormat, ExportSink};
-use crate::split::{SqlDialect, StatementSpan, split_statements};
+use crate::split::{split_statements, SqlDialect, StatementSpan};
 use crate::tls::TlsFiles;
 use crate::types::{
     self, CancelToken, Capabilities, Column, ColumnDef, CompletionContext, CompletionResponse,
@@ -3687,11 +3687,9 @@ mod tests {
             seen.last().is_some_and(|(t, _)| t.contains("readonly=2")),
             "{seen:?}"
         );
-        assert!(
-            !seen
-                .iter()
-                .any(|(t, b)| !t.contains("readonly=2") && b.contains("throwIf"))
-        );
+        assert!(!seen
+            .iter()
+            .any(|(t, b)| !t.contains("readonly=2") && b.contains("throwIf")));
     }
 
     #[test]
