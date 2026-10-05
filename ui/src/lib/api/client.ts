@@ -302,11 +302,105 @@ export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}
   }
 }
 
+/** Default deadline for an `int` / `bg` READ (S13-05). Without one, a daemon
+ *  that accepted the connection but stalled (runtime lag, sleep/wake, a
+ *  wedged handler) left the promise pending forever: pollers with an
+ *  in-flight guard never ticked again and spinners spun until a reload.
+ *  Writes get none (a timed-out write may still have been applied — a retry
+ *  could duplicate it), nor does the `long` lane (slow by design) or a
+ *  stream (`laneFetch` direct callers). */
+export const READ_DEADLINE_MS = 20_000;
+
+/** `caller` combined with a `ms` deadline. `timedOut()` tells the deadline
+ *  apart from the caller's own abort; `done()` clears the timer. */
+export function withDeadline(
+  ms: number,
+  caller?: AbortSignal,
+): { signal: AbortSignal; timedOut: () => boolean; done: () => void } {
+  const ctl = new AbortController();
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    ctl.abort(new DOMException('The request timed out.', 'TimeoutError'));
+  }, ms);
+  const onAbort = (): void => ctl.abort(caller?.reason);
+  if (caller?.aborted) ctl.abort(caller.reason);
+  else caller?.addEventListener('abort', onAbort, { once: true });
+  return {
+    signal: ctl.signal,
+    timedOut: () => fired && !caller?.aborted,
+    done: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+/** The ApiError a deadline expiry surfaces as (status 0, code `timeout`). */
+function timeoutError(): ApiError {
+  return new ApiError(0, { code: 'timeout', message: 'The Otto daemon didn’t answer in time.' } as Problem);
+}
+
 function resolveLane(path: string, signal: AbortSignal | undefined, lane: Lane | undefined): Lane {
   return lane ?? inheritedLane(signal) ?? (isLongPath(path) ? 'long' : 'int');
 }
 
 async function request<T>(
+  method: string,
+  path: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  lane: Lane,
+  cond?: ConditionalOpts,
+): Promise<T> {
+  const isRead = method === 'GET' || method === 'HEAD';
+  if (!isRead || lane === 'long') return requestOnce<T>(method, path, body, signal, lane, cond);
+  const deadline = withDeadline(READ_DEADLINE_MS, signal);
+  try {
+    return await requestOnce<T>(method, path, body, deadline.signal, lane, cond);
+  } catch (e) {
+    if (deadline.timedOut()) throw timeoutError();
+    throw e;
+  } finally {
+    deadline.done();
+  }
+}
+
+/** Shared auth + 401 + provider-health handling for every daemon call that
+ *  goes through `fetch` (S13-10): the JSON `request` and the raw helpers
+ *  (text / blob / ndjson). Returns the Response when it is OK; throws the
+ *  parsed Problem as an `ApiError` otherwise. */
+async function rawRequest(
+  lane: Lane,
+  path: string,
+  init: { method?: string; body?: BodyInit | null; contentType?: string; accept?: string; signal?: AbortSignal; headers?: Record<string, string> } = {},
+): Promise<Response> {
+  const headers: Record<string, string> = { ...(init.headers ?? {}) };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (init.contentType) headers['Content-Type'] = init.contentType;
+  if (init.accept) headers['Accept'] = init.accept;
+  const resp = await laneFetch(lane, path, { method: init.method ?? 'GET', headers, body: init.body, signal: init.signal });
+  if (isProviderPath(path)) serviceHealth.report(resp.status);
+  if (resp.status === 401 && token && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT, { detail: { token } }));
+  }
+  if (!resp.ok) throw await problemOf(resp);
+  return resp;
+}
+
+/** The `ApiError` for a non-OK response (JSON Problem body, else statusText). */
+async function problemOf(resp: Response): Promise<ApiError> {
+  let problem: Problem = { code: 'internal', message: resp.statusText };
+  try {
+    problem = await resp.json();
+  } catch {
+    // non-JSON error body — keep statusText
+  }
+  return new ApiError(resp.status, problem);
+}
+
+async function requestOnce<T>(
   method: string,
   path: string,
   body: unknown,
@@ -344,15 +438,7 @@ async function request<T>(
     if (resp.status === 304) return undefined as T;
   }
 
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  if (!resp.ok) throw await problemOf(resp);
 
   // Accepted responses may carry a job/review object. Only an actually empty
   // successful body is void; an empty error must still reject above.
@@ -585,18 +671,11 @@ export function isAbortError(e: unknown): boolean {
 
 /**
  * Fetch a text resource (e.g. a `text/markdown` report) from /api/v1<path> with
- * the stored Bearer token. Throws `ApiError` on a non-2xx response.
+ * the stored Bearer token. Throws `ApiError` on a non-2xx response; a 401
+ * sends the user back to login like any `api.*` call (via `rawRequest`).
  */
 export async function authedText(path: string): Promise<string> {
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
-    throw new ApiError(resp.status, problem);
-  }
-  return resp.text();
+  return (await rawRequest('int', path)).text();
 }
 
 /**
@@ -605,37 +684,16 @@ export async function authedText(path: string): Promise<string> {
  * URL.revokeObjectURL() when done (e.g. on component unmount).
  */
 export async function authedBlobUrl(path: string): Promise<string> {
-  const token = getToken();
-  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { headers });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try { problem = await resp.json(); } catch { /* non-JSON error body */ }
-    throw new ApiError(resp.status, problem);
-  }
-  return URL.createObjectURL(await resp.blob());
+  return URL.createObjectURL(await (await rawRequest('int', path)).blob());
 }
 
 /**
  * POST a raw binary body (e.g. an `image/png` Blob) to /api/v1<path> and parse
  * the JSON reply. Skips JSON/base64 framing entirely — a 15 MB PNG goes over
- * the wire as 15 MB, not ~20 MB of base64 inside a JSON string. Mirrors
- * `postForText`'s auth + error handling.
+ * the wire as 15 MB, not ~20 MB of base64 inside a JSON string.
  */
 export async function postBlob<T>(path: string, body: Blob, contentType: string): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': contentType };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, { method: 'POST', headers, body });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  const resp = await rawRequest('int', path, { method: 'POST', body, contentType });
   return (await resp.json()) as T;
 }
 
@@ -644,32 +702,18 @@ export async function postBlob<T>(path: string, body: Blob, contentType: string)
  * response body as text. For download/export endpoints that reply with a
  * non-JSON body (e.g. `text/csv`) — which the JSON-parsing `request()` helper
  * cannot read (it would `resp.json()` the CSV and throw a SyntaxError).
- * Mirrors `authedBlobUrl`'s error handling; skips `serviceHealth.report` for the
- * same reason `request()` does on infra paths.
  */
 export async function postForText(
   path: string,
   body: unknown,
   signal?: AbortSignal,
 ): Promise<string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const resp = await fetch(`${baseUrl()}/api/v1${path}`, {
+  const resp = await rawRequest('int', path, {
     method: 'POST',
-    headers,
     body: JSON.stringify(body),
+    contentType: 'application/json',
     signal,
   });
-  if (!resp.ok) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
   return resp.text();
 }
 
@@ -677,8 +721,7 @@ export async function postForText(
  * POST a JSON body to /api/v1<path> and read a streamed NDJSON response,
  * invoking `onLine` for each parsed JSON line as it arrives. For long-running
  * endpoints that emit incremental progress (e.g. the streaming DB export) so the
- * caller can drive a progress bar and the connection never idles out. Mirrors
- * `postForText`'s auth + error handling.
+ * caller can drive a progress bar and the connection never idles out.
  */
 export async function postNdjsonStream(
   path: string,
@@ -686,26 +729,15 @@ export async function postNdjsonStream(
   onLine: (obj: unknown) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
   // DB export-to-path / import run for minutes: the long lane (alias host),
   // never one of the six interactive sockets.
-  const resp = await laneFetch('long', path, {
+  const resp = await rawRequest('long', path, {
     method: 'POST',
-    headers,
     body: JSON.stringify(body),
+    contentType: 'application/json',
     signal,
   });
-  if (!resp.ok || !resp.body) {
-    let problem: Problem = { code: 'internal', message: resp.statusText };
-    try {
-      problem = await resp.json();
-    } catch {
-      // non-JSON error body — keep statusText
-    }
-    throw new ApiError(resp.status, problem);
-  }
+  if (!resp.body) throw new ApiError(resp.status, { code: 'internal', message: 'empty response stream' } as Problem);
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';

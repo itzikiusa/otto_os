@@ -205,6 +205,9 @@ export function mergeInFlight(fetched: Notice[], ingested: Notice[]): Notice[] {
   return capNotices(out);
 }
 
+/** Internal marker: a load answered for a previous identity (dropped). */
+const STALE = Symbol('stale-identity');
+
 class NotificationStore {
   /** Raw: every write replaces the array (and edited notices) wholesale. */
   notices: Notice[] = $state.raw([]);
@@ -264,11 +267,15 @@ class NotificationStore {
     // Notices ingested from the event stream while the GET is in flight may
     // be newer than its snapshot — merged back below, never overwritten.
     const since = this.ingestSeq;
+    const epoch = this.identityEpoch;
     try {
       const [notices, settings] = await Promise.all([
         api.get<Notice[]>('/notifications'),
         api.get<NotificationSettings>('/notifications/settings').catch(() => this.settings),
       ]);
+      // Answered for the previous identity: drop it (the queued reload
+      // below fetches the new identity's notices).
+      if (epoch !== this.identityEpoch) throw STALE;
       const fetched = notices.filter((n) => !this.isChannelSessionNotice(n));
       this.notices = mergeInFlight(fetched, this.ingestedSince(since));
       this.settings = settings;
@@ -280,9 +287,13 @@ class NotificationStore {
       }
       this.error = null;
     } catch (e) {
-      // Backend may not be ready yet (the events WS reloads on connect) — keep
-      // whatever we had and surface the failure so the bell can offer Retry.
-      this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+      // A previous identity's answer (or failure) is dropped; the queued
+      // reload below runs for the new one.
+      if (e !== STALE && epoch === this.identityEpoch) {
+        // Backend may not be ready yet (the events WS reloads on connect) — keep
+        // whatever we had and surface the failure so the bell can offer Retry.
+        this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+      }
     } finally {
       this.loading = false;
     }
@@ -293,6 +304,21 @@ class NotificationStore {
   }
 
   private reloadQueued = false;
+  /** Bumped on an identity change; a load answered for the old one is dropped. */
+  private identityEpoch = 0;
+
+  /** The signed-in identity changed (impersonate / stop / re-login, S13-02):
+   *  notices are per user on the daemon, so the previous identity's list,
+   *  in-flight load and ingest log must not mix with the new one's. Clears
+   *  (a load in flight is dropped); the caller then calls `load()`, which
+   *  queues behind a dropped in-flight one. */
+  resetForIdentity(): void {
+    this.identityEpoch += 1;
+    this.notices = [];
+    this.ingestLog = [];
+    this.loaded = false;
+    this.error = null;
+  }
   /** Event-stream ingests, in order, for {@link load}'s in-flight merge. */
   private ingestSeq = 0;
   private ingestLog: { seq: number; notice: Notice }[] = [];

@@ -272,6 +272,28 @@ class ProofStore {
     if (this.detail) await this.open(this.detail.pack.id);
   }
 
+  /** The signed-in identity changed (S13-02): nothing read with the previous
+   *  token survives. Clears the list, detail and roll-up, invalidates loads in
+   *  flight, and re-reads what is on screen for the current workspace. */
+  identityChanged(): void {
+    const wsId = this.wsId;
+    const keys = [...this.askedKeys];
+    this.closeDetail();
+    ++this.listSeq;
+    ++this.moreSeq;
+    this.packs = [];
+    this.nextCursor = null;
+    this.loadingMore = false;
+    this.listLoading = false;
+    this.error = null;
+    this.summaryByWorkItem = {};
+    this.askedKeys = new Set();
+    this.summaryLoaded = false;
+    if (!wsId) return;
+    if (this.viewers > 0) void this.loadPacks(wsId, this.lastFilter);
+    void this.loadSummary(wsId, keys.length > 0 ? keys : undefined);
+  }
+
   closeDetail(): void {
     ++this.openSeq;
     this.detailLoading = false;

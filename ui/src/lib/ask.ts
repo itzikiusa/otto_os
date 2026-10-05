@@ -19,6 +19,7 @@ import {
 import { lsGet } from './storage';
 import { applyTileOrder } from './stores/splitLayout';
 import { workspaceCommandScope } from './stores/sessionScope';
+import { shownListQuery } from './stores/sessionBuckets';
 import { layout } from './stores/splitLayout.svelte';
 import { isForeground, visibleOnThisDevice, ws } from './stores/workspace.svelte';
 
@@ -67,7 +68,10 @@ function orchestratorPrefs(): { optimize: boolean; aiFallback: boolean } {
 export async function apiContext(workspaceId: string): Promise<OrchestrateCtx> {
   // Honour "Isolate sessions to this device": a session the user can't see
   // here must not be reachable by name or position ("session 2").
-  const sessions = (await api.get<Session[]>(`/workspaces/${workspaceId}/sessions`)).filter(
+  // Only the live, sidebar-shown rows (S13-04): the bare list also returned
+  // every archived row and background workflow/review/PR-draft agent, which a
+  // provider close then offered to stop — and downloaded the whole history.
+  const sessions = (await api.get<Session[]>(`/workspaces/${workspaceId}/sessions${shownListQuery()}`)).filter(
     visibleOnThisDevice,
   );
   const nameable = sessions.filter((s) => !s.archived && s.kind === 'agent' && isForeground(s));

@@ -1880,6 +1880,9 @@ export type OttoEvent =
        *  Deny" prompt (stores/uiControl.svelte.ts); the tool returns
        *  `pending_grant` and the agent retries once the user allows it. */
       type: 'ui_control_requested';
+      /** The session owner — the only user this event is delivered to. */
+      user_id: Id;
+      workspace_id: Id;
       session_id: Id;
       session_title: string;
       /** The paneKey of the module the command drives (`connections`, `shell`…). */
