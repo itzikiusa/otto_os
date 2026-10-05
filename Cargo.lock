@@ -4195,14 +4195,20 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "chrono",
  "http-body-util",
  "include_dir",
  "otto-context",
  "otto-core",
+ "otto-design",
+ "otto-improve",
  "otto-issues",
  "otto-memory",
+ "otto-orchestrator",
+ "otto-sessions",
  "otto-state",
+ "otto-swarm",
  "serde",
  "serde_json",
  "sqlx",
@@ -4210,6 +4216,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 
