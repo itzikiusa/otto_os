@@ -1403,3 +1403,33 @@ async fn an_approval_is_bound_to_the_requesting_session() {
     let env = d.agent_invoke("create_pr", pr_args()).await;
     assert_eq!(env["executed"], true, "{env}");
 }
+
+/// S5-07: the stdio bridge's native irreversible writers run through the
+/// governed path — reachable from a session credential even when the operator
+/// never ticked them in the catalog, and approval-gated there; a person's own
+/// token still needs the catalog switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_irreversible_writer_is_governed_for_its_session() {
+    let d = boot().await;
+    let args = json!({"account_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V",
+                      "url": "https://sqs.example/q", "body": "hello"});
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "aws_sqs_send",
+        args.clone(),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert_eq!(env["executed"], false, "{env}");
+    let env = invoke_as(
+        &d,
+        &d.human,
+        "aws_sqs_send",
+        args,
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "denied", "{env}");
+}
