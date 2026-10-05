@@ -608,6 +608,11 @@ static ACTIVE_RUNS: std::sync::LazyLock<Mutex<ActiveRuns>> =
 /// Is this registered run still working? Its session must be alive, its report
 /// must not have changed since it started, and it must be inside the timeout.
 async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool {
+    if let Some(age) = pending_age(run) {
+        // A slot reserved while its session spawns (S4-19a): alive until the
+        // spawn settles it, bounded so a crashed spawn can't wedge the period.
+        return age < pending_spawn_grace();
+    }
     if Utc::now() - run.started_at > chrono::Duration::from_std(RUN_TIMEOUT).unwrap_or_default() {
         return false;
     }
@@ -626,6 +631,21 @@ async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool
     now_rev == run.report_revision
 }
 
+/// Run-id prefix of a slot reserved under the registry lock while the PTY
+/// spawns OUTSIDE it (S4-19a) — the spawn used to hold the global lock, so
+/// `GET /insights/runs/active` and cancel stalled behind every spawn.
+const PENDING_PREFIX: &str = "pending:";
+/// How long a pending reservation counts as alive.
+fn pending_spawn_grace() -> chrono::Duration {
+    chrono::Duration::seconds(120)
+}
+
+fn pending_age(run: &ActiveRun) -> Option<chrono::Duration> {
+    run.run_id
+        .starts_with(PENDING_PREFIX)
+        .then(|| Utc::now() - run.started_at)
+}
+
 /// Live runs under `dir`, with liveness evaluated (async) before the prune.
 async fn live_runs<C: InsightsCtx>(ctx: &C, dir: &Path) -> Vec<ActiveRun> {
     let candidates = ACTIVE_RUNS.lock().await.all_live(dir, |_| true);
@@ -636,7 +656,11 @@ async fn live_runs<C: InsightsCtx>(ctx: &C, dir: &Path) -> Vec<ActiveRun> {
         }
     }
     let mut reg = ACTIVE_RUNS.lock().await;
+    // Pending reservations stay registered but are not attachable runs.
     reg.all_live(dir, |r| !dead.contains(&r.run_id))
+        .into_iter()
+        .filter(|r| !r.run_id.starts_with(PENDING_PREFIX))
+        .collect()
 }
 
 /// Manual requests explicitly regenerate; catch-up keeps per-period idempotency.
@@ -786,11 +810,45 @@ pub async fn run_insights<C: InsightsCtx>(
         info!(session = %run.run_id, key = %report_key, "insights: attaching to the run already in progress");
         return Ok(Some(run.run_id));
     }
-    let mut registry = ACTIVE_RUNS.lock().await;
-    // Re-check under the lock (another request may have registered meanwhile).
-    if let Some(run) = registry.live(&dir, &report_key, |_| true) {
-        return Ok(Some(run.run_id));
+    let pending_id = format!("{PENDING_PREFIX}{}", otto_core::new_id());
+    {
+        let mut registry = ACTIVE_RUNS.lock().await;
+        // Re-check under the lock (another request may have registered meanwhile).
+        if let Some(run) = registry.live(&dir, &report_key, |_| true) {
+            if run.run_id.starts_with(PENDING_PREFIX) {
+                return Err(otto_core::Error::Conflict(
+                    "an insights run for this period is starting — try again in a moment".into(),
+                ));
+            }
+            return Ok(Some(run.run_id));
+        }
+        // Reserve the period, then spawn OUTSIDE the lock (S4-19a).
+        registry.register(
+            &dir,
+            ActiveRun {
+                run_id: pending_id.clone(),
+                report_key: report_key.clone(),
+                report_revision: None,
+                started_at: Utc::now(),
+            },
+        );
     }
+    // Any early return below must release the reservation.
+    struct Unreserve(std::path::PathBuf, String, bool);
+    impl Drop for Unreserve {
+        fn drop(&mut self) {
+            if self.2 {
+                return;
+            }
+            let (dir, id) = (std::mem::take(&mut self.0), std::mem::take(&mut self.1));
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    ACTIVE_RUNS.lock().await.remove_run(&dir, &id);
+                });
+            }
+        }
+    }
+    let mut unreserve = Unreserve(dir.clone(), pending_id.clone(), false);
     let report_revision = {
         let (d, k) = (dir.clone(), report_key.clone());
         ctx::blocking(move || report_status(&d, &k, false))
@@ -819,16 +877,21 @@ pub async fn run_insights<C: InsightsCtx>(
     let session = ctx.manager().create(&ws, &user_id, req, None).await?;
     let sid = session.id.clone();
     info!(session = %sid, kind = kind.word(), offset, provider = %provider, "insights: started run");
-    registry.register(
-        &dir,
-        ActiveRun {
-            run_id: sid.to_string(),
-            report_key,
-            report_revision,
-            started_at: Utc::now(),
-        },
-    );
-    drop(registry);
+    {
+        // Swap the reservation for the real run (same period slot).
+        let mut registry = ACTIVE_RUNS.lock().await;
+        registry.remove_run(&dir, &pending_id);
+        registry.register(
+            &dir,
+            ActiveRun {
+                run_id: sid.to_string(),
+                report_key,
+                report_revision,
+                started_at: Utc::now(),
+            },
+        );
+        unreserve.2 = true;
+    }
 
     // Inject the prompt once the TUI has drawn + settled, then let it run
     // headlessly (no result-file watch — the skill writes its own artifacts).
@@ -1260,6 +1323,19 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S4-19a: a spawn reservation is recognised (and bounded); real runs aren't.
+    #[test]
+    fn pending_reservations_are_recognised() {
+        let mk = |id: &str| ActiveRun {
+            run_id: id.into(),
+            report_key: "k".into(),
+            report_revision: None,
+            started_at: Utc::now(),
+        };
+        assert!(pending_age(&mk("pending:x")).is_some_and(|a| a < pending_spawn_grace()));
+        assert!(pending_age(&mk("01HSESSION")).is_none());
+    }
 
     fn run(id: &str, key: &str) -> ActiveRun {
         ActiveRun {

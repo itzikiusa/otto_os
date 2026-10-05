@@ -732,7 +732,14 @@ impl otto_insights::InsightsCtx for ServerCtx {
             .input(sid, &crate::review_session::bracketed_paste(prompt))
             .await;
         tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
+        // Same swallowed-Enter guard as the assistant path (S4-19c): a TUI
+        // still digesting the paste can eat the first Enter, leaving the run
+        // idle behind a "generating" banner for the whole timeout.
+        let before = self.manager.live_handle(sid).map(|h| h.last_output_at());
         let _ = self.manager.input(sid, b"\r").await;
+        if !crate::review_session::dispatched(&self.manager, sid, before).await {
+            let _ = self.manager.input(sid, b"\r").await;
+        }
         true
     }
 }

@@ -1,0 +1,396 @@
+//! Route-level isolation tests for the swarm runtime + product agent routes
+//! (review S4-01/04/05/06/17/26): every `/workspaces/{id}/…/{rowId}` handler
+//! must refuse a row of ANOTHER workspace (404, nothing mutated), assignees
+//! must stay on the task's own swarm, "Stop verification" must settle the
+//! task, and PATCH `null` must clear nullable goal / task fields.
+//!
+//! Same harness as `workbench_api.rs`: a real `ServerCtx::for_tests` over an
+//! in-memory, fully migrated sqlite; requests go through the production
+//! handlers via `tower::ServiceExt::oneshot` with `AuthUser` injected the way
+//! the auth middleware does.
+
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http::{Method, StatusCode};
+use axum::routing::post;
+use axum::Router;
+use http_body_util::BodyExt;
+use otto_core::auth::AuthUser;
+use otto_core::domain::User;
+use otto_server::ServerCtx;
+use otto_state::swarm::NewTask;
+use otto_state::{NewAgent, NewProject, NewSwarm, TaskPatch};
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+struct World {
+    app: Router,
+    ctx: ServerCtx,
+    alice: User,
+    ws_a: String,
+    swarm_a: String,
+    project_a: String,
+    agent_a: String,
+    swarm_b: String,
+    project_b: String,
+    agent_b: String,
+    _tmp: tempfile::TempDir,
+}
+
+async fn world() -> World {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = otto_server::test_support::mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+    let users = otto_state::UsersRepo::new(pool.clone());
+    // Non-root users: alice administers A only, bob administers B only.
+    let alice = users.create("alice", "x", "Alice", false).await.unwrap();
+    let bob = users.create("bob", "x", "Bob", false).await.unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let ws_a = ctx.workspaces.create("A", &root, &alice.id).await.unwrap();
+    let ws_b = ctx.workspaces.create("B", &root, &bob.id).await.unwrap();
+
+    let mk_swarm = |ws: String, by: String| NewSwarm {
+        workspace_id: ws,
+        name: "s".into(),
+        description: "secret mission".into(),
+        preset_slug: None,
+        config: json!({}),
+        max_total_runs: None,
+        max_cost_usd: None,
+        max_runtime_secs: None,
+        max_attempts: None,
+        created_by: by,
+    };
+    let repo = &ctx.swarm_repo;
+    let swarm_a = repo
+        .create_swarm(mk_swarm(ws_a.id.clone(), alice.id.clone()))
+        .await
+        .unwrap();
+    let swarm_b = repo
+        .create_swarm(mk_swarm(ws_b.id.clone(), bob.id.clone()))
+        .await
+        .unwrap();
+    let mk_agent = |s: &otto_state::Swarm, by: &str| NewAgent {
+        swarm_id: s.id.clone(),
+        workspace_id: s.workspace_id.clone(),
+        name: "dev".into(),
+        title: "Developer".into(),
+        reports_to: None,
+        provider: "claude".into(),
+        model: None,
+        soul_name: None,
+        soul_md: None,
+        specialization: String::new(),
+        scope_md: String::new(),
+        skills: json!([]),
+        schedule: None,
+        cwd_mode: None,
+        avatar: String::new(),
+        order_idx: 0,
+        created_by: by.to_string(),
+    };
+    let agent_a = repo
+        .create_agent(mk_agent(&swarm_a, &alice.id))
+        .await
+        .unwrap();
+    let agent_b = repo
+        .create_agent(mk_agent(&swarm_b, &bob.id))
+        .await
+        .unwrap();
+    let mk_project = |s: &otto_state::Swarm, by: &str| NewProject {
+        swarm_id: s.id.clone(),
+        workspace_id: s.workspace_id.clone(),
+        name: "p".into(),
+        description: String::new(),
+        repo_path: None,
+        goal_md: Some("ship it".into()),
+        story_id: None,
+        order_idx: 0,
+        created_by: by.to_string(),
+    };
+    let project_a = repo
+        .create_project(mk_project(&swarm_a, &alice.id))
+        .await
+        .unwrap();
+    let project_b = repo
+        .create_project(mk_project(&swarm_b, &bob.id))
+        .await
+        .unwrap();
+
+    let app = Router::new()
+        .merge(otto_swarm::router::<ServerCtx>())
+        .merge(otto_swarm::runtime::engine::routes::<ServerCtx>())
+        .route(
+            "/product/analyses/{aid}/agents/{agent_id}/stop",
+            post(otto_product::analysis::stop_analysis_agent::<ServerCtx>),
+        )
+        .with_state(ctx.clone());
+    World {
+        app,
+        ctx,
+        alice,
+        ws_a: ws_a.id,
+        swarm_a: swarm_a.id,
+        project_a: project_a.id,
+        agent_a: agent_a.id,
+        swarm_b: swarm_b.id,
+        project_b: project_b.id,
+        agent_b: agent_b.id,
+        _tmp: tmp,
+    }
+}
+
+async fn call(
+    app: &Router,
+    u: &User,
+    method: Method,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(u.clone()));
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// S4-01: the lifecycle routes 404 a swarm of another workspace and leave it
+/// untouched; the same route works on the caller's own swarm.
+#[tokio::test]
+async fn lifecycle_routes_refuse_a_foreign_swarm() {
+    let w = world().await;
+    for action in ["abort", "pause", "resume", "start", "agent-stop"] {
+        let uri = format!("/workspaces/{}/swarm/swarms/{}/{action}", w.ws_a, w.swarm_b);
+        let (st, _) = call(&w.app, &w.alice, Method::POST, &uri, json!({})).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{action} on B's swarm via A");
+    }
+    let b = w.ctx.swarm_repo.get_swarm(&w.swarm_b).await.unwrap();
+    assert_ne!(b.status, "aborted", "B's swarm was not aborted");
+    assert_ne!(b.status, "paused");
+
+    let own = format!("/workspaces/{}/swarm/swarms/{}/pause", w.ws_a, w.swarm_a);
+    let (st, body) = call(&w.app, &w.alice, Method::POST, &own, json!({})).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "paused");
+}
+
+/// S4-01: plan (B's project) and recruit (B's swarm) via workspace A → 404,
+/// before any planner/recruiter agent is spawned or B's mission leaks.
+#[tokio::test]
+async fn plan_and_recruit_refuse_foreign_rows() {
+    let w = world().await;
+    let uri = format!("/workspaces/{}/swarm/projects/{}/plan", w.ws_a, w.project_b);
+    let (st, _) = call(&w.app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let uri = format!("/workspaces/{}/swarm/recruit", w.ws_a);
+    let (st, body) = call(
+        &w.app,
+        &w.alice,
+        Method::POST,
+        &uri,
+        json!({"role": "QA", "swarm_id": w.swarm_b}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    assert!(!body.to_string().contains("secret mission"));
+}
+
+/// S4-05 + S4-17: an assignee must be an agent of the task's own swarm (400
+/// otherwise); `null` clears it.
+#[tokio::test]
+async fn task_assignee_stays_on_roster_and_null_clears() {
+    let w = world().await;
+    let uri = format!("/swarm/projects/{}/tasks", w.project_a);
+    let (st, _) = call(
+        &w.app,
+        &w.alice,
+        Method::POST,
+        &uri,
+        json!({"title": "t", "assignee_agent_id": w.agent_b}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "foreign assignee on create");
+    let (st, task) = call(
+        &w.app,
+        &w.alice,
+        Method::POST,
+        &uri,
+        json!({"title": "t", "assignee_agent_id": w.agent_a}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{task}");
+    let tid = task["id"].as_str().unwrap().to_string();
+    let turi = format!("/swarm/tasks/{tid}");
+    let (st, _) = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &turi,
+        json!({"assignee_agent_id": w.agent_b}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "foreign assignee on update");
+    // An absent key leaves it unchanged …
+    let (st, t) = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &turi,
+        json!({"title": "t2"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(t["assignee_agent_id"], json!(w.agent_a));
+    // … an explicit null clears it.
+    let (st, t) = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &turi,
+        json!({"assignee_agent_id": null}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert!(t["assignee_agent_id"].is_null(), "{t}");
+}
+
+/// S4-06: "Stop verification" settles a verifying task to blocked (it used
+/// to stay `verifying` forever and be re-verified on the next start).
+#[tokio::test]
+async fn stop_verification_blocks_the_task() {
+    let w = world().await;
+    let task = w
+        .ctx
+        .swarm_repo
+        .create_task(NewTask {
+            project_id: w.project_a.clone(),
+            swarm_id: w.swarm_a.clone(),
+            workspace_id: w.ws_a.clone(),
+            title: "v".into(),
+            description: String::new(),
+            assignee_agent_id: Some(w.agent_a.clone()),
+            status: "todo".into(),
+            priority: "medium".into(),
+            parent_task_id: None,
+            depends_on: json!([]),
+            labels: json!([]),
+            order_idx: 0,
+            created_by: w.alice.id.clone(),
+        })
+        .await
+        .unwrap();
+    w.ctx
+        .swarm_repo
+        .update_task(
+            &task.id,
+            TaskPatch {
+                status: Some("verifying".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let uri = format!("/swarm/tasks/{}/verify/stop", task.id);
+    let (st, _) = call(&w.app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::OK);
+    let t = w.ctx.swarm_repo.get_task(&task.id).await.unwrap();
+    assert_eq!(t.status, "blocked");
+}
+
+/// S4-17: PATCH `null` clears a goal's nullable fields.
+#[tokio::test]
+async fn goal_patch_null_clears_fields() {
+    let w = world().await;
+    let uri = format!("/swarm/projects/{}/goals", w.project_a);
+    let (st, goal) = call(
+        &w.app,
+        &w.alice,
+        Method::POST,
+        &uri,
+        json!({"title": "g", "metric": "coverage", "verify_cmd": "make test", "target_value": 80.0}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{goal}");
+    let guri = format!("/swarm/goals/{}", goal["id"].as_str().unwrap());
+    let (st, g) = call(
+        &w.app,
+        &w.alice,
+        Method::PATCH,
+        &guri,
+        json!({"metric": null, "verify_cmd": null, "target_value": null}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g}");
+    assert!(g["metric"].is_null(), "{g}");
+    assert!(g["verify_cmd"].is_null(), "{g}");
+    assert!(g["target_value"].is_null(), "{g}");
+}
+
+/// S4-04: stopping an agent through an analysis it does not belong to → 404,
+/// and the foreign agent is untouched.
+#[tokio::test]
+async fn stop_analysis_agent_refuses_a_foreign_agent() {
+    let w = world().await;
+    let mk_story = |ws: &str, by: &str| otto_state::NewStory {
+        workspace_id: ws.to_string(),
+        source_kind: "draft".into(),
+        account_id: String::new(),
+        source_key: otto_core::new_id(),
+        title: "s".into(),
+        url: String::new(),
+        issue_type: None,
+        stage: "draft".into(),
+        cwd: None,
+        parent_id: None,
+        tree_kind: "story".into(),
+        folder: String::new(),
+        created_by: by.to_string(),
+    };
+    let pr = &w.ctx.product_repo;
+    let story_a = pr
+        .create_story(mk_story(&w.ws_a, &w.alice.id))
+        .await
+        .unwrap();
+    let ws_b = w
+        .ctx
+        .swarm_repo
+        .get_swarm(&w.swarm_b)
+        .await
+        .unwrap()
+        .workspace_id;
+    let story_b = pr.create_story(mk_story(&ws_b, &w.alice.id)).await.unwrap();
+    let mk_analysis = |sid: &str| otto_state::NewAnalysis {
+        story_id: sid.to_string(),
+        source_version_id: None,
+        status: "running".into(),
+        created_by: w.alice.id.clone(),
+    };
+    let an_a = pr.create_analysis(mk_analysis(&story_a.id)).await.unwrap();
+    let an_b = pr.create_analysis(mk_analysis(&story_b.id)).await.unwrap();
+    let agent_b = pr
+        .add_analysis_agent(otto_state::NewAnalysisAgent {
+            analysis_id: an_b.id.clone(),
+            name: "Lens".into(),
+            skill: "po-story-overview".into(),
+            provider: "claude".into(),
+            model: String::new(),
+            status: "running".into(),
+            session_id: None,
+        })
+        .await
+        .unwrap();
+    let uri = format!("/product/analyses/{}/agents/{}/stop", an_a.id, agent_b.id);
+    let (st, _) = call(&w.app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let still = pr.get_analysis_agent(&agent_b.id).await.unwrap();
+    assert_eq!(still.status, "running", "foreign agent untouched");
+}

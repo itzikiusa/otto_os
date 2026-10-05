@@ -797,4 +797,95 @@ mod tests {
         assert!(find_child_by_title(&kids, "Something new").is_none());
         assert!(find_child_by_title(&kids, "").is_none());
     }
+
+    /// S4-03: ingest acts only on swarm ids that belong to the session's own
+    /// workspace (and agent/project/task/run ids of THAT swarm).
+    #[tokio::test]
+    async fn swarm_scope_rejects_ids_outside_the_session_workspace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let u = users.create("u", "x", "U", false).await.unwrap();
+        let root = tmp.path().to_string_lossy().to_string();
+        let ws_a = ctx.workspaces.create("A", &root, &u.id).await.unwrap();
+        let ws_b = ctx.workspaces.create("B", &root, &u.id).await.unwrap();
+        let mk = |ws: &str| otto_state::NewSwarm {
+            workspace_id: ws.to_string(),
+            name: "s".into(),
+            description: String::new(),
+            preset_slug: None,
+            config: json!({}),
+            max_total_runs: None,
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: None,
+            created_by: u.id.clone(),
+        };
+        let sa = ctx.swarm_repo.create_swarm(mk(&ws_a.id)).await.unwrap();
+        let sb = ctx.swarm_repo.create_swarm(mk(&ws_b.id)).await.unwrap();
+        let mk_agent = |s: &otto_state::Swarm| otto_state::NewAgent {
+            swarm_id: s.id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            name: "a".into(),
+            title: "A".into(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills: json!([]),
+            schedule: None,
+            cwd_mode: None,
+            avatar: String::new(),
+            order_idx: 0,
+            created_by: u.id.clone(),
+        };
+        let aa = ctx.swarm_repo.create_agent(mk_agent(&sa)).await.unwrap();
+        let ab = ctx.swarm_repo.create_agent(mk_agent(&sb)).await.unwrap();
+        let session = |meta: Value| otto_core::domain::Session {
+            id: "sess".into(),
+            workspace_id: ws_a.id.clone(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: otto_core::domain::SessionStatus::Running,
+            cwd: root.clone(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: u.id.clone(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        // Own swarm + own agent → scoped.
+        let ok = verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sa.id, "agent_id": aa.id})),
+        )
+        .await
+        .expect("own swarm");
+        assert_eq!(ok.swarm_id, sa.id);
+        // Another workspace's swarm (forged meta) → refused.
+        assert!(verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sb.id, "agent_id": ab.id}))
+        )
+        .await
+        .is_none());
+        // Own swarm but a foreign agent id → refused.
+        assert!(verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sa.id, "agent_id": ab.id}))
+        )
+        .await
+        .is_none());
+        // Not a swarm session at all.
+        assert!(verified_swarm_scope(&ctx, &session(json!({})))
+            .await
+            .is_none());
+    }
 }
