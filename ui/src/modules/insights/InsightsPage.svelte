@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   // Insights view — two tabs:
@@ -248,22 +249,30 @@
     if (routeKey) router.replace('insights');
   }
 
-  // Fetch the full summary for the open report (the list has an excerpt).
+  // Fetch the full summary for the open report (the list has an excerpt) AND
+  // for the report its deltas compare against: a metric the excerpt cuts off
+  // falls back to the index (tool errors: 0), so comparing the open report's
+  // summary value with the previous one's index value showed "Up 24, worse"
+  // for a day that actually went 41 → 24.
   $effect(() => {
     const r = selected;
     if (!r) return;
-    const k = keyOf(r);
-    if (fullMd[k] != null) return;
+    const prev = untrack(() => previousOf(r));
+    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => fullMd[keyOf(x)]) == null);
+    if (!want.length) return;
     let current = true;
-    const path = r.html_path ? siblingPath(r.html_path, 'summary') : null;
-    const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
-    void summary
-      .then((text) => {
-        if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
-      })
-      .catch(() => {
-        if (current) fullMd = { ...fullMd, [k]: r.summary };
-      });
+    for (const x of want) {
+      const k = keyOf(x);
+      const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
+      const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+      void summary
+        .then((text) => {
+          if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
+        })
+        .catch(() => {
+          if (current) fullMd = { ...fullMd, [k]: x.summary };
+        });
+    }
     return () => { current = false; };
   });
 
