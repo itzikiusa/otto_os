@@ -225,7 +225,7 @@ pub fn parse_conflict_segments(text: &str) -> Vec<ConflictSegment> {
 
     for line in split_keep_lines(text) {
         if !in_conflict {
-            if line.starts_with("<<<<<<<") {
+            if is_conflict_marker(line, '<') {
                 flush_context(&mut context, &mut segments);
                 in_conflict = true;
                 side = Side::Ours;
@@ -239,11 +239,11 @@ pub fn parse_conflict_segments(text: &str) -> Vec<ConflictSegment> {
         }
 
         // Inside a conflict region.
-        if line.starts_with("|||||||") {
+        if is_conflict_marker(line, '|') {
             side = Side::Base;
-        } else if line.starts_with("=======") {
+        } else if is_conflict_marker(line, '=') {
             side = Side::Theirs;
-        } else if line.starts_with(">>>>>>>") {
+        } else if is_conflict_marker(line, '>') {
             segments.push(ConflictSegment::Conflict {
                 ours: std::mem::take(&mut ours),
                 theirs: std::mem::take(&mut theirs),
@@ -267,6 +267,19 @@ pub fn parse_conflict_segments(text: &str) -> Vec<ConflictSegment> {
     flush_context(&mut context, &mut segments);
 
     segments
+}
+
+/// Exact git conflict marker test: seven `ch` characters, then either end of
+/// line (an optional `\r` for CRLF files) or — for every marker but `=======`,
+/// which never carries a label — a space and the label. A prefix match would
+/// treat a setext `==========` underline or a `>>>>>>>>` quote line inside a
+/// conflict as a marker, flipping or closing the side and losing that line.
+fn is_conflict_marker(line: &str, ch: char) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let Some(rest) = line.strip_prefix(&*ch.to_string().repeat(7)) else {
+        return false;
+    };
+    rest.is_empty() || (ch != '=' && rest.starts_with(' '))
 }
 
 /// Split `text` into logical lines WITHOUT their trailing `\n`, dropping a
@@ -1781,6 +1794,80 @@ diff --git a/f b/f
         assert_eq!(hunks[0].lines[1].origin, LineOrigin::Add);
         assert_eq!(hunks[0].lines[2].old_line, Some(2));
         assert_eq!(hunks[0].lines[2].new_line, Some(3));
+    }
+
+    #[test]
+    fn conflict_markers_are_exact_not_prefixes() {
+        // A setext underline (`==========`), a quote line (`>>>>>>>>`) and a
+        // longer `<<<<<<<<` run inside a conflict are content, not markers.
+        let text = "\
+<<<<<<< HEAD
+Title
+==========
+>>>>>>>> quoted
+=======
+Other
+<<<<<<<<
+>>>>>>> feature
+";
+        let segs = parse_conflict_segments(text);
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        match &segs[0] {
+            ConflictSegment::Conflict { ours, theirs, base } => {
+                assert_eq!(ours, &["Title", "==========", ">>>>>>>> quoted"]);
+                assert_eq!(theirs, &["Other", "<<<<<<<<"]);
+                assert!(base.is_empty());
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        // A label on `=======` is not a separator either.
+        assert!(!is_conflict_marker("======= x", '='));
+        assert!(is_conflict_marker("<<<<<<<", '<'));
+        assert!(!is_conflict_marker("<<<<<<<HEAD", '<'));
+    }
+
+    #[test]
+    fn conflict_markers_tolerate_crlf_and_keep_cr_in_content() {
+        let text = "a\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> b\r\nz\r\n";
+        let segs = parse_conflict_segments(text);
+        assert_eq!(segs.len(), 3, "{segs:?}");
+        match &segs[1] {
+            ConflictSegment::Conflict { ours, theirs, base } => {
+                // Content lines keep their CR so a rebuilt file stays CRLF.
+                assert_eq!(ours, &["ours\r"]);
+                assert_eq!(theirs, &["theirs\r"]);
+                assert!(base.is_empty());
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        match &segs[2] {
+            ConflictSegment::Context { lines } => assert_eq!(lines, &["z\r"]),
+            other => panic!("expected context, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_markers_diff3_base_section() {
+        let text = "\
+<<<<<<< HEAD
+ours
+||||||| merged common ancestors
+base 1
+|||||||| not a marker
+=======
+theirs
+>>>>>>> feature
+";
+        let segs = parse_conflict_segments(text);
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        match &segs[0] {
+            ConflictSegment::Conflict { ours, theirs, base } => {
+                assert_eq!(ours, &["ours"]);
+                assert_eq!(base, &["base 1", "|||||||| not a marker"]);
+                assert_eq!(theirs, &["theirs"]);
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
     }
 
     #[test]
