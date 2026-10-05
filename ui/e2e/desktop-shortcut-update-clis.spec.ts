@@ -4,7 +4,8 @@ import { apiCtx, seedWorkspace } from './seed';
 // ⌘U and ⌘⇧U must both fire "Update all CLIs" (keys.ts case 'u'). The shifted
 // chord regressed in the exact-modifier keymap pass (3dc866e8) — users had the
 // ⌘⇧U habit from before it. The spec intercepts the provider-update POST so no
-// real CLI update runs; the assertion is that the chord dispatches the call.
+// real CLI update runs; the assertion is that the chord dispatches the call
+// (through the confirmation it now asks first).
 //
 // Desktop-browser project only (keyboard chords are a desktop concern); it
 // self-skips on the mobile/tablet device projects like the other desktop specs.
@@ -47,6 +48,11 @@ for (const [chord, name] of [
       { timeout: 10_000 },
     );
     await page.keyboard.press(chord);
+    // Updating every agent CLI on the host asks first; nothing is sent until
+    // the person confirms.
+    const confirm = page.getByRole('dialog', { name: 'Update all agent CLIs?' });
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: 'Update', exact: true }).click();
     await fired; // resolves only if the chord dispatched updateCLIs
   });
 }
