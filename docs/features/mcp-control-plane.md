@@ -740,9 +740,9 @@ queues every other call, or `ping`, behind it; replies are matched by JSON-RPC
 id. The enable list (+ grant) is cached for 5 s and the gateway tool list for
 30 s (refetched once on an unknown gateway tool); neither cache can widen
 access, because the daemon re-checks the enable list, the grant and the
-gateway authorization on every call. The bridge attaches to the daemon's
-database with `open_existing` — it never runs the repair `UPDATE`s or
-migrations at session start. A governed call that waits on an approval
+gateway authorization on every call. The bridge never opens the daemon's
+database: everything goes through the daemon's HTTP API, so a session start
+runs no repair `UPDATE`s or migrations. A governed call that waits on an approval
 resumes on the `mcp_approval_changed` event (5 s fallback re-read), not on a
 1 s poll.
 

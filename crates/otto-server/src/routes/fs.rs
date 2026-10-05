@@ -21,139 +21,10 @@ pub(crate) mod sandbox {
     //! NON-root callers of `/fs/browse` and `/fs/read` (`non_root_fs_denied`).
     //! Input paths have already been canonicalized (symlinks + `..` resolved).
 
-    use std::path::{Path, PathBuf};
+    //! The lists themselves live in [`otto_core::secret_paths`] so the vault
+    //! root/asset guard refuses exactly the same set.
 
-    /// Directories (relative to `$HOME`) that hold credentials/secrets and must
-    /// never be served through the session artifact endpoint.
-    const HOME_DENY_DIRS: &[&str] = &[
-        ".ssh",
-        ".aws",
-        ".gnupg",
-        ".kube",
-        ".docker",
-        ".config/gcloud",
-        ".config/gh",
-        ".azure",
-        ".password-store",
-        // S8-09 / S11-08: more credential stores a non-root caller must not read.
-        ".terraform.d",
-        ".config/op",
-        ".otto",
-        "Library/Keychains",
-        "Library/Cookies",
-        "Library/Safari",
-        "Library/Application Support/Google/Chrome",
-        "Library/Application Support/BraveSoftware",
-        "Library/Application Support/Microsoft Edge",
-        "Library/Application Support/Firefox",
-        "Library/Application Support/Arc",
-    ];
-
-    /// Individual credential FILES (relative to `$HOME`) whose directories stay
-    /// browsable (agent CLI homes, git and cargo config).
-    const HOME_DENY_FILES: &[&str] = &[
-        ".codex/auth.json",
-        ".claude/.credentials.json",
-        ".claude.json",
-        ".git-credentials",
-        ".config/git/credentials",
-        ".cargo/credentials",
-        ".cargo/credentials.toml",
-        ".gemini/oauth_creds.json",
-    ];
-
-    /// Absolute prefixes excluded from session artifacts (system secret stores).
-    const ABS_DENY_PREFIXES: &[&str] = &[
-        "/etc",
-        "/private/etc",
-        "/root",
-        "/var/root",
-        "/proc",
-        "/sys",
-    ];
-
-    /// Exact (case-insensitive) filenames that are known secret stores and are
-    /// never served as session artifacts, even outside the denied directories.
-    const DENY_FILE_NAMES: &[&str] = &[
-        "id_rsa",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "credentials",
-        ".env",
-        ".netrc",
-        ".pgpass",
-        ".npmrc",
-        ".pypirc",
-        ".dockercfg",
-        ".git-credentials",
-        // Shell / REPL histories routinely hold pasted tokens and passwords.
-        ".bash_history",
-        ".zsh_history",
-        ".sh_history",
-        ".python_history",
-        ".node_repl_history",
-        ".psql_history",
-        ".mysql_history",
-        ".rediscli_history",
-    ];
-
-    /// Filename substrings whose presence marks a likely secret (private keys,
-    /// keystores). Matched case-insensitively against the file name only.
-    const DENY_FILE_SUFFIXES: &[&str] = &[".pem", ".key", ".pfx", ".p12", ".keystore"];
-
-    fn home() -> Option<PathBuf> {
-        std::env::var("HOME")
-            .ok()
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from)
-    }
-
-    /// True when `canonical` (an already-resolved path) is inside a denied
-    /// directory or under a denied absolute prefix for session artifacts.
-    pub(crate) fn is_denied_dir(canonical: &Path) -> bool {
-        // Home-relative secret dirs.
-        if let Some(home) = home() {
-            if let Ok(home_canon) = home.canonicalize() {
-                for rel in HOME_DENY_DIRS {
-                    let denied = home_canon.join(rel);
-                    if canonical == denied || canonical.starts_with(&denied) {
-                        return true;
-                    }
-                }
-                if HOME_DENY_FILES
-                    .iter()
-                    .any(|rel| canonical == home_canon.join(rel))
-                {
-                    return true;
-                }
-            }
-        }
-        // Absolute system prefixes.
-        for prefix in ABS_DENY_PREFIXES {
-            let p = Path::new(prefix);
-            if canonical == p || canonical.starts_with(p) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// True when `canonical` names a known secret file (by exact name or
-    /// extension). Applied to session artifacts on top of [`is_denied_dir`].
-    pub(crate) fn is_denied_file(canonical: &Path) -> bool {
-        let name = match canonical.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_ascii_lowercase(),
-            None => return false,
-        };
-        if DENY_FILE_NAMES
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(&name))
-        {
-            return true;
-        }
-        DENY_FILE_SUFFIXES.iter().any(|s| name.ends_with(s))
-    }
+    pub(crate) use otto_core::secret_paths::{is_denied_dir, is_denied_file};
 }
 
 /// Keep OS errors actionable, rather than turning denied access into "not found".
@@ -336,36 +207,14 @@ fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
 /// checks the very path it then opens (S8-09: no second resolution a symlink
 /// swap could slip between).
 fn non_root_canonical_denied(canonical: &std::path::Path) -> ApiResult<()> {
-    use std::path::PathBuf;
-    let canonical = canonical.to_path_buf();
-    let home = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from);
-    let mut data_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(d) = std::env::var_os("OTTO_DATA_DIR").filter(|d| !d.is_empty()) {
-        data_dirs.push(PathBuf::from(d));
-    }
-    if let Some(h) = &home {
-        data_dirs.push(h.join("Library/Application Support/Otto"));
-    }
-    if in_otto_data_dir(&canonical, &data_dirs)
-        || sandbox::is_denied_dir(&canonical)
-        || sandbox::is_denied_file(&canonical)
-    {
+    use otto_core::secret_paths as sp;
+    if sp::in_protected_dir(canonical) || sp::is_denied_file(canonical) {
         return Err(ApiError(Error::Forbidden(format!(
             "{} holds credentials or Otto's own state; only the root user can open it",
             canonical.display()
         ))));
     }
     Ok(())
-}
-
-/// True when the CANONICAL `path` is (inside) one of Otto's data dirs.
-fn in_otto_data_dir(path: &std::path::Path, data_dirs: &[std::path::PathBuf]) -> bool {
-    data_dirs.iter().any(|d| {
-        let d = d.canonicalize().unwrap_or_else(|_| d.clone());
-        path.starts_with(&d)
-    })
 }
 
 /// `GET /api/v1/fs/browse?path=<abs-or-~-path>[&files=true]`
@@ -1016,9 +865,12 @@ mod tests {
 
     #[test]
     fn non_root_deny_covers_otto_data_dir_and_its_secrets() {
-        let data = tempfile::tempdir().unwrap();
-        let dirs = vec![data.path().to_path_buf()];
-        let canon = data.path().canonicalize().unwrap();
+        // The default data dir is refused even when `$OTTO_DATA_DIR` points
+        // elsewhere (the shared list in `otto_core::secret_paths`).
+        let Some(home) = otto_core::secret_paths::home_dir() else {
+            return;
+        };
+        let data = home.join("Library/Application Support/Otto");
         for rel in [
             "",
             "secrets.json",
@@ -1027,15 +879,12 @@ mod tests {
             "logs/ottod.log",
         ] {
             assert!(
-                super::in_otto_data_dir(&canon.join(rel), &dirs),
+                super::non_root_canonical_denied(&data.join(rel)).is_err(),
                 "{rel} must be denied"
             );
         }
         let other = tempfile::tempdir().unwrap();
-        assert!(!super::in_otto_data_dir(
-            &other.path().canonicalize().unwrap(),
-            &dirs
-        ));
+        assert!(super::non_root_canonical_denied(&other.path().canonicalize().unwrap()).is_ok());
     }
 
     #[test]

@@ -158,7 +158,7 @@ async fn create_vault<C: VaultCtx>(
     require(&c, &user, &ws, WorkspaceRole::Editor).await?;
     Ok(Json(
         c.vault()
-            .register(&ws, &req.name, req.root_path, req.okf)
+            .register_as(&ws, &req.name, req.root_path, req.okf, user.is_root)
             .await?,
     ))
 }

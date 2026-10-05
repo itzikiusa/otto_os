@@ -269,3 +269,192 @@ async fn concurrent_saves_on_a_file_database_all_succeed() {
         .unwrap();
     assert_eq!(n, 60, "every save indexed in its own transaction");
 }
+
+/// S7-02: merged text equal to a source deduplicates onto that source. It
+/// used to be superseded by ITSELF (active=0, superseded_by=self) — the merged
+/// knowledge vanished from search. Now it survives as the merged row and only
+/// the other sources are retired.
+#[tokio::test]
+async fn merge_whose_text_equals_a_source_keeps_that_source_live() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let saved = svc
+        .save(
+            &ws,
+            &user,
+            vec![
+                nm("A", "release trains leave on tuesday"),
+                nm("B", "release trains leave tuesdays"),
+            ],
+        )
+        .await
+        .unwrap();
+    let (a, b) = (saved[0].id.clone(), saved[1].id.clone());
+    let merged = svc
+        .merge(
+            &ws,
+            &user,
+            otto_memory::MergeReq {
+                // The repeated id is one source, not two.
+                ids: vec![a.clone(), b.clone(), a.clone()],
+                title: "Release trains".into(),
+                body: "release trains leave on tuesday".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.id, a, "deduplicated onto source A");
+    let a_row = svc.get(&ws, &a).await.unwrap();
+    assert!(a_row.active, "the merged row stays live");
+    assert_ne!(a_row.superseded_by.as_deref(), Some(a.as_str()));
+    let b_row = svc.get(&ws, &b).await.unwrap();
+    assert!(!b_row.active);
+    assert_eq!(b_row.superseded_by.as_deref(), Some(a.as_str()));
+    let hits = search_ids(&svc, &ws, "release trains").await;
+    assert!(
+        hits.contains(&a),
+        "merged knowledge is searchable: {hits:?}"
+    );
+    assert!(!hits.contains(&b), "retired source is not: {hits:?}");
+}
+
+/// S7-02: a split part equal to the parent (or to another part) used to
+/// resolve to the parent / one shared child — the parent then superseded
+/// itself. Both are refused before anything is written.
+#[tokio::test]
+async fn split_refuses_parts_equal_to_the_parent_or_each_other() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let parent = svc
+        .save(&ws, &user, vec![nm("P", "deploys need cmake and node")])
+        .await
+        .unwrap()
+        .remove(0);
+    let part = |t: &str, b: &str| otto_memory::SplitPart {
+        title: t.into(),
+        body: b.into(),
+    };
+    for parts in [
+        vec![
+            part("1", "deploys need cmake and node"),
+            part("2", "deploys need node"),
+        ],
+        vec![
+            part("1", "deploys need cmake"),
+            part("2", "deploys need cmake"),
+        ],
+    ] {
+        let err = svc
+            .split(&ws, &user, &parent.id, otto_memory::SplitReq { parts })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+    }
+    let p = svc.get(&ws, &parent.id).await.unwrap();
+    assert!(p.active, "a refused split leaves the parent untouched");
+    assert!(p.superseded_by.is_none());
+
+    let ok = svc
+        .split(
+            &ws,
+            &user,
+            &parent.id,
+            otto_memory::SplitReq {
+                parts: vec![
+                    part("1", "deploys need cmake"),
+                    part("2", "deploys need node"),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.memories.len(), 2);
+    let p = svc.get(&ws, &parent.id).await.unwrap();
+    assert!(!p.active);
+    assert_eq!(p.superseded_by.as_deref(), Some(ok.memories[0].id.as_str()));
+}
+
+/// S7-05: a search's access bump is ONE statement for the whole hit list;
+/// every listed id counts once, other workspaces are untouched.
+#[tokio::test]
+async fn bump_access_counts_each_hit_once_in_one_statement() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let saved = svc
+        .save(
+            &ws,
+            &user,
+            vec![nm("A", "alpha fact"), nm("B", "beta fact")],
+        )
+        .await
+        .unwrap();
+    let (a, b) = (saved[0].id.clone(), saved[1].id.clone());
+    let repo = svc.repo();
+    repo.bump_access(&ws, &[a.clone(), b.clone(), a.clone(), "missing".into()])
+        .await
+        .unwrap();
+    repo.bump_access("other-ws", std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    repo.bump_access(&ws, &[]).await.unwrap();
+    assert_eq!(svc.get(&ws, &a).await.unwrap().access_count, 1);
+    assert_eq!(svc.get(&ws, &b).await.unwrap().access_count, 1);
+    assert!(svc.get(&ws, &a).await.unwrap().last_accessed_at.is_some());
+}
+
+/// S7-06: undo tokens are random (distinct, 256-bit hex) and expire with
+/// the undo window measured from `forgotten_at`.
+#[tokio::test]
+async fn undo_tokens_are_random_and_expire() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let saved = svc
+        .save(
+            &ws,
+            &user,
+            vec![nm("A", "gamma fact"), nm("B", "delta fact")],
+        )
+        .await
+        .unwrap();
+    let t1 = svc.soft_forget(&ws, &saved[0].id).await.unwrap().undo_token;
+    let t2 = svc.soft_forget(&ws, &saved[1].id).await.unwrap().undo_token;
+    assert_ne!(t1, t2);
+    assert!(t1.len() == 64 && t1.chars().all(|c| c.is_ascii_hexdigit()));
+    // Within the window: restores.
+    assert!(svc.undo_forget(&ws, &t1).await.unwrap().active);
+    // Past the window: refused, the memory stays forgotten.
+    sqlx::query("UPDATE memories SET forgotten_at = ? WHERE id = ?")
+        .bind(chrono::Utc::now().timestamp() - otto_state::memory::UNDO_FORGET_WINDOW_SECS - 1)
+        .bind(&saved[1].id)
+        .execute(svc.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        svc.undo_forget(&ws, &t2).await.unwrap_err(),
+        Error::NotFound(_)
+    ));
+    assert!(!svc.get(&ws, &saved[1].id).await.unwrap().active);
+}
+
+/// S7-10: the boot warm-up builds + reconciles the FTS index up front, so a
+/// memory saved before it (e.g. by an older build) is searchable without a
+/// request paying the reconcile; repeated warm-ups are cached no-ops.
+#[tokio::test]
+async fn warm_fts_reconciles_before_the_first_request() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool.clone());
+    svc.save(&ws, &user, vec![nm("W", "warmup reconciles epsilon")])
+        .await
+        .unwrap();
+    // A fresh service over the same DB with its index wiped = a cold boot
+    // after rows landed without FTS.
+    sqlx::query("DELETE FROM memories_fts")
+        .execute(svc.pool())
+        .await
+        .unwrap();
+    let cold = MemoryService::with_defaults(pool);
+    let (a, b) = tokio::join!(cold.warm_fts(), cold.warm_fts());
+    assert!(a && b);
+    assert_eq!(fts_mids(&cold).await.len(), 1, "reconciled at warm-up");
+    assert_eq!(search_ids(&cold, &ws, "epsilon").await.len(), 1);
+}

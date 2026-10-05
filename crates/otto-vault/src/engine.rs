@@ -179,6 +179,8 @@ impl VaultEngine {
 
     /// Register an existing directory (created if `root` is None → a fresh
     /// vault under `~/.otto/vault/<slug>`). Kicks a full scan in the background.
+    /// Trusted/internal callers only: no root restriction — HTTP routes for
+    /// non-root users go through [`Self::register_as`] with `unrestricted: false`.
     pub async fn register(
         self: &Arc<Self>,
         ws: &str,
@@ -186,12 +188,50 @@ impl VaultEngine {
         root: Option<String>,
         okf: bool,
     ) -> Result<VaultRec> {
+        self.register_as(ws, name, root, okf, true).await
+    }
+
+    /// Refuse a vault root a NON-root caller may not register: a vault serves
+    /// every non-hidden file under its root to the workspace's Viewers (and
+    /// accepts text writes there), so the root must not be `/`, `$HOME`, inside
+    /// Otto's data dir / a credential dir, or CONTAIN one (S7-01). The path
+    /// may not exist yet — it is vetted before anything is created.
+    pub fn vet_shared_root(raw: &str) -> Result<PathBuf> {
+        let expanded = PathBuf::from(shellexpand_home(raw.trim()));
+        let canon =
+            otto_core::secret_paths::canonicalize_prospective(&expanded).ok_or_else(|| {
+                Error::Invalid(format!(
+                    "vault root must be an absolute path without `..`: {raw}"
+                ))
+            })?;
+        if let Some(why) = otto_core::secret_paths::subtree_root_denial(&canon) {
+            return Err(Error::Forbidden(format!(
+                "{why}; only the root user can register this vault root"
+            )));
+        }
+        Ok(canon)
+    }
+
+    /// [`Self::register`] with the caller's privilege: `unrestricted: false`
+    /// (non-root HTTP callers) vets the root with [`Self::vet_shared_root`]
+    /// before creating it and again once it is canonical.
+    pub async fn register_as(
+        self: &Arc<Self>,
+        ws: &str,
+        name: &str,
+        root: Option<String>,
+        okf: bool,
+        unrestricted: bool,
+    ) -> Result<VaultRec> {
         let name = name.trim();
         if name.is_empty() {
             return Err(Error::Invalid("vault name is required".into()));
         }
         let root_path = match root {
             Some(r) if !r.trim().is_empty() => {
+                if !unrestricted {
+                    Self::vet_shared_root(&r)?;
+                }
                 let p = PathBuf::from(shellexpand_home(r.trim()));
                 if p.is_file() {
                     return Err(Error::Invalid(format!("not a directory: {}", p.display())));
@@ -219,6 +259,11 @@ impl VaultEngine {
         let canon = root_path
             .canonicalize()
             .map_err(|e| Error::Invalid(format!("vault root: {e}")))?;
+        if !unrestricted {
+            // Re-vet the resolved root: a symlink swapped in after the first
+            // check must not land the vault on a protected tree.
+            Self::vet_shared_root(&canon.to_string_lossy())?;
+        }
         let id = self
             .store
             .create_vault(ws, name, &canon.to_string_lossy(), okf)
@@ -898,6 +943,7 @@ impl VaultEngine {
                 return Err(Error::Forbidden("path escapes the vault".into()));
             }
         }
+        Self::refuse_protected(&rootc, &target)?;
         Ok(target)
     }
 
@@ -916,7 +962,24 @@ impl VaultEngine {
         if !resolved.starts_with(&rootc) {
             return Err(Error::Forbidden("path escapes the vault".into()));
         }
+        Self::refuse_protected(&rootc, &resolved)?;
         Ok(resolved)
+    }
+
+    /// Every canonical note/asset path a vault reads or writes: never a
+    /// key-like file name, and never inside Otto's data dir / a credential dir
+    /// unless the vault ROOT itself was (deliberately, by root) placed there.
+    /// Covers vaults registered before roots were vetted (S7-01) — a legacy
+    /// `~` vault can't stream `Library/Application Support/Otto/otto.db`.
+    fn refuse_protected(rootc: &Path, path: &Path) -> Result<()> {
+        use otto_core::secret_paths as sp;
+        if sp::is_denied_file(path) || (sp::in_protected_dir(path) && !sp::in_protected_dir(rootc))
+        {
+            return Err(Error::Forbidden(
+                "path holds credentials or Otto's own state".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Open (and create where absent) every parent component relative to a held
@@ -2532,6 +2595,11 @@ fn slug(s: &str) -> String {
 }
 
 fn shellexpand_home(p: &str) -> String {
+    if p == "~" {
+        if let Some(h) = dirs::home_dir() {
+            return h.to_string_lossy().to_string();
+        }
+    }
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(h) = dirs::home_dir() {
             return h.join(rest).to_string_lossy().to_string();
