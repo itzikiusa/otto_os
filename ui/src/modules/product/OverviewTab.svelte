@@ -1163,16 +1163,16 @@
 {#snippet fieldEditor(ef: EditableField)}
   <div class="field-editor">
     {#if ef.schema_type === 'number'}
-      <input class="field-input" type="number" step="any" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="number" step="any" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'date'}
-      <input class="field-input" type="date" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="date" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'datetime'}
-      <input class="field-input" type="datetime-local" bind:value={fieldDraft} />
+      <input aria-label={ef.name} class="field-input" type="datetime-local" bind:value={fieldDraft} />
     {:else if ef.schema_type === 'user'}
       {#if assignablesLoading && assignables.length === 0}
         <Skeleton rows={1} height={27} label="people" />
       {:else}
-        <select class="field-input" bind:value={fieldDraft}>
+        <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
           <option value="">Unassigned</option>
           {#each assignables as u (u.account_id)}
             <option value={u.account_id}>{u.display_name}</option>
@@ -1180,7 +1180,7 @@
         </select>
       {/if}
     {:else if (ef.schema_type === 'option' || ef.schema_type === 'priority' || ef.schema_type === 'version' || ef.schema_type === 'component') && ef.allowed_values.length > 0}
-      <select class="field-input" bind:value={fieldDraft}>
+      <select aria-label={ef.name} class="field-input" bind:value={fieldDraft}>
         {#if !ef.required}
           <option value="">— None —</option>
         {/if}
@@ -1203,10 +1203,10 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
+      <input dir="auto" aria-label={ef.name} class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
-      <input class="field-input" type="text" bind:value={fieldDraft} />
+      <input dir="auto" aria-label={ef.name} class="field-input" type="text" bind:value={fieldDraft} />
       {#if ef.schema_type !== 'string'}
         <span class="field-raw-note">raw ({ef.schema_type})</span>
       {/if}
@@ -1255,7 +1255,7 @@
       </div>
       {#if editingTitle}
         <div class="title-edit">
-          <input
+          <input dir="auto"
             class="title-input"
             bind:value={titleDraft}
             spellcheck="false"
@@ -1315,7 +1315,7 @@
           class="tag-add-form"
           onsubmit={(e) => { e.preventDefault(); void addTag(); }}
         >
-          <input
+          <input dir="auto"
             class="tag-input"
             bind:value={tagInput}
             placeholder="Add tag…"
@@ -1415,7 +1415,7 @@
 
             <div class="field">
               <label class="label" for="draft-title">Title</label>
-              <input
+              <input dir="auto"
                 id="draft-title"
                 class="input wide-input"
                 bind:value={draftTitle}
@@ -1426,7 +1426,7 @@
 
             <div class="field">
               <label class="label" for="draft-body">Body (Markdown)</label>
-              <textarea
+              <textarea dir="auto"
                 id="draft-body"
                 class="textarea"
                 bind:value={draftBody}
@@ -1521,13 +1521,13 @@
 
             <!-- Add transcript form -->
             <div class="add-transcript-form">
-              <input
+              <input dir="auto"
                 class="input wide-input"
                 bind:value={newTranscriptTitle}
                 placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
               />
-              <textarea
+              <textarea dir="auto" aria-label="Transcript"
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
@@ -1580,7 +1580,7 @@
 
             {#if editingDesc}
               <div class="desc-editor">
-                <textarea
+                <textarea dir="auto"
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
@@ -1640,7 +1640,7 @@
                   </div>
                   <!-- Add comment form -->
                   <div class="add-comment-form">
-                    <textarea
+                    <textarea dir="auto"
                       class="textarea comment-textarea"
                       bind:value={newCommentBody}
                       rows={3}

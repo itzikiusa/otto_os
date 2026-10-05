@@ -99,7 +99,7 @@
           <span class="mono dim">--brand-font-{role}</span>
         </div>
         {#if f}
-          <input
+          <input dir="ltr"
             class="input stack mono"
             value={f.$value}
             oninput={(e) => setFont(role, e.currentTarget.value)}
@@ -107,7 +107,7 @@
             aria-label="{ROLE_LABEL[role]} font stack"
             spellcheck="false"
           />
-          <input
+          <input dir="ltr"
             class="input weights mono"
             value={(f.weights ?? []).join(', ')}
             onchange={(e) => setWeights(role, e.currentTarget.value)}

@@ -103,7 +103,7 @@
 </script>
 
 <div class="askbar" class:disabled={!sessionId}>
-  <textarea
+  <textarea dir="auto"
     bind:this={inputEl}
     bind:value={text}
     rows="1"

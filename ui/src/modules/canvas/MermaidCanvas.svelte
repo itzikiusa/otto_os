@@ -530,7 +530,7 @@
   .content {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — pan/zoom transform space is physical (x grows rightward) */
     will-change: transform;
   }
   .content :global(svg) {
@@ -547,7 +547,7 @@
   }
   .err {
     position: absolute;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     bottom: 64px;
     transform: translateX(-50%);
     display: inline-flex;

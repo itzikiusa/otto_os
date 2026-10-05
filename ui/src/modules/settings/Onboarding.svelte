@@ -162,7 +162,7 @@
 
         <div class="field">
           <label for="ob-name">Display name <span class="dim">(optional)</span></label>
-          <input id="ob-name" class="input" bind:value={displayName} placeholder="Root" />
+          <input dir="auto" id="ob-name" class="input" bind:value={displayName} placeholder="Root" />
         </div>
         <div class="field">
           <label for="ob-pass">Password</label>
@@ -201,7 +201,7 @@
 
         <div class="field">
           <label for="ob-wsname">Name</label>
-          <input id="ob-wsname" class="input" bind:value={wsName} placeholder="my-project" />
+          <input dir="auto" id="ob-wsname" class="input" bind:value={wsName} placeholder="my-project" />
         </div>
         <div class="field">
           <label for="ob-wspath">Directory</label>

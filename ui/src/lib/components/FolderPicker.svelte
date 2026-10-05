@@ -206,7 +206,7 @@
   {/if}
 
   <div class="pick-tools">
-    <input class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} data-autofocus />
+    <input dir="ltr" class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} data-autofocus />
     <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden

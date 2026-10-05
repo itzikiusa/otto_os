@@ -385,7 +385,7 @@
         {@render lazyPanel('api')}
       {:else if ui.rightTab === 'notes'}
         <div class="notes-wrap">
-          <textarea
+          <textarea dir="auto"
             class="notes"
             aria-label="Workspace notes"
             bind:value={notes}

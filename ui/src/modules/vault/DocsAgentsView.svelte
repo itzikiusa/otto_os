@@ -508,7 +508,7 @@
             {/each}
           </select>
           {#if tpl?.needsRepo}
-            <PathField bind:value={tplRepo}><input class="input tpl-repo" bind:value={tplRepo} placeholder="e.g. ~/code/payments-service" aria-label="Repository folder" /></PathField>
+            <PathField bind:value={tplRepo}><input dir="ltr" class="input tpl-repo" bind:value={tplRepo} placeholder="e.g. ~/code/payments-service" aria-label="Repository folder" /></PathField>
           {/if}
           <button
             class="tpl-use"
@@ -532,7 +532,7 @@
 
       <div class="field">
         <label for="da-prompt">What should be documented?</label>
-        <textarea
+        <textarea dir="auto"
           id="da-prompt"
           class="input da-prompt"
           bind:value={prompt}
@@ -542,7 +542,7 @@
       </div>
       <div class="field">
         <label for="da-target">Target folder (vault-relative, blank = root)</label>
-        <input id="da-target" class="input" bind:value={targetDir} placeholder="e.g. runbooks/deploys" />
+        <input dir="ltr" id="da-target" class="input" bind:value={targetDir} placeholder="e.g. runbooks/deploys" />
       </div>
 
       <div class="field" role="group" aria-labelledby="da-writers">
@@ -554,7 +554,7 @@
                 <option value={p}>{p}</option>
               {/each}
             </select>
-            <input class="input model" bind:value={agent.model} placeholder="Model (optional)" aria-label={`Writer agent ${i + 1} model`} />
+            <input dir="ltr" class="input model" bind:value={agent.model} placeholder="Model (optional)" aria-label={`Writer agent ${i + 1} model`} />
             <button
               class="icon-btn"
               title="Remove agent" aria-label="Remove agent"
@@ -617,7 +617,7 @@
                         <option value={p}>{p}</option>
                       {/each}
                     </select>
-                    <input
+                    <input dir="ltr"
                       class="input"
                       bind:value={reviewer.model}
                       placeholder="Model (optional)"
@@ -638,7 +638,7 @@
                       <Icon name="x" size={12} />
                     </button>
                   </div>
-                  <input
+                  <input dir="auto"
                     class="input review-focus"
                     bind:value={reviewer.focus}
                     placeholder="Optional focus — e.g. request/response bodies"

@@ -86,7 +86,7 @@
     {#if error}<div class="error" role="alert">{error}</div>{/if}
     {#if document}
       {#if editing}
-        <textarea aria-label={`${label} Markdown`} bind:value={draft} disabled={saving} spellcheck="false"></textarea>
+        <textarea dir="auto" aria-label={`${label} Markdown`} bind:value={draft} disabled={saving} spellcheck="false"></textarea>
         {#if kind === 'context'}
           <div class="actions">
             <button type="button" class="btn" disabled={saving} onclick={() => (picker = '')}>Add file reference…</button>

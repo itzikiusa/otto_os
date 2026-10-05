@@ -110,7 +110,7 @@
         <div class="swc-b">
           <div class="row">
             <b class="nm">{tokenLabel(name)}</b>
-            <input
+            <input dir="ltr"
               class="hex mono"
               class:bad={!hex}
               value={tok?.$value ?? ''}

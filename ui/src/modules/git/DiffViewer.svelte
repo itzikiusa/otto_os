@@ -1227,7 +1227,7 @@
       {#if !navCollapsed}
         <!-- Search inside nav -->
         <div class="nav-search-wrap">
-          <input
+          <input dir="ltr"
             class="nav-search input"
             type="text"
             placeholder="Filter files…"
@@ -1267,7 +1267,7 @@
 
   {#snippet composerBox()}
     <div class="composer">
-      <textarea
+      <textarea dir="auto" aria-label="Line comment"
         class="input"
         rows="2"
         bind:value={composerText}
@@ -1464,7 +1464,7 @@
       {#if !showNav || !prMode}
         <!-- Inline search bar when no nav sidebar -->
         <div class="toolbar-search-wrap">
-          <input
+          <input dir="auto"
             class="toolbar-search input"
             type="text"
             placeholder="Search files & diff…"

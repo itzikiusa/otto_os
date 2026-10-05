@@ -37,7 +37,7 @@
 <Modal title="New swarm" width={560} {onclose}>
   <div class="field">
     <label for="swarm-name">Name</label>
-    <input id="swarm-name" class="input" placeholder="e.g. Platform Team" bind:value={name} />
+    <input dir="auto" id="swarm-name" class="input" placeholder="e.g. Platform Team" bind:value={name} />
   </div>
 
   <p class="section-title">Start from a preset</p>

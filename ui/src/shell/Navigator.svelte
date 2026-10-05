@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   import { plural } from '../lib/plural';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { focusOnMount } from '../lib/focusOnMount';
@@ -791,7 +792,7 @@
     {#if !ui.sidebarEditMode}
       <div class="nav-search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           class="nav-search-input"
           placeholder="Filter sessions…"
           aria-label="Filter sessions"
@@ -873,7 +874,7 @@
             {#if secMovable}
               <span class="grip sec-grip" title="Drag to reorder sections" aria-hidden="true"><Icon name="grip" size={12} /></span>
             {/if}
-            <button
+            <button use:rowMenu
               class="group-head"
               class:pinned
               aria-expanded={open}
@@ -942,7 +943,7 @@
       {#if showWsFilter}
         <div class="nav-search ws-filter">
           <Icon name="search" size={12} />
-          <input
+          <input dir="ltr"
             class="nav-search-input"
             placeholder="Filter workspaces…"
             aria-label="Filter workspaces"
@@ -961,7 +962,7 @@
         <div class="nested-empty">No matching workspaces</div>
       {/if}
       {#each fWorkspaces as w (w.id)}
-        <button
+        <button use:rowMenu
           class="nav-item"
           class:active-ws={ws.currentId === w.id}
           onclick={() => ws.select(w.id)}
@@ -1066,7 +1067,7 @@
 {/snippet}
 
 {#snippet simpleRow(m: SidebarModule)}
-  <button
+  <button use:rowMenu
     class="nav-item"
     class:active={isActive(m.id)}
     aria-current={isActive(m.id) ? 'page' : undefined}
@@ -1093,7 +1094,7 @@
 {#snippet editRow(m: SidebarModule, first: boolean, last: boolean)}
   {@const fav = isFav(m.id)}
   <!-- Drag is the pointer path (presentation); the row’s ↑/↓ buttons and ⌥↑/⌥↓ reorder from the keyboard. -->
-  <div
+  <div use:rowMenu
     role="presentation"
     class="edit-row"
     class:hidden-row={isHidden(m.id)}
@@ -1172,7 +1173,7 @@
     class:drop-after={dragOverId === m.id && dropSide === 'after'}
     class:dragging={dragId === m.id}
   >
-    <button
+    <button use:rowMenu
       class="nav-item"
       class:active={router.module === 'agents' || router.module === ''}
       aria-current={router.module === 'agents' || router.module === '' ? 'page' : undefined}
@@ -1299,7 +1300,7 @@
          already in `ws.sessions`, so open / rename / archive work as above. -->
     {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
       <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
-      <div
+      <div use:rowMenu
         role="presentation"
         class="ws-group-label"
         title="Sessions not tied to any workspace"
@@ -1436,7 +1437,7 @@
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
               {/if}
               <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
-              <div
+              <div use:rowMenu
                 role="presentation"
                 class="nav-item nested-item archived"
                 title={s.title}
@@ -1513,7 +1514,7 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <input
+      <input dir="auto" aria-label="Rename session"
         class="nav-rename"
         bind:value={draft}
         use:focusOnMount
@@ -1524,7 +1525,7 @@
         }}
       />
     {:else}
-      <button
+      <button use:rowMenu
         class="nav-item nested-item"
         class:active={!otherWs && router.module === 'agents' && ws.activeSessionId === s.id}
         class:resumable

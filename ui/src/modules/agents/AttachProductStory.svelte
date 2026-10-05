@@ -76,7 +76,7 @@
     into the running agent session.
   </div>
 
-  <input
+  <input dir="auto" aria-label="Filter product stories"
     class="search-input"
     type="search"
     placeholder="Filter by title or key…"

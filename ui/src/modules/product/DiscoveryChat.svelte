@@ -235,7 +235,7 @@
         </select>
       </label>
     {/if}
-    <textarea
+    <textarea dir="auto" aria-label="Message"
       bind:this={composerEl}
       class="msg-input"
       placeholder="Describe the idea or problem… (Enter to send, Shift+Enter for newline)"

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import { splitter } from '../../lib/paneResizer';
   import { dialogFocus } from '../../lib/dialogFocus';
@@ -3207,7 +3208,7 @@
         {@const tracking = branchTracking(b, status)}
         {@const wtElsewhere = worktreeByBranch.get(b.name)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           class="ref-row"
           class:nested
           class:current={b.is_current}
@@ -3275,7 +3276,7 @@
       {#snippet remoteRow(leaf: BranchLeaf, nested: boolean)}
         {@const b = leaf.b}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           class="ref-row remote"
           class:nested
           class:dragging={dragSource?.name === b.name && dragSource.remote}
@@ -3396,7 +3397,7 @@
         {#if tagsOpen}
           {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               class="ref-row tag"
               class:ref-row-busy={revealBusy === t.name}
               title="{t.name} — click to show it on the graph, right-click for actions"
@@ -3435,7 +3436,7 @@
         {#if stashesOpen}
           {#each stashes as s (s.ref)}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               class="ref-row stash-row"
               title={`${s.ref} · ${s.message}`}
               onclick={() => selectStash(s)}
@@ -3467,7 +3468,7 @@
           {#each worktrees as w (w.path)}
             {@const isHere = currentRepoPath !== '' && normPath(w.path) === currentRepoPath}
             <div class="ref-action-row">
-            <button
+            <button use:rowMenu
               type="button"
               class="ref-row stash-row is-worktree"
               class:current={isHere}
@@ -3532,7 +3533,7 @@
           </button>
           {#if submodulesOpen}
             {#each submodules as sub (sub.path)}
-              <button
+              <button use:rowMenu
                 class="ref-row stash-row"
                 title={`${sub.path} @ ${sub.sha.slice(0, 10)}${sub.url ? ` · ${sub.url}` : ''}${sub.state !== 'ok' ? ` · ${sub.state}` : ''}`}
                 oncontextmenu={(e) => subMenu(e, sub)}
@@ -3727,7 +3728,7 @@
               {#if shouldCollapseRow(chips)}
                 <!-- Keep collapsed refs on a separate keyboard-accessible control. -->
                 {@const primary = primaryChip(chips)}
-                <button class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
+                <button use:rowMenu class="ref-select" tabindex="-1" title={primary.label} aria-label={`Select ${primary.label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(primary, primary.label, row.color)}</button>
                 <button
                   class="ref-expander"
                   tabindex="0"
@@ -3743,7 +3744,7 @@
                   {@const label = chip.kind === 'stash'
                     ? (stashMsgBySha.get(row.commit.sha) ?? 'stash')
                     : chip.label}
-                  <button class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
+                  <button use:rowMenu class="ref-select" tabindex="-1" title={label} aria-label={`Select ${label}`} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>{@render chipView(chip, label, row.color)}</button>
                 {/each}
               {/if}
               <!-- HEAD marker ("you are here") — rightmost so it stays visible as
@@ -3753,7 +3754,7 @@
               {/if}
             </div>
 
-            <button class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
+            <button use:rowMenu class="graph-select" title={row.commit.subject} aria-label={row.commit.subject} aria-pressed={isSelected} onclick={() => selectCommit(row.commit)} oncontextmenu={(e) => commitMenu(e, row.commit)}>
             <!-- SVG gutter -->
             <svg
               class="gutter"
@@ -4007,7 +4008,7 @@
       <div class="ref-pop-group">Branches</div>
       {#each refMenu.branches as chip (chip.kind + chip.label)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           type="button"
           class="ref-pop-row kind-{chip.kind}"
           class:is-current={chip.current}
@@ -4045,7 +4046,7 @@
       <div class="ref-pop-group">Tags</div>
       {#each refMenu.tags as chip (chip.kind + chip.label)}
         <div class="ref-action-row">
-        <button
+        <button use:rowMenu
           type="button"
           class="ref-pop-row kind-tag"
           title={`Double-click to checkout tag (detached) · ${chip.label}`}

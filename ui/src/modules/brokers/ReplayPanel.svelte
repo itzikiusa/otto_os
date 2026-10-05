@@ -123,11 +123,11 @@
   <div class="form">
     <label>
       Source topic
-      <input type="text" bind:value={sourceTopic} placeholder="e.g. orders-dlq" />
+      <input dir="ltr" type="text" bind:value={sourceTopic} placeholder="e.g. orders-dlq" />
     </label>
     <label>
       Target topic
-      <input type="text" bind:value={targetTopic} placeholder="e.g. orders" />
+      <input dir="ltr" type="text" bind:value={targetTopic} placeholder="e.g. orders" />
     </label>
 
     <label>
@@ -177,16 +177,16 @@
       <div class="transform-body">
         <label>
           Override key
-          <input type="text" bind:value={setKey} placeholder="leave blank to keep original" />
+          <input dir="auto" type="text" bind:value={setKey} placeholder="leave blank to keep original" />
         </label>
         <div class="inline-row">
           <label>
             Add/overwrite header key
-            <input type="text" bind:value={addHeaderKey} placeholder="x-replayed-from" />
+            <input dir="ltr" type="text" bind:value={addHeaderKey} placeholder="x-replayed-from" />
           </label>
           <label>
             Value
-            <input type="text" bind:value={addHeaderVal} placeholder="source-topic-name" />
+            <input dir="ltr" type="text" bind:value={addHeaderVal} placeholder="source-topic-name" />
           </label>
         </div>
       </div>

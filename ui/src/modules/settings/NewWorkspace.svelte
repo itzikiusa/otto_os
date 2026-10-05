@@ -52,7 +52,7 @@
 <Modal title="Add Workspace" {onclose}>
   <div class="field">
     <label for="nw-name">Name</label>
-    <input
+    <input dir="auto"
       id="nw-name"
       class="input"
       bind:value={name}
@@ -65,7 +65,7 @@
   <div class="field">
     <label for="nw-path">Project directory</label>
     <div class="path-row">
-      <input id="nw-path" class="input mono" bind:value={rootPath} spellcheck="false" onkeydown={onKeydown} placeholder="~/code/my-project" />
+      <input dir="ltr" id="nw-path" class="input mono" bind:value={rootPath} spellcheck="false" onkeydown={onKeydown} placeholder="~/code/my-project" />
       <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
     </div>
     <span class="hint">Created if it doesn’t exist. Sessions and repos run inside it. <code>~</code> expands to your home.</span>

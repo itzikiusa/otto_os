@@ -793,9 +793,9 @@
 {/if}
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
-    <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
-    <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
+    <div class="field"><label for="p-name">Name</label><input dir="auto" id="p-name" class="input" bind:value={projName} /></div>
+    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input dir="ltr" id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
+    <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea dir="auto" id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
       {#if projEditId}

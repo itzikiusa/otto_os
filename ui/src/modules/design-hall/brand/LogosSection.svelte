@@ -115,7 +115,7 @@
           {/if}
         </div>
         <figcaption>
-          <input class="input name" value={logo.name} oninput={(e) => (logo.name = e.currentTarget.value)} disabled={readonly} aria-label="Logo name" />
+          <input dir="auto" class="input name" value={logo.name} oninput={(e) => (logo.name = e.currentTarget.value)} disabled={readonly} aria-label="Logo name" />
           <select class="input kind" value={logo.kind} onchange={(e) => (logo.kind = e.currentTarget.value as BrandLogoKind)} disabled={readonly} aria-label="Logo variant">
             {#each LOGO_KINDS as k (k)}<option value={k}>{KIND_LABEL[k]}</option>{/each}
           </select>

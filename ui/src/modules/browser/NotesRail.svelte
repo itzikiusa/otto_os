@@ -64,7 +64,7 @@
             <p class="excerpt">{a.text}</p>
             {#if editingId === a.id}
               <div class="edit">
-                <textarea
+                <textarea dir="auto"
                   bind:value={editText}
                   placeholder="Check this claim against the spec"
                   aria-label="Note for this mark"

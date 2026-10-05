@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
@@ -1030,7 +1031,7 @@
 <div class="query-editor" bind:this={rootEl}>
   <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
-      <div
+      <div use:rowMenu
         class="qe-tab"
         class:active={i === database.activeTab}
         class:agent={!!t.agent}
@@ -1071,7 +1072,7 @@
           </span>
         {/if}
         {#if renaming === i}
-          <input
+          <input dir="ltr" aria-label="Rename query tab"
             class="qe-tab-rename mono"
             bind:value={renameText}
             use:focusOnMount
@@ -1350,7 +1351,7 @@
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
         <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
-          <input
+          <input dir="auto" aria-label={`Value for ${name}`}
             class="input qe-var-input"
             value={spec.value}
             placeholder={spec.type === 'number' ? '123' : 'value'}
@@ -1421,7 +1422,7 @@
 
   {#if saving}
     <div class="save-bar">
-      <input
+      <input dir="auto" aria-label="Query name"
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}

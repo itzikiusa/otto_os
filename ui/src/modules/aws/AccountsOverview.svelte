@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
   // Accounts overview: one card per AWS account — identity (account id + role
@@ -122,7 +123,7 @@
       <div class="ov-bar">
         <label class="ov-filter input-group">
           <Icon name="search" size={13} />
-          <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
+          <input dir="ltr" type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
         </label>
         {#if filter.trim()}<span class="dim">{visible.length} of {aws.accounts.length}</span>{/if}
       </div>
@@ -140,7 +141,7 @@
       {#each visible as a (a.id)}
         {@const p = aws.perms(a.id)}
         {@const loadingP = aws.permLoading[a.id] === true}
-        <article
+        <article use:rowMenu
           class="card"
           class:prod={a.environment === 'prod'}
           data-testid="aws-account-card"

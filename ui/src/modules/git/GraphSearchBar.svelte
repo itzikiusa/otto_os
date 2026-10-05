@@ -142,7 +142,7 @@
   <div class="gsb-row">
     <div class="gsb-box">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         class="gsb-input"
         bind:this={inputEl}
         bind:value={q}

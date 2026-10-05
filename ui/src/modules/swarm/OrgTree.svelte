@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // Recursive org tree (CEO → … → devs) by `reports_to`. Each node shows the
   // agent, a status dot, task/run counts, and its open sessions (click → open).
@@ -277,7 +278,7 @@
   {@const sessions = agentSessions(a.id)}
   {@const isOpen = open[a.id] ?? true}
   {@const running = runCount(a.id)}
-  <div
+  <div use:rowMenu
     class="row org-row"
     class:drag-over={dropTargetId === a.id}
     class:dragging-self={draggingAgentId === a.id}

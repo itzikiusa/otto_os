@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Product Story Analysis page — left sidebar (Stories | Learnings toggle +
   // story list + import) and a per-story workspace: ONE header band buckets the
   // 13 sub-views into 4 workflow GROUPS (Story · Discover · Deliver · Log) —
@@ -556,7 +557,7 @@
 {#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
   <!-- One tree row: an epic (▾/▸ + 🗂 + count), a top-level story (unchanged
        look) or an indented child (depth 1 = unfiled, 2 = inside a folder). -->
-  <div
+  <div use:rowMenu
     class="story-row-wrap"
     class:active={product.selectedId === s.id}
     class:child={depth > 0}

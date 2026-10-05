@@ -170,7 +170,7 @@
         </button>
       {/each}
     </div>
-    <input
+    <input dir="ltr"
       class="input pr-search"
       type="search"
       bind:value={query}

@@ -459,7 +459,7 @@
             {@const count = parseValues(drafts[n].text).length}
             <div class="mr-param">
               <span class="mr-pname mono" title={n}>:{n}</span>
-              <textarea
+              <textarea dir="ltr"
                 class="input mr-pvals mono"
                 rows={Math.min(4, Math.max(1, drafts[n].text.split('\n').length))}
                 bind:value={drafts[n].text}
@@ -560,7 +560,7 @@
                       <option value={`custom:${ov.name}`}>ON CLUSTER {ov.name}</option>
                     {/if}
                   </select>
-                  <input
+                  <input dir="ltr"
                     class="input mr-clname mono"
                     placeholder="other cluster…"
                     aria-label="Custom cluster for {t.label}"
@@ -632,7 +632,7 @@
       </ul>
       <label class="mr-typed">
         <span>Type <strong class="mono">{phrase}</strong> to confirm</span>
-        <input
+        <input dir="ltr"
           class="input mono"
           bind:value={typed}
           placeholder={phrase}

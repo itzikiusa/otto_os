@@ -258,7 +258,7 @@
       {#if memories.length}
         <div class="search">
           <Icon name="search" size={14} />
-          <input class="search-in" type="search" bind:value={query} placeholder="Filter memories…" aria-label="Filter memories" />
+          <input dir="ltr" class="search-in" type="search" bind:value={query} placeholder="Filter memories…" aria-label="Filter memories" />
         </div>
       {/if}
       {#if !memories.length}

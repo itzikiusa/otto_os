@@ -793,7 +793,7 @@
 
       <label class="field">
         <span>Name</span>
-        <input class="input" bind:value={fName} placeholder="Nightly ticket review" required />
+        <input dir="auto" class="input" bind:value={fName} placeholder="Nightly ticket review" required />
       </label>
 
       <div class="frow">
@@ -837,7 +837,7 @@
       {#if fKind === 'agent_prompt' && !PROVIDERS.includes(fProvider)}
         <label class="field">
           <span>Custom provider slug</span>
-          <input class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+          <input dir="auto" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
         </label>
       {/if}
 
@@ -851,12 +851,12 @@
       {:else if fProvider === 'shell'}
         <label class="field">
           <span>Shell command</span>
-          <textarea class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
+          <textarea dir="auto" class="input mono" bind:value={fPrompt} rows="4" placeholder="e.g. df -h && uptime"></textarea>
         </label>
       {:else}
         <label class="field">
           <span>Prompt (the agent’s instructions)</span>
-          <textarea class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
+          <textarea dir="auto" class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
         </label>
       {/if}
 
@@ -884,7 +884,7 @@
         {:else if fCadence === 'cron'}
           <label class="field">
             <span>Cron expression (5 fields)</span>
-            <input class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
+            <input dir="ltr" class="input mono" bind:value={fCronExpr} placeholder="0 9 * * 1" aria-invalid={cronFieldCount !== 5} />
             <small class="field-hint" class:bad={cronFieldCount !== 5}>
               {cronFieldCount === 5
                 ? 'minute · hour · day of month · month · day of week (0 or 7 = Sun)'
@@ -910,7 +910,7 @@
         {#if fCadence !== 'interval'}
           <label class="field">
             <span>Timezone</span>
-            <input class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
+            <input dir="auto" class="input" bind:value={fTimezone} placeholder="e.g. Europe/London" list="sched-tz-list" aria-invalid={!tzOk} />
             {#if !tzOk}<small class="field-hint bad">Unknown timezone — use an IANA name like Europe/London</small>{/if}
             {#if tzNames.length}
               <datalist id="sched-tz-list">{#each tzNames as z (z)}<option value={z}></option>{/each}</datalist>
@@ -945,17 +945,17 @@
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
             <span>Chat / channel id (optional)</span>
-            <input class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
+            <input dir="auto" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
           </label>
         {:else if fDestType === 'email'}
           <label class="field">
             <span>Send to (email)</span>
-            <input class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
+            <input dir="ltr" class="input" type="email" bind:value={fEmailTo} placeholder="you@example.com" />
           </label>
         {:else if fDestType === 'webhook'}
           <label class="field">
             <span>Webhook URL</span>
-            <input class="input" type="url" bind:value={fUrl} placeholder="https://…" />
+            <input dir="ltr" class="input" type="url" bind:value={fUrl} placeholder="https://…" />
           </label>
         {/if}
       </div>
@@ -963,7 +963,7 @@
       {#if fProvider === 'shell' && fKind === 'agent_prompt'}
         <label class="field">
           <span>Working dir (optional)</span>
-          <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
+          <PathField bind:value={fCwd}><input dir="ltr" class="input" bind:value={fCwd} placeholder="dir to run the command in" /></PathField>
         </label>
       {/if}
 
@@ -980,11 +980,11 @@
         <div class="frow">
           <label class="field">
             <span>Skill (optional, inlined)</span>
-            <input class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
+            <input dir="auto" class="input" bind:value={fSkill} placeholder="e.g. db-mysql" />
           </label>
           <label class="field">
             <span>Working dir (optional)</span>
-            <PathField bind:value={fCwd}><input class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
+            <PathField bind:value={fCwd}><input dir="ltr" class="input" bind:value={fCwd} placeholder="repo path — not a sandbox" /></PathField>
           </label>
         </div>
 

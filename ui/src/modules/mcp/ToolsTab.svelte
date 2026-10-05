@@ -307,7 +307,7 @@
         </div>
         <label class="field">
           <span>Arguments (JSON)</span>
-          <textarea bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
+          <textarea dir="ltr" bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
         </label>
         {#if argError}<p class="warn">{argError}</p>{/if}
 

@@ -867,7 +867,7 @@
   <div class="surface" class:stale class:kbd={kbdFocused} style:cursor={inputLive ? cursor : 'default'} bind:this={surfaceEl}>
     <canvas bind:this={canvasEl} aria-hidden="true"></canvas>
 
-    <textarea
+    <textarea dir="auto"
       class="sink"
       bind:this={sinkEl}
       aria-label={`Live page${session?.title ? `: ${session.title}` : ''}. Typing goes to the page; Escape gives the keyboard back to Otto.`}

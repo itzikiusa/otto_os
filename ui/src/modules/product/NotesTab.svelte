@@ -168,7 +168,7 @@
               <!-- Body or inline edit -->
               {#if editingId === n.id}
                 <div class="edit-wrap">
-                  <textarea
+                  <textarea dir="auto"
                     class="edit-text"
                     bind:value={editBody}
                     rows={4}
@@ -205,7 +205,7 @@
       <Modal title="Add note" width={480} onclose={closeAdd}>
         <div class="nt-add-body">
           <label class="form-label">Note <span class="req">*</span>
-            <textarea
+            <textarea dir="auto"
               class="form-textarea"
               bind:value={newBody}
               rows={5}
@@ -214,7 +214,7 @@
             ></textarea>
           </label>
           <label class="form-label">Section (optional)
-            <input
+            <input dir="auto"
               class="form-input"
               bind:value={newSection}
               placeholder="e.g. scope, edge-cases, decisions"

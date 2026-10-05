@@ -279,7 +279,7 @@
               ></label
             >
             {#if rule.children !== null}<label
-                >Named children<textarea
+                >Named children<textarea dir="auto"
                   rows="3"
                   value={rule.children.join('\n')}
                   onchange={(e) =>
@@ -426,7 +426,7 @@
               >{/each}</select
           ></label
         ><label
-          >Child scope<input
+          >Child scope<input dir="auto"
             bind:value={child}
             oninput={() => {
               effective = null;

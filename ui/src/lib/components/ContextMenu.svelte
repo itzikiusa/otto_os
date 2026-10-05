@@ -259,7 +259,7 @@
     {#if ctxMenu.filter}
       <div class="ctx-search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           bind:this={searchEl}
           class="ctx-search-input"
           type="text"

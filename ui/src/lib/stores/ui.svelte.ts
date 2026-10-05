@@ -67,6 +67,8 @@ const LS = {
   termFontFamily: 'otto_term_font_family',
   rtlBidi: 'otto_term_rtl_bidi',
   termCopyOnSelect: 'otto_term_copy_on_select',
+  termOptionAsMeta: 'otto_term_option_as_meta',
+  termScreenReader: 'otto_term_screen_reader',
   closeTabPref: 'otto_close_tab_pref',
   termToolbar: 'otto_term_toolbar',
   dbDock: 'otto_db_dock',
@@ -346,6 +348,16 @@ class UiStore {
   rtlBidi = $state(lsGet(LS.rtlBidi) === '1');
   /** Copy-to-clipboard automatically on text selection in the terminal. */
   termCopyOnSelect = $state(lsGet(LS.termCopyOnSelect) === '1');
+  /** ⌥ sends Meta (ESC-prefixed keys: ⌥← word-jump, ⌥⌫ word-delete in
+   *  shells and agent TUIs). Default ON — the long-standing behavior. Off,
+   *  ⌥ composes characters as macOS does elsewhere, which keyboard layouts
+   *  that type @ { } [ ] | \ or accents with ⌥ need. */
+  termOptionAsMeta = $state(lsGet(LS.termOptionAsMeta) !== '0');
+  /** xterm's screen-reader mode: an aria-live mirror of the output plus an
+   *  accessible row tree, read by VoiceOver. Forces the DOM renderer (the
+   *  WebGL canvas has no text for assistive tech). Off by default — there is
+   *  no reliable way for a webview to detect a running screen reader. */
+  termScreenReader = $state(lsGet(LS.termScreenReader) === '1');
   /** Show the desktop terminal toolbar (font zoom + copy-on-select). */
   termToolbar = $state(lsGet(LS.termToolbar) !== '0'); // default on
   /** Remembered close-tab choice: '' = ask every time, 'archive' = stop the
@@ -799,6 +811,16 @@ class UiStore {
   setTermCopyOnSelect(on: boolean): void {
     this.termCopyOnSelect = on;
     lsSet(LS.termCopyOnSelect, on ? '1' : '0');
+  }
+
+  setTermOptionAsMeta(on: boolean): void {
+    this.termOptionAsMeta = on;
+    lsSet(LS.termOptionAsMeta, on ? '1' : '0');
+  }
+
+  setTermScreenReader(on: boolean): void {
+    this.termScreenReader = on;
+    lsSet(LS.termScreenReader, on ? '1' : '0');
   }
 
   setTermToolbar(on: boolean): void {

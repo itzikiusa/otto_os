@@ -413,7 +413,7 @@
         {/if}
         <label class="lr-field">
           <span>Additional instructions <span class="hint-inline">optional</span></span>
-          <textarea
+          <textarea dir="auto"
             class="input lr-textarea"
             rows="3"
             bind:value={fInstructions}
@@ -563,7 +563,7 @@
                   <select class="input" bind:value={fixProvider} title="Fixer agent" aria-label="Fixer agent">
                     {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
                   </select>
-                  <input
+                  <input dir="auto"
                     type="text"
                     class="input lr-fix-input"
                     aria-label="Extra instructions for the fixer"

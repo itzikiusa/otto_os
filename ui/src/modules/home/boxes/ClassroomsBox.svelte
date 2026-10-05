@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../../lib/rowMenu';
   // Classrooms box: a 3D live view of every session — workspaces are
   // classrooms, sessions are students at desks, and the user is the headmaster
   // standing at the door of the current classroom. Students type while their
@@ -491,7 +492,7 @@
             {#if r.students.length + r.backRow.length > 0}
               <ul>
                 {#each [...r.students, ...r.backRow] as s (s.id)}
-                  <li class="lrow" data-student-id={s.id} oncontextmenu={(e) => studentMenu(e, s)}>
+                  <li use:rowMenu class="lrow" data-student-id={s.id} oncontextmenu={(e) => studentMenu(e, s)}>
                     <button
                       class="lmain"
                       aria-label="Open {studentAriaLabel(s, now() ? relTime(s.lastActiveAt) : '')}"

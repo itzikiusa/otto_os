@@ -89,7 +89,7 @@
   {#if listError}<p class="error" role="alert">{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
   {#if adding}
     <div class="actions">
-      <input class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />
+      <input dir="auto" class="input" aria-label="Account label" placeholder="Personal, Work…" maxlength="80" bind:value={label} />
       <button class="btn small" type="button" disabled={busy || !label.trim()} onclick={add}>Create profile</button>
     </div>
     <p>Each profile has its own subscription login. Your default CLI account stays available.</p>

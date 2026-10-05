@@ -249,7 +249,7 @@
 {#snippet searchField()}
   <label class="search" data-keep>
     <Icon name="search" size={14} />
-    <input
+    <input dir="auto"
       type="search"
       placeholder="Search designs, stories, references…"
       aria-label="Search all designs"
@@ -321,7 +321,7 @@
           <h2 id="dh-hero-h">What do you want to make?</h2>
           <p class="dim">Otto drafts it in the studio you pick, from your team’s past designs. Every result is a version you can compare, keep or undo.</p>
           <div class="composer">
-            <textarea
+            <textarea dir="auto"
               class="input"
               rows="2"
               placeholder="Describe it… e.g. “a launch page for the loyalty programme with a 3D card hero”"

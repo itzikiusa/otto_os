@@ -124,13 +124,13 @@
     {#each trash as entry (entry.id)}
       <article class="trash-entry">
         <div><strong>{entry.original_path}</strong><small title={new Date(entry.deleted_at).toLocaleString()}>Deleted {rel(entry.deleted_at)} · {entry.kind === 'dir' ? 'Folder' : 'File'}</small></div>
-        <label>Restore path<input aria-label={`Restore path for ${entry.original_path}`} placeholder={entry.original_path} bind:value={destination[entry.id]} /></label>
+        <label>Restore path<input dir="ltr" aria-label={`Restore path for ${entry.original_path}`} placeholder={entry.original_path} bind:value={destination[entry.id]} /></label>
         <button class="btn small" disabled={busy} onclick={() => void restoreTrash(entry)}>Restore</button>
       </article>
     {/each}
   {:else}
     <p>Review saved before/after versions of editor and agent writes. Restoring creates another recoverable edit.</p>
-    <label>File path <input aria-label="History file path" bind:value={vault.historyPath} placeholder="All files" /></label>
+    <label>File path <input dir="ltr" aria-label="History file path" bind:value={vault.historyPath} placeholder="All files" /></label>
     {#if vault.historySince}<p>Changes since {new Date(vault.historySince).toLocaleString()} <button class="btn small ghost" onclick={() => {vault.historySince = ''; vault.persistView();}}>Show all dates</button></p>{/if}
     <div class="history-layout">
       <nav aria-label="Saved revisions">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
   // DesignArena — the Product → **Design** tab (design/product-design-arena.md §4).
   // ONE arena for every design artifact of a story: a Figma/Canva-style 2D side
@@ -872,7 +873,7 @@
           </button>
           {#if !collapsedGroups[g.name]}
             {#each g.rows as r (r.att.id)}
-              <div
+              <div use:rowMenuKeys
                 class="mockup-row"
                 class:active={selectedId === r.att.id}
                 role="presentation"
@@ -995,7 +996,7 @@
         </div>
         {#if codeView && isText}
           <!-- Code view: the raw source, autosaved like every other editor. -->
-          <textarea class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
+          <textarea dir="ltr" class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
         {/if}
       </div>
 

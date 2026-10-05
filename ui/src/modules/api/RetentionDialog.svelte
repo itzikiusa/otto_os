@@ -56,17 +56,17 @@
   {/if}
   <div class="field">
     <label for="ret-rows">Keep the newest</label>
-    <input id="ret-rows" class="input" inputmode="numeric" bind:value={rows} />
+    <input dir="auto" id="ret-rows" class="input" inputmode="numeric" bind:value={rows} />
     <span class="hint" class:bad={r === null}>{r === null ? 'Enter a whole number (0 = no limit).' : r === 0 ? 'No limit on the number of requests.' : `Keep ${r} requests.`}</span>
   </div>
   <div class="field">
     <label for="ret-days">Delete requests older than (days)</label>
-    <input id="ret-days" class="input" inputmode="numeric" bind:value={days} />
+    <input dir="auto" id="ret-days" class="input" inputmode="numeric" bind:value={days} />
     <span class="hint" class:bad={d === null}>{d === null ? 'Enter a whole number (0 = never).' : d === 0 ? 'Never delete by age.' : `Delete after ${d} days.`}</span>
   </div>
   <div class="field">
     <label for="ret-runs">Automation runs to keep (per automation)</label>
-    <input id="ret-runs" class="input" inputmode="numeric" bind:value={runs} />
+    <input dir="auto" id="ret-runs" class="input" inputmode="numeric" bind:value={runs} />
     <span class="hint" class:bad={k === null}>{k === null ? 'Enter a whole number (0 = no limit).' : k === 0 ? 'Keep every run.' : `Keep the newest ${k} finished runs of each automation.`}</span>
   </div>
   {#snippet footer()}

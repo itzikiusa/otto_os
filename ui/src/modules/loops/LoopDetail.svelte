@@ -271,7 +271,7 @@
       <section class="decision" aria-label="Decision needed">
         <h3 class="section-title"><Icon name="warning" size={12} /> Decision needed</h3>
         <p class="q">{q.question}</p>
-        <textarea class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
+        <textarea dir="auto" class="input answer" rows="2" aria-label="Answer question" placeholder="Your answer — the agents read it on Resume" bind:value={answers[q.id]}></textarea>
         <div class="row-end">
           <button class="btn small" disabled={!answers[q.id]?.trim() || loop.status !== 'blocked' || acting}
             title={loop.status !== 'blocked' ? 'Answers are recorded while the loop is blocked' : undefined}
@@ -307,7 +307,7 @@
                 {@const approval = humanVerification(c, loop.ledger)}
                 {#if approval}<p class="verified"><Icon name="userCheck" size={12} /> Verified by {approval.verified_by}: {approval.evidence}</p>
                 {:else}
-                  <textarea class="input answer" rows="2" aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
+                  <textarea dir="auto" class="input answer" rows="2" aria-label={`Evidence for ${c.id}`} placeholder="What did you verify?" bind:value={evidence[c.id]}></textarea>
                   <div class="row-end">
                     <button class="btn small" disabled={!evidence[c.id]?.trim() || !canVerify || acting}
                       title={canVerify ? undefined : 'Record verification while the loop is paused, blocked or exhausted'}

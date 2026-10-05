@@ -340,7 +340,7 @@
         }
       }}
     >
-      <textarea
+      <textarea dir="auto"
         bind:value={pendingBody}
         aria-label="Annotation note"
         placeholder="e.g. Make this button the primary action"

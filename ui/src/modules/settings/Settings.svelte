@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   // Settings layout: subnav + routed page (#/settings/<page>). The section
   // list itself lives in ./sections.ts (labels, groups, keywords, access) so
   // the nav, each page title and the ⌘K "Settings: …" commands can't drift.
@@ -201,7 +202,7 @@
 </script>
 
 {#snippet navRow(s: SettingsSection, detail?: string)}
-  <button
+  <button use:rowMenuKeys
     class="settings-nav-item"
     class:active={pageId === s.id}
     aria-current={pageId === s.id ? 'page' : undefined}
@@ -225,7 +226,7 @@
     </div>
     <label class="settings-nav-filter">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         bind:this={filterEl}
         bind:value={query}
         class="settings-filter-input"

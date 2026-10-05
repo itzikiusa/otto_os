@@ -171,7 +171,7 @@
     {:else}
       <Icon name="layers" size={13} />
     {/if}
-    <input
+    <input dir="ltr"
       bind:this={inputEl}
       class="ns-input"
       role="combobox"

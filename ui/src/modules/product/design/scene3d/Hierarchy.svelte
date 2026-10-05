@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../../../lib/rowMenu';
   // Scene hierarchy — the game-studio left panel while a scene3d artifact is open
   // (the arena toggles it in place of the asset list). Groups collapse, rows
   // select, double-click / F2 renames inline, the eye hides, the ⋯ / right-click
@@ -308,7 +309,7 @@
 <div class="s3d-hier">
   <div class="s3d-hier-head">
     <span class="s3d-hier-title">Hierarchy</span>
-    <input class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
+    <input dir="ltr" class="s3d-hier-filter" placeholder="Filter objects…" bind:value={filter} aria-label="Filter objects" />
     {#if !readonly}
       <button class="s3d-icon-btn" title="Add object, light or group" aria-label="Add object, light or group" onclick={addMenu}>
         <Icon name="plus" size={14} />
@@ -330,7 +331,7 @@
     {#each visibleRows as r (r.id)}
       {@const hidden = r.node.node.visible === false}
       {@const dimmed = !isEffectivelyVisible(doc, r.id)}
-      <div
+      <div use:rowMenuKeys
         class="s3d-row"
         class:selected={selectedId === r.id}
         class:dimmed
@@ -356,7 +357,7 @@
         {/if}
         <span class="s3d-row-icon"><Icon name={iconFor(r.node)} size={13} /></span>
         {#if renaming === r.id}
-          <input
+          <input dir="auto"
             class="s3d-rename"
             aria-label="Name"
             bind:value={draft}
@@ -404,7 +405,7 @@
       <div class="s3d-section" role="presentation">Lights</div>
       {#each visibleLights as l (l.id)}
         {@const hidden = l.visible === false}
-        <div
+        <div use:rowMenuKeys
           class="s3d-row"
           class:selected={selectedId === l.id}
           class:dimmed={hidden}
@@ -422,7 +423,7 @@
           <span class="s3d-disclose spacer"></span>
           <span class="s3d-row-icon light"><Icon name="zap" size={13} /></span>
           {#if renaming === l.id}
-            <input
+            <input dir="auto"
               class="s3d-rename"
               aria-label="Name"
               bind:value={draft}

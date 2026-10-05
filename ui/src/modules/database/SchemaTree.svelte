@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Lazy recursive schema tree (databases → tables/views → columns; keyspaces →
   // keys; collections → fields). Mirrors CollectionsTree: chevron expand, indent
   // by depth, an icon per node kind, dimmed `detail`. Clicking a leaf object
@@ -520,7 +521,7 @@
   {#if !database.schemaLoading && database.schemaRoot.length > 0}
     <div class="tree-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="auto"
         class="tree-search-input"
         type="text"
         value={database.objectSearchQuery}
@@ -610,7 +611,7 @@
         </span>
       </div>
       {#each hits as hit (hit.path)}
-        <button
+        <button use:rowMenu
           class="hit"
           class:selected={database.selectedObjectPath === hit.path}
           aria-current={database.selectedObjectPath === hit.path ? 'true' : undefined}
@@ -666,7 +667,7 @@
 {#snippet nodeRow(node: SchemaNode, depth: number)}
   {@const open = database.isExpanded(node.id)}
   {@const selected = database.selectedObjectPath === node.id}
-  <div
+  <div use:rowMenu
     class="node"
     class:selected
     class:active-db={(node.kind === 'database' && node.label === database.activeDb) ||

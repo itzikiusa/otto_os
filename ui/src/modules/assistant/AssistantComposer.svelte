@@ -132,7 +132,7 @@
       <Icon name="plus" size={14} />
     </button>
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => void onFiles(e.currentTarget.files)} />
-    <textarea
+    <textarea dir="auto"
       bind:this={ta}
       bind:value={text}
       rows="1"

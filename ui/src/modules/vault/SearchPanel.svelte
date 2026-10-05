@@ -21,7 +21,7 @@
 </script>
 
 <div class="search">
-  <input
+  <input dir="auto"
     bind:this={input}
     bind:value={vault.searchQuery}
     type="search"

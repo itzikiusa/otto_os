@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PathField from '../../lib/components/PathField.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
@@ -775,7 +776,7 @@
     {/if}
     <StatusDot state={paneState} />
     {#if renaming}
-      <input
+      <input dir="auto"
         class="rename-input"
         aria-label="Session name"
         bind:value={draftTitle}
@@ -788,7 +789,7 @@
         onmousedown={(e) => e.stopPropagation()}
       />
     {:else}
-      <span
+      <span use:rowMenu
         class="pane-title"
         class:draggable={gripOn}
         role="button"
@@ -1023,7 +1024,7 @@
         </ul>
       {/if}
       <div class="dir-add">
-        <PathField bind:value={dirDraft}><input
+        <PathField bind:value={dirDraft}><input dir="ltr"
           id="sv-extra-dir"
           class="input mono"
           bind:value={dirDraft}

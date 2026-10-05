@@ -497,7 +497,7 @@
 
     <div class="prd-title-block">
       {#if editMode}
-        <input class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
+        <input dir="auto" class="input prd-title-input" aria-label="Pull request title" bind:value={editTitle} disabled={busy === 'edit'} />
       {/if}
       <div class="prd-meta">
         <span class="dim">{pr.author}</span>
@@ -517,7 +517,7 @@
     <div hidden={activeTab !== 'summary'}>
       <section class="prd-desc card">
         {#if editMode}
-          <textarea class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
+          <textarea dir="auto" class="input" rows="8" bind:value={editDesc} aria-label="Pull request description" disabled={busy === 'edit'}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Updates PR #{number} on {repoLabel} ({providerName}) · visible to the author and reviewers</span>
             <button class="btn small" disabled={busy === 'edit'} onclick={() => (editMode = false)}>Cancel</button>
@@ -608,7 +608,7 @@
         {#if showRequestChanges}
           <section class="prd-request-changes card">
             <div class="section-title" style="margin-bottom: 8px">Request changes</div>
-            <textarea
+            <textarea dir="auto"
               class="input"
               rows="3"
               bind:value={requestChangesBody}
@@ -645,7 +645,7 @@
         {/each}
 
         <div class="new-comment card">
-          <textarea class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
+          <textarea dir="auto" class="input" rows="3" bind:value={newComment} disabled={busy === 'comment'} aria-label="New comment" placeholder="Leave a comment…" onfocus={scrollIntoViewOnFocus}></textarea>
           <div class="row prd-compose-foot">
             <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
             <button

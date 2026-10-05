@@ -616,7 +616,7 @@
         {/each}
       </div>
       <div class="box">
-        <textarea
+        <textarea dir="auto"
           class="input"
           rows="2"
           bind:value={text}

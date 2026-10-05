@@ -32,9 +32,9 @@
   {:else}
     <p>To invite people on other computers, configure an HTTPS address that reaches this Otto daemon. An address beginning with localhost or 127.0.0.1 only works on this computer.</p>
     <div class="fields">
-      <label>Public HTTPS origin <input type="url" bind:value={origin} placeholder="https://otto.example.com" /></label>
-      <label>STUN servers, one per line <textarea rows="2" bind:value={stun} placeholder="stun:stun.example.com:3478"></textarea></label>
-      <label>TURN servers, one per line <textarea rows="2" bind:value={turn} placeholder="turns:turn.example.com:5349"></textarea></label>
+      <label>Public HTTPS origin <input dir="ltr" type="url" bind:value={origin} placeholder="https://otto.example.com" /></label>
+      <label>STUN servers, one per line <textarea dir="ltr" rows="2" bind:value={stun} placeholder="stun:stun.example.com:3478"></textarea></label>
+      <label>TURN servers, one per line <textarea dir="ltr" rows="2" bind:value={turn} placeholder="turns:turn.example.com:5349"></textarea></label>
       <label>TURN shared secret <input type="password" bind:value={secret} autocomplete="new-password" placeholder={configured ? 'Saved in Keychain — leave empty to keep' : 'Not configured'} disabled={clearSecret} /></label>
       {#if configured}<label class="check"><input type="checkbox" bind:checked={clearSecret} /> Remove the saved TURN secret</label>{/if}
       <label class="check"><input type="checkbox" bind:checked={relayOnly} /> Require the TURN relay for voice and screens</label>

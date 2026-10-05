@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Personal Agents module. Routes: `#/personal-agents` (agent cards),
   // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>[/<tab>]`
   // (one agent's page). The first list GET seeds four disabled example agents
@@ -201,7 +202,7 @@
           {#each agents as a (a.id)}
             {@const example = isExample(a)}
             {@const auto = autonomyById[a.id]}
-            <li class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
+            <li use:rowMenu class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
               <div class="card-top">
                 <AgentAvatar avatar={a.avatar} name={a.name} size={36} />
                 <div class="card-id">

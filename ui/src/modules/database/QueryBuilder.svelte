@@ -879,7 +879,7 @@
       {/if}
       <div class="pal-search">
         <Icon name="search" size={12} />
-        <input class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
+        <input dir="ltr" class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
       </div>
       <div class="pal-list">
         {#if paletteLoading}
@@ -977,7 +977,7 @@
                     aria-label="Select every column of {t.alias}"
                     title="Select every column"
                   />
-                  <input
+                  <input dir="ltr"
                     class="alias-input mono"
                     value={t.alias}
                     aria-label="Alias for {t.table}"
@@ -1100,10 +1100,10 @@
                     {#each colOptions as o (o.key)}<option value={o.key}>{o.key}</option>{/each}
                   </select>
                 {:else}
-                  <input class="input mono grow-2" bind:value={it.sql} placeholder={dialect === 'postgres' ? "CASE WHEN total > 100 THEN 'big' END" : "IF(total > 100, 'big', 'small')"} aria-label="SQL expression" spellcheck="false" />
+                  <input dir="ltr" class="input mono grow-2" bind:value={it.sql} placeholder={dialect === 'postgres' ? "CASE WHEN total > 100 THEN 'big' END" : "IF(total > 100, 'big', 'small')"} aria-label="SQL expression" spellcheck="false" />
                 {/if}
                 <span class="as">AS</span>
-                <input class="input mono alias" bind:value={it.as} placeholder={it.kind === 'column' ? it.ref.column : 'alias'} aria-label="Output name" spellcheck="false" />
+                <input dir="ltr" class="input mono alias" bind:value={it.as} placeholder={it.kind === 'column' ? it.ref.column : 'alias'} aria-label="Output name" spellcheck="false" />
                 <button class="icon-btn" onclick={() => moveSelect(i, -1)} disabled={i === 0} aria-label="Move up" title="Move up"><Icon name="chevronUp" size={12} /></button>
                 <button class="icon-btn" onclick={() => moveSelect(i, 1)} disabled={i === clauses.select.length - 1} aria-label="Move down" title="Move down"><Icon name="chevronDown" size={12} /></button>
                 <button class="icon-btn" onclick={() => removeSelect(it.id)} aria-label="Remove column" title="Remove"><Icon name="x" size={12} /></button>
@@ -1364,13 +1364,13 @@
             {#each opsFor(k) as op (op)}<option value={op}>{OPS[op].label}</option>{/each}
           </select>
           {#if ar === 1}
-            <input class="input mono val" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="Value" spellcheck="false" />
+            <input dir="ltr" class="input mono val" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="Value" spellcheck="false" />
           {:else if ar === 2}
-            <input class="input mono val half" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="From" spellcheck="false" />
+            <input dir="ltr" class="input mono val half" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="From" spellcheck="false" />
             <span class="as">and</span>
-            <input class="input mono val half" bind:value={it.value2} placeholder={placeholderFor(k)} aria-label="To" spellcheck="false" />
+            <input dir="ltr" class="input mono val half" bind:value={it.value2} placeholder={placeholderFor(k)} aria-label="To" spellcheck="false" />
           {:else if ar === 'list'}
-            <input
+            <input dir="ltr"
               class="input mono val"
               value={it.value ?? (it.values ?? []).join(', ')}
               oninput={(e) => setListText(it, e.currentTarget.value)}

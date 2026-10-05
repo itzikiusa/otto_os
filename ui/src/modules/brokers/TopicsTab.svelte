@@ -275,7 +275,7 @@
 {:else}
   <div class="topics">
     <div class="toolbar">
-      <input class="search" bind:value={query} placeholder="Filter topics…" aria-label="Filter topics" />
+      <input dir="ltr" class="search" bind:value={query} placeholder="Filter topics…" aria-label="Filter topics" />
       <label class="chk"><input type="checkbox" bind:checked={showInternal} /> Show internal</label>
       {#if cleanupOptions.length}
         <select bind:value={cleanupFilter} title="Cleanup policy">
@@ -306,7 +306,7 @@
 
     {#if creating}
       <div class="create">
-        <input bind:value={newName} placeholder="orders.events" aria-label="Topic name" />
+        <input dir="ltr" bind:value={newName} placeholder="orders.events" aria-label="Topic name" />
         <label title="Partitions">Parts <input type="number" min="1" bind:value={newParts} /></label>
         <label title="Replication factor">RF <input type="number" min="1" bind:value={newRf} /></label>
         <button

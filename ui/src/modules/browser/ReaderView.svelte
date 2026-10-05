@@ -263,7 +263,7 @@
     {#if pending}
       <div class="mark-composer">
         <p class="composer-excerpt">{pending.text.slice(0, 140)}</p>
-        <textarea
+        <textarea dir="auto"
           bind:value={noteText}
           placeholder="Check this price against last week’s"
           aria-label="Note for this mark"

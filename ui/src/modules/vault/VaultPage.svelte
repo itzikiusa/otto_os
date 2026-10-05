@@ -514,12 +514,12 @@
     <form class="av-body" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
       <div class="field">
         <label for="av-name">Name</label>
-        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
+        <input dir="auto" id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
       </div>
       <div class="field">
         <label for="av-path">Folder</label>
         <PathField bind:value={cPath} start={cPath || '~'}>
-          <input id="av-path" class="input" bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" spellcheck="false" />
+          <input dir="ltr" id="av-path" class="input" bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" spellcheck="false" />
         </PathField>
         <span class="hint">An existing folder (an Obsidian vault works as is) or a new path to create. Leave it blank to create one under ~/.otto/vault.</span>
       </div>

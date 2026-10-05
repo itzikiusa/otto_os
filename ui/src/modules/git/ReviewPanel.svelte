@@ -1131,7 +1131,7 @@
         {/if}
       </div>
       <div class="rp-context-row">
-        <textarea
+        <textarea dir="auto" aria-label="Review focus"
           class="rp-context-input"
           rows={2}
           placeholder="What should the reviewers focus on? (optional)"
@@ -1240,7 +1240,7 @@
       {/if}
     </div>
     <div class="rp-context-row">
-      <textarea
+      <textarea dir="auto" aria-label="Review focus"
         class="rp-context-input"
         rows={2}
         placeholder="What should the reviewers focus on? (optional)"
@@ -1405,7 +1405,7 @@
               {/if}
             </div>
             {#if c.state === 'draft' && c.id in editingBody}
-              <textarea
+              <textarea dir="auto"
                 class="rp-edit-body"
                 rows={5}
                 aria-label="Comment text"
@@ -1555,7 +1555,7 @@
           {/if}
         {:else}
           <div class="cfg-repo-row">
-            <select
+            <select aria-label="Review preset"
               class="cfg-select cfg-preset-select"
               value={selectedPresetId}
               onchange={(e) => pickNamedPreset((e.currentTarget as HTMLSelectElement).value)}
@@ -1576,7 +1576,7 @@
           </div>
           {#if presetSaveOpen}
             <div class="cfg-repo-row cfg-preset-save-row">
-              <input
+              <input dir="auto" aria-label="Preset name"
                 class="cfg-input"
                 bind:value={presetNameDraft}
                 placeholder="Preset name (e.g. Backend services)"
@@ -1608,7 +1608,7 @@
             <div class="cfg-agent-fields">
               <div class="cfg-field">
                 <span class="cfg-label">Name</span>
-                <input class="cfg-input" bind:value={editAgents[i].name} />
+                <input dir="auto" aria-label="Reviewer name" class="cfg-input" bind:value={editAgents[i].name} />
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Run on (CLIs)</span>
@@ -1627,7 +1627,7 @@
               </div>
               <div class="cfg-field">
                 <span class="cfg-label">Lens / instructions</span>
-                <textarea class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
+                <textarea dir="auto" aria-label="Reviewer lens / instructions" class="cfg-textarea" rows={3} bind:value={editAgents[i].prompt}></textarea>
               </div>
             </div>
             <div class="cfg-agent-actions">
@@ -1674,11 +1674,11 @@
           <div class="cfg-agent-fields">
             <div class="cfg-field">
               <span class="cfg-label">Name</span>
-              <input class="cfg-input" bind:value={editSummarizer.name} />
+              <input dir="auto" aria-label="Summarizer name" class="cfg-input" bind:value={editSummarizer.name} />
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Provider <span class="dim">(uses its default model)</span></span>
-              <select class="cfg-select" bind:value={editSummarizer.provider}>
+              <select aria-label="Summarizer provider" class="cfg-select" bind:value={editSummarizer.provider}>
                 {#each PROVIDER_OPTIONS as p}
                   <option value={p}>{p}</option>
                 {/each}
@@ -1686,7 +1686,7 @@
             </div>
             <div class="cfg-field">
               <span class="cfg-label">Merge / dedupe instructions</span>
-              <textarea class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
+              <textarea dir="auto" aria-label="Summarizer merge / dedupe instructions" class="cfg-textarea" rows={3} bind:value={editSummarizer.prompt}></textarea>
             </div>
           </div>
         </div>

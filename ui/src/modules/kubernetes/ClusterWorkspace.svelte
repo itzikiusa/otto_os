@@ -42,6 +42,9 @@
   import K8sViewSwitch from './K8sViewSwitch.svelte';
   import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
   import { monitorPath } from './viewState';
+  import { SINGLE_KEYS, SINGLE_KEYS_PREF, inWorkspace } from './workspaceKeys';
+  import { lsGet, lsSet } from '../../lib/storage';
+  import SettingToggle from '../settings/SettingToggle.svelte';
 
   interface Props {
     cluster: K8sCluster;
@@ -91,6 +94,10 @@
   let filterEl = $state<HTMLInputElement | null>(null);
   let nsPicker = $state<NamespacePicker | null>(null);
   let hintsOpen = $state(false);
+  /** The workspace root: shortcuts act only while focus is inside it. */
+  let wspEl: HTMLDivElement | undefined = $state();
+  /** Single-key shortcuts on/off (per device; the ? sheet has the switch). */
+  let singleKeys = $state(lsGet(SINGLE_KEYS_PREF) !== '0');
   let k9sInstallOpen = $state(false);
   let k9sOpening = $state(false);
   let scaleFor = $state<{ row: K8sRow; def: ActionDef } | null>(null);
@@ -302,6 +309,10 @@
     const onKey = (e: KeyboardEvent): void => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (keyContext.terminalFocused || ui.modalCount > 0 || ctxMenu.open || k8s.k9sSessionId) return;
+      // Only while focus is in the workspace (or on nothing): a letter typed
+      // in the sidebar or another pane is not a workspace command.
+      if (!inWorkspace(e.target, wspEl)) return;
+      if (!singleKeys && SINGLE_KEYS.has(e.key)) return;
       if (e.key === 'Escape') {
         // The open namespace combobox owns Escape and preserves its focus.
         if ((e.target as HTMLElement | null)?.closest('[role="combobox"][aria-expanded="true"]')) return;
@@ -395,7 +406,7 @@
   const drawerOpen = $derived(!!sel);
 </script>
 
-<div class="wsp" class:prod={cluster.environment === 'prod'} data-testid="k8s-workspace">
+<div class="wsp" class:prod={cluster.environment === 'prod'} data-testid="k8s-workspace" bind:this={wspEl}>
   <PageHeader title={cluster.name} class="k8s-topbar">
   {#snippet leading()}
     <button class="icon-btn" onclick={() => router.go('kubernetes')} title="All clusters" aria-label="Back to clusters"><Icon name="chevronLeft" size={14} /></button>
@@ -580,6 +591,17 @@
       <dt><kbd>Esc</kbd></dt><dd>Close details / leave the filter</dd>
       <dt><kbd>?</kbd></dt><dd>This list</dd>
     </dl>
+    <p class="hints-scope">They work while focus is in this workspace, not in the sidebar or other panes.</p>
+    <SettingToggle
+      label="Single-key shortcuts"
+      hint="Turn off if you use a screen reader or speech input, or type into the page with letter keys. Enter and Esc keep working."
+      checked={singleKeys}
+      onchange={(v) => {
+        singleKeys = v;
+        lsSet(SINGLE_KEYS_PREF, v ? '1' : '0');
+      }}
+      testid="k8s-single-keys"
+    />
     {#snippet footer()}
       <button class="btn" onclick={() => (hintsOpen = false)}>Close</button>
     {/snippet}
@@ -589,7 +611,7 @@
 {#snippet filterBox()}
   <div class="filter">
     <Icon name="search" size={12} />
-    <input bind:this={filterEl} class="filter-in" placeholder="Filter rows…" bind:value={k8s.filter} aria-label="Filter rows" aria-keyshortcuts="/" title="Filter rows (/)" data-testid="k8s-filter" />
+    <input dir="ltr" bind:this={filterEl} class="filter-in" placeholder="Filter rows…" bind:value={k8s.filter} aria-label="Filter rows" aria-keyshortcuts="/" title="Filter rows (/)" data-testid="k8s-filter" />
     {#if k8s.filter}<button class="icon-btn" onclick={() => (k8s.filter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>{/if}
   </div>
 {/snippet}
@@ -831,5 +853,10 @@
   }
   .mono {
     font-family: var(--font-mono);
+  }
+  .hints-scope {
+    margin-block: 12px 4px;
+    color: var(--text-dim);
+    font-size: var(--fs-s);
   }
 </style>

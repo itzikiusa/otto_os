@@ -265,7 +265,7 @@
       {#if target === 'artifact'}
         <div class="field">
           <label for="dh-link-q">Find a design</label>
-          <input id="dh-link-q" class="input" bind:value={q} oninput={onQuery} placeholder="Tier card" data-testid="design-link-search" />
+          <input dir="auto" id="dh-link-q" class="input" bind:value={q} oninput={onQuery} placeholder="Tier card" data-testid="design-link-search" />
           <ul class="pick" role="listbox" aria-label="Designs">
             {#each hits as h (h.artifact.id)}
               <li>
@@ -301,7 +301,7 @@
       {:else}
         <div class="field">
           <label for="dh-link-url">URL</label>
-          <input id="dh-link-url" class="input" bind:value={url} placeholder="https://example.com/inspiration" />
+          <input dir="ltr" id="dh-link-url" class="input" bind:value={url} placeholder="https://example.com/inspiration" />
           <span class="hint">Stored as a reference; nothing is fetched.</span>
         </div>
       {/if}

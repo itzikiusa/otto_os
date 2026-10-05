@@ -168,7 +168,7 @@
   <div class="card s-card">
     <label class="mint-label" for="pat-label">Label <span class="dim">(optional)</span></label>
     <div class="mint-row">
-      <input
+      <input dir="auto"
         id="pat-label"
         class="input mint-input"
         type="text"

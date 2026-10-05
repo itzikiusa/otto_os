@@ -106,7 +106,7 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}>{label}</span
   >
-  <input
+  <input dir="auto"
     class="nd-input"
     type="text"
     inputmode="decimal"

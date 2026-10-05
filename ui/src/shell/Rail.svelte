@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   // Collapsed 44px icon rail (⌘1 expands to the Navigator).
   import { navBadge } from '../lib/navBadge';
   import Icon from '../lib/components/Icon.svelte';
@@ -147,7 +148,7 @@
       {/if}
       {#each sec.modules as m (m.id)}
         {@const inSide = sidePane.active && sidePane.key === m.id}
-        <button
+        <button use:rowMenu
           class="rail-btn"
           class:active={isActive(m.id)}
           aria-current={isActive(m.id) ? 'page' : undefined}
@@ -312,7 +313,9 @@
        opaque over the sidebar so the icon under the badge doesn't show
        through. White on the bright working-green was ~2:1. */
     background: color-mix(in srgb, var(--success) 24%, var(--bg-sidebar));
-    color: var(--success);
+    /* Pulled 30% toward --text: the raw semantic colour on its own 24% tint
+       was 3.7–4.0:1 in the light themes (tokenContrast.test.ts). */
+    color: color-mix(in srgb, var(--success) 70%, var(--text));
     font-size: var(--fs-xs);
     font-weight: 600;
     line-height: 1;
@@ -321,7 +324,7 @@
   }
   .rail-badge.needs {
     background: color-mix(in srgb, var(--warning) 24%, var(--bg-sidebar));
-    color: var(--warning);
+    color: color-mix(in srgb, var(--warning) 70%, var(--text));
   }
   .avatar {
     width: 22px;

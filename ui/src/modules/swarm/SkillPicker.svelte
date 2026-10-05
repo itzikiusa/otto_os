@@ -47,7 +47,7 @@
 <div class="picker">
   {#if label}<span class="lbl">{label}</span>{/if}
   <div class="add">
-    <input
+    <input dir="auto"
       class="input grow"
       aria-label="Add a skill"
       placeholder="e.g. golang-testing"

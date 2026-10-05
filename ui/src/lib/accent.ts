@@ -48,7 +48,8 @@ export function accentText(hex: string, text: string, surfaces: string[]): strin
   if (!accent || !foreground || backgrounds.length === 0) return null;
   const mix = (a: number[], b: number[], weight: number): [number, number, number] =>
     a.map((v, i) => v * weight + b[i] * (1 - weight)) as [number, number, number];
-  const candidates = [...backgrounds, ...backgrounds.map((bg) => mix(accent, bg, 0.14))];
+  // --accent-soft (14%) and --accent-soft-strong (22%) over every surface.
+  const candidates = [...backgrounds, ...[0.14, 0.22].flatMap((p) => backgrounds.map((bg) => mix(accent, bg, p)))];
   for (let percent = 62; percent >= 0; percent--) {
     const color = mix(accent, foreground, percent / 100);
     if (candidates.every((bg) => ratio(luminance(color), luminance(bg)) >= 4.6)) {

@@ -447,7 +447,7 @@
     <h2 class="section-title first">Accounts</h2>
     {#if users.length > 5}
       <div class="user-filter-row">
-        <input
+        <input dir="ltr"
           class="input filter"
           type="search"
           placeholder="Filter users…"
@@ -681,12 +681,12 @@
     >
       <div class="field">
         <label for="nu-user">Username</label>
-        <input id="nu-user" class="input" bind:value={newUsername} spellcheck="false" autocomplete="off" placeholder="dana" />
+        <input dir="auto" id="nu-user" class="input" bind:value={newUsername} spellcheck="false" autocomplete="off" placeholder="dana" />
         <span class="hint">They sign in with this; shown as @username.</span>
       </div>
       <div class="field">
         <label for="nu-display">Display name <span class="dim">(optional)</span></label>
-        <input id="nu-display" class="input" bind:value={newDisplay} placeholder="Dana Cohen" />
+        <input dir="auto" id="nu-display" class="input" bind:value={newDisplay} placeholder="Dana Cohen" />
       </div>
       <div class="field">
         <label for="nu-pass">Password</label>

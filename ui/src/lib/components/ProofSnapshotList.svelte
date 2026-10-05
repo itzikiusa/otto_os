@@ -64,7 +64,7 @@
   <div class="snaps-head">
     <h3 class="group-title">Snapshots <span class="dim">· {snapshots.length}</span></h3>
     <div class="snap-new">
-      <input
+      <input dir="auto"
         class="input note"
         bind:value={note}
         placeholder="Note (optional)"

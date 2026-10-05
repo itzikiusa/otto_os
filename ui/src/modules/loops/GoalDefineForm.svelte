@@ -213,7 +213,7 @@
 
   <section class="block">
     <label class="lbl" for="gl-seed">Goal <span class="hint">(what “done” looks like)</span></label>
-    <textarea
+    <textarea dir="auto"
       id="gl-seed"
       class="input in area"
       bind:value={seed}
@@ -226,7 +226,7 @@
     {#if mode === 'build'}
     <label class="lbl" for="gl-repo">Repository path</label>
     <div class="repo-row">
-      <input id="gl-repo" class="input in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
+      <input dir="ltr" id="gl-repo" class="input in grow" bind:value={repoPath} placeholder="/absolute/path/to/repo" />
       <button type="button" class="btn" onclick={() => (picking = true)}>Browse…</button>
     </div>
     {/if}
@@ -239,7 +239,7 @@
         {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
       </button>
       {#if draft}
-        <input class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
+        <input dir="ltr" aria-label="Refine the draft" class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
         <button class="btn" onclick={define} disabled={!ws.currentId || defining || !feedback.trim()}>Refine</button>
       {/if}
     </div>
@@ -248,7 +248,7 @@
   {#if draft}
     <section class="block">
       <label class="lbl" for="gl-name">Name</label>
-      <input id="gl-name" class="input in" bind:value={name} />
+      <input dir="auto" id="gl-name" class="input in" bind:value={name} />
       {#if draft.definition.summary}
         <p class="muted">{draft.definition.summary}</p>
       {/if}
@@ -257,24 +257,24 @@
       {#each draft.definition.acceptance_criteria as c, i (c.id)}
         <div class="crit">
           <div class="crit-row">
-            <input class="input in grow" bind:value={c.text} placeholder="Criterion description" />
+            <input dir="auto" aria-label="Criterion description" class="input in grow" bind:value={c.text} placeholder="Criterion description" />
             <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="trash" size={13} /></button>
           </div>
           <div class="crit-row">
-            <select class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
+            <select aria-label="Verification kind" class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
               <option value="agent">Agent assessment</option>
               {#if c.verify_kind === 'manual'}<option value="manual">Agent assessment (legacy)</option>{/if}
               <option value="human">Human verification</option>
               <option value="command">Shell command</option>
             </select>
             {#if c.verify_kind === 'command'}
-              <input class="input in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
+              <input dir="ltr" aria-label="Verification command" class="input in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
             {:else}
-              <input class="input in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
+              <input dir="auto" aria-label="How to verify" class="input in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
             {/if}
           </div>
           {#if c.verify_kind === 'command'}
-            <input class="input in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
+            <input dir="auto" aria-label="What this command checks" class="input in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
           {/if}
         </div>
       {/each}
@@ -323,9 +323,9 @@
       {#if showAdvanced}
       <div id="gl-advanced">
       <label class="lbl" for="gl-sources">Source, spec and plan links (one per line)</label>
-      <textarea id="gl-sources" class="input in area mono" rows="3" bind:value={sourceLinks} placeholder="https://…"></textarea>
+      <textarea dir="ltr" id="gl-sources" class="input in area mono" rows="3" bind:value={sourceLinks} placeholder="https://…"></textarea>
       <label class="lbl" for="gl-skills">Selected skills (comma separated)</label>
-      <input id="gl-skills" class="input in" bind:value={selectedSkills} placeholder="e.g. db-mysql, golang-testing" />
+      <input dir="auto" id="gl-skills" class="input in" bind:value={selectedSkills} placeholder="e.g. db-mysql, golang-testing" />
       {#each ['planner', 'evaluator', 'digester'] as role}
         {@const key = role as 'planner' | 'evaluator' | 'digester'}
         <label class="lbl" for={`gl-${role}`}>{role[0].toUpperCase() + role.slice(1)} provider</label>

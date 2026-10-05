@@ -370,7 +370,7 @@
         <div class="list-tools">
           <label class="search">
             <Icon name="search" size={14} />
-            <input type="search" placeholder="Filter skills…" bind:value={query} aria-label="Filter skills" />
+            <input dir="ltr" type="search" placeholder="Filter skills…" bind:value={query} aria-label="Filter skills" />
           </label>
           <div class="chips" role="group" aria-label="Filter by source">
             <button class="fchip" class:active={source === 'all'} aria-pressed={source === 'all'} onclick={() => (source = 'all')}>All <span class="n">{groups.length}</span></button>

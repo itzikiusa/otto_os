@@ -1362,7 +1362,7 @@
     </button>
     {#if panelOpen}
       <div class="panel-body">
-        <input class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
+        <input dir="ltr" class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
 
         <div class="sec">
           Focus
@@ -1392,7 +1392,7 @@
           </label>
         {/if}
         <div class="typeahead">
-          <input
+          <input dir="auto"
             class="filter"
             type="text"
             placeholder="Anchor on a note…"
@@ -1419,7 +1419,7 @@
             {/if}
           </div>
           {#if serviceFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
+            <input dir="auto" class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
           {/if}
           <div class="facets">
             {#each svcShown as f (f.label)}
@@ -1468,7 +1468,7 @@
             {/if}
           </div>
           {#if tagFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
+            <input dir="auto" class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
           {/if}
           <div class="facets">
             {#each tagShown as f (f.label)}

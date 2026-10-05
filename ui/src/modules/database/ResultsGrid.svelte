@@ -1440,7 +1440,7 @@
       <div class="grid-toolbar">
         <div class="gt-search">
           <Icon name="search" size={12} />
-          <input
+          <input dir="ltr"
             class="gt-search-input mono"
             type="text"
             placeholder="Filter rows…"
@@ -1562,7 +1562,7 @@
                   <button class="val-x" aria-label="Remove value" title="Remove value" onclick={() => database.removeFilterValue(ci, vi)}><Icon name="x" size={12} /></button>
                 </span>
               {/each}
-              <input
+              <input dir="ltr"
                 class="cond-add mono"
                 placeholder="+ value"
                 aria-label="Add a value to the {cond.column} filter"

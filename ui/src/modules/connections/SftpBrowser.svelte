@@ -313,7 +313,7 @@
         <Icon name="arrowUp" size={12} /> Upload
       </button>
       <span class="grow"></span>
-      <input
+      <input dir="ltr"
         class="sftp-search"
         type="text"
         placeholder="Filter this folder…"

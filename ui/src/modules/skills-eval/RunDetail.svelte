@@ -654,7 +654,7 @@
         under the name below (overwrites an existing skill of that name).
       </p>
       <label class="field-label" for="promote-name">Library skill name</label>
-      <input id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" aria-invalid={!!promoteNameError} aria-describedby="promote-name-err" />
+      <input dir="auto" id="promote-name" class="input" bind:value={promoteName} placeholder="my-skill" aria-invalid={!!promoteNameError} aria-describedby="promote-name-err" />
       {#if promoteNameError}<p class="field-err" id="promote-name-err">{promoteNameError}</p>{/if}
       {#if promoteIter?.skill_after}
         <div class="src-toggle">

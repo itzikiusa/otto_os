@@ -27,7 +27,7 @@
 <Modal title="Start a session room" {onclose}>
   <p>Invite up to three people to this terminal and its available history. You decide who enters and who can type.</p>
   <p>Anyone you give control can run commands with this session’s permissions. Chat stays separate from the agent.</p>
-  <label>Your display name <input maxlength="80" bind:value={name} autocomplete="nickname" disabled={!!created} /></label>
+  <label>Your display name <input dir="auto" maxlength="80" bind:value={name} autocomplete="nickname" disabled={!!created} /></label>
   {#if error}<p role="alert">{error}</p>{/if}
   {#snippet footer()}
     <button class="btn" onclick={onclose} disabled={busy}>Cancel</button>

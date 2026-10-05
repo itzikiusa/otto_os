@@ -31,7 +31,7 @@
     </dl>
     <div class="field">
       <label for="k8s-sync-rev">Revision <span class="dim">(blank = the app’s targetRevision)</span></label>
-      <input id="k8s-sync-rev" class="input mono" bind:value={revision} placeholder="HEAD, a branch, tag or SHA" onkeydown={(e) => { if (e.key === 'Enter') submit(); }} />
+      <input dir="ltr" id="k8s-sync-rev" class="input mono" bind:value={revision} placeholder="HEAD, a branch, tag or SHA" onkeydown={(e) => { if (e.key === 'Enter') submit(); }} />
     </div>
     <label class="checkbox-row">
       <input type="checkbox" bind:checked={prune} />

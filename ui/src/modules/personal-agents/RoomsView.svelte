@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // Agent rooms — the only agent-to-agent transport, always user-visible.
   // Room list + create on the left; the selected room's membership editor,
@@ -201,7 +202,7 @@
   {#if !viewport.isPhone || !selectedId}
   <aside class="list" aria-label="Agent rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
-      <input
+      <input dir="auto"
         bind:this={createEl}
         bind:value={newRoomName}
         placeholder="New room name"
@@ -214,7 +215,7 @@
     <ul>
       {#each rooms as r (r.room.id)}
         <li>
-          <button
+          <button use:rowMenu
             class="room"
             data-room-id={r.room.id}
             class:active={r.room.id === selectedId}
@@ -345,7 +346,7 @@
 
         {#if error}<div class="err" role="alert">{error}</div>{/if}
         <div class="composer">
-          <textarea
+          <textarea dir="auto"
             value={draft}
             oninput={(e) => { if (selectedId) drafts[selectedId] = e.currentTarget.value; }}
             rows="2"

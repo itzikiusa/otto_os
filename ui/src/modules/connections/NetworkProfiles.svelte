@@ -77,7 +77,7 @@
     {#each profiles as profile (profile.id)}<button class="btn small" type="button" disabled={busy} onclick={() => edit(profile)} aria-pressed={editing?.id === profile.id} aria-label={`Edit ${profile.name}`}>{profile.name}{profile.archived ? ' (archived)' : ''}</button>{/each}
     <button class="btn small" type="button" disabled={busy} onclick={() => edit(null)}>New network profile</button>
   </div>
-  <label>Network profile name<input aria-label="Network profile name" bind:value={name} disabled={busy} maxlength="120" /></label>
+  <label>Network profile name<input dir="auto" aria-label="Network profile name" bind:value={name} disabled={busy} maxlength="120" /></label>
   <label>SSH connection<select aria-label="SSH connection" bind:value={sshId} disabled={busy || connectionsLoading || !!connectionsError}>
     <option value="">Choose SSH connection</option>
     {#each connections as connection (connection.id)}<option value={connection.id}>{connection.name}</option>{/each}
@@ -87,7 +87,7 @@
   {#each endpoints as endpoint, i (i)}
     <fieldset disabled={busy}><legend>Endpoint {i + 1}</legend>
       <div class="endpoint-fields">
-      <label>Name<input aria-label={`Endpoint ${i + 1} name`} bind:this={endpointNames[i]} bind:value={endpoint.name} placeholder="DB" /></label>
+      <label>Name<input dir="ltr" aria-label={`Endpoint ${i + 1} name`} bind:this={endpointNames[i]} bind:value={endpoint.name} placeholder="DB" /></label>
       <label>Remote host<input dir="ltr" aria-label={`Endpoint ${i + 1} remote host`} bind:value={endpoint.remote_host} placeholder="db.internal" /></label>
       <label>Remote port<input aria-label={`Endpoint ${i + 1} remote port`} type="number" min="1" max="65535" bind:value={endpoint.remote_port} /></label>
       <label>Host environment (optional)<input dir="ltr" aria-label={`Endpoint ${i + 1} host environment`} bind:value={endpoint.host_env} placeholder="PGHOST or APP_HOST" /></label>

@@ -271,7 +271,7 @@
         {:else}
           <div class="step-hint">A workspace maps to a project directory. Sessions run inside it.</div>
           <div class="ws-form">
-            <input class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
+            <input dir="auto" class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
               <input class="input mono path-input" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>

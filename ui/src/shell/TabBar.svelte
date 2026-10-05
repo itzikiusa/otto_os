@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../lib/rowMenu';
   // Session tabs: click activates, middle-click closes, ⌘W closes active,
   // ⌃Tab cycles (handled in keys.ts → workspace store).
   import Icon from '../lib/components/Icon.svelte';
@@ -327,7 +328,7 @@
       >
         {#if renamingId === id}
           {#if id !== DB_PANE_ID}<StatusDot state={tabState(id)} size={6} />{/if}
-          <input
+          <input dir="auto"
             class="tab-rename"
             bind:value={draft}
             use:focusOnMount
@@ -339,7 +340,7 @@
             }}
           />
         {:else}
-          <button
+          <button use:rowMenu
             class="tab-main"
             role="tab"
             aria-selected={ws.activeSessionId === id}

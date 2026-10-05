@@ -13,15 +13,24 @@
   };
 </script>
 
-<!-- No aria-live on the container: each toast carries its own role, so a toast is announced once, not twice. -->
-<!-- The lift is set HERE, not on :root — see FloatingBar's toast-lift effect. -->
-<div class="toasts" style:--toast-lift="{barStore.toastLift}px">
+<!-- The container is the live region, and it is ALWAYS mounted (empty or
+     not): WebKit/VoiceOver only speak CHANGES to a region that already
+     exists, so a toast carrying its own role="status" — inserted together
+     with its text — was often never announced. Toasts are additions to this
+     polite region; an error toast is its own role="alert" (assertive), which
+     as the nearest live region speaks it once, interrupting. aria-atomic on
+     each toast re-reads the whole toast when its ×N count bumps. No role on
+     the container, so it isn't a second "status" landmark.
+     The lift is set HERE, not on :root — see FloatingBar's toast-lift effect. -->
+<div class="toasts" aria-live="polite" aria-relevant="additions text" style:--toast-lift="{barStore.toastLift}px">
   {#each toasts.toasts as t (t.id)}
-    <!-- An error interrupts (assertive); everything else waits its turn. The
-         timer holds while the pointer or focus is on the toast. -->
+    <!-- An error interrupts (assertive); everything else waits its turn in
+         the container's polite region. The timer holds while the pointer or
+         focus is on the toast. -->
     <div
       class="toast {t.level}"
-      role={t.level === 'error' ? 'alert' : 'status'}
+      role={t.level === 'error' ? 'alert' : undefined}
+      aria-atomic="true"
       onmouseenter={() => toasts.pause(t.id)}
       onmouseleave={() => toasts.resume(t.id)}
       onfocusin={() => toasts.pause(t.id)}

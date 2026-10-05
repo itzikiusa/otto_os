@@ -413,7 +413,7 @@
       <!-- Focus input -->
       <div class="focus-wrap">
         <label class="field-label" for="focus-input">Focus <span class="focus-optional">(optional)</span></label>
-        <textarea
+        <textarea dir="auto"
           id="focus-input"
           class="focus-input"
           rows={2}
@@ -453,7 +453,7 @@
     <!-- ── History selector ─────────────────────────────────────────────────── -->
     <section class="history-row">
       <span class="field-label">History</span>
-      <select
+      <select aria-label="Analysis history"
         class="hist-select"
         onfocus={loadHistory}
         onchange={(e) => {

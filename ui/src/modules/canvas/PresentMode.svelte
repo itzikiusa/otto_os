@@ -355,8 +355,7 @@
   .progress {
     position: absolute;
     top: 0;
-    left: 0;
-    right: 0;
+    inset-inline: 0;
     height: 2px;
     background: var(--surface-2);
   }
@@ -444,7 +443,7 @@
   .notes {
     position: absolute;
     bottom: 56px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     max-width: 80vw;
     background: var(--surface);
@@ -456,7 +455,7 @@
   .controls {
     position: absolute;
     bottom: 14px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     display: flex;
     align-items: center;
@@ -511,5 +510,8 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
+  }
+  .present:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 </style>

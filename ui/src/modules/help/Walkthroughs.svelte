@@ -244,7 +244,7 @@
           <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey} style="--list-pane-w:{listW}px">
             <div class="rail-search">
               <Icon name="search" size={13} />
-              <input
+              <input dir="ltr"
                 bind:this={searchEl}
                 bind:value={query}
                 type="search"
