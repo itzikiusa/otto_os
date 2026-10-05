@@ -102,6 +102,13 @@ pub struct WorkbenchPatch {
     pub checkpoint: bool,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Optimistic-concurrency precondition for a `content` write: the
+    /// `content_hash` the client's buffer was based on. A mismatch (another
+    /// window saved meanwhile — even a coalesced autosave, which keeps `rev`)
+    /// is a `Conflict` (409) instead of a silent last-writer-wins overwrite.
+    /// Absent = unconditional ("Keep mine", agent writes).
+    #[serde(default)]
+    pub if_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -562,6 +569,13 @@ impl WorkbenchRepo {
             return Err(Error::Conflict(
                 "doc is in the trash — restore it first".into(),
             ));
+        }
+        if let (Some(want), Some(_)) = (&patch.if_hash, &patch.content) {
+            if *want != doc.content_hash {
+                return Err(Error::Conflict(
+                    "stale: the doc changed since this buffer was loaded".into(),
+                ));
+            }
         }
         let meta_changed = name.is_some()
             || language.is_some()
@@ -1135,6 +1149,73 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(blobs, 3, "select 1, v3, v4");
+    }
+
+    /// S18-06: a stale buffer (another window autosaved — coalesced, so the
+    /// `rev` did NOT move) must be refused, never silently overwrite.
+    #[tokio::test]
+    async fn if_hash_refuses_a_stale_content_write_even_within_a_coalesced_burst() {
+        let repo = WorkbenchRepo::new(mem_pool().await);
+        let (ws, u) = ids();
+        let t0 = Utc::now();
+        let d = new_doc(&repo, t0).await;
+        // Window 1 and window 2 both start from the same content.
+        let w2 = repo
+            .update_at(&ws, &u, &d.doc.id, content("window 2 a"), t0)
+            .await
+            .unwrap();
+        let base = w2.content_hash.clone();
+        let w2b = repo
+            .update_at(
+                &ws,
+                &u,
+                &d.doc.id,
+                content("window 2 b"),
+                t0 + Duration::seconds(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(w2b.rev, w2.rev, "coalesced autosave keeps rev");
+        // Window 1 still holds `base`: its write is a conflict, content intact.
+        let stale = WorkbenchPatch {
+            if_hash: Some(base),
+            ..content("window 1 stale")
+        };
+        let err = repo
+            .update_at(&ws, &u, &d.doc.id, stale, t0 + Duration::seconds(2))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+        assert_eq!(
+            repo.get(&ws, &u, &d.doc.id).await.unwrap().content,
+            "window 2 b"
+        );
+        // A matching precondition succeeds; no precondition overwrites ("Keep mine").
+        let fresh = WorkbenchPatch {
+            if_hash: Some(w2b.content_hash.clone()),
+            ..content("window 1 rebased")
+        };
+        repo.update_at(&ws, &u, &d.doc.id, fresh, t0 + Duration::seconds(3))
+            .await
+            .unwrap();
+        repo.update_at(
+            &ws,
+            &u,
+            &d.doc.id,
+            content("keep mine"),
+            t0 + Duration::seconds(4),
+        )
+        .await
+        .unwrap();
+        // Metadata-only patches ignore the precondition.
+        let meta = WorkbenchPatch {
+            pinned: Some(true),
+            if_hash: Some("not-the-hash".into()),
+            ..Default::default()
+        };
+        repo.update_at(&ws, &u, &d.doc.id, meta, t0 + Duration::seconds(5))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

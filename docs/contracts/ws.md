@@ -1739,8 +1739,11 @@ and, if the doc is open in this window and `client_id` is not this window's
 own (the `client_id` the PATCH sent), refetch the doc.
 
 ```json
-{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"content_hash":"9f2c…","updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
 ```
+
+`content_hash` is the doc's hash after the change: a coalesced autosave keeps
+`rev`, so a window compares the hash (not just `rev`) to know its copy is stale.
 
 `action` ∈ `created` | `updated` (content, metadata or a revision restore) |
 `trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless

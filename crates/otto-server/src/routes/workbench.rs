@@ -93,6 +93,7 @@ fn changed(ctx: &ServerCtx, doc: &WorkbenchDoc, action: &str, client_id: Option<
         doc_id: doc.id.clone(),
         action: action.to_string(),
         rev: doc.rev,
+        content_hash: doc.content_hash.clone(),
         updated_at: doc.updated_at.to_rfc3339(),
         client_id,
     });
