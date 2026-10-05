@@ -40,6 +40,7 @@ mod goal_loop_policy;
 mod goal_loop_roles;
 pub mod goal_loop_workspace;
 pub mod history_index;
+pub mod host_guard;
 pub mod improve_channels;
 pub mod insights;
 pub mod k8s_monitor_scheduler;
@@ -197,6 +198,7 @@ pub fn build_router_with_assets(
         .merge(rooms::public_routes())
         .merge(protected);
     let events_tx = ctx.events.clone();
+    let host_guard_state = host_guard::HostGuardState::new(ctx.pool.clone());
     let telemetry_ctx = ctx.telemetry.clone();
 
     let mut app = Router::new()
@@ -221,6 +223,12 @@ pub fn build_router_with_assets(
         telemetry::middleware,
     ))
     .layer(TraceLayer::new_for_http())
+    // DNS-rebinding guard: refuse a `Host` we don't serve (host_guard.rs).
+    // Inside CORS so a refused request still gets no CORS grant.
+    .layer(axum::middleware::from_fn_with_state(
+        host_guard_state,
+        host_guard::host_guard_with_settings,
+    ))
     .layer(cors_layer())
 }
 
@@ -240,8 +248,16 @@ pub fn build_router_with_assets(
 /// and the SPA use.
 fn cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _parts| {
-            origin.to_str().map(is_allowed_origin).unwrap_or(false)
+        .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, parts| {
+            let request_host = parts
+                .headers
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .map(host_guard::host_of);
+            origin
+                .to_str()
+                .map(|o| is_allowed_origin_for(o, request_host.as_deref()))
+                .unwrap_or(false)
         }))
         .allow_methods([
             Method::GET,
@@ -272,12 +288,36 @@ fn cors_layer() -> CorsLayer {
 /// How long a browser may reuse a CORS preflight (`Access-Control-Max-Age`).
 const CORS_PREFLIGHT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Whether a request `Origin` is trusted by [`cors_layer`].
+/// Whether a request `Origin` is trusted by [`cors_layer`], given the request's
+/// own `Host` (port-stripped).
 ///
-/// Accepts the Tauri webview origins, loopback (any port), RFC-1918 private LAN
-/// ranges, and Tailscale (`*.ts.net`) hosts — the surfaces the desktop app and
-/// the remote/mobile access feature legitimately use. Everything else (arbitrary
-/// public web origins) is rejected.
+/// Loopback + Tauri origins are always trusted (the desktop app, `vite` in dev).
+/// A private-LAN (RFC-1918) or Tailscale (`*.ts.net`) origin is trusted only
+/// when it names the SAME host the request was sent to — i.e. a page this
+/// machine serves on another port (vite `--host`, the network listener). It
+/// used to be any LAN/tailnet origin, which let any other device's web page
+/// (a router admin UI, a coworker's dev server) make CORS calls into the
+/// daemon. `*.ts.net` additionally honours the `OTTO_ALLOWED_HOSTS` pin.
+fn is_allowed_origin_for(origin: &str, request_host: Option<&str>) -> bool {
+    if is_allowed_origin(origin) {
+        return true;
+    }
+    let Some(req_host) = request_host else {
+        return false;
+    };
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = host_guard::host_of(rest);
+    host == req_host && (is_private_lan_host(&host) || host_guard::tailscale_allowed(&host))
+}
+
+/// Origins trusted regardless of the request's `Host`: the Tauri webview
+/// origins and loopback (any port). Everything else (LAN, tailnet, arbitrary
+/// public web origins) goes through [`is_allowed_origin_for`].
 fn is_allowed_origin(origin: &str) -> bool {
     // Tauri native shell.
     if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
@@ -299,12 +339,7 @@ fn is_allowed_origin(origin: &str) -> bool {
         rest.split(':').next().unwrap_or(rest)
     };
 
-    host == "localhost"
-        || host == "127.0.0.1"
-        || host == "[::1]"
-        || host.ends_with(".localhost")
-        || host.ends_with(".ts.net") // Tailscale
-        || is_private_lan_host(host)
+    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host.ends_with(".localhost")
 }
 
 /// True for RFC-1918 private IPv4 hosts (`10.0.0.0/8`, `172.16.0.0/12`,
@@ -358,6 +393,35 @@ mod cors_tests {
         let h = ok.headers();
         assert_eq!(h[header::ACCESS_CONTROL_MAX_AGE], "600");
         assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "tauri://localhost");
+
+        // A LAN / tailnet origin is trusted only for its OWN host.
+        let lan_preflight = |origin: &'static str, host: &'static str| {
+            let mut r = preflight(origin);
+            r.headers_mut()
+                .insert(header::HOST, HeaderValue::from_static(host));
+            r
+        };
+        let same = app
+            .clone()
+            .oneshot(lan_preflight(
+                "https://192.168.1.20:5173",
+                "192.168.1.20:7443",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            same.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://192.168.1.20:5173"
+        );
+        let other_device = app
+            .clone()
+            .oneshot(lan_preflight("http://192.168.1.1", "192.168.1.20:7443"))
+            .await
+            .unwrap();
+        assert!(other_device
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
 
         let denied = app
             .oneshot(preflight("https://evil.example"))
