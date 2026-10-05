@@ -284,7 +284,7 @@
       })
       .catch((e) => {
         if (seq !== proxySeq) return;
-        toastError('Could not take over this page', e);
+        toastError('Couldn’t take over this page', e);
         takeover = false;
       });
   });
