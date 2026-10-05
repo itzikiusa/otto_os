@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type WebSocketRoute } from '@playwright/test';
 import type { Review } from '../src/lib/api/types';
 
 test('completed async run discovers, expands and reloads summarizer retries and fallback', async ({ page }) => {
@@ -22,6 +22,16 @@ test('completed async run discovers, expands and reloads summarizer retries and 
     }
     await route.fulfill({ json: [] });
   });
+  // A connected event socket (a down one shows every running row as
+  // "Reconnecting…"); the spec announces each review change on it the way the
+  // daemon's `review_changed` does.
+  let events: WebSocketRoute | undefined;
+  await page.routeWebSocket(/\/ws\/events/, (socket) => {
+    events = socket;
+    socket.onMessage(() => {});
+  });
+  const reviewChanged = () =>
+    events?.send(JSON.stringify({ type: 'review_changed', workspace_id: '', review_id: 'r', status: review.status }));
   let attached = '';
   await page.routeWebSocket(/\/ws\/term\//, (socket) => {
     attached = new URL(socket.url()).pathname;
@@ -34,20 +44,24 @@ test('completed async run discovers, expands and reloads summarizer retries and 
   const row = page.locator('[data-sess="summary-first"]');
   await expect(row).toContainText('Summarizer');
   await expect(row).toContainText('codex');
-  await expect(row).toContainText(/running \d+s/);
+  await expect(row).toContainText(/Working \d+s/);
   await row.getByTitle('Show live terminal').click();
   await expect(row.locator('.xterm')).toBeVisible();
   await expect.poll(() => attached).toBe('/ws/term/summary-first');
   await expect(row.locator('.xterm-rows')).toContainText('Summarizing live findings');
   review = { ...review, status: 'done', agents: [{ ...review.agents[0], status: 'done', fallback: true, note: '1 final comment' }] };
+  reviewChanged();
   await expect(row.getByTestId('summarizer-fallback')).toContainText('Deterministic fallback');
   await page.reload();
   await expect(page.locator('[data-sess="summary-first"]')).toContainText('fallback');
   review = { ...review, status: 'running', agents: [{ ...review.agents[0], status: 'running', fallback: false, session_id: 'summary-retry' }] };
-  // No event socket in this fixture: a TERMINAL review is re-read every
-  // TERMINAL_RECHECK_MS (30 s, RunAgents.svelte), so the retry shows by then.
-  await expect(page.locator('[data-sess="summary-retry"]')).toContainText(/running \d+s/, { timeout: 35_000 });
+  // A TERMINAL review is otherwise re-read only every TERMINAL_RECHECK_MS
+  // (30 s, RunAgents.svelte); the retry's `review_changed` makes it due now.
+  await expect(page.locator('[data-sess="summary-first"], [data-sess="summary-retry"]').first()).toBeVisible();
+  reviewChanged();
+  await expect(page.locator('[data-sess="summary-retry"]')).toContainText(/Working \d+s/);
   await expect(page.locator('[data-sess="historic"]')).toContainText('Earlier attempt');
   review = { ...review, status: 'cancelled' };
-  await expect(page.locator('[data-sess="summary-retry"]')).toContainText('cancelled');
+  reviewChanged();
+  await expect(page.locator('[data-sess="summary-retry"]')).toContainText('Canceled');
 });
