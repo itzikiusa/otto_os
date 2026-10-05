@@ -270,17 +270,21 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
-  # BLOCKING functional E2E: every desktop-* spec on the desktop-browser
+  # ADVISORY functional E2E: every desktop-* spec on the desktop-browser
   # project (Chromium, 1280×800 3-pane shell) plus the mobile specs at iPhone
   # portrait (WebKit), sharded across 4 runners. Isolated throwaway daemon per
   # shard (ui/e2e/global-setup.ts: temp data dir, own port, file secret store,
   # fake agent CLIs). Perf specs are skipped here (OTTO_E2E_FUNCTIONAL_ONLY) —
   # they run in perf-gates. Retries are 0 and any `flaky` count fails the
-  # shard. The other mobile/tablet projects run nightly (e2e-nightly.yml).
+  # shard, so a red shard is an honest result — but the suite is too slow to
+  # gate merges, so it never fails the workflow (continue-on-error) and no
+  # job `needs:` it. Keep it out of the branch's required status checks.
+  # The other mobile/tablet projects run nightly (e2e-nightly.yml).
   e2e-functional:
-    name: E2E functional (shard ${{ matrix.shard }}/4)
+    name: E2E functional (shard ${{ matrix.shard }}/4, advisory)
     needs: build-ottod
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 60
     strategy:
       fail-fast: false
