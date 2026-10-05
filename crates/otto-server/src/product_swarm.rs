@@ -856,7 +856,7 @@ pub async fn discover_story(
 
     // 9. Auto-start the swarm so the discovery agents actually run. Unlike
     //    `to-swarm` (which leaves the swarm paused), discovery is fire-and-go.
-    //    Replicates the `start` handler in swarm_runtime.rs: point-of-action
+    //    Replicates the `start` handler in otto_swarm::runtime::engine: point-of-action
     //    budget gate first (same guard as `start`), then set status active,
     //    start the coordinator, emit the status event. (Starting the swarm runs
     //    ALL ready tasks, which now includes the discovery tasks — intended.)
@@ -873,8 +873,13 @@ pub async fn discover_story(
         .set_swarm_status(&swarm.id, "active")
         .await
         .map_err(ApiError)?;
-    crate::swarm_runtime::start_coordinator(ctx.clone(), swarm.id.clone());
-    crate::swarm_runtime::emit_status(&ctx, &story.workspace_id, &swarm.id, "active");
+    otto_swarm::runtime::engine::start_coordinator(ctx.swarm_rt(), swarm.id.clone());
+    otto_swarm::runtime::engine::emit_status(
+        &ctx.swarm_rt(),
+        &story.workspace_id,
+        &swarm.id,
+        "active",
+    );
 
     // 10. Return the run + swarm + project + seeded tasks.
     let swarm = ctx

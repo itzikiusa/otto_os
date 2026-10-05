@@ -778,8 +778,8 @@ async fn run(cfg: Config) -> Result<(), String> {
         vault_docs_refine: otto_server::vault_docs_agent::new_refine_registry(),
         swarm,
         swarm_repo,
-        swarm_coords: otto_server::swarm_runtime::new_registry(),
-        swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
+        swarm_coords: otto_swarm::runtime::engine::new_registry(),
+        swarm_run_cancels: otto_swarm::runtime::run::new_cancel_registry(),
         goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
         goal_loops: otto_server::goal_loop::new_registry(),
         workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
@@ -1295,7 +1295,9 @@ async fn run(cfg: Config) -> Result<(), String> {
         )
         // An inbound message on a swarm-bound channel launches that swarm.
         .with_swarm_trigger(std::sync::Arc::new(
-            otto_server::swarm_channels::SwarmTriggerImpl { ctx: ctx.clone() },
+            otto_swarm::runtime::channels::SwarmTriggerImpl {
+                ctx: ctx.swarm_rt(),
+            },
         ))
         // An inbound `/run <ref>` (or `approve`/`reject` reply) drives a Run with
         // Otto run on the root user's behalf (the channel-trust model).
@@ -1449,11 +1451,11 @@ async fn run(cfg: Config) -> Result<(), String> {
         Ok(_) => {}
         Err(e) => tracing::warn!("swarm recovery: {e}"),
     }
-    let _swarm_scheduler_handle = otto_server::swarm_scheduler::start(ctx.clone());
+    let _swarm_scheduler_handle = otto_swarm::runtime::scheduler::start(ctx.swarm_rt());
     match ctx.swarm_repo.list_all_active_swarms().await {
         Ok(active) => {
             for s in active {
-                otto_server::swarm_runtime::start_coordinator(ctx.clone(), s.id.clone());
+                otto_swarm::runtime::engine::start_coordinator(ctx.swarm_rt(), s.id.clone());
             }
             tracing::info!("swarm scheduler started; coordinators restored");
         }

@@ -21,8 +21,8 @@ use otto_core::event::Event;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Notify;
 
-use crate::cancel_signal::CancelSignal;
-use crate::state::ServerCtx;
+use crate::runtime::host::SwarmRt;
+use otto_core::cancel_signal::CancelSignal;
 
 /// Longest a coordinator sleeps without an event: a backstop for a missed
 /// emit point and for time-based budgets (`max_runtime_secs`).
@@ -114,12 +114,12 @@ fn swarm_of(ev: &Event) -> Option<&str> {
 
 /// Start the bus listener once per process (idempotent; called from
 /// `start_coordinator`). A lagged bus pokes every known swarm.
-pub fn ensure_listener(ctx: &ServerCtx) {
+pub fn ensure_listener(ctx: &SwarmRt) {
     static STARTED: OnceLock<()> = OnceLock::new();
     if STARTED.set(()).is_err() {
         return;
     }
-    let mut rx = ctx.events.subscribe();
+    let mut rx = ctx.events().subscribe();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {

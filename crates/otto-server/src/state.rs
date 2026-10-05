@@ -143,9 +143,9 @@ pub struct ServerCtx {
     pub swarm: Arc<otto_swarm::SwarmService>,
     pub swarm_repo: otto_state::SwarmRepo,
     /// Per-swarm Coordinator runtime handles (start/pause/abort/resume).
-    pub swarm_coords: crate::swarm_runtime::CoordinatorRegistry,
+    pub swarm_coords: otto_swarm::runtime::engine::CoordinatorRegistry,
     /// Per-run cancellation flags for in-flight swarm runs (manual Stop / abort).
-    pub swarm_run_cancels: crate::swarm_run::CancelRegistry,
+    pub swarm_run_cancels: otto_swarm::runtime::run::CancelRegistry,
     // -- Goal Loops --------------------------------------------------------
     pub goal_loops_repo: otto_state::GoalLoopsRepo,
     /// Per-loop controller runtime handles (start/pause/resume/stop).

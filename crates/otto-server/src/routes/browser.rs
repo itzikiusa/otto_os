@@ -2117,8 +2117,8 @@ pub(crate) mod tests {
             vault_docs_refine: crate::vault_docs_agent::new_refine_registry(),
             swarm,
             swarm_repo,
-            swarm_coords: crate::swarm_runtime::new_registry(),
-            swarm_run_cancels: crate::swarm_run::new_cancel_registry(),
+            swarm_coords: otto_swarm::runtime::engine::new_registry(),
+            swarm_run_cancels: otto_swarm::runtime::run::new_cancel_registry(),
             goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
             goal_loops: crate::goal_loop::new_registry(),
             workgraph: Arc::new(otto_workgraph::WorkGraphService::new(

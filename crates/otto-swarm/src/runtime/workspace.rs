@@ -16,7 +16,7 @@ use otto_core::api::WorkspaceContextConfig;
 use otto_core::Result;
 use otto_state::{Swarm, SwarmAgent, SwarmProject, SwarmTask};
 
-use crate::state::ServerCtx;
+use crate::runtime::host::SwarmRt;
 
 /// The board-posting helper materialized into every agent cwd. Uses the
 /// per-session ingest token (same gate as `/ingest/claude`).
@@ -48,8 +48,8 @@ curl -s -X POST "$BASE/api/v1/ingest/swarm/board" \
   -d "$PAYLOAD" >/dev/null 2>&1
 "#;
 
-fn swarm_base(ctx: &ServerCtx, swarm_id: &str, agent_id: &str) -> PathBuf {
-    ctx.data_dir.join("swarm").join(swarm_id).join(agent_id)
+fn swarm_base(ctx: &SwarmRt, swarm_id: &str, agent_id: &str) -> PathBuf {
+    ctx.data_dir().join("swarm").join(swarm_id).join(agent_id)
 }
 
 fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
@@ -110,11 +110,11 @@ pub fn integration_branch_name(swarm: &Swarm, project: &SwarmProject) -> String 
 /// Path of the dedicated integration worktree (checked out on `integration_branch`).
 /// All merges happen here so Otto never touches the user's primary checkout.
 pub fn integration_worktree_path(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm_id: &str,
     project_id: &str,
 ) -> std::path::PathBuf {
-    ctx.data_dir
+    ctx.data_dir()
         .join("swarm")
         .join(swarm_id)
         .join(project_id)
@@ -127,7 +127,7 @@ pub fn integration_worktree_path(
 /// The branch is pinned from the repo's HEAD on first creation — the single base
 /// every agent worktree branches from, so per-task merges compose.
 pub async fn ensure_integration_worktree(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &Swarm,
     project: &SwarmProject,
 ) -> Result<(String, String)> {
@@ -165,7 +165,7 @@ pub async fn ensure_integration_worktree(
         .is_empty()
     {
         let _ = ctx
-            .swarm_repo
+            .swarm_repo()
             .update_project(
                 &project.id,
                 otto_state::ProjectPatch {
@@ -195,7 +195,7 @@ fn integration_lock(project_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> 
 /// Ensure the agent has a prepared, unique working directory. Returns its path.
 /// Thin wrapper over [`ensure_cwd_info`] for callers that only need the path.
 pub async fn ensure_cwd(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &Swarm,
     agent: &SwarmAgent,
     project: Option<&SwarmProject>,
@@ -207,7 +207,7 @@ pub async fn ensure_cwd(
 /// In worktree mode the agent's branch (`swarm/<s>/<a>`) is based on the project's
 /// pinned integration branch so per-task work merges back cleanly.
 pub async fn ensure_cwd_info(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &Swarm,
     agent: &SwarmAgent,
     project: Option<&SwarmProject>,
@@ -284,7 +284,7 @@ pub async fn ensure_cwd_info(
     Ok(scratch_info(ctx, swarm, agent).await)
 }
 
-async fn scratch_info(ctx: &ServerCtx, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
+async fn scratch_info(ctx: &SwarmRt, swarm: &Swarm, agent: &SwarmAgent) -> CwdInfo {
     let scratch = swarm_base(ctx, &swarm.id, &agent.id).join("work");
     let _ = tokio::fs::create_dir_all(&scratch).await;
     CwdInfo {
@@ -533,7 +533,7 @@ curl -s -X POST "$BASE/api/v1/ingest/swarm/discovery-report" \
 /// `otto-post` board helper + `otto-product` draft helper + `otto-mockup` /
 /// `otto-discovery-report` discovery helpers. Best-effort.
 pub fn provision_agent(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &Swarm,
     project: Option<&SwarmProject>,
     agent: &SwarmAgent,
@@ -550,7 +550,7 @@ pub fn provision_agent(
     };
     let ctx_root = otto_context::materialize::default_context_root();
     let _ = otto_context::materialize::provision(
-        &ctx.context_library,
+        ctx.context_library(),
         &cfg,
         cwd,
         &agent.provider,

@@ -20,8 +20,8 @@ use otto_core::event::Event;
 use otto_state::{GoalPatch, SwarmAgent, SwarmGoal, SwarmProject, SwarmTask, TaskPatch};
 use serde_json::{json, Value};
 
-use crate::state::ServerCtx;
-use crate::swarm_agent_run::CancelState;
+use crate::runtime::agent_run::CancelState;
+use crate::runtime::host::SwarmRt;
 
 // ===========================================================================
 // Pure engine
@@ -43,7 +43,7 @@ pub struct Verdict {
 impl Verdict {
     /// Parse a verdict from a leader reply (expects one JSON object).
     pub fn parse(reply: &str) -> Option<Verdict> {
-        let v = otto_swarm::recruiter::extract_json(reply)?;
+        let v = crate::recruiter::extract_json(reply)?;
         Some(Verdict {
             target_met: v
                 .get("target_met")
@@ -261,7 +261,7 @@ pub fn is_verifying(task_id: &str) -> bool {
 }
 
 /// Stop every in-flight verification for a swarm (Abort): flag + kill sessions.
-pub async fn stop_swarm(ctx: &ServerCtx, swarm_id: &str) {
+pub async fn stop_swarm(ctx: &SwarmRt, swarm_id: &str) {
     let handles: Vec<CancelState> = {
         let map = registry().lock().unwrap();
         map.values()
@@ -276,7 +276,7 @@ pub async fn stop_swarm(ctx: &ServerCtx, swarm_id: &str) {
 }
 
 /// Stop a single task's verification.
-pub async fn stop_task(ctx: &ServerCtx, task_id: &str) {
+pub async fn stop_task(ctx: &SwarmRt, task_id: &str) {
     let cs = registry()
         .lock()
         .unwrap()
@@ -303,8 +303,8 @@ impl Drop for RegistryGuard {
 /// Build the task's goal set: its explicit goals, plus task-scoped COPIES of the
 /// project goals and the swarm standing goals (created once, idempotent by title)
 /// so each is tracked + resumable per task. Returns the ordered goal rows.
-pub async fn assemble_task_goals(ctx: &ServerCtx, task: &SwarmTask) -> Vec<SwarmGoal> {
-    let repo = &ctx.swarm_repo;
+pub async fn assemble_task_goals(ctx: &SwarmRt, task: &SwarmTask) -> Vec<SwarmGoal> {
+    let repo = &ctx.swarm_repo();
     let mut existing = repo.list_goals_for_task(&task.id).await.unwrap_or_default();
     let have: std::collections::HashSet<String> =
         existing.iter().map(|g| g.title.to_lowercase()).collect();
@@ -372,12 +372,12 @@ pub const STANDING_GOALS: &[(&str, &str)] = &[
 
 /// Ensure the swarm has its standing-goal templates (idempotent).
 pub async fn ensure_standing_goals(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm_id: &str,
     workspace_id: &str,
     created_by: &str,
 ) {
-    let repo = &ctx.swarm_repo;
+    let repo = &ctx.swarm_repo();
     let existing = repo
         .list_standing_goals(&swarm_id.to_string())
         .await
@@ -410,8 +410,8 @@ pub async fn ensure_standing_goals(
 }
 
 /// Does this task have any goals to verify (explicit, project, or standing)?
-pub async fn task_has_goals(ctx: &ServerCtx, task: &SwarmTask) -> bool {
-    let repo = &ctx.swarm_repo;
+pub async fn task_has_goals(ctx: &SwarmRt, task: &SwarmTask) -> bool {
+    let repo = &ctx.swarm_repo();
     if !repo
         .list_goals_for_task(&task.id)
         .await
@@ -443,12 +443,12 @@ pub async fn task_has_goals(ctx: &ServerCtx, task: &SwarmTask) -> bool {
 /// `reports_to` up to an agent that has reports), else the swarm root, else the
 /// dev itself (self-verification — acceptable; review m3).
 pub async fn resolve_leader(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm_id: &str,
     dev_agent_id: &str,
 ) -> Option<SwarmAgent> {
     let agents = ctx
-        .swarm_repo
+        .swarm_repo()
         .list_agents(&swarm_id.to_string())
         .await
         .ok()?;
@@ -476,7 +476,7 @@ pub async fn resolve_leader(
 // ===========================================================================
 
 pub struct SwarmVerifyOps {
-    ctx: ServerCtx,
+    ctx: SwarmRt,
     ws: Workspace,
     user: User,
     swarm: otto_state::Swarm,
@@ -502,7 +502,7 @@ impl VerifyOps for SwarmVerifyOps {
             clip(&goal.title, 40),
             clip(&self.task.title, 30)
         );
-        let (raw, _rid) = crate::swarm_agent_run::run_swarm_agent(
+        let (raw, _rid) = crate::runtime::agent_run::run_swarm_agent(
             &self.ctx,
             &self.ws,
             &self.user,
@@ -516,7 +516,7 @@ impl VerifyOps for SwarmVerifyOps {
             &title,
             &self.cwd,
             &prompt,
-            |t| otto_swarm::recruiter::extract_json(t).is_some(),
+            |t| crate::recruiter::extract_json(t).is_some(),
             &self.cancel,
         )
         .await;
@@ -530,7 +530,7 @@ impl VerifyOps for SwarmVerifyOps {
             clip(&goal.title, 40),
             clip(&self.task.title, 30)
         );
-        let (raw, _rid) = crate::swarm_agent_run::run_swarm_agent(
+        let (raw, _rid) = crate::runtime::agent_run::run_swarm_agent(
             &self.ctx,
             &self.ws,
             &self.user,
@@ -544,7 +544,7 @@ impl VerifyOps for SwarmVerifyOps {
             &title,
             &self.cwd,
             &prompt,
-            |t| otto_swarm::recruiter::extract_json(t).is_some(),
+            |t| crate::recruiter::extract_json(t).is_some(),
             &self.cancel,
         )
         .await;
@@ -556,7 +556,7 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn merge_back(&self) -> String {
-        let outcome = crate::swarm_merge::merge_task_branch(
+        let outcome = crate::runtime::merge::merge_task_branch(
             &self.ctx,
             &self.swarm,
             &self.project,
@@ -596,7 +596,7 @@ impl VerifyOps for SwarmVerifyOps {
         } else {
             "merge"
         };
-        crate::swarm_runtime::system_post_meta(
+        crate::runtime::engine::system_post_meta(
             &self.ctx,
             &self.swarm.id,
             Some(&self.project.id),
@@ -611,7 +611,7 @@ impl VerifyOps for SwarmVerifyOps {
         if outcome.status == "conflicts" {
             let _ = self
                 .ctx
-                .swarm_repo
+                .swarm_repo()
                 .create_task(otto_state::swarm::NewTask {
                     project_id: self.project.id.clone(),
                     swarm_id: self.swarm.id.clone(),
@@ -640,7 +640,7 @@ impl VerifyOps for SwarmVerifyOps {
     async fn record(&self, goal: &SwarmGoal, status: &str, iterations: i64, v: Option<&Verdict>) {
         let _ = self
             .ctx
-            .swarm_repo
+            .swarm_repo()
             .update_goal(
                 &goal.id,
                 GoalPatch {
@@ -657,7 +657,7 @@ impl VerifyOps for SwarmVerifyOps {
     async fn record_iterations(&self, goal: &SwarmGoal, iterations: i64) {
         let _ = self
             .ctx
-            .swarm_repo
+            .swarm_repo()
             .update_goal(
                 &goal.id,
                 GoalPatch {
@@ -689,7 +689,7 @@ impl VerifyOps for SwarmVerifyOps {
             measured,
             clip(&v.summary, 240)
         );
-        crate::swarm_runtime::system_post_meta(
+        crate::runtime::engine::system_post_meta(
             &self.ctx,
             &self.swarm.id,
             Some(&self.project.id),
@@ -706,7 +706,7 @@ impl VerifyOps for SwarmVerifyOps {
             "🚫 Goal “{}” {} (after {} attempt(s)).",
             goal.title, reason, goal.max_retries
         );
-        crate::swarm_runtime::system_post_meta(
+        crate::runtime::engine::system_post_meta(
             &self.ctx,
             &self.swarm.id,
             Some(&self.project.id),
@@ -716,13 +716,13 @@ impl VerifyOps for SwarmVerifyOps {
             json!({ "event": "goal_unmet", "goal_id": goal.id, "reason": reason }),
         )
         .await;
-        let _ = self.ctx.events.send(Event::Notice {
+        let _ = self.ctx.events().send(Event::Notice {
             level: "warn".into(),
             title: "Swarm goal could not be achieved".into(),
             body: clip(&body, 160),
         });
         // Reply back to the originating channel, if the project was channel-launched.
-        crate::swarm_channels::notify_origin(&self.ctx, &self.project, &body).await;
+        crate::runtime::channels::notify_origin(&self.ctx, &self.project, &body).await;
     }
 
     fn cancelled(&self) -> bool {
@@ -730,14 +730,14 @@ impl VerifyOps for SwarmVerifyOps {
     }
 
     async fn over_budget(&self) -> bool {
-        crate::swarm_runtime::is_over_budget(&self.ctx, &self.swarm.id).await
+        crate::runtime::engine::is_over_budget(&self.ctx, &self.swarm.id).await
     }
 }
 
 impl SwarmVerifyOps {
     async fn emit_goal(&self, goal_id: &str) {
-        if let Ok(g) = self.ctx.swarm_repo.get_goal(&goal_id.to_string()).await {
-            let _ = self.ctx.events.send(Event::SwarmGoalUpdated {
+        if let Ok(g) = self.ctx.swarm_repo().get_goal(&goal_id.to_string()).await {
+            let _ = self.ctx.events().send(Event::SwarmGoalUpdated {
                 workspace_id: self.swarm.workspace_id.clone(),
                 swarm_id: self.swarm.id.clone(),
                 task_id: Some(self.task.id.clone()),
@@ -753,7 +753,7 @@ impl SwarmVerifyOps {
 
 /// Start verifying a task's goals (idempotent — a no-op if one is already running).
 /// Spawns a background controller. `dev_agent_id` is the agent that did the work.
-pub fn start_verification(ctx: &ServerCtx, task: SwarmTask, dev_agent_id: String) {
+pub fn start_verification(ctx: &SwarmRt, task: SwarmTask, dev_agent_id: String) {
     // Test-and-set: register a handle, or bail if one already runs for this task.
     let cancel = CancelState::detached();
     {
@@ -777,7 +777,7 @@ pub fn start_verification(ctx: &ServerCtx, task: SwarmTask, dev_agent_id: String
             tracing::warn!(task = %task.id, "swarm verification controller error: {e}");
             // Don't strand the task in `verifying`.
             let _ = ctx
-                .swarm_repo
+                .swarm_repo()
                 .update_task(
                     &task.id,
                     TaskPatch {
@@ -786,21 +786,21 @@ pub fn start_verification(ctx: &ServerCtx, task: SwarmTask, dev_agent_id: String
                     },
                 )
                 .await;
-            crate::swarm_runtime::emit_task_pub(&ctx, &task.id).await;
+            crate::runtime::engine::emit_task_pub(&ctx, &task.id).await;
         }
     });
 }
 
 async fn run_controller(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     task: &SwarmTask,
     dev_agent_id: &str,
     cancel: CancelState,
 ) -> otto_core::Result<()> {
-    let repo = &ctx.swarm_repo;
+    let repo = &ctx.swarm_repo();
     let swarm = repo.get_swarm(&task.swarm_id).await?;
     let project = repo.get_project(&task.project_id).await?;
-    let ws = ctx.workspaces.get(&swarm.workspace_id).await?;
+    let ws = ctx.workspaces().get(&swarm.workspace_id).await?;
     let dev = repo.get_agent(&dev_agent_id.to_string()).await?;
     let leader = resolve_leader(ctx, &swarm.id, dev_agent_id)
         .await
@@ -808,7 +808,7 @@ async fn run_controller(
 
     // The dev's worktree + branch (already created during the dev's turn).
     let cwd_info =
-        crate::swarm_workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
+        crate::runtime::workspace::ensure_cwd_info(ctx, &swarm, &dev, Some(&project)).await?;
     let (agent_branch, integration_branch) =
         match (cwd_info.branch.clone(), cwd_info.integration_branch.clone()) {
             (Some(b), Some(i)) => (b, i),
@@ -822,8 +822,8 @@ async fn run_controller(
                     },
                 )
                 .await?;
-                crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
-                crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
+                crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
+                crate::runtime::engine::complete_parent_if_done(ctx, task).await;
                 return Ok(());
             }
         };
@@ -838,8 +838,8 @@ async fn run_controller(
             },
         )
         .await?;
-        crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
-        crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
+        crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
+        crate::runtime::engine::complete_parent_if_done(ctx, task).await;
         return Ok(());
     }
 
@@ -885,12 +885,12 @@ async fn run_controller(
         },
     )
     .await?;
-    crate::swarm_runtime::emit_task_pub(ctx, &task.id).await;
+    crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
     // A verified subtask may be the last open child of a delegated parent —
     // complete it (only `route_result`'s plain `done` path did, so a parent
     // whose last child finished through verification stayed in_progress).
     if final_status == "done" {
-        crate::swarm_runtime::complete_parent_if_done(ctx, task).await;
+        crate::runtime::engine::complete_parent_if_done(ctx, task).await;
     }
 
     let passed = summary
@@ -917,7 +917,7 @@ async fn run_controller(
         "Goal verification for “{}” complete: {passed} passed, {warned} warned, {unmet} unmet{merge_note}.",
         task.title
     );
-    crate::swarm_runtime::system_post_meta(
+    crate::runtime::engine::system_post_meta(
         ctx,
         &swarm.id,
         Some(&task.project_id),
@@ -928,16 +928,16 @@ async fn run_controller(
                 "merge": summary.merge_status }),
     )
     .await;
-    crate::swarm_channels::notify_origin(ctx, &project, &body).await;
+    crate::runtime::channels::notify_origin(ctx, &project, &body).await;
     Ok(())
 }
 
 /// On coordinator (re)start: re-spawn controllers for tasks left in `verifying`
 /// (e.g. after a daemon restart) so they aren't stranded (review B2). The trigger
 /// persists the dev as the task's `assignee_agent_id`, so recovery reads it there.
-pub async fn recover(ctx: &ServerCtx, swarm_id: &str) {
+pub async fn recover(ctx: &SwarmRt, swarm_id: &str) {
     let tasks = ctx
-        .swarm_repo
+        .swarm_repo()
         .list_tasks_for_swarm(&swarm_id.to_string())
         .await
         .unwrap_or_default();
@@ -948,7 +948,7 @@ pub async fn recover(ctx: &ServerCtx, swarm_id: &str) {
         let Some(dev_agent_id) = task.assignee_agent_id.clone() else {
             tracing::warn!(task = %task.id, "swarm: stranded verifying task has no assignee; marking blocked");
             let _ = ctx
-                .swarm_repo
+                .swarm_repo()
                 .update_task(
                     &task.id,
                     TaskPatch {

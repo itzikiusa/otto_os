@@ -63,8 +63,8 @@ Otto.app (Tauri / otto-desktop)
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |
 | `otto-product` | Jira/Confluence product workflows |
-| `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
-| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor |
+| `otto-swarm` | Agent Swarm — role agents, org tree, CRUD router, and the orchestration runtime (Coordinator, turn runner, scheduler, verifier, channel triggers) behind the `SwarmHost` trait otto-server implements |
+| `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, workflow engine & plugin supervisor |
 | `ottod` | The daemon binary |
 
 > The Tauri desktop shell lives in `apps/desktop/src-tauri` and is a **separate,
