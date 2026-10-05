@@ -52,6 +52,36 @@ fn swarm_base(ctx: &SwarmRt, swarm_id: &str, agent_id: &str) -> PathBuf {
     ctx.data_dir().join("swarm").join(swarm_id).join(agent_id)
 }
 
+/// The agent's worktree path + branch FOR ONE PROJECT (S4-08). An agent
+/// serves every project of its swarm: keyed per agent alone, a second
+/// project in another repo hit "directory exists" on `git worktree add` (and
+/// silently fell back to scratch → "done, unverified"), and one in the same
+/// repo merged project A's commits into B's integration branch. Worktrees
+/// made before this change (`<agent>/wt`, branch `swarm/<s>/<a>`) are left
+/// in place; their branch keeps any unmerged work.
+pub fn agent_worktree(
+    ctx: &SwarmRt,
+    swarm: &Swarm,
+    agent: &SwarmAgent,
+    project: &SwarmProject,
+) -> (PathBuf, String) {
+    let (path, branch) = agent_worktree_names(&swarm.id, &agent.id, &project.id);
+    (swarm_base(ctx, &swarm.id, &agent.id).join(path), branch)
+}
+
+/// Pure naming for [`agent_worktree`]: (dir under the agent base, branch).
+fn agent_worktree_names(swarm_id: &str, agent_id: &str, project_id: &str) -> (String, String) {
+    (
+        format!("wt-{}", short(project_id)),
+        format!(
+            "swarm/{}/{}/{}",
+            short(swarm_id),
+            short(agent_id),
+            short(project_id)
+        ),
+    )
+}
+
 fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
     // 1. An explicit PER-AGENT choice always wins: "repo" opts a *single* agent
     //    out (a deliberately single-agent project), "scratch" for non-code roles,
@@ -242,9 +272,8 @@ pub async fn ensure_cwd_info(
                     return Ok(scratch_info(ctx, swarm, agent).await);
                 }
             };
-            let wt = swarm_base(ctx, &swarm.id, &agent.id).join("wt");
+            let (wt, branch) = agent_worktree(ctx, swarm, agent, project);
             let wt_str = wt.to_string_lossy().to_string();
-            let branch = format!("swarm/{}/{}", short(&swarm.id), short(&agent.id));
             let git = otto_git::LocalGit::new(repo_path);
             // Base the agent worktree on the pinned integration branch — but only
             // on first creation. `worktree_add_if_absent` reuses an existing tree
@@ -638,6 +667,18 @@ pub fn install_helper(cwd: &str, name: &str, body: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// S4-08: one worktree + branch per (agent, project) — never shared
+    /// across an agent's projects.
+    #[test]
+    fn agent_worktree_is_keyed_by_project() {
+        let (pa, ba) = agent_worktree_names("swarm0000000001", "agent000000001", "proj000000000A");
+        let (pb, bb) = agent_worktree_names("swarm0000000001", "agent000000001", "proj000000000B");
+        assert_ne!(pa, pb);
+        assert_ne!(ba, bb);
+        assert!(ba.starts_with("swarm/"));
+        assert_ne!(pa, "wt", "never the legacy per-agent dir");
+    }
 
     /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.
     #[test]
