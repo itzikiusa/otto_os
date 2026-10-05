@@ -265,6 +265,39 @@ fn kill_through_the_holder_escalates_past_an_ignored_hup() {
     assert!(!pid_alive(child));
 }
 
+/// A KILL issued while the connection is being re-established used to be
+/// dropped (`ConnectionReset`): the child ran on, orphaned, while the session
+/// looked dead. It now ends the holder over a fresh connection, and the exit
+/// is reported only after that.
+#[test]
+fn kill_while_reconnecting_terminates_over_a_fresh_connection() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec sleep 60"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    let child = h.pid().unwrap();
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.simulate_holder_reconnecting();
+    h.kill().expect("kill falls back to terminate");
+    assert!(
+        h.has_exited(),
+        "exit reported once the terminate is confirmed"
+    );
+    wait_until("child gone", Duration::from_secs(10), || !pid_alive(child));
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
 #[test]
 fn stale_socket_is_reported_and_removed() {
     let dir = short_tempdir();

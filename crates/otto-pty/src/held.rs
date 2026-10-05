@@ -11,7 +11,13 @@
 //!
 //! A dropped connection is re-established (the holder replaced us, or kicked a
 //! lagging stream); a holder that is really gone counts as the child exiting
-//! (`-1`) — its PTY master closed, which hung the child up.
+//! (`-1`) — its PTY master closed, which hung the child up. A holder that is
+//! alive but unreachable is NOT reported as exited (that would let a resume
+//! start a second CLI on the same conversation): it is ended over a fresh
+//! connection ([`crate::holder::terminate`]) first, and only a confirmed
+//! terminate — or a holder that is provably gone — fires the exit. KILL /
+//! RELEASE that cannot be sent on the current connection (mid-reconnect) take
+//! the same fallback instead of being silently lost.
 
 use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
@@ -34,6 +40,9 @@ const MAX_INPUT_CHUNK: usize = 1 << 20;
 /// Reconnect attempts after an unexpected disconnect, and the pause between.
 const RECONNECT_ATTEMPTS: u32 = 10;
 const RECONNECT_PAUSE: Duration = Duration::from_millis(300);
+/// Pause before another reconnect/terminate round when the holder is alive
+/// but could be neither reconnected nor terminated.
+const UNREACHABLE_RETRY: Duration = Duration::from_secs(5);
 
 type Ack = io::Result<()>;
 
@@ -55,6 +64,12 @@ pub(crate) struct HeldConn {
     /// adoption, or a send that failed mid-reconnect). The daemon's status
     /// tick re-asserts the cap every 2 s; only a change is sent.
     history_cap: AtomicUsize,
+    /// The holder was ended over a fresh connection ([`Self::terminate_fallback`]).
+    terminated: AtomicBool,
+    /// Publishes the child's exit to the handle (reader thread, or a
+    /// confirmed terminate — which supersedes our connection, so the reader
+    /// would never see an EXITED frame for it).
+    exit: ExitSignal,
 }
 
 impl HeldConn {
@@ -102,13 +117,59 @@ impl HeldConn {
         }
     }
 
+    /// End the child. If the KILL can't go out on the current connection (it
+    /// is being re-established, or just broke), end the holder over a fresh
+    /// one instead — a lost kill orphaned the holder's child for up to a day
+    /// while the session looked dead and could be resumed a second time.
     pub(crate) fn kill(&self) -> io::Result<()> {
-        self.send(frame::KILL, &[])
+        if self.terminated.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        match self.send(frame::KILL, &[]) {
+            Ok(()) => Ok(()),
+            Err(_) => self.terminate_fallback(),
+        }
     }
 
-    /// Tell the holder it may exit once the child is gone. Best-effort.
+    /// Tell the holder it may exit once the child is gone. Best-effort, with
+    /// the same fresh-connection fallback as [`Self::kill`].
     pub(crate) fn release(&self) {
-        let _ = self.send(frame::RELEASE, &[]);
+        if self.terminated.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.send(frame::RELEASE, &[]).is_err() {
+            let _ = self.terminate_fallback();
+        }
+    }
+
+    /// [`crate::holder::terminate`] over a fresh connection (KILL + RELEASE).
+    /// The exit is reported only once that is confirmed — the frames were
+    /// delivered, or nobody listens on the socket any more (holder gone).
+    /// That connection supersedes ours, so no EXITED frame would follow.
+    fn terminate_fallback(&self) -> io::Result<()> {
+        let res = match crate::holder::terminate(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if holder_gone(&e) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if res.is_ok() {
+            self.terminated.store(true, Ordering::SeqCst);
+            self.mark_exited(-1);
+        }
+        res
+    }
+
+    /// The child is gone (confirmed): fail the waiting writer and fire the
+    /// handle's exit (idempotent — the first code wins).
+    fn mark_exited(&self, code: i32) {
+        self.exited.store(true, Ordering::SeqCst);
+        self.fail_pending(io::ErrorKind::BrokenPipe);
+        self.exit.fire(code);
+    }
+
+    /// Forget the write half (see `PtyHandle::simulate_holder_reconnecting`).
+    pub(crate) fn drop_writer(&self) {
+        lock_unpoisoned(&self.write).take();
     }
 
     /// Hang up for good (the handle is dropping).
@@ -275,6 +336,11 @@ pub(crate) fn adopt(path: &Path) -> Result<PtyHandle, AdoptError> {
     let child_state = Arc::new(ChildState::default());
     let (exit_tx, exit_rx) = watch::channel::<Option<i32>>(None);
     let (done_tx, done_rx) = watch::channel(false);
+    let exit = ExitSignal {
+        child_state: Arc::clone(&child_state),
+        exit_tx,
+        done_tx,
+    };
     let conn = Arc::new(HeldConn {
         path: path.to_path_buf(),
         info: info.clone(),
@@ -285,22 +351,19 @@ pub(crate) fn adopt(path: &Path) -> Result<PtyHandle, AdoptError> {
         closed: AtomicBool::new(false),
         exited: AtomicBool::new(false),
         history_cap: AtomicUsize::new(0),
+        terminated: AtomicBool::new(false),
+        exit,
     });
-    let exit = ExitSignal {
-        child_state: Arc::clone(&child_state),
-        exit_tx,
-        done_tx,
-    };
     if let Some(code) = info.exited {
         // Dead on arrival (it exited while nobody was connected): visible to
         // the caller before this returns, not only once the reader runs.
         conn.exited.store(true, Ordering::SeqCst);
-        exit.fire(code);
+        conn.exit.fire(code);
     }
     {
         let conn = Arc::clone(&conn);
         let mirror = mirror.clone();
-        std::thread::spawn(move || reader_loop(stream, conn, mirror, exit));
+        std::thread::spawn(move || reader_loop(stream, conn, mirror));
     }
     Ok(PtyHandle::from_held(
         conn,
@@ -340,7 +403,15 @@ impl ExitSignal {
     }
 }
 
-fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit: ExitSignal) {
+/// Nobody listens on the holder's socket: it is gone (killed, crashed).
+fn holder_gone(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+    )
+}
+
+fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror) {
     loop {
         match frame::read_sync(&mut stream) {
             Ok((frame::OUTPUT, data)) => mirror.feed_bytes(data.into()),
@@ -359,9 +430,7 @@ fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit
                     .ok()
                     .and_then(|v| v.get("code").and_then(|c| c.as_i64()))
                     .unwrap_or(-1) as i32;
-                conn.exited.store(true, Ordering::SeqCst);
-                conn.fail_pending(io::ErrorKind::BrokenPipe);
-                exit.fire(code);
+                conn.mark_exited(code);
                 // We hold the whole final state: the holder may go — unless
                 // this handle was detached (daemon handing over for a
                 // restart): then the next daemon adopts the exited holder and
@@ -390,16 +459,52 @@ fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit
                     return;
                 }
                 lock_unpoisoned(&conn.write).take();
-                match reconnect(&conn, &mirror) {
+                match reconnect_or_end(&conn, &mirror) {
                     Some(fresh) => stream = fresh,
-                    None => {
-                        // The holder is gone — and with its PTY master the
-                        // child was hung up. Report it like an exit.
-                        conn.exited.store(true, Ordering::SeqCst);
-                        exit.fire(-1);
-                        return;
-                    }
+                    None => return,
                 }
+            }
+        }
+    }
+}
+
+/// Outcome of one [`reconnect`] round.
+enum Reconnect {
+    /// Back on the SAME holder.
+    Connected(UnixStream),
+    /// Our holder is provably gone: nobody listens on the socket, or a
+    /// different holder (pid / protocol) owns it now.
+    Gone,
+    /// The holder may still be alive but every attempt failed.
+    Unreachable,
+    /// The handle is closing or was detached: stop quietly.
+    Stop,
+}
+
+/// Reconnect after a dropped connection; on give-up decide whether the child
+/// really is gone. `None` = the reader is done (exit fired if confirmed).
+///
+/// An unreachable-but-maybe-alive holder is ended over a fresh connection
+/// before the exit is reported: reporting `-1` while its child still ran let
+/// a resume start a second CLI on the same conversation, and left the holder
+/// (and child) orphaned for up to its 24 h idle limit.
+fn reconnect_or_end(conn: &HeldConn, mirror: &Mirror) -> Option<UnixStream> {
+    loop {
+        match reconnect(conn, mirror) {
+            Reconnect::Connected(stream) => return Some(stream),
+            Reconnect::Stop => return None,
+            Reconnect::Gone => {
+                // With its PTY master gone the child was hung up.
+                conn.mark_exited(-1);
+                return None;
+            }
+            Reconnect::Unreachable => {
+                if conn.terminate_fallback().is_ok() {
+                    return None;
+                }
+                // Neither reachable nor terminable: try again later rather
+                // than declare a possibly-live child dead.
+                std::thread::sleep(UNREACHABLE_RETRY);
             }
         }
     }
@@ -407,10 +512,15 @@ fn reader_loop(mut stream: UnixStream, conn: Arc<HeldConn>, mirror: Mirror, exit
 
 /// Re-establish a dropped connection to the SAME holder (it replaced a stale
 /// client, or cut a lagging stream). The new snapshot resyncs the mirror.
-fn reconnect(conn: &HeldConn, mirror: &Mirror) -> Option<UnixStream> {
+fn reconnect(conn: &HeldConn, mirror: &Mirror) -> Reconnect {
     for attempt in 0..RECONNECT_ATTEMPTS {
         if conn.closed.load(Ordering::SeqCst) || conn.is_detached() {
-            return None;
+            return Reconnect::Stop;
+        }
+        if conn.exited.load(Ordering::SeqCst) {
+            // A fallback terminate (kill/release mid-reconnect) already
+            // confirmed and reported the end.
+            return Reconnect::Stop;
         }
         if attempt > 0 {
             std::thread::sleep(RECONNECT_PAUSE);
@@ -419,7 +529,7 @@ fn reconnect(conn: &HeldConn, mirror: &Mirror) -> Option<UnixStream> {
             Ok((stream, info, (cols, rows, snapshot))) => {
                 if info.holder_pid != conn.info.holder_pid || info.child_pid != conn.info.child_pid
                 {
-                    return None;
+                    return Reconnect::Gone;
                 }
                 let Ok(write) = stream.try_clone() else {
                     continue;
@@ -427,11 +537,11 @@ fn reconnect(conn: &HeldConn, mirror: &Mirror) -> Option<UnixStream> {
                 mirror.reset_to(cols, rows, &snapshot);
                 *lock_unpoisoned(&conn.write) = Some(write);
                 // An exited child's EXITED frame follows on this connection.
-                return Some(stream);
+                return Reconnect::Connected(stream);
             }
-            Err(AdoptError::Stale) | Err(AdoptError::Incompatible(_)) => return None,
+            Err(AdoptError::Stale) | Err(AdoptError::Incompatible(_)) => return Reconnect::Gone,
             Err(AdoptError::Failed(_)) => continue,
         }
     }
-    None
+    Reconnect::Unreachable
 }

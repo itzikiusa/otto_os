@@ -374,8 +374,8 @@ fn pty_capture(h: &Arc<PtyHandle>, lines: usize) -> impl FnOnce() -> Capture + S
     }
 }
 
-/// A `scrollback` reply built off the async worker. The live stream is left
-/// untouched (the client may skip an optional compact and keep streaming).
+/// A `scrollback` reply built off the async worker, for a viewer with no live
+/// subscription to swap (normally [`resync_frame`] answers `scrollback`).
 async fn snapshot_frame(h: &Arc<PtyHandle>, lines: usize, binary: bool) -> Snap {
     let h = Arc::clone(h);
     let epoch = h.spawn_seq();
@@ -2032,9 +2032,17 @@ async fn serve_terminal<S: SessionsCtx>(
                         // fresh screen under stale (possibly narrow-painted)
                         // history. Omitted (0) when no live handle exists.
                         // Built off the async worker (r3-06-02).
-                        let frame = match handle.as_ref() {
-                            Some(h) => snapshot_frame(h, want, binary_snapshots).await,
-                            None => Snap::build(Vec::new(), 0, false),
+                        //
+                        // Like `resync`, the snapshot and a NEW subscription
+                        // are taken under one emulator lock and swapped in for
+                        // `out_rx`: every chunk already queued on the old
+                        // receiver is in the snapshot, so streaming it after
+                        // the snapshot double-applied output (duplicated lines
+                        // on every attach/reattach).
+                        let frame = match (out_rx.as_mut(), handle.as_ref()) {
+                            (Some(rx), Some(h)) => resync_frame(rx, pty_capture(h, want), binary_snapshots).await,
+                            (None, Some(h)) => snapshot_frame(h, want, binary_snapshots).await,
+                            (_, None) => Snap::build(Vec::new(), 0, false),
                         };
                         // Sent inline, i.e. before any subsequent live bytes.
                         if frame.send(&mut socket).await.is_err() {
@@ -2951,6 +2959,45 @@ mod tests {
         ));
         tx.send(Bytes::from_static(b"after")).unwrap();
         assert_eq!(rx.try_recv().unwrap(), Bytes::from_static(b"after"));
+    }
+
+    /// The attach `scrollback` reply against a REAL PTY: output that was
+    /// queued on the viewer's attach-time subscription is already in the
+    /// snapshot, so after the reply (built like `resync`) it must not arrive
+    /// on the live stream again — it used to be painted twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scrollback_reply_never_double_applies_queued_output() {
+        let spec = otto_pty::CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "sleep 0.3; printf QUEUED-MARK; sleep 5".into()],
+            cwd: None,
+            env: vec![],
+        };
+        let h = Arc::new(PtyHandle::spawn(&spec).expect("spawn"));
+        // The attach-time subscription (`out_rx`).
+        let mut rx = h.subscribe();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !String::from_utf8_lossy(&h.snapshot_with_history(10)).contains("QUEUED-MARK") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "marker never printed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let frame = resync_frame(&mut rx, pty_capture(&h, 100), false).await;
+        let v: serde_json::Value = serde_json::from_str(frame.json()).unwrap();
+        let data = B64.decode(v["data"].as_str().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(&data).contains("QUEUED-MARK"));
+        // Nothing already in the snapshot is streamed after it.
+        let mut streamed = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            streamed.extend_from_slice(&chunk);
+        }
+        assert!(
+            !String::from_utf8_lossy(&streamed).contains("QUEUED-MARK"),
+            "queued output was delivered in both the snapshot and the live stream"
+        );
+        let _ = h.kill();
     }
 
     // ── Credit-based flow control ─────────────────────────────────────────
