@@ -1,120 +1,120 @@
 {
-  "file": "otto-tour-rooms-20260928.mp4",
-  "poster": "otto-tour-rooms-poster.jpg",
-  "captions": "otto-tour-rooms.vtt",
-  "duration": 253.566667,
+  "file": "otto-tour-20261005.mp4",
+  "poster": "otto-tour-20261005-poster.jpg",
+  "captions": "otto-tour-20261005.vtt",
+  "duration": 140.01,
   "chapters": [
     {
       "id": "intro",
       "section": "getting-started",
       "title": "Meet Otto",
       "start": 0,
-      "duration": 7.5
+      "duration": 8
     },
     {
       "id": "home",
       "section": "home",
       "title": "Home",
-      "start": 7.5,
-      "duration": 10.8
+      "start": 8,
+      "duration": 6
     },
     {
       "id": "command-bar",
       "section": "command-bar",
       "title": "The command bar",
-      "start": 18.3,
-      "duration": 16.93
+      "start": 14,
+      "duration": 8
     },
     {
       "id": "assistant",
       "section": "assistant",
       "title": "Assistant",
-      "start": 35.23,
-      "duration": 9.63
+      "start": 22,
+      "duration": 6
     },
     {
       "id": "agents",
       "section": "agents",
       "title": "Agents and History",
-      "start": 44.87,
-      "duration": 14.73
+      "start": 28,
+      "duration": 12
     },
     {
       "id": "mission-control",
       "section": "mission-control",
       "title": "Run with Otto and Mission Control",
-      "start": 59.6,
-      "duration": 10.7
+      "start": 40,
+      "duration": 8
     },
     {
       "id": "swarm",
       "section": "swarm",
       "title": "Swarms and Goal Loops",
-      "start": 70.3,
-      "duration": 10.13
+      "start": 48,
+      "duration": 8
     },
     {
       "id": "workflows",
       "section": "workflows",
       "title": "Workflows and schedules",
-      "start": 80.43,
-      "duration": 10.53
+      "start": 56,
+      "duration": 8
     },
     {
       "id": "git",
       "section": "git",
       "title": "Git, reviews and proof",
-      "start": 90.97,
-      "duration": 12.47
+      "start": 64,
+      "duration": 8
     },
     {
       "id": "vault",
       "section": "vault",
       "title": "Product and Vault",
-      "start": 103.43,
-      "duration": 7.73
+      "start": 72,
+      "duration": 6
     },
     {
       "id": "design",
       "section": "design",
       "title": "Design Hall and Skills Lab",
-      "start": 111.17,
-      "duration": 15.1
+      "start": 78,
+      "duration": 10
     },
     {
       "id": "database",
       "section": "database",
       "title": "Database Explorer",
-      "start": 126.27,
-      "duration": 17.03
+      "start": 88,
+      "duration": 8
     },
     {
       "id": "infra",
       "section": "connections",
       "title": "Connections and cloud",
-      "start": 143.3,
-      "duration": 14.43
+      "start": 96,
+      "duration": 8
     },
     {
       "id": "insights",
       "section": "insights",
       "title": "Insights and Usage",
-      "start": 157.73,
-      "duration": 7.47
+      "start": 104,
+      "duration": 8
     },
     {
       "id": "rooms",
       "section": "rooms",
       "title": "Rooms · collaborate and recap",
-      "start": 165.2,
-      "duration": 76.53333333333333
+      "start": 112,
+      "duration": 16
     },
     {
       "id": "outro",
       "section": "phone-and-remote",
       "title": "Everywhere",
-      "start": 241.73333333333332,
-      "duration": 11.83
+      "start": 128,
+      "duration": 12
     }
   ]
 }
