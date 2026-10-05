@@ -904,7 +904,7 @@ mod tests {
                 "-u",
                 "root",
                 "-p",
-                "--database=mydb",
+                "'--database=mydb'",
             ]
         );
         // The password never reaches argv, and isn't parked in the local ssh
