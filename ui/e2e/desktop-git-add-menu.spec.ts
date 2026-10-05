@@ -106,13 +106,19 @@ test('+ stays fully visible when many repo tabs are open', async ({ page }) => {
   });
   expect(within).toBe(true);
   await expectFullyInViewport(page, page.locator('.git-tab-new'), 'open-repo + button');
-  // …and the strip USES the header's free width (the Git header has no
-  // actions of its own): it used to stop at 50% of the row, ellipsizing
-  // repo names beside an empty half-row. Its trailing edge must reach
-  // close to the row's end.
+  // …and the strip USES the header's free width: it used to stop at 50% of
+  // the row, ellipsizing repo names beside an empty half-row. Its trailing
+  // edge must reach close to where the header's own actions begin (the Git
+  // header now carries branch / Pull / Publish), or the row's end without any.
   const gap = await page.locator('.git-tab-new').evaluate((btn) => {
     const row = btn.closest('.ph-row') as HTMLElement;
-    return row.getBoundingClientRect().right - btn.getBoundingClientRect().right;
+    const actions = Array.from(row.querySelectorAll<HTMLElement>('.ph-actions > *, .ph-more'))
+      .map((el) => el.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0);
+    const end = actions.length
+      ? Math.min(...actions.map((r) => r.left))
+      : row.getBoundingClientRect().right;
+    return end - btn.getBoundingClientRect().right;
   });
   expect(gap).toBeLessThan(80);
 });
