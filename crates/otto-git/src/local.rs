@@ -2496,8 +2496,15 @@ impl LocalGit {
         Ok(oid.to_string())
     }
 
-    /// Run `git diff <base>` — diffs the working tree (staged + unstaged)
-    /// against `base` and returns the raw unified diff text.
+    /// Run `git diff -M <merge-base(base, HEAD)>` — diffs the working tree
+    /// (staged + unstaged) against the point this branch FORKED from `base`
+    /// and returns the raw unified diff text.
+    ///
+    /// The merge-base, not `base`'s tip: once `base` moves on after the branch
+    /// point, a tip diff shows every commit landed on `base` since as a
+    /// reverse change of this branch — reviewers flagged code the branch never
+    /// touched and PR drafts described it. Falls back to `base` itself when
+    /// there is no common ancestor (unrelated histories, unborn HEAD).
     ///
     /// These texts feed reviews and commit-message drafts, so they carry the
     /// same fixed [`DIFF_FORMAT`] as the parsed diffs: a `diff.external` in the
@@ -2505,8 +2512,49 @@ impl LocalGit {
     /// `--` pins `base` as a REVISION even when a file shares its name.
     pub async fn diff_text_against(&self, base: &str) -> Result<String> {
         Self::guard_ref(base)?;
-        self.exec_text(&GitCmd::diff("diff").args(["--end-of-options", base, "--"]))
+        let from = self.fork_point(base).await;
+        self.exec_text(&GitCmd::diff("diff").args(["-M", "--end-of-options", from.as_str(), "--"]))
             .await
+    }
+
+    /// `git merge-base <base> HEAD`, or `base` itself when git finds none.
+    async fn fork_point(&self, base: &str) -> String {
+        match self
+            .run_read(&["merge-base", "--end-of-options", base, "HEAD"])
+            .await
+        {
+            Ok(out) if is_full_oid(out.trim()) => out.trim().to_string(),
+            _ => base.to_string(),
+        }
+    }
+
+    /// [`Self::diff_text_against`] plus every untracked (not ignored) file as
+    /// a new-file patch — what a LOCAL review must see: a brand-new module the
+    /// user hasn't `git add`ed yet is part of the change under review, but a
+    /// plain `git diff` never lists it.
+    pub async fn review_diff_text(&self, base: &str) -> Result<String> {
+        // Bound the untracked tail: an unignored build/vendor dir must not
+        // turn a review into a multi-hundred-MB prompt file.
+        const UNTRACKED_BUDGET: usize = 8 * 1024 * 1024;
+        let mut out = self.diff_text_against(base).await?;
+        for f in self.untracked(&[]).await? {
+            if out.len() > UNTRACKED_BUDGET {
+                break;
+            }
+            let cmd = GitCmd::diff("diff")
+                .args(["-U3", "--no-index"])
+                .paths(["/dev/null", f.as_str()]);
+            // --no-index exits 1 for a normal difference.
+            let (_, stdout, _, _) = self.exec(&cmd, None).await?;
+            let patch = String::from_utf8_lossy(&stdout);
+            if !patch.is_empty() {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&patch);
+            }
+        }
+        Ok(out)
     }
 
     /// Raw unified diff of the staged changes (`git diff --cached`). Empty when
@@ -2530,7 +2578,8 @@ impl LocalGit {
         let cmd = match base {
             Some(b) => {
                 Self::guard_ref(b)?;
-                GitCmd::diff("diff").args(["--end-of-options", b, "--"])
+                let from = self.fork_point(b).await;
+                GitCmd::diff("diff").args(["-M", "--end-of-options", from.as_str(), "--"])
             }
             None => GitCmd::diff("diff").args(["-M"]),
         };
@@ -3148,6 +3197,48 @@ impl LocalGit {
         let out = self.run_remote(&["fetch", "--prune"], token).await?;
         self.seed_commit_graph();
         Ok(out)
+    }
+
+    /// Fetch a PR/MR's head commit into the private ref
+    /// `refs/otto/pr-review/<pr_number>` and return that ref. A fork PR's
+    /// source branch does not exist on `origin`, so `origin/<branch>` cannot
+    /// be checked out — but the host publishes the head under a
+    /// provider-specific ref: GitHub `refs/pull/N/head`, GitLab
+    /// `refs/merge-requests/N/head`. Both are tried (a miss is a cheap
+    /// "couldn't find remote ref"). Falls back to `head_sha` when the commit
+    /// is already present locally (e.g. Bitbucket, which exposes neither).
+    pub async fn fetch_pr_head(
+        &self,
+        pr_number: u64,
+        head_sha: Option<&str>,
+        token: Option<String>,
+    ) -> Result<String> {
+        let local = format!("refs/otto/pr-review/{pr_number}");
+        for remote_ref in [
+            format!("refs/pull/{pr_number}/head"),
+            format!("refs/merge-requests/{pr_number}/head"),
+        ] {
+            let spec = format!("+{remote_ref}:{local}");
+            if let Ok((true, ..)) = self
+                .run_remote_raw(&["fetch", "--no-tags", "origin", &spec], token.clone())
+                .await
+            {
+                return Ok(local);
+            }
+        }
+        if let Some(sha) = head_sha.map(str::trim).filter(|s| !s.is_empty()) {
+            Self::guard_ref(sha)?;
+            let commit = format!("{sha}^{{commit}}");
+            if let Ok(full) = self
+                .run(&["rev-parse", "--verify", "--quiet", &commit])
+                .await
+            {
+                return Ok(full.trim().to_string());
+            }
+        }
+        Err(Error::Invalid(format!(
+            "could not fetch the head of PR #{pr_number} (no pull/merge-request ref and the head commit is not local)"
+        )))
     }
 
     /// One-shot background `commit-graph write --reachable --changed-paths`
@@ -6214,6 +6305,47 @@ mod tests {
         sh_git(&dir, &["checkout", "develop"]);
         let r = git.resolve_base(Some("develop")).await.unwrap();
         assert_eq!(r.branch, "develop");
+    }
+
+    /// `main` moved on after the branch point: the review/PR diff must hold
+    /// ONLY the branch's own change (merge-base), not main's later commits as
+    /// reverse hunks; the review variant also carries untracked new files.
+    #[tokio::test]
+    async fn diff_text_against_uses_merge_base_and_review_adds_untracked() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        sh_git(&dir, &["checkout", "-b", "feature"]);
+        write(&dir, "feature.txt", "mine\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "feature work"]);
+        // main advances after the branch point.
+        sh_git(&dir, &["checkout", "main"]);
+        write(&dir, "main_only.txt", "landed on main later\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "main moved"]);
+        sh_git(&dir, &["checkout", "feature"]);
+
+        let d = git.diff_text_against("main").await.unwrap();
+        assert!(d.contains("feature.txt"), "{d}");
+        assert!(
+            !d.contains("main_only.txt"),
+            "main's later commit leaked: {d}"
+        );
+        let (capped, _) = git.diff_text_capped(Some("main"), 1 << 20).await.unwrap();
+        assert!(!capped.contains("main_only.txt"), "{capped}");
+
+        write(&dir, "brand_new.rs", "fn new() {}\n");
+        assert!(!git
+            .diff_text_against("main")
+            .await
+            .unwrap()
+            .contains("brand_new.rs"));
+        let r = git.review_diff_text("main").await.unwrap();
+        assert!(
+            r.contains("brand_new.rs") && r.contains("+fn new() {}"),
+            "{r}"
+        );
+        assert!(!r.contains("main_only.txt"));
     }
 
     #[tokio::test]

@@ -184,6 +184,10 @@ struct RawFinding {
     file: Option<String>,
     #[serde(default)]
     line: Option<u32>,
+    #[serde(default)]
+    line_end: Option<u32>,
+    #[serde(default)]
+    end_line: Option<u32>,
     #[serde(default = "default_severity")]
     severity: String,
     #[serde(default)]
@@ -274,6 +278,7 @@ impl RawFinding {
         ReviewFinding {
             path: self.path.or(self.file).filter(|s| !s.trim().is_empty()),
             line: self.line,
+            line_end: self.line_end.or(self.end_line),
             severity: normalize_severity(&self.severity),
             body,
             lens,
@@ -305,9 +310,112 @@ pub fn parse_findings_array(text: &str) -> Option<Vec<ReviewFinding>> {
     if start >= end {
         return None;
     }
-    serde_json::from_str::<Vec<RawFinding>>(&stripped[start..end])
-        .ok()
-        .map(|raw| raw.into_iter().map(RawFinding::into_finding).collect())
+    // Element-wise and lenient: one finding with `"line": "42-45"` or
+    // `"severity": null` used to fail the WHOLE array, discarding every other
+    // finding the reviewer wrote. Only an element that cannot be read as a
+    // finding object at all is skipped.
+    let items = serde_json::from_str::<Vec<serde_json::Value>>(&stripped[start..end]).ok()?;
+    Some(
+        items
+            .into_iter()
+            .filter_map(|v| {
+                let v = coerce_finding_value(v)?;
+                serde_json::from_value::<RawFinding>(v)
+                    .ok()
+                    .map(RawFinding::into_finding)
+            })
+            .collect(),
+    )
+}
+
+/// Leading unsigned integer of `s` (`"42"`, `"42-45"`, `" L42 "` → 42).
+fn numeric_prefix(s: &str) -> Option<u32> {
+    let t = s.trim().trim_start_matches(['L', 'l', '#']);
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Normalize one raw finding element into the shape [`RawFinding`] reads:
+/// line numbers from a number OR a numeric-prefix string (a `"42-45"` range
+/// also yields `line_end` 45 when none was given), severity from any scalar
+/// (null ⇒ default), and every other text field dropped when it is not a
+/// string. `None` ⇒ not an object at all.
+fn coerce_finding_value(v: serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    let Value::Object(mut map) = v else {
+        return None;
+    };
+    let as_line = |v: &Value| -> Option<u32> {
+        match v {
+            Value::Number(n) => n
+                .as_u64()
+                .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+                .and_then(|n| u32::try_from(n).ok()),
+            Value::String(s) => numeric_prefix(s),
+            _ => None,
+        }
+    };
+    // A "42-45" range string carries its own end.
+    let range_end = match map.get("line") {
+        Some(Value::String(s)) => s
+            .split_once(['-', '–', ':'])
+            .and_then(|(_, e)| numeric_prefix(e)),
+        _ => None,
+    };
+    for key in ["line", "line_end", "end_line"] {
+        if let Some(raw) = map.remove(key) {
+            if let Some(n) = as_line(&raw) {
+                map.insert(key.into(), Value::from(n));
+            }
+        }
+    }
+    if let Some(end) = range_end {
+        if !map.contains_key("line_end") && !map.contains_key("end_line") {
+            map.insert("line_end".into(), Value::from(end));
+        }
+    }
+    match map.remove("severity") {
+        Some(Value::String(s)) => {
+            map.insert("severity".into(), Value::String(s));
+        }
+        Some(Value::Number(n)) => {
+            map.insert("severity".into(), Value::String(n.to_string()));
+        }
+        Some(Value::Bool(b)) => {
+            map.insert("severity".into(), Value::String(b.to_string()));
+        }
+        _ => {} // null / object / array ⇒ default
+    }
+    for key in [
+        "path",
+        "file",
+        "body",
+        "summary",
+        "description",
+        "message",
+        "comment",
+        "issue",
+        "detail",
+        "details",
+        "title",
+        "failure_scenario",
+        "suggested_fix",
+        "fix",
+        "lens",
+    ] {
+        match map.get(key) {
+            Some(Value::String(_)) => {}
+            Some(Value::Number(n)) => {
+                let s = n.to_string();
+                map.insert(key.into(), Value::String(s));
+            }
+            Some(_) => {
+                map.remove(key);
+            }
+            None => {}
+        }
+    }
+    Some(Value::Object(map))
 }
 
 /// Outcome of one review agent run (fed to the summarizer).
@@ -1070,6 +1178,31 @@ pub async fn submit_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One malformed field must not discard the whole findings file: a
+    /// range-string line, a null severity and a non-object element are each
+    /// tolerated, the good findings survive, and line_end is captured.
+    #[test]
+    fn parse_findings_is_lenient_per_element() {
+        let text = r#"[
+            {"path": "a.rs", "line": 3, "severity": "bug", "body": "ok"},
+            {"path": "b.rs", "line": "42-45", "severity": null, "body": "range"},
+            {"path": "c.rs", "line": "L7", "line_end": "9", "severity": 2, "body": "str"},
+            "not a finding",
+            {"file": "d.rs", "line": {"x": 1}, "body": ["nested"], "title": "t"}
+        ]"#;
+        let f = parse_findings(text);
+        assert_eq!(f.len(), 4, "{f:?}");
+        assert_eq!((f[0].line, f[0].severity.as_str()), (Some(3), "bug"));
+        assert_eq!((f[1].line, f[1].line_end), (Some(42), Some(45)));
+        assert_eq!(f[1].severity, "info");
+        assert_eq!((f[2].line, f[2].line_end), (Some(7), Some(9)));
+        assert_eq!(f[3].path.as_deref(), Some("d.rs"));
+        assert_eq!(f[3].line, None);
+        assert_eq!(f[3].body, "t");
+        // An empty array is still a well-formed "no findings".
+        assert_eq!(parse_findings_array("[]").map(|v| v.len()), Some(0));
+    }
 
     #[test]
     fn user_record_after_scans_only_past_the_offset() {

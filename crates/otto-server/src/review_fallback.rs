@@ -136,6 +136,7 @@ mod tests {
         ReviewFinding {
             path: Some(path.to_string()),
             line: Some(line),
+            line_end: None,
             severity: severity.to_string(),
             body: body.to_string(),
             lens: None,

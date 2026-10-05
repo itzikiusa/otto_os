@@ -9,6 +9,10 @@ use crate::OrchestratorContext;
 
 /// Maximum number of actions a plan may contain.
 pub const MAX_ACTIONS: usize = 10;
+/// Most sessions one `spawn_sessions` action may open. The plan is
+/// re-validated at execute time (the client can edit it), so this caps what a
+/// hand-crafted `{"count": 10000}` could spawn.
+pub const MAX_SPAWN_COUNT: u8 = 8;
 
 /// Find the first complete JSON array embedded in `text` (brackets matched
 /// outside of string literals) that parses as JSON.
@@ -91,6 +95,11 @@ pub fn validate_plan(
                 }
                 if *count == 0 {
                     return Err(Error::Invalid(format!("action {i}: count must be >= 1")));
+                }
+                if *count > MAX_SPAWN_COUNT {
+                    return Err(Error::Invalid(format!(
+                        "action {i}: count must be <= {MAX_SPAWN_COUNT} (got {count})"
+                    )));
                 }
             }
             Action::Broadcast { text } => {
@@ -250,5 +259,14 @@ mod tests {
             .map(|_| otto_core::api::Action::Broadcast { text: "x".into() })
             .collect();
         assert!(validate_plan(&too_many, &c, &a).is_err());
+
+        let spawn = |count| {
+            vec![otto_core::api::Action::SpawnSessions {
+                provider: "claude".into(),
+                count,
+            }]
+        };
+        assert!(validate_plan(&spawn(MAX_SPAWN_COUNT), &c, &a).is_ok());
+        assert!(validate_plan(&spawn(MAX_SPAWN_COUNT + 1), &c, &a).is_err());
     }
 }
