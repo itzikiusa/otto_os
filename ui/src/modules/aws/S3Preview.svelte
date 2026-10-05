@@ -26,6 +26,15 @@
   /** Mirrors the daemon's `INLINE_PREVIEW_CAP` (crates/otto-aws/src/s3.rs). */
   const INLINE_CAP = 25 * 1024 * 1024;
 
+  const RASTER_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/avif', 'image/x-icon', 'image/vnd.microsoft.icon']);
+  const RASTER_EXT: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', avif: 'image/avif', ico: 'image/x-icon' };
+  /** The blob as a raster image type (its own when allow-listed, else from the
+   *  key's extension), or null — SVG and anything else are not rendered. */
+  function rasterImageBlob(blob: Blob, objectKey: string): Blob | null {
+    const own = blob.type.split(';')[0].trim().toLowerCase();
+    const type = RASTER_TYPES.has(own) ? own : RASTER_EXT[objectKey.split('.').pop()?.toLowerCase() ?? ''];
+    return type ? new Blob([blob], { type }) : null;
+  }
   const kind = $derived.by<'json' | 'csv' | 'text' | 'image' | 'pdf' | 'binary' | null>(() => {
     const d = data;
     if (!d) return null;
@@ -101,7 +110,16 @@
     mediaUrl = null;
     awsDownloadBlob(awsApi.s3DownloadPath(accountId, bucket, key, true), undefined, ctrl.signal)
       .then(({ blob }) => {
-        url = URL.createObjectURL(blob);
+        // Never trust the object's stored Content-Type for what we render: a
+        // blob URL is same-origin with the app, so an "image" or "pdf" served
+        // as text/html would run as a page. Re-type from the DETECTED kind —
+        // PDF always as application/pdf, images only as a raster type.
+        const typed = k === 'pdf' ? new Blob([blob], { type: 'application/pdf' }) : rasterImageBlob(blob, key);
+        if (!typed) {
+          mediaError = 'This object isn’t a previewable raster image.';
+          return;
+        }
+        url = URL.createObjectURL(typed);
         mediaUrl = url;
       })
       .catch((e) => {
