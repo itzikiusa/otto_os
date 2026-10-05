@@ -5,10 +5,17 @@
 //! password, but an attacker can still hammer it with guessed tokens. We mirror
 //! [`crate::ws`]'s sibling structure from `otto-server`'s `login_throttle`:
 //!
-//! * Key: **real socket-peer IP** only (no username axis — share tokens are
-//!   random 32-byte handles, not usernames, so a per-username tally is not
-//!   meaningful). The peer IP comes from `ConnectInfo<SocketAddr>`, which is
-//!   always the real wire address (never a spoofable forwarding header).
+//! * Key: the **client IP** only (no username axis — share tokens are random
+//!   32-byte handles, not usernames, so a per-username tally is not
+//!   meaningful). That is the socket peer, except behind the documented
+//!   Cloudflare tunnel, where every client arrives as `127.0.0.1` and the
+//!   `CF-Connecting-IP` header is used instead ([`resolve_client_ip`]: only for
+//!   a loopback peer that named the tunnel host — never a spoofable header from
+//!   a direct client).
+//! * The `/ws/term` gate authenticates FIRST and never refuses a token that
+//!   verifies; only failures are counted and only failures are refused while
+//!   locked (S8-02). The OTP routes (`/share/verify`, `/share/extend`) still
+//!   check the lock up front: a 6-digit code IS guessable.
 //! * Threshold: [`FAILURE_THRESHOLD`] failures inside [`FAILURE_WINDOW`] →
 //!   lockout for [`LOCKOUT_DURATION`].
 //! * Map size is capped at [`MAX_TRACKED_KEYS`]; a flood of distinct IPs is
@@ -105,6 +112,47 @@ pub struct LockedOut {
     pub retry_after: Duration,
 }
 
+/// The caller's client address as the daemon's `Host` guard resolved it
+/// (`otto-server` `host_guard`), inserted as a request extension on every
+/// request it lets through. Throttles and audit rows key on [`ClientIp::ip`]
+/// instead of the raw socket peer (S8-02 / S8-07).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientIp {
+    /// Tunnel-aware client IP: the `CF-Connecting-IP` of a request that came
+    /// through the documented Cloudflare tunnel, else the socket peer.
+    pub ip: IpAddr,
+    /// A loopback peer that addressed the daemon by a loopback name (or sent
+    /// no `Host`): the desktop app / a local tool, never a tunnelled client.
+    pub local: bool,
+}
+
+/// Resolve the tunnel-aware client IP (pure; the host guard feeds it).
+///
+/// The documented remote setup is a Cloudflare tunnel (`cloudflared` →
+/// `http://127.0.0.1:7700`), so EVERY internet client reaches the listener as
+/// `127.0.0.1` — keying a lockout on the peer made one anonymous visitor lock
+/// out every guest and the desktop app at once. `CF-Connecting-IP` is trusted
+/// ONLY when both hold: the peer is loopback (cloudflared runs on this Mac) and
+/// the request named the tunnel host (`share_base_url`) — a LAN/tailnet peer
+/// or a loopback request for `127.0.0.1` can never pick its own key with it.
+pub fn resolve_client_ip(peer: IpAddr, via_tunnel_host: bool, cf_connecting_ip: Option<&str>) -> IpAddr {
+    if peer.is_loopback() && via_tunnel_host {
+        if let Some(ip) = cf_connecting_ip.and_then(|v| v.trim().parse::<IpAddr>().ok()) {
+            return ip;
+        }
+    }
+    peer
+}
+
+/// The client IP of a request: the guard-resolved [`ClientIp`] when present,
+/// else the raw `ConnectInfo` socket peer (routers mounted without the guard).
+pub fn client_ip(ext: &axum::http::Extensions) -> Option<IpAddr> {
+    ext.get::<ClientIp>().map(|c| c.ip).or_else(|| {
+        ext.get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip())
+    })
+}
+
 /// Process-global share throttle used by the live [`ws_auth_gate`].
 pub fn global() -> &'static ShareThrottle {
     static STORE: OnceLock<ShareThrottle> = OnceLock::new();
@@ -160,6 +208,24 @@ mod tests {
         // A successful redemption clears the lockout.
         store.clear(addr);
         assert!(store.check(addr).is_ok(), "clear() must reset the lockout");
+    }
+
+    #[test]
+    fn cf_connecting_ip_is_trusted_only_via_the_tunnel_host_on_loopback() {
+        let lo = ip(127, 0, 0, 1);
+        let lan = ip(192, 168, 1, 9);
+        // Tunnelled: loopback peer + tunnel host → the forwarded client.
+        assert_eq!(
+            resolve_client_ip(lo, true, Some("203.0.113.7")),
+            ip(203, 0, 113, 7)
+        );
+        // Desktop (loopback Host): the header is ignored.
+        assert_eq!(resolve_client_ip(lo, false, Some("203.0.113.7")), lo);
+        // A non-loopback peer can never choose its key with the header.
+        assert_eq!(resolve_client_ip(lan, true, Some("203.0.113.7")), lan);
+        // Garbage / missing header falls back to the peer.
+        assert_eq!(resolve_client_ip(lo, true, Some("nope")), lo);
+        assert_eq!(resolve_client_ip(lo, true, None), lo);
     }
 
     #[test]

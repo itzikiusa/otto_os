@@ -13,12 +13,11 @@
 //! `session_id` (else 403, no upgrade) — and its write capability is the share's
 //! capped role (`Editor` may input/resize; a `Viewer` share is read-only).
 
-use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -785,10 +784,10 @@ fn problem(status: StatusCode, e: &Error) -> Response {
 /// JSON problem BEFORE the WebSocket upgrade extractor runs — this is the
 /// property the isolation tests rely on.
 ///
-/// Rate limiting (Task 1.8): the real socket-peer IP (from
-/// `ConnectInfo<SocketAddr>`, wired up by `into_make_service_with_connect_info`
-/// in `ottod`) is checked against the share-redemption throttle BEFORE auth.
-/// A failed auth records a failure; a successful auth clears the IP's tally.
+/// Rate limiting (Task 1.8, S8-02): the token is authenticated FIRST and a
+/// valid one always passes. A failed auth records a failure against the
+/// tunnel-aware client IP and, once that IP is locked, is answered 429 instead
+/// of 401. Store errors (`Internal`) are 503 and never counted.
 async fn ws_auth_gate<S: SessionsCtx>(
     State(st): State<WsState<S>>,
     Path(session_id): Path<Id>,
@@ -796,13 +795,10 @@ async fn ws_auth_gate<S: SessionsCtx>(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // 0. Extract the real peer IP from the ConnectInfo extension (Task 1.8).
-    //    `into_make_service_with_connect_info::<SocketAddr>` (in ottod) injects
-    //    this; it's absent only in unit-test harnesses that don't wire it up.
-    let peer_ip = req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip());
+    // 0. The client IP: the host guard's tunnel-aware [`share_throttle::ClientIp`]
+    //    when present, else the raw `ConnectInfo` peer (absent only in unit-test
+    //    harnesses that wire neither).
+    let peer_ip = share_throttle::client_ip(req.extensions());
 
     // 1. Token source resolution (Task 1.10): subprotocol first, then query.
     let subprotocol_token = token_from_subprotocol(req.headers());
@@ -812,35 +808,32 @@ async fn ws_auth_gate<S: SessionsCtx>(
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
 
-    // 2. IP rate-limit check BEFORE auth (Task 1.8).
-    if let Some(ip) = peer_ip {
-        if let Err(locked) = share_throttle::global().check(ip) {
-            let secs = locked.retry_after.as_secs().max(1);
-            let body = otto_core::api::Problem {
-                code: "too_many_requests".to_string(),
-                message: "too many failed share-token attempts; try again later".to_string(),
-            };
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [("retry-after", secs.to_string())],
-                Json(body),
-            )
-                .into_response();
-        }
-    }
-
-    // 3. Token auth.
+    // 2. Token auth FIRST (S8-02 / S1-05). A token that verifies is never
+    //    refused by the lockout: on the desktop (and behind a tunnel without
+    //    `CF-Connecting-IP`) every client shares 127.0.0.1, so a lock checked
+    //    before auth let any web page — or a stale-token reconnect loop — keep
+    //    every terminal from attaching. Tokens are 256-bit; the lockout only
+    //    ever needs to slow down guesses, so it gates failures alone.
     let auth = match st.auth.authenticate(&token).await {
-        Ok(auth) => {
-            // Successful auth: clear the IP's failure tally.
-            if let Some(ip) = peer_ip {
-                share_throttle::global().clear(ip);
-            }
-            auth
-        }
+        Ok(auth) => auth,
+        // A store hiccup is not a guess: never counted, never a lockout.
+        Err(e @ Error::Internal(_)) => return problem(StatusCode::SERVICE_UNAVAILABLE, &e),
         Err(_) => {
-            // Failed auth: record failure against the peer IP.
             if let Some(ip) = peer_ip {
+                if let Err(locked) = share_throttle::global().check(ip) {
+                    let secs = locked.retry_after.as_secs().max(1);
+                    let body = otto_core::api::Problem {
+                        code: "too_many_requests".to_string(),
+                        message: "too many failed share-token attempts; try again later"
+                            .to_string(),
+                    };
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", secs.to_string())],
+                        Json(body),
+                    )
+                        .into_response();
+                }
                 share_throttle::global().record_failure(ip);
             }
             return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized);
@@ -1276,9 +1269,15 @@ async fn reauth_loop_shared<S: SessionsCtx>(
             _ = tick.tick() => {}
         }
         let started = std::time::Instant::now();
-        let Ok(current) = ctx.manager().get(&session_id).await else {
-            unregister_reauth(&shared, &can_tx, false);
-            return;
+        let current = match ctx.manager().get(&session_id).await {
+            Ok(current) => current,
+            // A transient store error (SQLITE_BUSY, pool timeout) is not a
+            // revocation: keep the last verdict and look again next tick.
+            Err(Error::Internal(_)) => continue,
+            Err(_) => {
+                unregister_reauth(&shared, &can_tx, false);
+                return;
+            }
         };
         let get_ms = started.elapsed().as_millis() as u64;
         let verdict = live_auth.check(&ctx, &current).await;
@@ -1301,14 +1300,17 @@ async fn reauth_loop_shared<S: SessionsCtx>(
                     changed
                 });
             }
+            // Transient (DB busy / pool timeout): keep the last verdict, retry
+            // next tick. Only a definite auth/authz failure evicts.
+            Err(Error::Internal(_)) => continue,
             Err(_) => {
+                // Access revoked mid-connection: evict THIS viewer only (S1-01).
+                // The session itself is never killed from here — a share or
+                // impersonation token resolves to the OWNER, so "the revoked
+                // user created it" used to take the owner's live agent down when
+                // a guest's share lapsed, an impersonation expired, or the owner
+                // logged out on another device.
                 unregister_reauth(&shared, &can_tx, false);
-                // Access revoked mid-connection. Killing the session stays the
-                // owner-only path (unchanged): a guest losing a share must not
-                // take the owner's terminal down with it.
-                if current.created_by == live_auth.user.id {
-                    let _ = ctx.manager().kill_session(&session_id).await;
-                }
                 return;
             }
         }
@@ -2581,6 +2583,7 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_blocks_locked_ip() {
         use crate::share_throttle::{ShareThrottle, FAILURE_THRESHOLD};
+        use axum::extract::ConnectInfo;
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         let pool = mem_pool().await;
@@ -2614,6 +2617,52 @@ mod tests {
             StatusCode::OK,
             "a valid token from a clean IP must still pass through the global throttle"
         );
+    }
+
+    /// S8-02 / S1-05: once an IP is locked by junk tokens, a token that
+    /// VERIFIES still attaches (the lock only refuses further failures), and
+    /// the tunnel-aware [`share_throttle::ClientIp`] keys tunnelled clients
+    /// apart so one visitor's junk never locks another.
+    #[tokio::test]
+    async fn locked_ip_still_admits_a_valid_token() {
+        use crate::share_throttle::{ClientIp, FAILURE_THRESHOLD};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+        // Unique per-test addresses: the gate uses the process-global throttle.
+        let attacker = IpAddr::V4(Ipv4Addr::new(198, 18, 77, 1));
+        let other = IpAddr::V4(Ipv4Addr::new(198, 18, 77, 2));
+        let req = |token: &str, ip: IpAddr| {
+            Request::builder()
+                .method("GET")
+                .uri(format!("/ws/term/{s1}?token={token}"))
+                .extension(ClientIp { ip, local: false })
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+
+        for _ in 0..FAILURE_THRESHOLD {
+            let resp = app.clone().oneshot(req("junk", attacker)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        // Locked: further junk is 429 …
+        let resp = app.clone().oneshot(req("junk", attacker)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        // … but a valid token from the SAME address still attaches.
+        let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
+        let resp = app.clone().oneshot(req(&token, attacker)).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a token that verifies must never be refused by the lockout"
+        );
+        // A different (tunnel-resolved) client is unaffected by the lock.
+        let resp = app.clone().oneshot(req("junk", other)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ---- Task 7.3: email-OTP gate before attach ---------------------------
@@ -2700,6 +2749,10 @@ mod tests {
         seed_user(&pool, "alice").await;
         seed_workspace(&pool, "ws1").await;
         let sid = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let before = SessionsRepo::new(pool.clone())
+            .get(&sid)
+            .await
+            .expect("session row");
         let st = build(&pool).await;
         let token = mint_share(&pool, "alice", &sid, WorkspaceRole::Editor).await;
         let user = st
@@ -2747,6 +2800,20 @@ mod tests {
             verdict, None,
             "a revoked share closes the capability watch (= evict this socket)"
         );
+
+        // S1-01: evicting the guest must NOT kill the owner's session. A share
+        // token resolves to the owner, so the old "revoked user created it ⇒
+        // kill" rule took the owner's live agent down with the guest.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let after = SessionsRepo::new(pool.clone())
+            .get(&sid)
+            .await
+            .expect("session row survives the eviction");
+        assert_eq!(
+            after.status, before.status,
+            "re-auth eviction must leave the session status untouched"
+        );
+        assert!(st.ctx.manager().get(&sid).await.is_ok());
     }
 
     /// Perf 01 F8: sockets presenting the same token to the same session

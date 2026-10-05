@@ -168,21 +168,61 @@ impl HostGuardState {
 }
 
 /// Production middleware: the static rules, plus the Public link domain host.
+///
+/// It also stamps the request with the tunnel-aware
+/// [`otto_sessions::share_throttle::ClientIp`] every throttle and audit row keys
+/// on (S8-02 / S8-07): behind the documented Cloudflare tunnel every client
+/// reaches us as `127.0.0.1`, so `CF-Connecting-IP` is honoured — but only for
+/// a loopback peer that named the `share_base_url` host.
 pub async fn host_guard_with_settings(
     axum::extract::State(st): axum::extract::State<HostGuardState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    let mut host: Option<String> = None;
+    let mut via_tunnel = false;
     if let Some(h) = req.headers().get(header::HOST) {
         let Ok(raw) = h.to_str() else {
             return misdirected();
         };
-        let host = host_of(raw);
-        if !host_allowed(&host) && st.share_host().await.as_deref() != Some(host.as_str()) {
+        let name = host_of(raw);
+        let statically_ok = host_allowed(&name);
+        // The tunnel host is a DNS name; a loopback/IP-literal Host never is,
+        // so the desktop hot path never consults the settings cache.
+        let tunnel_candidate = !is_loopback_name(&name) && !is_ip_literal(&name);
+        let is_share_host = if !statically_ok || tunnel_candidate {
+            st.share_host().await.as_deref() == Some(name.as_str())
+        } else {
+            false
+        };
+        if !statically_ok && !is_share_host {
             return misdirected();
         }
+        via_tunnel = is_share_host;
+        host = Some(name);
     }
+    stamp_client_ip(&mut req, host.as_deref(), via_tunnel);
     next.run(req).await
+}
+
+/// Insert the resolved [`otto_sessions::share_throttle::ClientIp`] (no-op when
+/// the listener did not wire `ConnectInfo`, e.g. in-process tests).
+fn stamp_client_ip(req: &mut Request, host: Option<&str>, via_tunnel: bool) {
+    use otto_sessions::share_throttle::{resolve_client_ip, ClientIp};
+    let Some(peer) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+    else {
+        return;
+    };
+    let cf = req
+        .headers()
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok());
+    let ip = resolve_client_ip(peer, via_tunnel, cf);
+    let local = peer.is_loopback() && !via_tunnel && host.is_none_or(is_loopback_name);
+    req.extensions_mut().insert(ClientIp { ip, local });
 }
 
 #[cfg(test)]

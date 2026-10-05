@@ -61,6 +61,11 @@ pub const SHARE_TOKEN_TTL_MIN_SECS: i64 = 60;
 /// emailed code can at most grant a 12h window per verification; requests above
 /// this are clamped down.
 pub const SHARE_OTP_WINDOW_MAX_SECS: i64 = 12 * 60 * 60;
+
+/// Absolute lifetime of an email-OTP share (S8-06): `POST /share/extend` grants
+/// fresh ≤12h windows, but never past `created_at + this`. A lapsed share stays
+/// listed (as `dormant`) until then so the owner can see and revoke it.
+pub const SHARE_OTP_ABSOLUTE_MAX_SECS: i64 = 7 * 24 * 60 * 60;
 /// Lifetime of a single emailed OTP (10 minutes). Short by design — the code is
 /// a second factor delivered out-of-band, single-use, and rate-limited.
 pub const SHARE_OTP_TTL_SECS: i64 = 600;
@@ -1243,6 +1248,7 @@ impl AuthRepo {
                 label,
                 created_at: now,
                 expires_at,
+                dormant: false,
             },
         ))
     }
@@ -1333,6 +1339,7 @@ impl AuthRepo {
                 label,
                 created_at: now,
                 expires_at,
+                dormant: false,
             },
         ))
     }
@@ -1464,11 +1471,19 @@ impl AuthRepo {
         let window_secs =
             original_window.clamp(SHARE_TOKEN_TTL_MIN_SECS, SHARE_OTP_WINDOW_MAX_SECS);
 
-        let otp = generate_otp();
         let now = Utc::now();
-        // Fresh ≤12h window; the bearer-token TTL tracks it so the token can never
-        // outlive the window it grants.
-        let expires_at = now + Duration::seconds(window_secs);
+        // Absolute lifetime (S8-06): past it the link is dead for good — the
+        // holder can no longer revive it, however often they ask.
+        let hard_end = created_at + Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS);
+        if now >= hard_end {
+            return Err(Error::Forbidden(
+                "this share link reached its 7-day lifetime; ask the owner for a new link".into(),
+            ));
+        }
+        let otp = generate_otp();
+        // Fresh ≤12h window (never past the absolute lifetime); the bearer-token
+        // TTL tracks it so the token can never outlive the window it grants.
+        let expires_at = (now + Duration::seconds(window_secs)).min(hard_end);
         let max_expires_at = expires_at.timestamp();
         let otp_expires_at = (now + Duration::seconds(SHARE_OTP_TTL_SECS)).timestamp();
 
@@ -1498,15 +1513,19 @@ impl AuthRepo {
     /// List the **live** (non-revoked, non-expired) share tokens for one session,
     /// newest first. Metadata only — never the secret.
     pub async fn list_shares_for_session(&self, session_id: &Id) -> Result<Vec<ShareInfo>> {
-        let now = Utc::now().to_rfc3339();
+        let now_ts = Utc::now();
+        let now = now_ts.to_rfc3339();
+        let dormant_cutoff = (now_ts - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS)).to_rfc3339();
         let rows = sqlx::query(
             "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
              FROM auth_sessions
-             WHERE kind = 'share' AND revoked = 0 AND session_scope = ? AND expires_at > ?
+             WHERE kind = 'share' AND revoked = 0 AND session_scope = ?
+                   AND (expires_at > ? OR (recipient_email IS NOT NULL AND created_at > ?))
              ORDER BY created_at DESC",
         )
         .bind(session_id)
         .bind(now)
+        .bind(dormant_cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("list shares for session: {e}")))?;
@@ -1516,6 +1535,7 @@ impl AuthRepo {
                 let scope_role: String = row.get("scope_role");
                 let role = WorkspaceRole::parse(&scope_role)
                     .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                let expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
                 Ok(ShareInfo {
                     id: row.get("id"),
                     session_id: Id::from(row.get::<String, _>("session_scope")),
@@ -1523,7 +1543,8 @@ impl AuthRepo {
                     token_prefix: row.get("token_prefix"),
                     label: row.get("label"),
                     created_at: parse_ts(&row.get::<String, _>("created_at"))?,
-                    expires_at: parse_ts(&row.get::<String, _>("expires_at"))?,
+                    expires_at,
+                    dormant: expires_at <= now_ts,
                 })
             })
             .collect()
@@ -1533,16 +1554,20 @@ impl AuthRepo {
     /// first) — the Settings → Sharing "Active links" table. Owner-scoped:
     /// another user's links never appear. Metadata only — never the secret.
     pub async fn list_shares_for_user(&self, owner_user_id: &Id) -> Result<Vec<ShareInfo>> {
-        let now = Utc::now().to_rfc3339();
+        let now_ts = Utc::now();
+        let now = now_ts.to_rfc3339();
+        let dormant_cutoff = (now_ts - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS)).to_rfc3339();
         let rows = sqlx::query(
             "SELECT id, session_scope, scope_role, token_prefix, label, created_at, expires_at
              FROM auth_sessions
-             WHERE kind = 'share' AND revoked = 0 AND user_id = ? AND expires_at > ?
+             WHERE kind = 'share' AND revoked = 0 AND user_id = ?
+                   AND (expires_at > ? OR (recipient_email IS NOT NULL AND created_at > ?))
              ORDER BY created_at DESC
              LIMIT 500",
         )
         .bind(owner_user_id)
         .bind(now)
+        .bind(dormant_cutoff)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("list shares for user: {e}")))?;
@@ -1552,6 +1577,7 @@ impl AuthRepo {
                 let scope_role: String = row.get("scope_role");
                 let role = WorkspaceRole::parse(&scope_role)
                     .ok_or_else(|| Error::Internal(format!("bad scope_role '{scope_role}'")))?;
+                let expires_at = parse_ts(&row.get::<String, _>("expires_at"))?;
                 Ok(ShareInfo {
                     id: row.get("id"),
                     session_id: Id::from(row.get::<String, _>("session_scope")),
@@ -1559,7 +1585,8 @@ impl AuthRepo {
                     token_prefix: row.get("token_prefix"),
                     label: row.get("label"),
                     created_at: parse_ts(&row.get::<String, _>("created_at"))?,
-                    expires_at: parse_ts(&row.get::<String, _>("expires_at"))?,
+                    expires_at,
+                    dormant: expires_at <= now_ts,
                 })
             })
             .collect()
@@ -2833,6 +2860,58 @@ mod tests {
                 "OTP must be numeric: {otp}"
             );
         }
+    }
+
+    /// S8-06: a lapsed OTP share stays listed as `dormant` (the link holder
+    /// can still revive it), and `extend` is refused past the 7-day absolute
+    /// lifetime — after which it also drops out of the lists.
+    #[tokio::test]
+    async fn lapsed_otp_share_is_listed_dormant_and_extend_is_capped() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+        let sid = Id::from("S1");
+        let (raw, _otp, _) = repo
+            .issue_share_otp_token(&owner, &sid, WorkspaceRole::Viewer, 3600, None, "g@example.com")
+            .await
+            .unwrap();
+        let set_times = |created: chrono::DateTime<Utc>, expires: chrono::DateTime<Utc>| {
+            let pool = pool.clone();
+            let raw = raw.clone();
+            async move {
+                sqlx::query("UPDATE auth_sessions SET created_at = ?, expires_at = ? WHERE token_hash = ?")
+                    .bind(created.to_rfc3339())
+                    .bind(expires.to_rfc3339())
+                    .bind(token_hash(&raw))
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        let now = Utc::now();
+
+        // Lapsed 1 day into its life: listed, flagged dormant, still extendable
+        // — and the fresh window never runs past the absolute lifetime.
+        set_times(now - Duration::days(1), now - Duration::hours(1)).await;
+        let listed = repo.list_shares_for_user(&owner).await.unwrap();
+        assert_eq!(listed.len(), 1, "a revivable lapsed share must stay visible");
+        assert!(listed[0].dormant);
+        assert!(repo.list_shares_for_session(&sid).await.unwrap()[0].dormant);
+        assert!(repo.extend_share_otp(&raw).await.unwrap().is_some());
+        let live = repo.list_shares_for_user(&owner).await.unwrap();
+        assert!(!live[0].dormant, "an extended share is live again");
+
+        // Past the absolute lifetime: extend is refused and the row is gone.
+        set_times(
+            now - Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS + 60),
+            now - Duration::hours(1),
+        )
+        .await;
+        assert!(matches!(
+            repo.extend_share_otp(&raw).await,
+            Err(Error::Forbidden(_))
+        ));
+        assert!(repo.list_shares_for_user(&owner).await.unwrap().is_empty());
     }
 
     /// Minting an OTP share: returns a raw OTP, stores only its hash, and the
