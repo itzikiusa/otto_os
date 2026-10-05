@@ -1,50 +1,55 @@
-// Shot lists per chapter. Coordinates are normalized to the captured page
-// (1600×900 CSS px @2x): x 0..1 left→right, y 0..1 top→bottom.
-// Stills/clips come from scripts/capture.mjs → public/capture/.
+// Shot lists per chapter, on the beat grid (120 BPM: a beat is 15 frames). A
+// chapter's shots must add up to its bars × 4 beats (script/chapters.json);
+// layout() refuses anything else. Times inside a shot (camera keys `b`,
+// callouts `b`/`until`) are beats from the shot's cut.
+// Coordinates are normalized to the captured page (1600×900 CSS px @2x):
+// x 0..1 left→right, y 0..1 top→bottom.
+// Stills/clips come from scripts/capture.mjs → public/capture/ and the Rooms
+// clips from scripts/capture-rooms.mjs → public/capture/rooms/.
 import type { ChapterSpec } from './types';
 
 const cap = (f: string) => `capture/${f}`;
+const room = (f: string) => `capture/rooms/${f}`;
 
 export const SCENES: Record<string, ChapterSpec> = {
-  intro: { id: 'intro', group: 'Shell', title: 'Meet Otto', shots: [{ kind: 'custom', id: 'desktop' }] },
+  intro: { id: 'intro', group: 'Shell', title: 'Meet Otto', shots: [{ kind: 'custom', id: 'intro', beats: 16 }] },
 
+  // 3 bars
   home: {
     id: 'home',
     group: 'Work',
     title: 'Home',
-    kicker: 'A macOS-native desktop for your agents',
+    kicker: 'Your desktop for every agent',
     shots: [
       {
         kind: 'screen',
         src: cap('home.jpg'),
-        weight: 1.6,
+        beats: 8,
+        label: 'What needs you, what’s running, what’s next',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 0.42, x: 0.5, y: 0.5, z: 1 },
-          { t: 0.95, x: 0.58, y: 0.3, z: 1.45 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2.5, x: 0.45, y: 0.3, z: 1.4 },
         ],
         callouts: [
-          { t0: 0.32, t1: 0.6, x: 0.07, y: 0.475, label: 'Grouped sidebar', side: 'right' },
-          { t0: 0.4, t1: 0.6, x: 0.13, y: 0.027, label: 'One header per page', side: 'bottom' },
-          { t0: 0.66, x: 0.21, y: 0.175, label: 'What needs you', side: 'bottom' },
-          { t0: 0.76, x: 0.45, y: 0.175, label: 'What’s running', side: 'bottom' },
-          { t0: 0.86, x: 0.67, y: 0.175, label: 'What’s next', side: 'bottom' },
+          { b: 0.75, until: 2.5, x: 0.07, y: 0.475, label: 'Grouped sidebar', side: 'right' },
+          { b: 3, x: 0.21, y: 0.325, label: 'What needs you', side: 'bottom' },
+          { b: 4, x: 0.45, y: 0.325, label: 'What’s running', side: 'bottom' },
+          { b: 5, x: 0.67, y: 0.325, label: 'What’s next', side: 'bottom' },
         ],
       },
       {
         kind: 'screen',
         src: cap('home.jpg'),
-        wipeTo: cap('home-light.jpg'),
-        weight: 0.8,
-        chip: 'Light and dark, one design system',
-        cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1.04 },
-          { t: 1, x: 0.5, y: 0.5, z: 1 },
-        ],
+        beats: 4,
+        transition: 'push',
+        label: 'Light and dark, one design system',
+        wipeTo: { src: cap('home-light.jpg'), b0: 0.5, b1: 2.5 },
+        cam: [{ b: 0, x: 0.5, y: 0.5, z: 1.06 }],
       },
     ],
   },
 
+  // 4 bars
   'command-bar': {
     id: 'command-bar',
     group: 'Shell',
@@ -52,61 +57,78 @@ export const SCENES: Record<string, ChapterSpec> = {
     kicker: 'Type or speak. ⌘K from anywhere.',
     shots: [
       {
+        // cmdk.mp4: ⌘K at ~0.9 s, "go to mission" typed by ~2.9 s, Enter ~4.5 s, then it docks.
         kind: 'screen',
         src: cap('cmdk.mp4'),
-        from: 1.2,
-        rate: 1.75,
-        weight: 2.2,
+        from: 0.6,
+        rate: 2,
+        beats: 5,
+        label: 'Run any command from one bar',
         cam: [
-          { t: 0, x: 0.5, y: 0.62, z: 1.25 },
-          { t: 0.3, x: 0.5, y: 0.7, z: 1.4 },
-          { t: 0.42, x: 0.5, y: 0.5, z: 1 },
-          { t: 0.55, x: 0.5, y: 0.8, z: 1.35 },
-          { t: 1, x: 0.5, y: 0.8, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.66, z: 1.3 },
+          { b: 3.6, x: 0.5, y: 0.5, z: 1 },
         ],
         callouts: [
-          { t0: 0.04, t1: 0.3, x: 0.33, y: 0.93, label: 'Press', keys: '⌘ K', side: 'top' },
-          { t0: 0.32, t1: 0.47, x: 0.5, y: 0.985, label: 'Docks into the status bar', side: 'top' },
-          { t0: 0.8, t1: 0.99, x: 0.73, y: 0.935, label: 'Four spaces', keys: '⌃1 ⌃4', side: 'top' },
+          { b: 0.3, until: 3.2, x: 0.33, y: 0.93, label: 'Press', keys: '⌘ K', side: 'top' },
+          { b: 4, x: 0.5, y: 0.985, label: 'Docks into the status bar', side: 'top' },
         ],
       },
-      { kind: 'custom', id: 'desktop', weight: 1.1 },
+      {
+        // Reopened at ~7.1 s, "what needs me today?" by ~9.6 s, ⌃2 at ~11.1 s.
+        kind: 'screen',
+        src: cap('cmdk.mp4'),
+        from: 7,
+        rate: 2.4,
+        beats: 4,
+        transition: 'push',
+        label: 'Ask, and answer in four spaces',
+        cam: [
+          { b: 0, x: 0.5, y: 0.74, z: 1.35 },
+          { b: 2.6, x: 0.55, y: 0.78, z: 1.45 },
+        ],
+        callouts: [{ b: 3.2, x: 0.73, y: 0.935, label: 'Four spaces', keys: '⌃1 ⌃4', side: 'top' }],
+      },
+      { kind: 'custom', id: 'desktop', beats: 7, label: '⌥Space from any app, the menu bar, pop-out windows' },
     ],
   },
 
+  // 3 bars
   assistant: {
     id: 'assistant',
     group: 'Work',
     title: 'Assistant',
-    kicker: 'Your personal agent — it asks before anything leaves your Mac',
+    kicker: 'Your personal agent, asks before anything leaves your Mac',
     shots: [
       {
         kind: 'screen',
         src: cap('assistant.jpg'),
-        weight: 1.3,
+        beats: 7,
+        label: 'Threads, tasks and approvals',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.55, y: 0.35, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2, x: 0.5, y: 0.35, z: 1.25 },
         ],
         callouts: [
-          { t0: 0.2, x: 0.17, y: 0.108, label: 'Threads in four spaces', side: 'bottom' },
-          { t0: 0.45, x: 0.61, y: 0.405, label: 'Otto asks, you decide', side: 'bottom' },
-          { t0: 0.65, x: 0.86, y: 0.105, label: 'Needs you', side: 'left' },
+          { b: 1, until: 4, x: 0.17, y: 0.108, label: 'Threads in four spaces', side: 'bottom' },
+          { b: 2.5, x: 0.61, y: 0.405, label: 'Otto asks, you decide', side: 'bottom' },
+          { b: 4, x: 0.86, y: 0.105, label: 'Needs you', side: 'left' },
         ],
       },
       {
         kind: 'screen',
         src: cap('assistant-memory.jpg'),
-        weight: 0.8,
+        beats: 5,
+        label: 'Memory you can read and edit',
         cam: [
-          { t: 0, x: 0.4, y: 0.4, z: 1.2 },
-          { t: 1, x: 0.4, y: 0.5, z: 1.35 },
+          { b: 0, x: 0.4, y: 0.4, z: 1.15 },
+          { b: 1, x: 0.4, y: 0.45, z: 1.35 },
         ],
-        callouts: [{ t0: 0.2, x: 0.33, y: 0.35, label: 'Remembers what matters', side: 'right' }],
+        callouts: [{ b: 1.5, x: 0.33, y: 0.35, label: 'Remembers what matters', side: 'right' }],
       },
     ],
   },
 
+  // 6 bars
   agents: {
     id: 'agents',
     group: 'Work',
@@ -116,90 +138,95 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('agents-tab.jpg'),
-        weight: 0.8,
+        beats: 4,
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.4, y: 0.4, z: 1.2 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1.5, x: 0.4, y: 0.4, z: 1.25 },
         ],
-        callouts: [{ t0: 0.25, x: 0.07, y: 0.24, label: 'Every session, live', side: 'right' }],
+        callouts: [{ b: 1.5, x: 0.07, y: 0.24, label: 'Every session, live', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('agents-tiled.jpg'),
-        weight: 1,
+        beats: 5,
+        label: 'Tiled: see every agent at once',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1.15 },
-          { t: 1, x: 0.55, y: 0.5, z: 1 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.2 },
+          { b: 1, x: 0.55, y: 0.5, z: 1 },
         ],
-        chip: 'Tiled — see every agent at once',
       },
       {
         kind: 'screen',
         src: cap('agents-queue.jpg'),
-        weight: 0.9,
+        beats: 5,
+        label: 'Work queue: what needs you first',
         cam: [
-          { t: 0, x: 0.6, y: 0.3, z: 1.35 },
-          { t: 1, x: 0.6, y: 0.3, z: 1.2 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1, x: 0.6, y: 0.3, z: 1.35 },
         ],
-        chip: 'Work queue — what needs you first',
       },
       {
         kind: 'screen',
         src: cap('agents-broadcast.jpg'),
-        weight: 0.8,
+        beats: 5,
+        label: 'Broadcast one prompt to many agents',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1.25 },
-          { t: 1, x: 0.5, y: 0.5, z: 1.4 },
+          { b: 0, x: 0.5, y: 0.5, z: 1.1 },
+          { b: 1, x: 0.5, y: 0.5, z: 1.4 },
         ],
-        chip: 'Broadcast one prompt to many agents',
       },
       {
         kind: 'screen',
         src: cap('history.jpg'),
-        weight: 1,
+        beats: 5,
+        label: 'History: every past conversation',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.7, y: 0.3, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1.5, x: 0.7, y: 0.3, z: 1.3 },
         ],
-        callouts: [{ t0: 0.3, x: 0.905, y: 0.075, label: 'Resume any conversation', side: 'bottom' }],
-        chip: 'History',
+        callouts: [{ b: 2, x: 0.905, y: 0.075, label: 'Resume any conversation', side: 'bottom' }],
       },
     ],
   },
 
+  // 4 bars
   'mission-control': {
     id: 'mission-control',
     group: 'Work',
     title: 'Run with Otto',
-    kicker: 'From a ticket to a reviewed branch — then see all the work',
+    kicker: 'From a ticket to a reviewed branch',
     shots: [
       {
         kind: 'screen',
         src: cap('run-with-otto.jpg'),
-        weight: 1,
+        beats: 8,
+        label: 'One click: source, branch, proof, review, PR',
         cam: [
-          { t: 0, x: 0.55, y: 0.35, z: 1.25 },
-          { t: 1, x: 0.55, y: 0.4, z: 1.4 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 1.5, x: 0.55, y: 0.38, z: 1.3 },
+          { b: 4.5, x: 0.7, y: 0.45, z: 1.4 },
         ],
         callouts: [
-          { t0: 0.18, x: 0.38, y: 0.38, label: 'Source → branch → proof → review → PR', side: 'top' },
-          { t0: 0.55, x: 0.96, y: 0.48, label: 'Waits for your approval', side: 'left' },
+          { b: 1.5, until: 4.5, x: 0.38, y: 0.38, label: 'Source → branch → proof → review → PR', side: 'top' },
+          { b: 5, x: 0.96, y: 0.48, label: 'Waits for your approval', side: 'left' },
         ],
       },
       {
         kind: 'screen',
         src: cap('mission-control.jpg'),
-        weight: 1,
+        beats: 8,
+        transition: 'whip',
+        label: 'Mission Control: the whole work graph',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.55, y: 0.3, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2, x: 0.5, y: 0.32, z: 1.3 },
         ],
-        callouts: [{ t0: 0.25, x: 0.4, y: 0.085, label: 'Running · waiting · approvals · spend', side: 'bottom' }],
-        chip: 'Mission Control',
+        callouts: [{ b: 2.5, x: 0.4, y: 0.085, label: 'Running · waiting · approvals · spend', side: 'bottom' }],
       },
     ],
   },
 
+  // 4 bars — verse
   swarm: {
     id: 'swarm',
     group: 'Automate',
@@ -209,131 +236,136 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('swarm.jpg'),
-        weight: 0.9,
+        beats: 5,
+        label: 'Roles and an org chart',
         cam: [
-          { t: 0, x: 0.35, y: 0.3, z: 1.5 },
-          { t: 1, x: 0.4, y: 0.3, z: 1.35 },
+          { b: 0, x: 0.45, y: 0.4, z: 1.1 },
+          { b: 1.5, x: 0.35, y: 0.3, z: 1.5 },
         ],
-        callouts: [{ t0: 0.25, x: 0.325, y: 0.2, label: 'Roles and an org chart', side: 'right' }],
+        callouts: [{ b: 2, x: 0.325, y: 0.2, label: 'Coordinator and roles', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('swarm-board.jpg'),
-        weight: 1,
+        beats: 5,
+        label: 'A shared board',
         cam: [
-          { t: 0, x: 0.6, y: 0.35, z: 1.3 },
-          { t: 1, x: 0.65, y: 0.35, z: 1.2 },
+          { b: 0, x: 0.55, y: 0.4, z: 1.05 },
+          { b: 1, x: 0.62, y: 0.35, z: 1.3 },
         ],
-        chip: 'A shared board',
       },
       {
         kind: 'screen',
         src: cap('loops.jpg'),
-        weight: 1,
+        beats: 6,
+        label: 'Goal Loops: plan, execute, evaluate',
         cam: [
-          { t: 0, x: 0.4, y: 0.25, z: 1.6 },
-          { t: 1, x: 0.4, y: 0.25, z: 1.45 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.4, y: 0.25, z: 1.55 },
         ],
         callouts: [
-          { t0: 0.15, x: 0.2, y: 0.1, label: 'Plan → execute → evaluate', side: 'bottom' },
-          { t0: 0.45, x: 0.18, y: 0.26, label: 'Acceptance checks', side: 'right' },
+          { b: 1.5, x: 0.2, y: 0.1, label: 'Plan → execute → evaluate', side: 'bottom' },
+          { b: 3, x: 0.18, y: 0.26, label: 'Until the acceptance checks pass', side: 'right' },
         ],
-        chip: 'Goal Loops',
       },
     ],
   },
 
+  // 4 bars
   workflows: {
     id: 'workflows',
     group: 'Automate',
-    title: 'Workflows and schedules',
+    title: 'Workflows',
     kicker: 'Pipelines of agents, approvals and tools',
     shots: [
       {
         kind: 'screen',
         src: cap('workflows.jpg'),
-        weight: 1.3,
+        beats: 6,
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.45, y: 0.3, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1.5, x: 0.42, y: 0.3, z: 1.3 },
         ],
-        callouts: [{ t0: 0.3, x: 0.3, y: 0.072, label: 'Paused for your approval', side: 'bottom' }],
+        callouts: [{ b: 2, x: 0.3, y: 0.072, label: 'Paused for your approval', side: 'bottom' }],
       },
       {
         kind: 'screen',
         src: cap('scheduled-tasks.jpg'),
-        weight: 0.9,
+        beats: 5,
+        label: 'Scheduled tasks on a cadence',
         cam: [
-          { t: 0, x: 0.45, y: 0.2, z: 1.6 },
-          { t: 1, x: 0.4, y: 0.2, z: 1.5 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.45, y: 0.22, z: 1.55 },
         ],
-        chip: 'Scheduled Tasks',
       },
       {
         kind: 'screen',
         src: cap('personal-agents.jpg'),
-        weight: 0.9,
+        beats: 5,
+        label: 'Personal agents with their own soul and memory',
         cam: [
-          { t: 0, x: 0.5, y: 0.2, z: 1.6 },
-          { t: 1, x: 0.45, y: 0.2, z: 1.5 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.48, y: 0.22, z: 1.55 },
         ],
-        chip: 'Personal Agents',
       },
     ],
   },
 
+  // 4 bars — chorus 2
   git: {
     id: 'git',
     group: 'Build',
-    title: 'Git, reviews and proof',
+    title: 'Git, review and proof',
     kicker: 'Graph, work in progress, PRs and AI review',
     shots: [
       {
         kind: 'screen',
         src: cap('git.jpg'),
-        weight: 1,
+        beats: 5,
+        label: 'A commit graph with your work in progress',
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.4, y: 0.4, z: 1.3 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 1, x: 0.4, y: 0.38, z: 1.3 },
         ],
         callouts: [
-          { t0: 0.2, x: 0.3, y: 0.225, label: 'Work in progress', side: 'right' },
-          { t0: 0.45, x: 0.2, y: 0.315, label: 'Branches and worktrees', side: 'right' },
+          { b: 1.5, x: 0.3, y: 0.225, label: 'Work in progress', side: 'right' },
+          { b: 3, x: 0.2, y: 0.315, label: 'Branches and worktrees', side: 'right' },
         ],
       },
       {
         kind: 'screen',
         src: cap('git-wip.jpg'),
-        weight: 0.8,
+        beats: 3,
+        label: 'Stage, commit, draft the message with AI',
         cam: [
-          { t: 0, x: 0.75, y: 0.35, z: 1.35 },
-          { t: 1, x: 0.78, y: 0.35, z: 1.45 },
+          { b: 0, x: 0.7, y: 0.4, z: 1.15 },
+          { b: 0.5, x: 0.76, y: 0.35, z: 1.45 },
         ],
-        chip: 'Stage, commit, draft with AI',
       },
       {
         kind: 'screen',
         src: cap('git-review.jpg'),
-        weight: 1,
+        beats: 4,
+        label: 'Multi-agent AI review with findings',
         cam: [
-          { t: 0, x: 0.5, y: 0.4, z: 1.2 },
-          { t: 1, x: 0.5, y: 0.35, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 1, x: 0.5, y: 0.35, z: 1.35 },
         ],
-        chip: 'Multi-agent AI review',
       },
       {
         kind: 'screen',
         src: cap('proof.jpg'),
-        weight: 0.9,
+        beats: 4,
+        label: 'Proof packs: the evidence behind every change',
         cam: [
-          { t: 0, x: 0.7, y: 0.3, z: 1.3 },
-          { t: 1, x: 0.72, y: 0.3, z: 1.4 },
+          { b: 0, x: 0.6, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.7, y: 0.3, z: 1.4 },
         ],
-        chip: 'Proof packs — the evidence behind every change',
       },
     ],
   },
 
+  // 3 bars
   vault: {
     id: 'vault',
     group: 'Build',
@@ -343,26 +375,28 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('product.jpg'),
-        weight: 0.9,
+        beats: 5,
+        label: 'Product: stories into analysis and drafts',
         cam: [
-          { t: 0, x: 0.4, y: 0.3, z: 1.4 },
-          { t: 1, x: 0.4, y: 0.3, z: 1.3 },
+          { b: 0, x: 0.45, y: 0.4, z: 1.1 },
+          { b: 1, x: 0.4, y: 0.3, z: 1.4 },
         ],
-        chip: 'Product',
       },
       {
         kind: 'screen',
         src: cap('vault-graph.jpg'),
-        weight: 1.1,
+        beats: 7,
+        transition: 'wipe',
+        label: 'Vault: linked markdown and a live graph',
         cam: [
-          { t: 0, x: 0.6, y: 0.55, z: 1.1 },
-          { t: 1, x: 0.65, y: 0.5, z: 1.35 },
+          { b: 0, x: 0.55, y: 0.5, z: 1 },
+          { b: 2, x: 0.65, y: 0.5, z: 1.4 },
         ],
-        chip: 'Vault — linked markdown + graph',
       },
     ],
   },
 
+  // 5 bars
   design: {
     id: 'design',
     group: 'Build',
@@ -372,24 +406,36 @@ export const SCENES: Record<string, ChapterSpec> = {
       {
         kind: 'screen',
         src: cap('design.jpg'),
-        weight: 1.2,
+        beats: 6,
         cam: [
-          { t: 0, x: 0.5, y: 0.5, z: 1 },
-          { t: 1, x: 0.45, y: 0.55, z: 1.25 },
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2, x: 0.45, y: 0.55, z: 1.25 },
         ],
         callouts: [
-          { t0: 0.15, x: 0.35, y: 0.46, label: 'Frames · Graphics · Site · 3D · Brand', side: 'top' },
-          { t0: 0.55, x: 0.82, y: 0.12, label: 'What Otto learned', side: 'bottom' },
+          { b: 1.5, until: 4, x: 0.35, y: 0.46, label: 'Frames · Graphics · Site · 3D · Brand', side: 'top' },
+          { b: 4, x: 0.82, y: 0.12, label: 'What Otto learned', side: 'bottom' },
         ],
       },
-      { kind: 'screen', src: cap('design-frame.jpg'), weight: 0.75, cam: [{ t: 0, x: 0.4, y: 0.4, z: 1.2 }, { t: 1, x: 0.38, y: 0.35, z: 1.35 }], chip: 'Frames — versions you compare' },
-      { kind: 'screen', src: cap('design-3d.jpg'), weight: 0.7, cam: [{ t: 0, x: 0.35, y: 0.45, z: 1.3 }, { t: 1, x: 0.35, y: 0.45, z: 1.45 }], chip: '3D Studio' },
-      { kind: 'screen', src: cap('design-site.jpg'), weight: 0.7, cam: [{ t: 0, x: 0.35, y: 0.4, z: 1.3 }, { t: 1, x: 0.35, y: 0.4, z: 1.4 }], chip: 'Site Studio' },
-      { kind: 'screen', src: cap('design-brand.jpg'), weight: 0.65, cam: [{ t: 0, x: 0.5, y: 0.25, z: 1.5 }, { t: 1, x: 0.5, y: 0.25, z: 1.6 }], chip: 'Brand Kit' },
-      { kind: 'screen', src: cap('skills-eval.jpg'), weight: 0.8, cam: [{ t: 0, x: 0.35, y: 0.35, z: 1.3 }, { t: 1, x: 0.35, y: 0.3, z: 1.4 }], chip: 'Skills Lab' },
+      // Quick cuts through the studios, one every two beats.
+      { kind: 'screen', src: cap('design-frame.jpg'), beats: 2, transition: 'whip', card: { title: 'Frames', sub: 'Versions you compare' }, cam: [{ b: 0, x: 0.4, y: 0.4, z: 1.25 }] },
+      { kind: 'screen', src: cap('design-3d.jpg'), beats: 2, transition: 'whip', card: { title: '3D Studio' }, cam: [{ b: 0, x: 0.35, y: 0.45, z: 1.35 }] },
+      { kind: 'screen', src: cap('design-site.jpg'), beats: 2, transition: 'whip', card: { title: 'Site Studio' }, cam: [{ b: 0, x: 0.35, y: 0.4, z: 1.35 }] },
+      { kind: 'screen', src: cap('design-brand.jpg'), beats: 2, transition: 'whip', card: { title: 'Brand Kit' }, cam: [{ b: 0, x: 0.5, y: 0.3, z: 1.5 }] },
+      {
+        kind: 'screen',
+        src: cap('skills-eval.jpg'),
+        beats: 6,
+        transition: 'push',
+        label: 'Skills Lab evaluates and sharpens your agent skills',
+        cam: [
+          { b: 0, x: 0.45, y: 0.45, z: 1.05 },
+          { b: 1, x: 0.35, y: 0.32, z: 1.4 },
+        ],
+      },
     ],
   },
 
+  // 4 bars — verse 2
   database: {
     id: 'database',
     group: 'Infrastructure',
@@ -397,89 +443,165 @@ export const SCENES: Record<string, ChapterSpec> = {
     kicker: 'MySQL · Postgres · MongoDB · Redis · ClickHouse',
     shots: [
       {
+        // db-builder.mp4 at 2.6×: tables join by ~3 s, aggregate ~7 s, HAVING/sort ~11 s, Run ~13.7 s.
         kind: 'screen',
         src: cap('db-builder.mp4'),
-        from: 0.4,
-        rate: 1.55,
-        weight: 2.3,
+        from: 1,
+        rate: 2.6,
+        beats: 12,
+        label: 'Build a query visually',
         cam: [
-          { t: 0, x: 0.45, y: 0.3, z: 1.35 },
-          { t: 0.35, x: 0.45, y: 0.35, z: 1.3 },
-          { t: 0.55, x: 0.45, y: 0.7, z: 1.4 },
-          { t: 0.8, x: 0.55, y: 0.7, z: 1.4 },
-          { t: 0.9, x: 0.6, y: 0.4, z: 1.1 },
-          { t: 1, x: 0.6, y: 0.4, z: 1.1 },
+          { b: 0, x: 0.45, y: 0.32, z: 1.35 },
+          { b: 5, x: 0.45, y: 0.7, z: 1.4 },
+          { b: 9.5, x: 0.6, y: 0.5, z: 1.05 },
         ],
         callouts: [
-          { t0: 0.1, t1: 0.36, x: 0.46, y: 0.2, label: 'Joins follow foreign keys', side: 'bottom' },
-          { t0: 0.5, t1: 0.78, x: 0.34, y: 0.86, label: 'GROUP BY · HAVING · ORDER BY', side: 'right' },
-          { t0: 0.6, t1: 0.86, x: 0.72, y: 0.62, label: 'Live SQL', side: 'left' },
+          { b: 0.5, until: 4.5, x: 0.46, y: 0.2, label: 'Joins follow foreign keys', side: 'bottom' },
+          { b: 5.5, until: 9, x: 0.34, y: 0.86, label: 'GROUP BY · HAVING · ORDER BY', side: 'right' },
+          { b: 7, until: 9.5, x: 0.72, y: 0.62, label: 'Live SQL', side: 'left' },
         ],
       },
       {
         kind: 'screen',
         src: cap('db-results.jpg'),
-        weight: 0.9,
+        beats: 4,
+        transition: 'push',
+        label: 'Results in a grid, or one record at a time',
         cam: [
-          { t: 0, x: 0.6, y: 0.6, z: 1.3 },
-          { t: 1, x: 0.55, y: 0.6, z: 1.45 },
+          { b: 0, x: 0.6, y: 0.6, z: 1.2 },
+          { b: 1, x: 0.55, y: 0.6, z: 1.45 },
         ],
-        callouts: [{ t0: 0.2, x: 0.55, y: 0.5, label: 'Grid · Vertical · JSON', side: 'top' }],
-        chip: 'Results in a grid or one record at a time',
+        callouts: [{ b: 1, x: 0.55, y: 0.5, label: 'Grid · Vertical · JSON', side: 'top' }],
       },
     ],
   },
 
+  // 4 bars — quick cuts across the infrastructure modules
   infra: {
     id: 'infra',
     group: 'Infrastructure',
     title: 'Connections and cloud',
-    kicker: 'SSH, Kafka, AWS, Kubernetes, APIs, the web — governed',
+    kicker: 'SSH, Kafka, AWS, Kubernetes, APIs and the web',
     shots: [
-      {
-        kind: 'montage',
-        weight: 1,
-        items: [
-          { src: cap('connections.jpg'), label: 'Connections', sub: 'SSH hosts, SFTP, sections', x: 0.2, y: 0.25, z: 1.35 },
-          { src: cap('brokers.jpg'), label: 'Message brokers', sub: 'Kafka topics and messages', x: 0.5, y: 0.35, z: 1.2 },
-          { src: cap('aws.jpg'), label: 'AWS', sub: 'S3 · SQS · EC2 · Athena · EKS', x: 0.35, y: 0.25, z: 1.3 },
-          { src: cap('kubernetes.jpg'), label: 'Kubernetes', sub: 'Clusters, workloads, logs', x: 0.3, y: 0.15, z: 1.5 },
-          { src: cap('api.jpg'), label: 'API client', sub: 'Requests, environments, history', x: 0.5, y: 0.3, z: 1.2 },
-          { src: cap('browser.jpg'), label: 'Browser', sub: 'Reader and live tabs for agents', x: 0.6, y: 0.4, z: 1.15 },
-          { src: cap('mcp-activity.jpg'), label: 'MCP control plane', sub: 'Every tool call approved and audited', x: 0.55, y: 0.35, z: 1.2 },
-        ],
-      },
+      { kind: 'screen', src: cap('connections.jpg'), beats: 4, card: { title: 'Connections', sub: 'SSH terminals, SFTP, sections' }, cam: [{ b: 0, x: 0.3, y: 0.35, z: 1.1 }, { b: 1, x: 0.2, y: 0.25, z: 1.35 }] },
+      { kind: 'screen', src: cap('brokers.jpg'), beats: 2, transition: 'whip', card: { title: 'Message brokers', sub: 'Kafka topics and messages' }, cam: [{ b: 0, x: 0.5, y: 0.35, z: 1.2 }] },
+      { kind: 'screen', src: cap('aws.jpg'), beats: 2, transition: 'whip', card: { title: 'AWS', sub: 'S3 · SQS · EC2 · Athena · EKS' }, cam: [{ b: 0, x: 0.35, y: 0.25, z: 1.3 }] },
+      { kind: 'screen', src: cap('kubernetes.jpg'), beats: 2, transition: 'whip', card: { title: 'Kubernetes', sub: 'Clusters, workloads, logs' }, cam: [{ b: 0, x: 0.3, y: 0.2, z: 1.45 }] },
+      { kind: 'screen', src: cap('api.jpg'), beats: 2, transition: 'whip', card: { title: 'API client', sub: 'Requests, environments, history' }, cam: [{ b: 0, x: 0.5, y: 0.3, z: 1.2 }] },
+      { kind: 'screen', src: cap('browser.jpg'), beats: 2, transition: 'whip', card: { title: 'Browser', sub: 'Reader and live tabs for agents' }, cam: [{ b: 0, x: 0.6, y: 0.4, z: 1.15 }] },
+      { kind: 'screen', src: cap('mcp-activity.jpg'), beats: 2, transition: 'whip', card: { title: 'MCP control plane', sub: 'Every tool call approved and audited' }, cam: [{ b: 0, x: 0.55, y: 0.35, z: 1.2 }] },
     ],
   },
 
+  // 4 bars — breakdown: slower, wider moves
   insights: {
     id: 'insights',
     group: 'Insight',
     title: 'Insights and Usage',
-    kicker: 'Reports with key findings; tokens, cost and load',
+    kicker: 'Key findings, tokens, cost and load',
     shots: [
       {
         kind: 'screen',
         src: cap('insights.jpg'),
-        weight: 1,
+        beats: 8,
+        label: 'Reports with key findings',
         cam: [
-          { t: 0, x: 0.55, y: 0.35, z: 1.2 },
-          { t: 1, x: 0.6, y: 0.35, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 2, x: 0.55, y: 0.35, z: 1.3 },
         ],
-        callouts: [{ t0: 0.25, x: 0.45, y: 0.24, label: 'Key findings', side: 'right' }],
+        callouts: [{ b: 2.5, x: 0.45, y: 0.24, label: 'Key findings', side: 'right' }],
       },
       {
         kind: 'screen',
         src: cap('usage.jpg'),
-        weight: 1,
+        beats: 8,
+        transition: 'wipe',
+        label: 'Usage: tokens, cost and machine load',
         cam: [
-          { t: 0, x: 0.5, y: 0.35, z: 1.25 },
-          { t: 1, x: 0.55, y: 0.4, z: 1.35 },
+          { b: 0, x: 0.5, y: 0.4, z: 1.05 },
+          { b: 2, x: 0.55, y: 0.4, z: 1.35 },
         ],
-        chip: 'Usage',
       },
     ],
   },
 
-  outro: { id: 'outro', group: 'Everywhere', title: 'Everywhere', shots: [{ kind: 'custom', id: 'phone' }] },
+  // 8 bars — the final chorus. Genuine two-person room footage (1920×1080).
+  rooms: {
+    id: 'rooms',
+    group: 'Work',
+    title: 'Rooms',
+    kicker: 'Collaborate on a live session, then recap it',
+    shots: [
+      {
+        kind: 'screen',
+        src: room('01-start.mp4'),
+        from: 0.5,
+        rate: 1.3,
+        beats: 6,
+        label: 'Start a room from a live session',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1.05 },
+          { b: 2, x: 0.5, y: 0.5, z: 1.6 },
+        ],
+        callouts: [{ b: 3, x: 0.62, y: 0.49, label: 'The host admits who joins', side: 'right' }],
+      },
+      {
+        kind: 'screen',
+        src: room('04-screen.mp4'),
+        from: 0.6,
+        rate: 1.4,
+        beats: 6,
+        transition: 'whip',
+        label: 'Share a live screen and talk it through',
+        cam: [
+          { b: 0, x: 0.45, y: 0.5, z: 1.1 },
+          { b: 1.5, x: 0.33, y: 0.55, z: 1.75 },
+        ],
+        highlights: [{ b: 2.5, until: 5.5, x: 0.16, y: 0.38, w: 0.3, h: 0.38 }],
+      },
+      {
+        kind: 'screen',
+        src: room('05-draw.mp4'),
+        from: 0.4,
+        rate: 1.3,
+        beats: 6,
+        transition: 'push',
+        label: 'Teammates draw on the shared screen, with permission',
+        cam: [
+          { b: 0, x: 0.35, y: 0.5, z: 1.4 },
+          { b: 1, x: 0.27, y: 0.53, z: 1.9 },
+        ],
+      },
+      {
+        kind: 'screen',
+        src: room('07-request-control.mp4'),
+        from: 0.5,
+        rate: 1.3,
+        beats: 6,
+        transition: 'whip',
+        label: 'Hand over terminal control, take it back any time',
+        cam: [
+          { b: 0, x: 0.5, y: 0.5, z: 1 },
+          { b: 2, x: 0.28, y: 0.8, z: 1.7 },
+        ],
+        callouts: [{ b: 3, x: 0.2, y: 0.83, label: 'A real test, in the shared terminal', side: 'right' }],
+      },
+      {
+        kind: 'screen',
+        src: room('11-summary.mp4'),
+        from: 0.8,
+        rate: 1.6,
+        beats: 8,
+        transition: 'push',
+        label: 'A local recap, only after everyone consents',
+        cam: [
+          { b: 0, x: 0.5, y: 0.45, z: 1.05 },
+          { b: 1.5, x: 0.5, y: 0.33, z: 1.45 },
+        ],
+        callouts: [{ b: 2.5, x: 0.36, y: 0.24, label: 'Decisions · actions · open questions', side: 'right' }],
+      },
+    ],
+  },
+
+  outro: { id: 'outro', group: 'Everywhere', title: 'Everywhere', shots: [{ kind: 'custom', id: 'outro', beats: 24 }] },
 };

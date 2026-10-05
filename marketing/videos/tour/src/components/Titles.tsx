@@ -1,121 +1,169 @@
 import React from 'react';
-import { AbsoluteFill, Easing, interpolate, useCurrentFrame, useVideoConfig } from 'remotion';
-import { C, FONT, GROUP_TINT } from '../theme';
+import { AbsoluteFill, interpolate, useCurrentFrame } from 'remotion';
+import { CHAPTERS, NUMBERED, type PlacedChapter } from '../layout';
+import { C, FONT, GROUP_TINT, rgba } from '../theme';
+import { GLIDE, POP, beatPulse, clamp, easeOut, sp } from '../motion';
+import { WIN, WIN_LEFT } from './Screen';
 
-const clamp = { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' } as const;
+/** Frames the hero title holds before it docks into the header band. */
+const HERO = 22;
 
 /**
- * Chapter card: a glass lower-third that slides in over the footage at the
- * start of a chapter — sidebar group chip, big title, a short kicker line.
+ * Kinetic chapter title. On the downbeat the group and title slam in big over
+ * a scrim (each word rises out of a mask, staggered); after ~1.5 beats it
+ * docks into the header band above the window, where it stays with a second
+ * line that follows the shot on screen.
  */
-export const ChapterCard: React.FC<{ group: string; title: string; kicker?: string; hold?: number; index: number; total: number }> = ({
-  group,
-  title,
-  kicker,
-  hold = 3.4,
-  index,
-  total,
-}) => {
-  const f = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const inK = interpolate(f, [4, 22], [0, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
-  const outK = interpolate(f, [hold * fps, hold * fps + 14], [1, 0], { ...clamp, easing: Easing.in(Easing.cubic) });
-  const k = Math.min(inK, outK);
-  if (k <= 0) return null;
-  const tint = GROUP_TINT[group] ?? C.accent;
-  const words = title.split(' ');
+export const ChapterHeader: React.FC<{ ch: PlacedChapter }> = ({ ch }) => {
+  const f = useCurrentFrame(); // frames since the chapter's start
+  const tint = GROUP_TINT[ch.spec.group] ?? C.accent;
+  const dock = sp(f, HERO, GLIDE);
+  const exit = interpolate(f, [ch.frames - 5, ch.frames], [1, 0], clamp);
+  const words = ch.spec.title.split(' ');
+  // The hero block flies toward the band and hands over to the docked header.
+  const heroO = interpolate(dock, [0, 0.55, 0.8], [1, 1, 0], clamp);
+  const heroX = interpolate(dock, [0, 1], [0, WIN_LEFT - 128]);
+  const heroY = interpolate(dock, [0, 1], [0, -390]);
+  const heroS = interpolate(dock, [0, 1], [1, 0.32]);
+  const dockO = interpolate(dock, [0.55, 0.9], [0, 1], clamp) * exit;
+  // The line under the docked title: the current shot's label, else the kicker.
+  const abs = ch.from + f;
+  const shot = ch.shots.find((s) => abs >= s.from && abs < s.from + s.frames) ?? ch.shots[0];
+  const label = shot.shot.label ?? ch.spec.kicker ?? '';
+  const labelF = abs - (shot.shot.label ? shot.from : ch.from);
+  const lk = shot.index === 0 ? dockO : sp(labelF, 0, POP) * exit;
   return (
     <AbsoluteFill style={{ pointerEvents: 'none' }}>
-      <div
+      {/* scrim behind the hero so the title reads over any footage */}
+      <AbsoluteFill
         style={{
-          position: 'absolute',
-          left: 80,
-          bottom: 70,
-          padding: '22px 30px 24px 26px',
-          borderRadius: 22,
-          background: 'rgba(16,16,20,0.78)',
-          backdropFilter: 'blur(22px) saturate(1.4)',
-          border: '1px solid rgba(255,255,255,0.14)',
-          boxShadow: '0 30px 80px rgba(0,0,0,0.5)',
-          transform: `translateX(${(1 - inK) * -60}px)`,
-          opacity: k,
-          display: 'flex',
-          gap: 22,
-          alignItems: 'stretch',
+          background: `linear-gradient(90deg, rgba(6,6,10,0.9) 0%, rgba(6,6,10,0.72) 45%, rgba(6,6,10,0) 80%)`,
+          opacity: interpolate(f, [0, 2], [0, 1], clamp) * interpolate(dock, [0, 0.7], [1, 0], clamp),
         }}
-      >
-        <div style={{ width: 5, borderRadius: 3, background: tint, boxShadow: `0 0 18px ${tint}` }} />
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
-            <span
-              style={{
-                font: `700 16px ${FONT}`,
-                letterSpacing: 2.2,
-                textTransform: 'uppercase',
-                color: tint,
-              }}
-            >
-              {group}
-            </span>
-            <span style={{ font: `500 16px ${FONT}`, color: C.textDim, letterSpacing: 1 }}>
-              {String(index).padStart(2, '0')} / {String(total).padStart(2, '0')}
-            </span>
-          </div>
-          <div style={{ font: `700 50px ${FONT}`, color: C.text, letterSpacing: -1.2, lineHeight: 1.05, display: 'flex', gap: 14 }}>
+      />
+      {heroO > 0 ? (
+        <div
+          style={{
+            position: 'absolute',
+            left: 128,
+            top: 360,
+            width: 1400,
+            transformOrigin: '0 0',
+            transform: `translate(${heroX}px, ${heroY}px) scale(${heroS})`,
+            opacity: heroO,
+          }}
+        >
+          <GroupTag group={ch.spec.group} tint={tint} size={28} k={sp(f, 0, POP)} number={ch.number} />
+          <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: 30, rowGap: 0, marginTop: 14 }}>
             {words.map((w, i) => {
-              const wk = interpolate(f, [8 + i * 4, 24 + i * 4], [0, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
+              const k = sp(f, 1 + i * 2, POP);
               return (
-                <span key={i} style={{ opacity: wk, transform: `translateY(${(1 - wk) * 18}px)`, display: 'inline-block' }}>
-                  {w}
+                <span key={i} style={{ display: 'inline-block', overflow: 'hidden', paddingBottom: 10 }}>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      font: `800 118px ${FONT}`,
+                      letterSpacing: -4.5,
+                      lineHeight: 1.02,
+                      color: C.text,
+                      transform: `translateY(${(1 - k) * 110}%)`,
+                    }}
+                  >
+                    {w}
+                  </span>
                 </span>
               );
             })}
           </div>
-          {kicker ? (
+          {ch.spec.kicker ? (
             <div
               style={{
-                font: `500 22px ${FONT}`,
-                color: '#c9c9d1',
-                marginTop: 8,
-                opacity: interpolate(f, [18, 34], [0, 1], clamp),
+                font: `550 38px ${FONT}`,
+                color: '#d4d4de',
+                marginTop: 18,
+                letterSpacing: -0.4,
+                opacity: interpolate(f, [6, 12], [0, 1], clamp),
+                transform: `translateY(${(1 - easeOut(interpolate(f, [6, 14], [0, 1], clamp))) * 20}px)`,
               }}
             >
-              {kicker}
+              {ch.spec.kicker}
             </div>
           ) : null}
+        </div>
+      ) : null}
+      {/* docked header, above the window */}
+      <div style={{ position: 'absolute', left: WIN_LEFT, top: 22, height: WIN.top - 30, display: 'flex', flexDirection: 'column', justifyContent: 'center', opacity: dockO }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 16 }}>
+          <GroupTag group={ch.spec.group} tint={tint} size={15} k={1} />
+          <span style={{ font: `750 34px ${FONT}`, color: C.text, letterSpacing: -0.9 }}>{ch.spec.title}</span>
+        </div>
+        <div style={{ height: 30, overflow: 'hidden', marginTop: 2 }}>
+          <div
+            key={shot.index}
+            style={{ font: `500 22px ${FONT}`, color: '#c4c4ce', letterSpacing: -0.1, transform: `translateY(${(1 - lk) * 26}px)`, opacity: lk }}
+          >
+            {label}
+          </div>
         </div>
       </div>
     </AbsoluteFill>
   );
 };
 
-/** A small bottom-center chip naming the feature on screen right now. */
-export const FeatureChip: React.FC<{ label: string; frames: number }> = ({ label, frames }) => {
-  const f = useCurrentFrame();
-  const k = Math.min(
-    interpolate(f, [2, 14], [0, 1], clamp),
-    interpolate(f, [frames - 10, frames - 1], [1, 0], clamp),
+const GroupTag: React.FC<{ group: string; tint: string; size: number; k: number; number?: number }> = ({ group, tint, size, k, number }) => (
+  <span style={{ display: 'inline-flex', alignItems: 'center', gap: size * 0.6, opacity: k, transform: `translateX(${(1 - k) * -30}px)` }}>
+    <span style={{ width: size * 0.62, height: size * 0.62, borderRadius: size, background: tint, boxShadow: `0 0 ${size}px ${rgba(tint, 0.9)}` }} />
+    <span style={{ font: `750 ${size}px ${FONT}`, letterSpacing: size * 0.16, textTransform: 'uppercase', color: tint }}>{group}</span>
+    {number ? (
+      <span style={{ font: `600 ${size}px ${FONT}`, letterSpacing: size * 0.08, color: C.textDim }}>
+        {String(number).padStart(2, '0')} / {String(NUMBERED.length).padStart(2, '0')}
+      </span>
+    ) : null}
+  </span>
+);
+
+/**
+ * The chapter rail, top right: one segment per numbered chapter (sized by its
+ * length), done ones in their group colour, the current one filling in time
+ * with a beat-synced glow.
+ */
+export const ProgressRail: React.FC = () => {
+  const f = useCurrentFrame(); // absolute
+  const numbered = CHAPTERS.filter((c) => c.number > 0);
+  const first = numbered[0];
+  const last = numbered[numbered.length - 1];
+  const o = Math.min(
+    interpolate(f, [first.from + HERO, first.from + HERO + 12], [0, 1], clamp),
+    interpolate(f, [last.from + last.frames - 8, last.from + last.frames], [1, 0], clamp),
   );
-  if (k <= 0) return null;
+  if (o <= 0) return null;
+  const total = numbered.reduce((s, c) => s + c.frames, 0);
+  const W = 470;
+  const gap = 5;
+  const cur = numbered.find((c) => f >= c.from && f < c.from + c.frames);
   return (
-    <AbsoluteFill style={{ pointerEvents: 'none', alignItems: 'center' }}>
-      <div
-        style={{
-          position: 'absolute',
-          bottom: 30,
-          padding: '9px 20px',
-          borderRadius: 999,
-          background: 'rgba(10,132,255,0.92)',
-          color: '#fff',
-          font: `650 21px ${FONT}`,
-          letterSpacing: 0.2,
-          boxShadow: '0 10px 30px rgba(10,132,255,0.45)',
-          opacity: k,
-          transform: `translateY(${(1 - k) * 16}px)`,
-        }}
-      >
-        {label}
+    <div style={{ position: 'absolute', right: WIN_LEFT, top: 50, width: W, opacity: o }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10, font: `650 16px ${FONT}`, letterSpacing: 1.5, color: C.textDim }}>
+        {cur ? (
+          <span>
+            <span style={{ color: C.text }}>{String(cur.number).padStart(2, '0')}</span> / {String(numbered.length).padStart(2, '0')}
+          </span>
+        ) : null}
       </div>
-    </AbsoluteFill>
+      <div style={{ display: 'flex', gap }}>
+        {numbered.map((c) => {
+          const tint = GROUP_TINT[c.spec.group] ?? C.accent;
+          const w = ((W - gap * (numbered.length - 1)) * c.frames) / total;
+          const p = interpolate(f, [c.from, c.from + c.frames], [0, 1], clamp);
+          const active = c === cur;
+          const glow = active ? 0.45 + 0.4 * beatPulse(f) : 0;
+          return (
+            <div key={c.id} style={{ width: w, height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.14)', overflow: 'hidden', boxShadow: active ? `0 0 14px ${rgba(tint, glow)}` : undefined }}>
+              <div style={{ width: `${p * 100}%`, height: '100%', background: tint, opacity: active ? 1 : 0.85 }} />
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 };
