@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { DESKTOP_GATE_SPECS, MOBILE_GATE_SPECS, gateMatcher } from './e2e/gate-specs';
 
 // Mobile/tablet E2E suite. Runs the real UI (Vite dev server) against an
 // ISOLATED throwaway daemon spun up in global-setup (temp data dir + temp port)
@@ -66,6 +67,20 @@ export default defineConfig({
       testMatch: /desktop-.*\.spec\.ts/,
       testIgnore: FUNCTIONAL_ONLY ? /desktop-.*perf.*\.spec\.ts/ : undefined,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
+    },
+    // The BLOCKING smoke gate (ci.yml `e2e-gate`): a green-history subset of
+    // the specs above, listed in e2e/gate-specs.ts. Same devices/viewports as
+    // desktop-browser / iphone-portrait, so a gate spec behaves identically in
+    // the advisory shards.
+    {
+      name: 'desktop-gate',
+      testMatch: gateMatcher(DESKTOP_GATE_SPECS),
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
+    },
+    {
+      name: 'iphone-gate',
+      testMatch: gateMatcher(MOBILE_GATE_SPECS),
+      use: { ...devices['iPhone 14 Pro Max'], storageState: STATE },
     },
     // Desktop WEBKIT: the perf gates (desktop-*perf*) on the engine closest to
     // the app's WKWebView, where style/layout/paint dominate (r3-10-02).
