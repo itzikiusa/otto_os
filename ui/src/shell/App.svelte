@@ -401,12 +401,10 @@
     };
   });
 
-  // Open Git tabs remain fresh while working in other modules. Only the
-  // visible, focused window schedules network work; focus resumes due repos.
+  // Automatic network work belongs to the visible Git page. Leaving it stops
+  // queued/background work; returning resumes due repos with the same backoff.
   $effect(() => {
-    // The side-by-side pane keeps repos fresh only while it shows Git — the
-    // main window already polls every open repo tab.
-    if (isEmbedded && moduleName !== 'git') return;
+    if (moduleName !== 'git') return;
     let stopped = false;
     void untrack(() => git.initializeOpenTabs()).then(() => {
       if (!stopped) git.startAutoFetch();

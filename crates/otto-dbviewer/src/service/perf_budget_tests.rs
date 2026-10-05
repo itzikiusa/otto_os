@@ -80,6 +80,7 @@ async fn fixture() -> (DbViewerService, Id, Id) {
 /// builds (each parks briefly so concurrent callers overlap).
 struct Stub {
     roots: usize,
+    fk_scopes: Option<Vec<Option<String>>>,
     bulk_calls: AtomicUsize,
 }
 
@@ -108,7 +109,22 @@ impl Driver for Stub {
         unreachable!("the bulk path must not walk the tree")
     }
     async fn object_detail(&self, _: &ResolvedConfig, _: &NodePath) -> Result<ObjectDetail> {
-        unreachable!("the bulk path must not introspect per object")
+        let mut detail = ObjectDetail::new("t", NodeKind::Table);
+        detail.foreign_keys = (0..self.roots)
+            .map(|i| crate::types::ForeignKey {
+                name: format!("fk{i}"),
+                columns: vec!["id".into()],
+                ref_table: format!("target{i}"),
+                ref_columns: vec!["id".into()],
+                ref_schema: self
+                    .fk_scopes
+                    .as_ref()
+                    .map_or_else(|| Some("shop".into()), |scopes| scopes[i].clone()),
+            })
+            .collect();
+        detail.ddl = Some("CREATE TABLE t (id INT)".into());
+        detail.extra = serde_json::json!({"private": true});
+        Ok(detail)
     }
     async fn run(&self, _: &ResolvedConfig, _: &QueryRequest) -> Result<QueryResult> {
         Ok(QueryResult::message("ok"))
@@ -147,6 +163,7 @@ impl Driver for Stub {
 fn stub(roots: usize) -> Arc<Stub> {
     Arc::new(Stub {
         roots,
+        fk_scopes: None,
         bulk_calls: AtomicUsize::new(0),
     })
 }
@@ -439,4 +456,98 @@ fn bench_query_result_serialise_100k_x_30() {
         t.elapsed(),
         bytes.len() / (1024 * 1024)
     );
+}
+
+#[tokio::test]
+async fn object_detail_reads_do_not_scale_with_repeated_foreign_key_scopes() {
+    let mut counts = Vec::new();
+    for keys in [5, 500] {
+        let (mut service, conn, user) = fixture().await;
+        service.registry.set_for_test(Engine::Mysql, stub(keys));
+        crate::access::reads::take();
+        let detail = service
+            .object_detail(&conn, &user, "db:shop/table:t", false)
+            .await
+            .unwrap();
+        assert_eq!(detail.foreign_keys.len(), keys);
+        let reads = crate::access::reads::take();
+        eprintln!("Object detail with {keys} foreign keys: {reads} state reads");
+        counts.push(reads);
+    }
+    assert_eq!(
+        counts[0], counts[1],
+        "same-schema foreign keys must share authorization reads"
+    );
+}
+
+#[tokio::test]
+async fn object_detail_filters_mixed_fk_scopes_without_changing_order() {
+    use otto_core::access::*;
+    use otto_core::domain::{Capability, Feature};
+    let (mut service, conn, root) = fixture().await;
+    let pool = service.connections.pool();
+    let reader = otto_state::UsersRepo::new(pool.clone())
+        .create("reader", "", "Reader", false)
+        .await
+        .unwrap();
+    otto_state::GrantsRepo::new(pool.clone())
+        .set_grants(&reader.id, &[(Feature::Database, Capability::View)])
+        .await
+        .unwrap();
+    let repo = otto_state::resource_access::ResourceAccessRepo::new(pool.clone());
+    let mut policy = repo
+        .get_policy(ResourceKind::Connection, &conn)
+        .await
+        .unwrap();
+    policy.rules = vec![AccessRule {
+        id: "shop-only".into(),
+        subject_kind: SubjectKind::User,
+        subject_id: reader.id.clone(),
+        effect: RuleEffect::Allow,
+        operations: vec!["discover".into(), "db_browse".into()],
+        children: Some(vec!["shop".into()]),
+        grantable_operations: vec![],
+        credential_connection_id: None,
+    }];
+    repo.put_policy(
+        &policy,
+        policy.revision,
+        &AccessActor {
+            real_user_id: root,
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    // Omitted references inherit the source; empty references remain global.
+    let scopes = vec![
+        Some("shop".into()),
+        Some("hidden".into()),
+        None,
+        Some("db:shop".into()),
+        Some("".into()),
+        Some("shop".into()),
+    ];
+    service.registry.set_for_test(
+        Engine::Mysql,
+        Arc::new(Stub {
+            roots: scopes.len(),
+            fk_scopes: Some(scopes),
+            bulk_calls: AtomicUsize::new(0),
+        }),
+    );
+    let detail = service
+        .object_detail(&conn, &reader.id, "db:shop/table:t", false)
+        .await
+        .unwrap();
+    assert_eq!(
+        detail
+            .foreign_keys
+            .iter()
+            .map(|k| k.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fk0", "fk2", "fk3", "fk5"]
+    );
+    assert!(detail.ddl.is_none());
+    assert_eq!(detail.extra, Value::Null);
 }

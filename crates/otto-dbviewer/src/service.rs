@@ -1693,23 +1693,43 @@ impl DbViewerService {
                     .object_detail_with_opts(&r.config, &node, approx_row_count),
             )
             .await?;
-        if self.is_enforced(conn_id).await? {
-            let mut foreign_keys = Vec::new();
-            for key in result.foreign_keys {
-                if self
-                    .authorize(
-                        conn_id,
-                        user_id,
-                        key.ref_schema.as_deref().or(child.as_deref()),
-                        "db_browse",
-                    )
-                    .await
-                    .is_ok()
-                {
-                    foreign_keys.push(key);
-                }
-            }
-            result.foreign_keys = foreign_keys;
+        let snap = self.access_snapshot(conn_id).await?;
+        if snap.enforced() {
+            // Many keys usually reference the same database. Load membership
+            // once and evaluate each distinct scope, not once per FK.
+            let scopes: Vec<_> = result
+                .foreign_keys
+                .iter()
+                .map(|key| crate::access::child(key.ref_schema.as_deref().or(child.as_deref())))
+                .collect();
+            let unique: Vec<_> = scopes
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let allowed = crate::access::check_many(
+                &self.connections.pool(),
+                &snap.conn,
+                &snap.policy,
+                user_id,
+                &unique,
+                "db_browse",
+            )
+            .await?;
+            let decisions: HashMap<_, _> = unique.into_iter().zip(allowed).collect();
+            result.foreign_keys = result
+                .foreign_keys
+                .into_iter()
+                .zip(scopes)
+                .filter_map(|(key, scope)| {
+                    decisions
+                        .get(&scope)
+                        .copied()
+                        .unwrap_or(false)
+                        .then_some(key)
+                })
+                .collect();
             if self
                 .authorize(conn_id, user_id, None, "db_browse")
                 .await
