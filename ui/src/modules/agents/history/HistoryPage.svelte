@@ -69,7 +69,7 @@
   // A resumed process may finish starting after this History visit has ended.
   // Its completion must never replace a newer route or workspace decision.
   $effect(() => {
-    void wsId; void scope; void router.parts;
+    void wsId; void scope; void router.parts; void router.pendingTarget;
     return () => { ++actionGeneration; };
   });
   onDestroy(() => {
@@ -172,8 +172,10 @@
   async function resume(e: HistoryEntry): Promise<void> {
     if (!wsId || busy) return;
     busy = true;
-    const generation = actionGeneration, workspace = wsId, originScope = scope;
-    const current = () => alive && generation === actionGeneration && wsId === workspace && scope === originScope;
+    const generation = actionGeneration, workspace = wsId, originScope = scope, originHash = window.location.hash;
+    // Accepted navigation can keep this page mounted while its destination
+    // chunk loads. The hash also fences the interval before hashchange parses it.
+    const current = () => alive && generation === actionGeneration && wsId === workspace && scope === originScope && window.location.hash === originHash && !router.pendingTarget;
     try {
       let sid = e.session_id;
       if (e.status === 'on_disk' || !sid) {

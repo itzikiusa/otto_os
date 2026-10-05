@@ -13,6 +13,7 @@ function setup(status = 'working') {
   const views = new Map([['a', 'terminal']]);
   const current = {id: 'a', status};
   const context: Record<string, any> = {wsId: 'w', scope: 'workspace', alive: true, actionGeneration: 0, busy: false, canEdit: true,
+    window: {location: {hash: '#/history'}}, router: {parts: ['history'], pendingTarget: null},
     ws: {getSession: () => current, refreshSessions: async () => {},
       restartSession: async (id: string) => {restarts.push(id);},
       resumeSession: async (id: string) => {resumes.push(id); return current;},
@@ -56,7 +57,7 @@ test('History opens a stale live row through safe resume if its process has sinc
   assert.deepEqual(h.opened, ['a']);
 });
 
-for (const departure of ['destroyed', 'new-route', 'workspace', 'scope'] as const) {
+for (const departure of ['destroyed', 'new-route', 'workspace', 'scope', 'pending-route', 'hash-before-parse'] as const) {
   test(`History resume completion ignores a ${departure} origin`, async () => {
     const h = setup();
     let release!: (value: unknown) => void;
@@ -65,6 +66,8 @@ for (const departure of ['destroyed', 'new-route', 'workspace', 'scope'] as cons
     if (departure === 'destroyed') h.context.alive = false;
     else if (departure === 'new-route') h.context.actionGeneration++;
     else if (departure === 'workspace') h.context.wsId = 'next-workspace';
+    else if (departure === 'pending-route') h.context.router.pendingTarget = ['settings', 'insights'];
+    else if (departure === 'hash-before-parse') h.context.window.location.hash = '#/settings/insights';
     else h.context.scope = 'scratch';
     release({id: 'a', status: 'working'});
     await pending;
