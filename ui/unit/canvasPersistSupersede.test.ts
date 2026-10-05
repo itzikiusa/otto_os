@@ -18,7 +18,7 @@ test('queued, superseded scene writes are dropped; the newest doc is sent', asyn
   };
   const mod = loadSource(new URL('../src/lib/stores/canvas.svelte.ts', import.meta.url), {
     '../api/client': { api, getToken: () => 'tok' },
-    './workspace.svelte': { ws: { currentId: 'w1' } },
+    './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
     '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
@@ -38,7 +38,7 @@ test('drafts staged in one tick collapse into a single PUT', async () => {
   const sent: unknown[] = [];
   const mod = loadSource(new URL('../src/lib/stores/canvas.svelte.ts', import.meta.url), {
     '../api/client': { api: { put: async (_p: string, b: { doc: unknown }) => { sent.push(b.doc); return {}; } }, getToken: () => 'tok' },
-    './workspace.svelte': { ws: { currentId: 'w1' } },
+    './workspace.svelte': { ws: { currentId: 'w1' } }, '../labels': { NO_WORKSPACE: 'Select a workspace first' },
     '../providers': { defaultAgentProvider: () => 'claude' },
     '../loadError': { loadErrorText: (e: unknown) => String(e) },
     '../../modules/canvas/scene': { assistToNodes: () => [], emptyScene: () => ({}), parseScene: (x: unknown) => x },
