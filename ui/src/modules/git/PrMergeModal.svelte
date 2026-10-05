@@ -123,16 +123,24 @@
     merging = true;
     error = null;
     try {
+      // Pin the merge to the head these checks/readiness rows describe: a push
+      // while the modal is open must 409, not merge unreviewed commits.
       await api.post(`/repos/${repoId}/prs/${number}/merge`, {
         strategy,
         delete_source_branch: deleteSource,
+        ...(pr.head_sha ? { expected_head_sha: pr.head_sha } : {}),
       });
       toasts.success('PR merged', `#${mergedNumber}`);
       if (!disposed) onmerged();
     } catch (e) {
       // Keep the provider's own words — "Required status check failing" and
       // friends are the actionable text.
-      const detail = e instanceof ApiError || e instanceof Error ? e.message : String(e);
+      const moved = e instanceof ApiError && e.status === 409 && /head|changed|sha/i.test(e.message);
+      const detail = moved
+        ? 'The pull request changed since these checks ran (new commits were pushed). Close this dialog and re-check before merging.'
+        : e instanceof ApiError || e instanceof Error
+          ? e.message
+          : String(e);
       if (disposed) toasts.error(`Couldn’t merge PR #${mergedNumber}`, detail);
       else error = detail;
     } finally {

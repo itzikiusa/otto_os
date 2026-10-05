@@ -3454,6 +3454,9 @@ export interface CreatePrReq {
 
 export interface DraftPrReq {
   base: string;
+  /** Branch to describe (the PR's Source). The daemon diffs
+   *  `merge-base(base, head)..head`; absent = the checked-out branch. */
+  head?: string;
 }
 
 export interface DraftPrResp {
@@ -3508,6 +3511,9 @@ export interface MergePrReq {
   strategy: MergeStrategy;
   /** Ask the provider to delete the PR's source branch as part of the merge. */
   delete_source_branch?: boolean;
+  /** The PR head the client checked (CI / readiness). The merge is refused
+   *  with 409 when the PR's head moved since — never merge unchecked commits. */
+  expected_head_sha?: string | null;
 }
 
 /** One CI check / job / commit-status row behind the PR's aggregate status

@@ -42,6 +42,7 @@
     COLLAPSE_ALL_FILES,
     COLLAPSE_ALL_LINES,
     FILE_COLLAPSE_LINES,
+    ROW_KEY_SEP,
     buildFileRows,
     estimateRow,
     fileMatches,
@@ -54,6 +55,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
+  import { carryViewState, carryViewed } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
@@ -97,6 +99,13 @@
      * "Load anyway" (`full`). Without it such files show a note instead.
      */
     loadFile?: DiffFileLoader;
+    /** Stable identity of what this diff shows (e.g. `repo#pr`). When set, a
+     *  re-fetched diff with the same key keeps viewed marks, expansions and
+     *  the open composer for paths that still exist (a push re-fetches). */
+    stateKey?: string;
+    /** Revision the diff's NEW side is at (a commit / PR head). History and
+     *  Blame open there instead of the local HEAD. */
+    rev?: string;
   }
   let {
     diff,
@@ -109,6 +118,8 @@
     repoId,
     wip,
     loadFile,
+    stateKey,
+    rev,
   }: Props = $props();
 
   let mode = $state<'unified' | 'split'>('unified');
@@ -145,6 +156,8 @@
   // `sel` only restyle rows, so toggling them never rebuilds rows.
   interface ViewState {
     for: DiffResp | null;
+    /** The `stateKey` this state was made under (carry-over across reloads). */
+    key: string | undefined;
     /** Explicit collapse choices; a missing path uses its derived default. */
     overrides: Record<string, boolean>;
     composer: ComposerAt | null;
@@ -158,6 +171,7 @@
   }
   const freshState = (d: DiffResp | null): ViewState => ({
     for: d,
+    key: stateKey,
     overrides: {},
     composer: null,
     uncapped: new Map(),
@@ -166,15 +180,30 @@
     full: new Set(),
   });
   let vsRaw = $state.raw<ViewState>(freshState(null));
-  const vs: ViewState = $derived(vsRaw.for === diff ? vsRaw : freshState(diff));
+  const diffPaths = $derived(new Set(diff.files.map((f) => f.path)));
+  /** Same identity, new diff object (a reload): carry, don't reset. */
+  const sameKey = (k: string | undefined): boolean => stateKey !== undefined && k === stateKey;
+  const vs: ViewState = $derived(
+    vsRaw.for === diff
+      ? vsRaw
+      : sameKey(vsRaw.key)
+        ? { ...freshState(diff), ...carryViewState(vsRaw, diffPaths) }
+        : freshState(diff),
+  );
   /** Patch the view state of diff `d` — a no-op once `d` is no longer shown. */
   function patchVs(p: Partial<ViewState>, d: DiffResp = diff): void {
     if (d !== diff) return;
-    vsRaw = { ...vs, ...p, for: d };
+    vsRaw = { ...vs, ...p, for: d, key: stateKey };
   }
 
-  let viewedRaw = $state.raw<{ for: DiffResp | null; v: Set<string> }>({ for: null, v: new Set() });
-  const viewed = $derived(viewedRaw.for === diff ? viewedRaw.v : new Set<string>());
+  let viewedRaw = $state.raw<{ for: DiffResp | null; key: string | undefined; v: Set<string> }>({ for: null, key: undefined, v: new Set() });
+  const viewed = $derived(
+    viewedRaw.for === diff
+      ? viewedRaw.v
+      : sameKey(viewedRaw.key)
+        ? carryViewed(viewedRaw.v, diffPaths)
+        : new Set<string>(),
+  );
 
   let composerText = $state('');
   let composerBusy = $state(false);
@@ -526,7 +555,7 @@
     for (let i = s; i < e && i < rs.length; i++) {
       const r = rs[i];
       if (inHunk(r)) {
-        const gk = `${r.file.path}\u0000g${r.hi}`;
+        const gk = `${r.file.path}${ROW_KEY_SEP}g${r.hi}`;
         if (!g || g.key !== gk) {
           g = { key: gk, group: true, split: r.kind === 'split' || effMode === 'split', items: [] };
           out.push(g);
@@ -810,7 +839,9 @@
       (fd) => {
         done();
         if (ctl.signal.aborted || d !== diff) return;
-        land(d, file.path, fd ?? { ...file, hunks: [], hunks_omitted: false, too_large: false }, null);
+        // Nothing came back for this path: `hunks_omitted` keeps it reading
+        // as "No diff available", not as an empty (looks-unchanged) body.
+        land(d, file.path, fd ?? { ...file, hunks: [], hunks_omitted: true, too_large: false }, null);
       },
       (e: unknown) => {
         done();
@@ -860,12 +891,15 @@
   async function submitComment(): Promise<void> {
     const c = vs.composer;
     if (!c || !onAddComment || composerText.trim() === '') return;
-    const d = diff;
     composerBusy = true;
     try {
       await onAddComment(c.path, c.line, composerText.trim(), { side: c.side, oldLine: c.oldLine });
-      patchVs({ composer: null }, d);
-      composerText = '';
+      // Only close the composer that was posted: the user may have opened
+      // another line's composer (and typed into it) while this one posted.
+      if (vs.composer === c) {
+        patchVs({ composer: null });
+        composerText = '';
+      }
     } finally {
       composerBusy = false;
     }
@@ -892,14 +926,16 @@
     return sel !== null && sel.path === path && sel.hunk === hi && sel.lines.has(li);
   }
 
-  /** Click = toggle one line; shift-click = the range from the last anchor. */
-  function selectLine(e: MouseEvent, path: string, hi: number, li: number, line: DiffLine): void {
+  /** Click = toggle one line; shift-click = the range from the last anchor.
+   *  A range picks only the CHANGED lines in it — context lines can't be staged,
+   *  and counting them made the button read "Stage 6 lines" for 3 changes. */
+  function selectLine(e: MouseEvent, path: string, hi: number, li: number, line: DiffLine, hunkLines?: DiffLine[]): void {
     if (!wip || line.origin === 'context') return;
     const cur = sel !== null && sel.path === path && sel.hunk === hi ? sel : null;
     if (e.shiftKey && cur) {
       const [a, b] = cur.anchor <= li ? [cur.anchor, li] : [li, cur.anchor];
       const lines = new Set(cur.lines);
-      for (let i = a; i <= b; i++) lines.add(i);
+      for (let i = a; i <= b; i++) if (!hunkLines || hunkLines[i]?.origin !== 'context') lines.add(i);
       selRaw = { for: diff, s: { path, hunk: hi, lines, anchor: cur.anchor } };
       return;
     }
@@ -917,17 +953,28 @@
 
   async function applyHunk(file: FileDiff, hi: number, hunk: Hunk, op: HunkOp): Promise<void> {
     if (!wip || !repoId || applying) return;
-    if (op === 'discard') {
-      const ok = await confirmer.ask(
-        'Discard these changes? This rewrites the working file and cannot be undone from the file — a backup stash `otto: backup before hunk discard` is kept.',
-        { title: 'Discard hunk', confirmLabel: 'Discard' },
-      );
-      if (!ok) return;
-    }
+    // Capture the line pick BEFORE any await: a re-fetch while the confirm is
+    // open swaps `diff`, which drops `sel` — reading it afterwards silently
+    // widened "Discard 2 lines" into a whole-hunk discard.
+    const shown = diff;
     const picked =
       sel !== null && sel.path === file.path && sel.hunk === hi && sel.lines.size > 0
         ? [...sel.lines].sort((a, b) => a - b)
         : undefined;
+    if (op === 'discard') {
+      const what = picked ? plural(picked.length, 'changed line') : 'this whole hunk';
+      const ok = await confirmer.ask(
+        `Discard ${what}? This rewrites the working file and cannot be undone from the file — a backup stash \`otto: backup before hunk discard\` is kept.`,
+        { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard' },
+      );
+      if (!ok) return;
+      // The diff changed under the dialog: the pick and the hunk index may no
+      // longer mean what the user confirmed. Re-pick instead of guessing.
+      if (diff !== shown) {
+        toasts.info('Diff changed', 'The file changed while you were confirming — nothing was discarded. Pick the lines again.');
+        return;
+      }
+    }
     applying = true;
     try {
       const r = await api.post<StageHunkResp>(`/repos/${repoId}/stage-hunk`, {
@@ -971,12 +1018,12 @@
       {
         label: 'History',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path }),
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path, rev }),
       },
       {
         label: 'Blame',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path }),
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path, rev }),
       },
     ]);
   }
@@ -1054,7 +1101,7 @@
     readView();
     await tick();
     requestAnimationFrame(() => {
-      const el = rootEl?.querySelector(`[data-rk="${CSS.escape(`${path}\u0000f`)}"]`);
+      const el = rootEl?.querySelector(`[data-rk="${CSS.escape(`${path}${ROW_KEY_SEP}f`)}"]`);
       el?.scrollIntoView({ block: 'start' });
     });
   }
@@ -1063,7 +1110,7 @@
     const next = new Set(viewed);
     if (next.has(path)) next.delete(path);
     else next.add(path);
-    viewedRaw = { for: diff, v: next };
+    viewedRaw = { for: diff, key: stateKey, v: next };
   }
 
   const viewedCount = $derived(viewed.size);
@@ -1087,6 +1134,8 @@
     // Don't steal keys while the user is typing in a text field.
     const tag = (e.target as HTMLElement).tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    // Bare keys only: ⌘[ / ⌘] (back/forward), Ctrl+N and friends are not ours.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === ']' || e.key === 'n') {
       e.preventDefault();
       navToFile(+1);
@@ -1163,7 +1212,7 @@
        staging) it is a real <button> with a spoken label; of a row's two gutters
        only one is a tab stop (the other stays mouse-clickable) so a diff does not
        double its tab order. A cell with no number is a plain, inert box. -->
-  {#snippet gut(side: 'old' | 'new', n: number | null, other: number | null, act: ((e: MouseEvent) => void) | null, kind: 'comment' | 'select')}
+  {#snippet gut(side: 'old' | 'new', n: number | null, other: number | null, act: ((e: MouseEvent) => void) | null, kind: 'comment' | 'select', pressed?: boolean)}
     {#if act && n != null}
       <button
         type="button"
@@ -1173,6 +1222,7 @@
         class:selectable={kind === 'select'}
         tabindex={side === 'new' || other == null ? 0 : -1}
         aria-label="{kind === 'comment' ? 'Comment on' : 'Select'} line {n}"
+        aria-pressed={kind === 'select' ? pressed === true : undefined}
         onclick={act}
       >{n}</button>
     {:else}
@@ -1365,15 +1415,16 @@
     {:else if r.kind === 'line'}
       {@const lang = langOf(r.file.path)}
       {@const pick = !!wip && r.line.origin !== 'context'}
-      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
+      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line, (vs.loaded.get(r.file.path) ?? r.file).hunks[r.hi]?.lines) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
+      {@const picked = pick ? isSelected(r.file.path, r.hi, r.li) : undefined}
       <div
         class="vrow dline {r.line.origin}"
-        class:selected={isSelected(r.file.path, r.hi, r.li)}
+        class:selected={picked === true}
         data-rk={r.key}
         use:measure={[r.key, i]}
       >
-        {@render gut('old', r.line.old_line, r.line.new_line, act, wip ? 'select' : 'comment')}
-        {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment')}
+        {@render gut('old', r.line.old_line, r.line.new_line, act, wip ? 'select' : 'comment', picked)}
+        {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment', picked)}
         <span class="sign" data-find-skip>{sign(r.line)}</span>
         <span class="code mono">{@render codeText(r.line.content, lang, r.key)}</span>
       </div>

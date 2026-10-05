@@ -14,7 +14,8 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { humanize, isTerminal, runStatusInfo, sourceLabel } from './runStatus';
+  import { humanize, isTerminal, prNumberFromUrl, runStatusInfo, sourceLabel } from './runStatus';
+  import { router } from '../../lib/router.svelte';
 
   interface Props {
     run: OttoRun;
@@ -105,6 +106,17 @@
     }
   }
 </script>
+
+<!-- Review / Post comments live in Otto's PR detail — link there, not only to the forge. -->
+{#snippet prLinks(url: string)}
+  {@const n = prNumberFromUrl(url)}
+  {#if n !== null && run.repo_id}
+    <button class="btn primary" onclick={() => router.go(`git/${run.repo_id}/pr/${n}`)}>Open in Otto</button>
+    <a class="btn" href={url} target="_blank" rel="noreferrer">View on forge <Icon name="external" size={12} /></a>
+  {:else}
+    <a class="btn primary" href={url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+  {/if}
+{/snippet}
 
 <aside class="detail">
   <header class="d-head">
@@ -239,7 +251,7 @@
       {#if prDraft.description}<pre class="pr-desc">{prDraft.description}</pre>{/if}
       <div class="actions">
         {#if run.pr_url}
-          <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+          {@render prLinks(run.pr_url)}
         {:else}
           <button class="btn primary" disabled={busy || !!prBlock} title={prBlock || 'Push the branch and open this draft as a real pull request'} onclick={openPr}>Open PR</button>
           {#if prBlock}<span class="muted hint">{prBlock}.</span>{/if}
@@ -249,7 +261,7 @@
   {:else if run.pr_url}
     <section class="block pr">
       <h3 class="h">Pull request</h3>
-      <a class="btn primary" href={run.pr_url} target="_blank" rel="noreferrer">View PR <Icon name="external" size={12} /></a>
+      {@render prLinks(run.pr_url)}
     </section>
   {/if}
 

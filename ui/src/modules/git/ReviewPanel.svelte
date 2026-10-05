@@ -8,6 +8,7 @@
   import { verdictLabel } from '../../lib/labels';
   import { api, ApiError, isAbortError } from '../../lib/api/client';
   import { prDiffFile, prDiffSummary } from './diff-load';
+  import { alreadyOnPr } from './reviewPost';
   import type {
     Review,
     ReviewComment,
@@ -22,6 +23,7 @@
     MergeReadiness,
     ReviewFindingRow,
     EditReviewCommentReq,
+    PrDetail,
   } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -571,12 +573,22 @@
 
   /** `quiet` (bulk post): no per-comment toasts — the caller reports one summary. */
   async function postComment(c: ReviewComment, confirmed = false, quiet = false): Promise<boolean> {
+    // An open edit is unsent text: posting now would send the STORED body,
+    // not what the box shows. Save (or cancel) the edit first.
+    if (c.id in editingBody) {
+      if (!quiet) toasts.warn('Save your edit first', 'The comment has unsaved edits — Save or Cancel them before posting.');
+      return false;
+    }
+    const retry = c.state === 'approved' && !c.posted;
+    if (retry && (await lookupOnPr(c, quiet))) return false;
     if (!confirmed) {
       const ok = await confirmOutward({
         verb: 'Post to PR',
         title: `Post comment to PR #${prNumber}?`,
         where: prWhere,
-        what: commentPreview(c),
+        what: retry
+          ? `${commentPreview(c)}\n\nA previous attempt failed — the provider may have created it anyway; no copy was found on the PR.`
+          : commentPreview(c),
         who: PR_WHO,
       });
       if (!ok) return false;
@@ -607,7 +619,26 @@
     }
   }
 
+  /** Retry guard: true when a copy of `c` is already on the PR (a forge 5xx
+   *  that created it). A failed lookup refuses the retry — a duplicate is the
+   *  outward mistake this exists to prevent. */
+  async function lookupOnPr(c: ReviewComment, quiet: boolean): Promise<boolean> {
+    try {
+      const pr = await api.get<PrDetail>(`/repos/${repoId}/prs/${prNumber}`);
+      if (alreadyOnPr(c, pr.comments ?? [])) {
+        if (!quiet) toasts.info('Already on the PR', 'The earlier attempt did post this comment — not posting it again.');
+        return true;
+      }
+      return false;
+    } catch (e) {
+      if (!quiet) toastError('Couldn’t check the PR for this comment', e);
+      return true;
+    }
+  }
+
   let postingAll = $state(false);
+  /** Any draft with an open (unsaved) edit — bulk post would send stale text. */
+  const editingAny = $derived(Object.keys(editingBody).length > 0);
   /** Drafts, plus approved comments the provider refused (re-post is safe:
    *  the daemon claims `posted` atomically and never re-posts a posted one). */
   function isPostable(c: ReviewComment): boolean {
@@ -615,6 +646,10 @@
   }
 
   async function postAllDrafts(): Promise<void> {
+    if (editingAny) {
+      toasts.warn('Save your edits first', 'Some comments have unsaved edits — Save or Cancel them before posting.');
+      return;
+    }
     const drafts = (review?.comments ?? []).filter(isPostable);
     if (drafts.length === 0) return;
     const ok = await confirmOutward({
@@ -628,7 +663,12 @@
     postingAll = true;
     let posted = 0;
     try {
-      for (const c of drafts) if (await postComment(c, true, true)) posted++;
+      // Re-read each comment's CURRENT state: one declined mid-run is skipped.
+      for (const d of drafts) {
+        const c = review?.comments.find((x) => x.id === d.id);
+        if (!c || !isPostable(c)) continue;
+        if (await postComment(c, true, true)) posted++;
+      }
     } finally {
       postingAll = false;
     }
@@ -1214,7 +1254,13 @@
         {/if}
       </span>
       {#if postableCount > 1}
-        <button class="btn small" disabled={postingAll} data-testid="rp-post-all" onclick={() => void postAllDrafts()}>
+        <button
+          class="btn small"
+          disabled={postingAll || editingAny}
+          title={editingAny ? 'Save or cancel the open edits first' : undefined}
+          data-testid="rp-post-all"
+          onclick={() => void postAllDrafts()}
+        >
           {postingAll ? 'Posting…' : `Post ${postableCount} comments to PR…`}
         </button>
       {/if}
@@ -1349,9 +1395,9 @@
               {#if c.state === 'draft'}
                 <button
                   class="btn small"
-                  disabled={!!actionBusy[c.id] || postingAll}
+                  disabled={!!actionBusy[c.id] || postingAll || c.id in editingBody}
                   data-testid="rp-post-comment"
-                  title="Post this comment to {prWhere}"
+                  title={c.id in editingBody ? 'Save or cancel your edit first' : `Post this comment to ${prWhere}`}
                   onclick={() => void postComment(c)}
                 >
                   {actionBusy[c.id] === 'approve' ? 'Posting…' : 'Post to PR…'}
@@ -1369,7 +1415,7 @@
                 {/if}
                 <button
                   class="btn small ghost"
-                  disabled={!!actionBusy[c.id]}
+                  disabled={!!actionBusy[c.id] || postingAll}
                   onclick={() => declineComment(c)}
                 >
                   {actionBusy[c.id] === 'decline' ? 'Declining…' : 'Decline'}
