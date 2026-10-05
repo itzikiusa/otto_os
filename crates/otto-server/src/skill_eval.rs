@@ -39,7 +39,7 @@ use crate::state::ServerCtx;
 
 /// Per-run cancellation flags, keyed by eval id. A running eval checks its flag
 /// between/within agent steps; cancel/delete set it and kill live sessions.
-pub type CancelRegistry = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+pub use otto_core::cancel::CancelRegistry;
 
 fn register_cancel(reg: &CancelRegistry, eval_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
@@ -1995,11 +1995,9 @@ fn default_skill_eval_config(default_provider: &str) -> SkillEvalConfig {
 
 pub(crate) async fn load_skill_eval_config(ctx: &ServerCtx) -> SkillEvalConfig {
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
-    let global_default = repo.get("default_provider").await.ok().flatten();
-    let default_provider =
-        otto_core::provider::resolve_provider(&[otto_core::provider::global_default(
-            global_default.as_ref(),
-        )]);
+    let default_provider = ctx
+        .resolve_provider_or_fallback(None, None, "skill_eval.config")
+        .await;
     match repo.get("skill_eval").await {
         Ok(Some(v)) => serde_json::from_value(v)
             .unwrap_or_else(|_| default_skill_eval_config(&default_provider)),

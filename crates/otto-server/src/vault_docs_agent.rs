@@ -608,18 +608,12 @@ async fn start_run(
 
     // Provider precedence per agent: request → workspace default → global
     // default → claude (the mockup_assist / Discovery Chat shape).
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let ws_fallback = ctx
+        .resolve_provider(Some(&ws), None)
         .await
-        .ok()
-        .flatten();
-    let resolve = |explicit: &str| {
-        otto_core::provider::resolve_provider(&[
-            explicit,
-            otto_core::provider::workspace_default(&ws.settings),
-            otto_core::provider::global_default(global_default.as_ref()),
-        ])
-    };
+        .map_err(ApiError)?;
+    let resolve =
+        |explicit: &str| otto_core::provider::resolve_provider(&[explicit, ws_fallback.as_str()]);
 
     let writers: Vec<WriterSpec> = req
         .agents
@@ -1410,16 +1404,10 @@ async fn refine(
             reg.entry(key.clone()).or_default().session_id = Some(sid.clone());
         }
     }
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let mut provider = ctx
+        .resolve_provider(Some(&ws), req.provider.as_deref())
         .await
-        .ok()
-        .flatten();
-    let mut provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
     if let Some(sid) = existing.clone() {
         match ctx.manager.get(&sid).await {
             // An explicitly different provider means "give me a fresh agent on

@@ -2149,16 +2149,8 @@ fn clean_selection(sel: Option<Value>) -> Result<Option<Value>, Error> {
 }
 
 async fn pick_provider(ctx: &ServerCtx, ws: &Workspace, requested: Option<&str>) -> String {
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    ctx.resolve_provider_or_fallback(Some(ws), requested, "design_assist")
         .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        requested.unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 async fn load_editable(

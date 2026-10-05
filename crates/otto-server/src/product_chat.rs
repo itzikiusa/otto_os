@@ -240,16 +240,10 @@ pub async fn send_message(
         .map_err(ApiError)?;
     // Provider is honored only on FIRST message (session create); resumes ignore
     // it. Default to the workspace default, else the global default, else claude.
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let default_provider = ctx
+        .resolve_provider(Some(&ws), req.provider.as_deref())
         .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
     let mut meta = json!({ "source": "discovery_chat", "story_id": chat.story_id, "chat_id": cid });
     if let Some(m) = req
         .model
@@ -733,11 +727,7 @@ fn mermaid_from_nodes(nodes: &[Value], edges: &[Value]) -> String {
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max).collect();
-    format!("{cut}\n…[truncated]")
+    otto_core::text::clip_chars_with(text, max, "\n…[truncated]")
 }
 
 // ---------------------------------------------------------------------------

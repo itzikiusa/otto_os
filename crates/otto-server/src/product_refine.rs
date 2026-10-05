@@ -20,6 +20,7 @@
 //!   POST /api/v1/product/refinement-threads/{tid}/messages  (ws editor) → TurnResp
 //!   POST /api/v1/product/refinement-threads/{tid}/archive   (ws editor) → RefinementThread
 
+use otto_core::text::clip_chars;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -379,16 +380,10 @@ pub async fn send_message(
         .get(&story.workspace_id)
         .await
         .map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let provider = ctx
+        .resolve_provider(Some(&ws), req.provider.as_deref())
         .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
     let mut meta =
         json!({ "source": "product_refine", "story_id": thread.story_id, "thread_id": tid });
     // Model: this turn's override, else the thread's stored model.
@@ -518,11 +513,11 @@ fn build_refinement_prompt(
     // 3. Discovery context (only when a report is present).
     if let Some(report) = discovery_report {
         s.push_str("## Discovery findings\n");
-        s.push_str(&truncate(report, DISCOVERY_BUDGET));
+        s.push_str(&clip_chars(report, DISCOVERY_BUDGET));
         s.push('\n');
         if !discovery_task_summaries.is_empty() {
             for summary in discovery_task_summaries {
-                s.push_str(&format!("- {}\n", truncate(summary, DISCOVERY_BUDGET)));
+                s.push_str(&format!("- {}\n", clip_chars(summary, DISCOVERY_BUDGET)));
             }
         }
         s.push('\n');
@@ -583,14 +578,6 @@ fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
 
 /// Truncate `text` to at most `max` chars, appending an ellipsis when cut. Keeps
 /// the prompt bounded so a sprawling report/summary doesn't blow the budget.
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max).collect();
-    format!("{cut}…")
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

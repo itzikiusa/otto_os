@@ -40,6 +40,8 @@ mod mcp_auto_approve;
 mod personal_agent_policy;
 #[path = "policy_coverage.rs"]
 mod policy_coverage;
+#[path = "provider_resolve.rs"]
+mod provider_resolve;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
 #[path = "rooms_api.rs"]

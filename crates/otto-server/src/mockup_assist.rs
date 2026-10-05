@@ -94,16 +94,10 @@ pub async fn assist_mockup(
     // Resolve the agent provider (honored only when a NEW mockup session is
     // created; a refine resumes the existing one). Precedence mirrors Discovery
     // Chat: request → workspace default → global default → claude.
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let provider = ctx
+        .resolve_provider(Some(&ws), req.provider.as_deref())
         .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
 
     // Resolve the target attachment (+ whether THIS call minted it, for cleanup on
     // failure), its format, current source, and the resumable assist session id.

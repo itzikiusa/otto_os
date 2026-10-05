@@ -1619,13 +1619,7 @@ pub(crate) async fn is_over_budget(ctx: &ServerCtx, swarm_id: &str) -> bool {
     }
 }
 
-pub(crate) fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        s.chars().take(n).collect::<String>() + "…"
-    }
-}
+pub(crate) use otto_core::text::clip_chars as clip;
 
 // --- Session teardown for pause/abort --------------------------------------
 
@@ -2156,15 +2150,8 @@ async fn check(ctx: &ServerCtx, user: &AuthUser, ws: &Id, role: WorkspaceRole) -
 /// `default_provider` setting, else "claude". Keeps these coordinator-spawned
 /// sessions on the user's configured default instead of a bare "claude" literal.
 async fn swarm_meta_provider(ctx: &ServerCtx, ws: &otto_core::domain::Workspace) -> String {
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    ctx.resolve_provider_or_fallback(Some(ws), None, "swarm_meta_provider")
         .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 async fn start(

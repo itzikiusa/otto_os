@@ -55,23 +55,9 @@ pub fn routes() -> Router<ServerCtx> {
 /// explicit pick → the workspace's `default_provider` → the global
 /// `default_provider` setting → "claude".
 async fn resolve_task_provider(ctx: &ServerCtx, ws_id: &Id, explicit: &str) -> String {
-    let ws_default = ctx
-        .workspaces
-        .get(ws_id)
+    let ws = ctx.workspaces.get(ws_id).await.ok();
+    ctx.resolve_provider_or_fallback(ws.as_ref(), Some(explicit), "scheduled_tasks")
         .await
-        .ok()
-        .map(|ws| otto_core::provider::workspace_default(&ws.settings).to_string())
-        .unwrap_or_default();
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    otto_core::provider::resolve_provider(&[
-        explicit,
-        ws_default.as_str(),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ])
 }
 
 /// `POST /scheduled-tasks/{id}/convert-to-workflow` — materialize a scheduled

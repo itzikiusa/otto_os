@@ -188,8 +188,8 @@ pub use sessions::{
     UsageLabelRow,
 };
 pub use settings::{
-    otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, OTTO_MCP_ENABLED_KEY,
-    PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
+    otto_mcp_enabled_for, pr_draft_model_from, SettingsRepo, DEFAULT_PROVIDER_KEY,
+    OTTO_MCP_ENABLED_KEY, PR_DRAFT_MODEL_DEFAULT, PR_DRAFT_MODEL_KEY,
 };
 pub use skill_evals::{SkillEvalSummary, SkillEvalSummaryPage, SkillEvalsRepo};
 pub use skill_reviews::SkillReviewsRepo;
