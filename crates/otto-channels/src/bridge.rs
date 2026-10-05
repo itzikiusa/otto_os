@@ -364,9 +364,11 @@ async fn agent_dispatched(
 /// in its own task so a slow TUI never stalls the channel receive loop.
 ///
 /// `_turn` is this session's turn lock (see [`Bridge::handle`] step 4): held
-/// from the paste through the dispatch confirmation, so a second message in
-/// the same thread can't paste into the box before this one was submitted
-/// (the two used to merge into one prompt).
+/// from the paste through the dispatch confirmation AND until the turn's
+/// final reply (capped at [`crate::mirror::TURN_HOLD_CAP`]), so a second
+/// message in the same thread can't paste into the box before this one was
+/// submitted (the two used to merge into one prompt), nor re-point the mirror
+/// while this turn is still answering.
 async fn submit_to_agent(
     manager: Arc<SessionManager>,
     mirror: Arc<Mirror>,
@@ -422,8 +424,13 @@ async fn submit_to_agent(
 
     // 4. Monitor: confirm the agent actually started. If the prompt is still
     //    sitting in the box after the grace window, press Enter once more.
+    //    Then keep the turn lock until THIS turn's Final reply (capped): the
+    //    next message's attach / begin_turn must not reset the mirror mid-turn.
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed — session is processing the relay");
+        mirror
+            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
+            .await;
         return;
     }
     warn!(channel = %label, session = %session_id, "bridge: agent did not start within {DISPATCH_WAIT:?}; re-sending Enter");
@@ -433,6 +440,9 @@ async fn submit_to_agent(
     }
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed after retry");
+        mirror
+            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
+            .await;
     } else {
         warn!(channel = %label, session = %session_id, "bridge: agent still not dispatched — prompt may be sitting in the input box");
     }
@@ -920,7 +930,7 @@ impl Bridge {
         // One turn at a time on this session: the previous message's paste →
         // submit → dispatch confirmation completes before this one attaches
         // its turn and pastes (two quick messages used to merge into one
-        // prompt). Held by `submit_to_agent` until dispatch is confirmed.
+        // prompt). Held by `submit_to_agent` until the turn's final reply.
         let turn = turn.acquire().await;
 
         // --- 5. Compose the message text ---
