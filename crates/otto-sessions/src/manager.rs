@@ -2475,6 +2475,37 @@ impl SessionManager {
         );
     }
 
+    /// The `process_sandbox` policy for a NON-PTY process the daemon runs on a
+    /// user's behalf as `provider` in `cwd` — today a scheduled `shell` task's
+    /// `/bin/sh -c`. Same decision and profile as a session spawn
+    /// ([`Self::apply_sandbox`]): `None` when the setting is off or excludes
+    /// `provider`, or on a host without Seatbelt.
+    pub async fn process_sandbox_policy(
+        &self,
+        provider: &str,
+        cwd: &std::path::Path,
+    ) -> Option<otto_sandbox::SandboxPolicy> {
+        if !otto_sandbox::is_supported() {
+            return None;
+        }
+        let cfg = self
+            .settings
+            .as_ref()?
+            .get("process_sandbox")
+            .await
+            .ok()??;
+        let network = sandbox_decision(&cfg, SessionKind::Agent, provider)?;
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let extra: Vec<std::path::PathBuf> =
+            resolve_git_common_dir(cwd).await.into_iter().collect();
+        Some(sandbox_policy(
+            cwd, &home, &data_dir, &extra, network, false,
+        ))
+    }
+
     /// Is Otto's first-party MCP tool server enabled for `workspace_id`?
     /// Reads the `otto_mcp_enabled` setting and applies the shared precedence
     /// rules (see [`otto_state::otto_mcp_enabled_for`]); **default ON** when the
