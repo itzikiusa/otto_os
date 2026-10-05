@@ -78,11 +78,19 @@ fn repo(ctx: &ServerCtx) -> ApiClientRepo {
     ApiClientRepo::new(ctx.pool.clone())
 }
 
-/// Per-WORKSPACE cookie jars (captures Set-Cookie and resends on matching
-/// requests, so login/session flows just work). Keyed by the executing
-/// workspace so cookies captured while working in workspace A are never
-/// replayed for workspace B. In-memory per daemon run, like the old global.
-fn cookie_jar(wid: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
+/// The cookie-jar scope of one user in one workspace ([`jar_scope`]): the
+/// key every client / jar below is cached under.
+fn jar_scope(wid: &Id, user_id: &Id) -> Id {
+    format!("{wid}\u{1f}{user_id}")
+}
+
+/// Per-(WORKSPACE, USER) cookie jars (captures Set-Cookie and resends on
+/// matching requests, so login/session flows just work). Keyed by
+/// [`jar_scope`]: cookies captured in workspace A are never replayed for
+/// workspace B, and on a shared workspace user A's login session is never
+/// replayed on — or listed to — user B (S6-19). Automation runs use their
+/// actor's jar. In-memory per daemon run, like the old global.
+fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
     static JARS: OnceLock<StdMutex<HashMap<Id, Arc<reqwest_cookie_store::CookieStoreMutex>>>> =
         OnceLock::new();
     let jars = JARS.get_or_init(|| StdMutex::new(HashMap::new()));
@@ -1373,7 +1381,8 @@ pub async fn postman_sync(
     }))
 }
 
-/// `GET /workspaces/{wid}/api-client/cookies` — list this workspace's jar.
+/// `GET /workspaces/{wid}/api-client/cookies` — list the CALLER's jar in this
+/// workspace (never another user's captured sessions).
 pub async fn list_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
@@ -1382,7 +1391,7 @@ pub async fn list_cookies(
     // Editor-gated: cookie values are live credentials (session tokens), not
     // something a read-only viewer should be able to exfiltrate.
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let jar = cookie_jar(&wid);
+    let jar = cookie_jar(&jar_scope(&wid, &user.id));
     let store = jar
         .lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?;
@@ -1400,14 +1409,15 @@ pub async fn list_cookies(
     Ok(Json(Value::Array(cookies)))
 }
 
-/// `DELETE /workspaces/{wid}/api-client/cookies` — clear this workspace's jar.
+/// `DELETE /workspaces/{wid}/api-client/cookies` — clear the caller's jar in
+/// this workspace.
 pub async fn clear_cookies(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_ws_role(&ctx, &user, &wid, WorkspaceRole::Editor).await?;
-    let jar = cookie_jar(&wid);
+    let jar = cookie_jar(&jar_scope(&wid, &user.id));
     jar.lock()
         .map_err(|_| ApiError(Error::Internal("cookie jar poisoned".into())))?
         .clear();
@@ -2127,7 +2137,14 @@ pub async fn run_saved_request(
             }
         };
     let allow_local = workspace_allows_local(&ctx, &wid).await;
-    let mut response = match build_and_send(&wid, &exec, &vars, proxy.as_deref(), allow_local).await
+    let mut response = match build_and_send(
+        &jar_scope(&wid, &user.id),
+        &exec,
+        &vars,
+        proxy.as_deref(),
+        allow_local,
+    )
+    .await
     {
         Ok((mut response, raw)) => {
             // Image preview only: this route serves agents/tools, never the
@@ -2365,7 +2382,14 @@ pub async fn execute(
     {
         Ok(proxy) => {
             let allow_local = workspace_allows_local(&ctx, &wid).await;
-            build_and_send(&wid, &exec_req, &vars, proxy.as_deref(), allow_local).await
+            build_and_send(
+                &jar_scope(&wid, &user.id),
+                &exec_req,
+                &vars,
+                proxy.as_deref(),
+                allow_local,
+            )
+            .await
         }
         Err(msg) => Err(msg),
     };
@@ -2904,13 +2928,21 @@ pub(crate) async fn prepare_stream(
         .collect();
     // No whole-body timeout: a stream's body never "finishes" — the caller
     // bounds only the time to the response head.
-    prepare_request(wid, &req, &vars, proxy.as_deref(), allow_local, false)
-        .await
-        .map(|p| p.0)
-        .map_err(|e| api_secrets::scrub_str(&e, &values))
+    prepare_request(
+        &jar_scope(wid, actor),
+        &req,
+        &vars,
+        proxy.as_deref(),
+        allow_local,
+        false,
+    )
+    .await
+    .map(|p| p.0)
+    .map_err(|e| api_secrets::scrub_str(&e, &values))
 }
 
-/// Build the outbound request. `whole_body_timeout`: apply the request's
+/// Build the outbound request. `wid` is the cookie-jar scope
+/// ([`jar_scope`]: workspace + acting user). `whole_body_timeout`: apply the request's
 /// timeout to connect → last body byte (one-shot sends); `false` for streams
 /// (SSE / WebSocket), whose callers bound only the wait for the response head.
 async fn prepare_request(
@@ -3711,7 +3743,15 @@ pub(crate) async fn run_step(
 
     // Send via the shared single-request path (same reqwest logic as /execute).
     let allow_local = workspace_allows_local(ctx, wid).await;
-    match build_and_send(wid, &exec, vars, proxy.as_deref(), allow_local).await {
+    match build_and_send(
+        &jar_scope(wid, actor),
+        &exec,
+        vars,
+        proxy.as_deref(),
+        allow_local,
+    )
+    .await
+    {
         // Steps only read status/body/timing — the raw bytes are dropped here.
         Ok((resp, _raw)) => {
             // Parse the body as JSON once for json_path assertions/extraction;
@@ -4620,6 +4660,38 @@ mod tests {
         cookie_jar(&w2).lock().unwrap().clear();
         assert_eq!(cookie_jar(&w1).lock().unwrap().iter_any().count(), 1);
         cookie_jar(&w1).lock().unwrap().clear();
+    }
+
+    /// S6-19: on a shared workspace each user has their own jar — user A's
+    /// captured session is neither replayed for nor listed to user B.
+    #[test]
+    fn cookie_jars_are_per_user_within_a_workspace() {
+        let wid: Id = "ws-cookie-shared".to_string();
+        let (a, b): (Id, Id) = ("user-a".into(), "user-b".into());
+        let url = "https://cookies.test/".parse().unwrap();
+        {
+            let jar = cookie_jar(&jar_scope(&wid, &a));
+            let cookie = reqwest_cookie_store::RawCookie::parse("sess=a-secret; Path=/").unwrap();
+            jar.lock().unwrap().insert_raw(&cookie, &url).unwrap();
+        }
+        assert_eq!(
+            cookie_jar(&jar_scope(&wid, &a))
+                .lock()
+                .unwrap()
+                .iter_any()
+                .count(),
+            1
+        );
+        assert_eq!(
+            cookie_jar(&jar_scope(&wid, &b))
+                .lock()
+                .unwrap()
+                .iter_any()
+                .count(),
+            0
+        );
+        assert_ne!(jar_scope(&wid, &a), jar_scope(&wid, &b));
+        cookie_jar(&jar_scope(&wid, &a)).lock().unwrap().clear();
     }
 
     #[test]

@@ -2322,8 +2322,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result. The whole call is bounded at 60 s (unary: `DEADLINE_EXCEEDED` result); a server stream stops at 60 s, 1000 messages or 5 MiB of JSON and returns what arrived with `truncated: true` |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only). 30 s budget, redirects are NOT followed (a 307/308 would resend the client secret), the body read is capped at 256 KiB, and an error without `error`/`error_description` quotes at most 300 chars of the body. Honours the workspace `allow_local` opt-in like `execute` |
-| GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
+| GET /workspaces/{wid}/api-client/cookies | ws editor | — | the CALLER's cookie jar in this workspace (jars are per (workspace, user) — never shared across workspaces or users; automation runs use their actor's jar; values are live credentials — editor-gated) |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear the caller's jar in this workspace |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
