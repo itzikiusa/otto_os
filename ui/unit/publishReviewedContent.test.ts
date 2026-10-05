@@ -12,11 +12,12 @@ function fixture(mode: 'story' | 'rfc', content: string | null = body) {
   const story = { id: 'A', title: 'Reviewed title', source_kind: 'confluence', url: 'https://example.test/rfc/123' };
   const published: any[] = [];
   const state = componentFunctions(component, ['loadPreview', 'submit', 'setError'], {
-    previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, reviewedContent: null,
+    alive: true, previewSequence: 0, previewStoryId: null, previewError: '', previewBody: null, reviewedContent: null,
     submitting: false, formError: '', formErrorDetail: '', mode, accountId: 'account', projectKey: 'PRJ',
     issueType: 'Story', spaceKey: 'RFC', parentId: '42', rfcTitle: 'My reviewed RFC title',
     crypto: webcrypto, TextEncoder, ApiError,
     product: {
+      captureSelection() { const id = this.selectedId; return () => this.selectedId === id; },
       selectedId: 'A', detail: { story: { ...story } },
       getVersion: async () => ({ id: 'version', kind: 'draft', body_md: content }),
       publishAsStory: async (req: unknown) => { published.push(req); return { story }; },

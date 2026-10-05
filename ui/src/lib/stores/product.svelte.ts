@@ -266,6 +266,11 @@ class ProductStore {
       (!key || this.requests.get(key) === request);
   }
 
+  /** Let a caller's follow-up action obey the same ownership as store writes. */
+  captureSelection(): () => boolean {
+    return this.owner();
+  }
+
   private clearSelectionData(): void {
     ++this.selectionGeneration;
     this.detail = null; this.detailError = null;

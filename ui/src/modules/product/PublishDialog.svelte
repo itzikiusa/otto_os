@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -18,6 +19,8 @@
     onclose: () => void;
   }
   let { mode, onclose }: Props = $props();
+  let alive = true;
+  onDestroy(() => { alive = false; });
 
   // ── Accounts (shared) ─────────────────────────────────────────────────────
   let accounts: IssueAccount[] = $state([]);
@@ -229,6 +232,8 @@
     if (!accountId) { formError = 'Select an account.'; return; }
 
     submitting = true;
+    const ownsSelection = product.captureSelection();
+    const current = () => alive && ownsSelection();
     try {
       if (mode === 'story') {
         if (!projectKey) { formError = 'Select a project.'; submitting = false; return; }
@@ -239,6 +244,7 @@
           issue_type: issueType || 'Story',
         });
         toasts.success('Published as Jira story', detail.story.title);
+        if (!current()) return;
         // Select the resulting story.
         if (detail.story.id !== product.selectedId) {
           await product.select(detail.story.id);
@@ -254,8 +260,9 @@
         });
         toasts.success('Published as Confluence RFC', detail.story.title);
       }
-      onclose();
+      if (current()) onclose();
     } catch (e) {
+      if (!current()) return;
       setError(mode === 'story' ? "Couldn’t publish to Jira" : "Couldn’t publish to Confluence", e);
       if (e instanceof ApiError && e.status === 409) {
         reviewedContent = null;
@@ -455,11 +462,6 @@
 </Modal>
 
 <style>
-  .loading {
-    padding: 12px 0;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .loading-inline {
     font-size: var(--fs-s);
     color: var(--text-dim);

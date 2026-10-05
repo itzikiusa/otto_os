@@ -1,6 +1,7 @@
 import {test, expect, type Page} from '@playwright/test';
 import {createHash} from 'node:crypto';
 import {apiCtx, seedWorkspace} from './seed';
+import {expectFullyInViewport} from './helpers';
 import type {ProductStoryDetail} from '../src/modules/product/types';
 
 test.use({serviceWorkers: 'block', viewport: {width: 1440, height: 1000}});
@@ -8,10 +9,11 @@ const originalBody = 'Reviewed café.\r\n  Keep these spaces.  \nThird\nFourth\n
 const revisedBody = 'Revised café.\r\n  New exact spaces.  \nThird\nFourth\nFifth\nSixth\nRevised final line.\n';
 const digest = (body: string) => createHash('sha256').update(body, 'utf8').digest('hex');
 
-async function fixture(page: Page) {
+async function fixture(page: Page, withOtherStory = false) {
   const {ctx, base} = await apiCtx();
   let detail: ProductStoryDetail;
   let workspaceId: string;
+  let other: ProductStoryDetail | undefined;
   const title = `Publication review ${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   try {
     workspaceId = await seedWorkspace(ctx, base);
@@ -21,6 +23,11 @@ async function fixture(page: Page) {
     const saved = await ctx.patch(`${base}/api/v1/product/stories/${detail.story.id}/draft`, {data: {title, body_md: originalBody}});
     expect(saved.ok()).toBe(true);
     detail = await saved.json();
+    if (withOtherStory) {
+      const createdOther = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/product/drafts`, {data: {title: `${title} next destination`}});
+      expect(createdOther.ok()).toBe(true);
+      other = await createdOther.json();
+    }
   } finally { await ctx.dispose(); }
   const id = detail.story.id;
   expect(detail.source).not.toBeNull();
@@ -43,9 +50,9 @@ async function fixture(page: Page) {
   // cases override their target; no unmatched publication can reach a daemon.
   await page.context().route(`**/api/v1/product/stories/${id}/publish-as-*`, route => route.fulfill({status: 500, json: {code: 'fixture', message: 'Unexpected publication route'}}));
   await page.goto('/#/product');
-  await page.locator('.story-row', {hasText: title}).click();
+  await page.locator('.story-row').and(page.getByTitle(title, {exact: true})).click();
   await expect(page.locator('.overview')).toBeVisible();
-  return {id, content, snapshot, versionId: detail.source!.id};
+  return {id, content, snapshot, other, versionId: detail.source!.id};
 }
 
 for (const mode of ['story', 'rfc'] as const) {
@@ -133,4 +140,59 @@ test('Product RFC destination retry preserves title and parent and ignores a dep
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({account_id: 'A', space_key: 'CURRENT', parent_id: '123456', title: 'My exact RFC title'});
   } finally {release();}
+});
+
+
+for (const reopen of [false, true]) test(`Product publication completion preserves ${reopen ? 'a reopened dialog after A to B to A' : 'the story selected after dismissing its dialog'}`, async ({page}, info) => {
+  test.skip(info.project.name !== 'desktop-browser', 'desktop mounted acceptance');
+  const f = await fixture(page, true);
+  let release!: () => void, requested = false;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.context().route(`**/api/v1/product/stories/${f.id}/publish-as-story`, async route => {
+    requested = true;
+    await gate;
+    await route.fulfill({json: f.snapshot()});
+  });
+  try {
+    await page.getByRole('button', {name: 'Publish as Jira story…', exact: true}).click();
+    const dialog = page.getByRole('dialog', {name: 'Publish as Jira story', exact: true});
+    await expect(dialog.getByTestId('publish-preview')).toContainText('Reviewed café.');
+    await dialog.getByRole('button', {name: 'Publish story', exact: true}).click();
+    await expect.poll(() => requested).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    const nextRow = page.locator('.story-row', {hasText: f.other!.story.title});
+    await nextRow.click();
+    await expect(nextRow).toHaveClass(/active/);
+    await expect(page.locator('.overview')).toBeVisible();
+    if (reopen) {
+      await page.locator('.story-row').and(page.getByTitle(f.content.title, {exact: true})).click();
+      await page.getByRole('button', {name: 'Publish as Jira story…', exact: true}).click();
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('button', {name: 'Publish story', exact: true})).toBeEnabled();
+    }
+    const response = page.waitForResponse(r => r.url().endsWith(`/product/stories/${f.id}/publish-as-story`));
+    release();
+    await (await response).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    if (reopen) {
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole('button', {name: 'Publish story', exact: true})).toBeEnabled();
+      await expect(page).toHaveURL(new RegExp(f.id));
+      for (const [size, viewport] of [['desktop', {width: 1440, height: 1000}], ['phone', {width: 390, height: 844}]] as const) {
+        await page.setViewportSize(viewport);
+        for (const colorScheme of ['light', 'dark'] as const) {
+          await page.emulateMedia({colorScheme});
+          await expect(page.locator('html')).toHaveAttribute('data-scheme', colorScheme);
+          await expectFullyInViewport(page, dialog, `publication ${size} ${colorScheme}`);
+          const screenshot = info.outputPath(`publication-${size}-${colorScheme}.png`);
+          await page.screenshot({path: screenshot, fullPage: true});
+          await info.attach(`publication-${size}-${colorScheme}`, {path: screenshot, contentType: 'image/png'});
+        }
+      }
+    } else {
+      await expect(nextRow).toHaveClass(/active/);
+      await expect(page).toHaveURL(new RegExp(f.other!.story.id));
+    }
+  } finally { release(); }
 });
