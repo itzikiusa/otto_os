@@ -8,7 +8,7 @@
 /// (the provider strings are not structured). R5.2.
 pub fn retry_class(err: &str) -> Option<&'static str> {
     let e = err.to_ascii_lowercase();
-    if e.contains("529") {
+    if has_number(&e, "529") {
         return Some("provider overloaded: 529");
     }
     if e.contains("overloaded") {
@@ -20,10 +20,39 @@ pub fn retry_class(err: &str) -> Option<&'static str> {
     if e.contains("too many open files") || e.contains("dup of fd") {
         return Some("fd exhaustion");
     }
-    if e.contains("spawn") {
+    if is_spawn_failure(&e) {
         return Some("spawn failure");
     }
     None
+}
+
+/// `needle` (digits) appears as a whole number — not inside "line 1529" or
+/// "port 52901" (S3-10: a bare substring promoted ordinary failures).
+fn has_number(hay: &str, needle: &str) -> bool {
+    hay.match_indices(needle).any(|(i, m)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + m.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_digit()) && !after.is_some_and(|c| c.is_ascii_digit())
+    })
+}
+
+/// OUR process-spawn errors only (otto-pty's `spawn <program>: …`, the session
+/// manager's `pty spawn task: …`, and "failed to spawn <provider cli>") — not
+/// any agent text that merely mentions spawning ("failed to spawn subagent").
+fn is_spawn_failure(e: &str) -> bool {
+    const PROGRAMS: [&str; 6] = ["claude", "codex", "agy", "gemini", "/bin/", "shell"];
+    if e.contains("pty spawn") {
+        return true;
+    }
+    ["failed to spawn ", "internal error: spawn ", "spawn "]
+        .iter()
+        .any(|lead| {
+            e.match_indices(lead).any(|(i, m)| {
+                // "spawn " alone must start the message (otto-pty's prefix).
+                (*lead != "spawn " || i == 0)
+                    && PROGRAMS.iter().any(|p| e[i + m.len()..].starts_with(p))
+            })
+        })
 }
 
 /// The next retry for a failed attempt: `(sleep_ms, effective_max_attempts,
@@ -91,6 +120,24 @@ mod tests {
             assert!(sleep >= 20_000, "{err}: {sleep}");
             assert_eq!(max_eff, 4, "{err}");
             assert_eq!(reason, label);
+        }
+        // S3-10: digits inside a bigger number and agent text that merely
+        // mentions spawning are NOT transient classes.
+        for err in [
+            "syntax error at line 1529",
+            "connect to 127.0.0.1:52901 refused",
+            "failed to spawn subagent: bad prompt",
+            "the agent decided not to spawn a worker",
+        ] {
+            assert_eq!(retry_class(err), None, "{err}");
+        }
+        for err in [
+            "spawn claude: Resource temporarily unavailable",
+            "internal error: pty spawn task: join error",
+            "HTTP 529",
+            "error(529): overloaded",
+        ] {
+            assert!(retry_class(err).is_some(), "{err}");
         }
         // Everything else keeps the node's own policy verbatim.
         let (sleep, max_eff, reason) =
