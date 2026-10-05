@@ -17,10 +17,10 @@
 //! change and every repo is routed by one rule, not per method. Explicit
 //! write transactions ([`DbPool::begin`], `BEGIN IMMEDIATE`) and raw
 //! connections ([`DbPool::acquire`]) always come from the writer; snapshot
-//! reads ([`DbPool::begin_read`]) come from the reader. Statements run on a transaction never
-//! pass through the router. The reader connections are opened read-only, so a
-//! mis-routed write fails loudly (`attempt to write a readonly database`)
-//! instead of silently racing the writer.
+//! reads ([`DbPool::begin_read`]) come from the reader. Statements run on a
+//! transaction never pass through the router. The reader connections are
+//! opened read-only, so a mis-routed write fails loudly (`attempt to write a
+//! readonly database`) instead of silently racing the writer.
 //!
 //! Tests and tools that build their own (often `sqlite::memory:`) pool convert
 //! it with `DbPool::from(pool)`: one pool serves both roles, exactly as before.
