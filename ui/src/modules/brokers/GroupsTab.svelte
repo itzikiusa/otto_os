@@ -7,7 +7,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { api, ApiError } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
-  import { confirmer } from '../../lib/confirm.svelte';
+  import { confirmProd } from '../../lib/confirmProd';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -247,9 +247,16 @@
 
   async function applyReset() {
     if (!selected || resetError) return;
-    // Clear preview and proceed to confirmation.
-    dryRunResult = null;
+    // The preview STAYS visible while the user types the confirm — its
+    // partition count and lag delta are what the confirm summarises.
     await resetOffsets();
+  }
+
+  /** "to earliest" / "to offset 42" / "to 2026-10-05 12:00" — the reset target. */
+  function resetTargetText(): string {
+    if (resetMode === 'offset') return `to offset ${Number(resetOffset)}`;
+    if (resetMode === 'timestamp') return `to ${new Date(resetTs).toLocaleString()}`;
+    return `to ${resetMode}`;
   }
 
   async function resetOffsets() {
@@ -259,16 +266,25 @@
     const request = detailRequest;
     const body = buildResetBody(guarded);
     const current = () => cluster.id === clusterId && selected === groupId && detailRequest === request;
-    const typed = await confirmer.promptText(
-      `Type the group name to confirm offset reset.`,
-      { title: `Reset offsets for "${groupId}"`, confirmLabel: 'Reset', placeholder: groupId, danger: true },
-    );
-    if (typed === null || !current()) return;
-    if (typed !== groupId) {
-      // A mistyped name must not look like a silent no-op.
-      toasts.warn('Offsets not reset', `The name you typed didn’t match "${selected}".`);
-      return;
-    }
+    // Where (cluster · env · group · topic scope) and what (mode/target + the
+    // dry-run's partition count and lag change, when previewed), then the
+    // typed group name — consumers resume from the new offsets.
+    const preview = dryRunResult && dryRunResult.group === groupId ? dryRunResult : null;
+    const ok = await confirmProd({
+      env: cluster.environment,
+      verb: 'Reset offsets',
+      title: `Reset offsets for "${groupId}"`,
+      where: `Consumer group ${groupId} · ${resetTopic ? `topic ${resetTopic}` : 'all topics'} · cluster ${cluster.name}`,
+      what: [
+        `Reset ${resetTargetText()}`,
+        preview
+          ? `${plural(preview.partitions.length, 'partition')} · lag ${preview.total_lag_before.toLocaleString()} → ${preview.total_lag_after.toLocaleString()}`
+          : 'Not previewed — use Preview to see the per-partition change first.',
+      ].join(' · '),
+      typed: groupId,
+      danger: true,
+    });
+    if (!ok || !current()) return;
 
     resetting = true;
     try {
