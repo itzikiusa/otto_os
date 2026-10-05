@@ -26,7 +26,7 @@ import { lsGet, lsSet } from '../storage';
 import { layout, type Axis } from './splitLayout.svelte';
 import { MAX_PANES, LS_PANES } from './splitLayout';
 import { isEmbedded } from '../desktop';
-import { SCRATCH_WORKSPACE_ID } from './sessionScope';
+import { SCRATCH_WORKSPACE_ID, sessionVerbsApply } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
@@ -79,6 +79,12 @@ export function visibleOnThisDevice(s: Session): boolean {
 /** Sentinel tab/pane id for the docked DB Explorer (not a real session). Lets
  *  the DB Explorer live as a pane in the Agents split, beside an agent. */
 export const DB_PANE_ID = '__db_explorer__';
+
+/** What a close gesture resolved to. 'delete-deferred' = the remembered
+ *  "Always delete": archive now, delete after the Undo toast expires. */
+type CloseAction = 'close' | 'archive' | 'delete' | 'delete-deferred';
+/** Undo window for a remembered "Always delete" close. */
+const DELETE_UNDO_MS = 8000;
 
 export type SplitAxis = Axis;
 
@@ -1291,16 +1297,17 @@ class WorkspaceStore {
    *  delete — both close the tab themselves) or, for a non-session id, just
    *  close the tab. A failed end falls back to closing the tab so a bulk
    *  close never leaves a dead tab behind, and reports the error. */
-  private async endSession(id: Id, action: 'close' | 'archive' | 'delete'): Promise<void> {
+  private async endSession(id: Id, action: CloseAction): Promise<void> {
     if (action === 'close' || !this.isEndable(id)) {
       this.closeTab(id);
       return;
     }
     try {
-      if (action === 'delete') await this.killSession(id);
+      if (action === 'delete-deferred') await this.deleteWithUndo(id);
+      else if (action === 'delete') await this.killSession(id);
       else await this.archiveSession(id);
     } catch (e) {
-      toastError(action === 'delete' ? 'Couldn’t delete the session' : 'Couldn’t archive the session', e);
+      toastError(action === 'archive' ? 'Couldn’t archive the session' : 'Couldn’t delete the session', e);
       this.closeTab(id);
     }
   }
@@ -1317,20 +1324,24 @@ class WorkspaceStore {
   /** Shared confirm step for {@link requestCloseTab}/{@link requestCloseTabs}:
    *  returns 'archive' | 'delete' (or 'close' when nothing needs ending), or
    *  null for cancel. Applies (and records) the remembered preference: a
-   *  single-tab close under "Always archive" or "Always delete" is silent —
-   *  the user opted out of the question in Settings → Appearance, and asking
-   *  anyway made the setting a lie. Two guards remain: a close that ends
+   *  single-tab close under "Always archive" or "Always delete" asks nothing
+   *  — the user opted out of the question in Settings → Appearance, and
+   *  asking anyway made the setting a lie. But "Always delete" is never
+   *  silently irreversible: it resolves to 'delete-deferred' (archive now,
+   *  delete after an Undo toast — see {@link deleteWithUndo}), so a stray
+   *  ⌘W / ⌫ / middle-click can be taken back. Two more guards: a close that ends
    *  **more than one** session (Close others / to the right / all), or one
    *  that stops a **working** agent mid-turn, always confirms once, whatever
    *  the preference. */
-  private async resolveCloseAction(ids: Id[]): Promise<'close' | 'archive' | 'delete' | null> {
+  private async resolveCloseAction(ids: Id[]): Promise<CloseAction | null> {
     const ending = ids.filter((id) => this.isEndable(id));
     if (ending.length === 0) return 'close';
     const n = ending.length;
     const many = n > 1;
     const busy = ending.filter((id) => this.statusMap[id] === 'working').length;
     const pref = ui.closeTabPref;
-    if ((pref === 'archive' || pref === 'delete') && !many && busy === 0) return pref;
+    if (pref === 'archive' && !many && busy === 0) return 'archive';
+    if (pref === 'delete' && !many && busy === 0) return 'delete-deferred';
     const name = this.sessions.find((s) => s.id === ending[0])?.title?.trim() || 'this session';
     const busyNote =
       busy === 0
@@ -1429,8 +1440,18 @@ class WorkspaceStore {
     this.persistTabs();
   }
 
-  closeActiveTab(): void {
-    if (this.activeSessionId) void this.requestCloseTab(this.activeSessionId);
+  /** ⌘W / File ▸ Close Tab / the palette's "Close tab" / the mobile bar.
+   *  Only while the Agents page is on screen: `activeSessionId` is the
+   *  focused pane's session whatever module is showing, so ⌘W on Git / Vault
+   *  / Settings used to end a session the user wasn't looking at. Elsewhere
+   *  it is a no-op (open dialogs already consume ⌘W via `modalKeyVerdict`;
+   *  the side pane closes itself via `embeddedKeyTarget`). Returns whether a
+   *  close was requested. */
+  closeActiveTab(): boolean {
+    if (!sessionVerbsApply(router.module)) return false;
+    if (!this.activeSessionId) return false;
+    void this.requestCloseTab(this.activeSessionId);
+    return true;
   }
 
   cycleTab(dir: 1 | -1): void {
@@ -1644,6 +1665,39 @@ class WorkspaceStore {
     this.applyArchiveState(s);
     toasts.push('info', 'Session archived', s.title, 8000, {
       action: { label: 'Undo', run: () => this.unarchiveAndOpen(id) },
+    });
+  }
+
+  /** Pending "Always delete" closes: id → timer. See {@link deleteWithUndo}. */
+  private pendingDeletes = new Map<Id, ReturnType<typeof setTimeout>>();
+
+  /**
+   * A remembered "Always delete" close (S13-01): no dialog, but not silently
+   * irreversible either. The session is ARCHIVED now (it stops, its tab
+   * closes, its history is kept) and permanently deleted only after the Undo
+   * toast runs out. Undo restores it exactly like the archive undo. If the
+   * window goes away inside the window, the session simply stays archived —
+   * the failure mode is "kept", never "lost".
+   */
+  async deleteWithUndo(id: Id, graceMs = DELETE_UNDO_MS): Promise<void> {
+    const s = await api.post<Session>(`/sessions/${id}/archive`);
+    this.applyArchiveState(s);
+    const timer = setTimeout(() => {
+      this.pendingDeletes.delete(id);
+      this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
+    }, graceMs);
+    this.pendingDeletes.set(id, timer);
+    toasts.push('info', 'Session deleted', s.title, graceMs, {
+      action: {
+        label: 'Undo',
+        run: async () => {
+          const t = this.pendingDeletes.get(id);
+          if (t === undefined) throw new Error('The session was already deleted.');
+          clearTimeout(t);
+          this.pendingDeletes.delete(id);
+          await this.unarchiveAndOpen(id);
+        },
+      },
     });
   }
 
