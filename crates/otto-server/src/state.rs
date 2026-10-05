@@ -106,6 +106,8 @@ pub struct ServerCtx {
     pub context_library: otto_context::Library,
     /// Embedded ClickHouse usage + metrics store (no-op when unavailable).
     pub usage: Arc<otto_usage::UsageEngine>,
+    /// Opt-in local application telemetry; absent in minimal test contexts.
+    pub telemetry: Option<Arc<otto_telemetry::TelemetryService>>,
     pub product: std::sync::Arc<otto_product::ProductService>,
     pub product_repo: otto_state::ProductRepo,
     /// Story attachments (files/images) repo — backs `product_media.rs`.

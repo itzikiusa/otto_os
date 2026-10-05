@@ -375,6 +375,19 @@ async fn run(cfg: Config) -> Result<(), String> {
             .as_ref(),
     );
     let usage = otto_usage::UsageEngine::start(usage_config, cfg.data_dir.clone()).await;
+    let telemetry_config = settings
+        .get("application_telemetry")
+        .await
+        .map_err(|e| format!("read telemetry setting: {e}"))?
+        .and_then(|v| serde_json::from_value::<otto_telemetry::TelemetryConfig>(v).ok())
+        .filter(|c| c.validate().is_ok())
+        .unwrap_or_default();
+    let telemetry = otto_telemetry::TelemetryService::start(
+        Arc::clone(&usage),
+        cfg.data_dir.clone(),
+        telemetry_config,
+    )
+    .await;
 
     // Otto context library (skills/souls/context) lives under the data dir; the
     // Provisioner materializes a workspace's active set into each CLI at spawn.
@@ -673,6 +686,7 @@ async fn run(cfg: Config) -> Result<(), String> {
         improve_engine: Arc::clone(&improve_engine),
         context_library: context_library.clone(),
         usage: Arc::clone(&usage),
+        telemetry: Some(Arc::clone(&telemetry)),
         product,
         product_repo,
         attachment_repo,
@@ -1442,11 +1456,18 @@ async fn run(cfg: Config) -> Result<(), String> {
     // double-counting; pre-existing history is skipped to avoid misdated rows).
     // agy is unsupported (its on-disk usage is encrypted).
     let _usage_tailer_handle = {
+        // An isolated E2E daemon must not import the developer's real provider
+        // history. Besides privacy, that startup scan distorts load baselines.
+        let transcript_home = if std::env::var("OTTO_E2E").as_deref() == Ok("1") {
+            cfg.data_dir.join("fixture-home")
+        } else {
+            dirs::home_dir().unwrap_or_else(|| cfg.data_dir.clone())
+        };
         let tailer = usage_tailer::UsageTailer::new(
             Arc::clone(&ctx.usage),
             pool.clone(),
             cfg.data_dir.clone(),
-            dirs::home_dir().unwrap_or_else(|| cfg.data_dir.clone()),
+            transcript_home,
         );
         let handle = tailer.start();
         tracing::info!("usage tailer: started (claude+codex; agy unsupported)");
@@ -1629,6 +1650,7 @@ async fn run(cfg: Config) -> Result<(), String> {
     }
     // Stop the embedded ClickHouse server cleanly (SIGTERM → flush) so its data
     // dir lock is released and the next daemon start doesn't have to reclaim it.
+    telemetry.shutdown().await;
     usage.shutdown().await;
     tracing::info!("ottod stopped");
     Ok(())

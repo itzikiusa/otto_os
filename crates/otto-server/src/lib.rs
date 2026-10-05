@@ -105,6 +105,7 @@ pub mod swarm_scheduler;
 pub mod swarm_verify;
 pub mod swarm_wake;
 pub mod swarm_workspace;
+pub mod telemetry;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod transport;
@@ -196,6 +197,7 @@ pub fn build_router_with_assets(
         .merge(rooms::public_routes())
         .merge(protected);
     let events_tx = ctx.events.clone();
+    let telemetry_ctx = ctx.telemetry.clone();
 
     let mut app = Router::new()
         .nest("/api/v1", api)
@@ -213,6 +215,10 @@ pub fn build_router_with_assets(
     app.layer(axum::middleware::from_fn_with_state(
         events_tx,
         live_events::notify_access_changes,
+    ))
+    .layer(axum::middleware::from_fn_with_state(
+        telemetry_ctx,
+        telemetry::middleware,
     ))
     .layer(TraceLayer::new_for_http())
     .layer(cors_layer())
@@ -253,8 +259,9 @@ fn cors_layer() -> CorsLayer {
             header::HeaderName::from_static("x-otto-ui-conn"),
             // Conditional list reads (k8s resources: an unchanged list is a 304).
             header::IF_NONE_MATCH,
+            header::HeaderName::from_static("traceparent"),
         ])
-        .expose_headers([header::ETAG])
+        .expose_headers([header::ETAG, header::HeaderName::from_static("traceparent")])
         // Every call carries `Authorization`, so every call is preflighted.
         // Without a max-age WebKit caches a preflight ~5 s (per URL), so a
         // poller paid an extra OPTIONS round-trip on almost every tick. 600 s

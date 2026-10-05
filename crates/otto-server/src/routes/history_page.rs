@@ -110,17 +110,20 @@ pub async fn list(
     let cursor = q.cursor(&scope)?;
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let budget = 4 * limit;
-    let candidates = history_page::candidates(
-        &ctx.pool,
-        PageRequest {
-            workspace: &wid,
-            owner: &user.id,
-            admin,
-            status: clean(q.status.as_deref()),
-            cwd: clean(q.cwd.as_deref()),
-            before: cursor.as_ref().map(|c| (c.at.as_str(), c.key.as_str())),
-            budget,
-        },
+    let candidates = crate::telemetry::measure(
+        "history.candidates",
+        history_page::candidates(
+            &ctx.pool,
+            PageRequest {
+                workspace: &wid,
+                owner: &user.id,
+                admin,
+                status: clean(q.status.as_deref()),
+                cwd: clean(q.cwd.as_deref()),
+                before: cursor.as_ref().map(|c| (c.at.as_str(), c.key.as_str())),
+                budget,
+            },
+        ),
     )
     .await
     .map_err(ApiError)?;
@@ -152,9 +155,12 @@ pub async fn list(
         .iter()
         .filter_map(|(_, r)| r.as_ref().map(|r| r.path.to_string_lossy().into_owned()))
         .collect();
-    let indexed = history_page::indexed_paths(&ctx.pool, &paths)
-        .await
-        .map_err(ApiError)?;
+    let indexed = crate::telemetry::measure(
+        "history.indexed_paths",
+        history_page::indexed_paths(&ctx.pool, &paths),
+    )
+    .await
+    .map_err(ApiError)?;
     let indexed: HashMap<_, _> = indexed
         .into_iter()
         .map(|row| (row.path.clone(), row))

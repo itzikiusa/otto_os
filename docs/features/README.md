@@ -194,3 +194,5 @@ contract owners.
 - [Workspace context](projects.md) — workspaces are the shared project boundary: instructions, references, memory and decisions automatically apply to their agent sessions.
 
 - [Subscription accounts](subscription-accounts.md) — separate Claude/Codex subscription logins, per-session selection and stable resume identity.
+
+- [Application telemetry and profiling](./application-telemetry.md) — opt-in local OTel collection, Otto usage, CPU/RAM monitoring and daily slow-operation suggestions.

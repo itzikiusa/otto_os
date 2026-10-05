@@ -1,0 +1,19 @@
+[package]
+name = "otto-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+otto-usage.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+sysinfo = "0.39.6"
+tempfile.workspace = true

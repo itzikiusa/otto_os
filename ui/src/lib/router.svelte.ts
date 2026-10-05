@@ -1,3 +1,4 @@
+import { beginNavigation, finishNavigationPaint } from './telemetry';
 // Tiny hash router. Routes look like "#/agents", "#/git/<repoId>/pr/42",
 // "#/settings/appearance", "#/history/<sessionId>". No SvelteKit — App.svelte
 // switches on `router.module`.
@@ -224,18 +225,22 @@ class Router {
   private parse(): void {
     const next = this.read();
     const seq = ++this.commitSeq;
+    const finish = beginNavigation(next[0] ?? 'agents');
+    const painted = (): void => finishNavigationPaint(next[0] ?? 'agents', finish);
     const wait = this.prepare?.(next) ?? null;
     if (!wait) {
       this.parts = next;
       if (this.pendingTarget) this.pendingTarget = null;
+      painted();
       return;
     }
     this.pendingTarget = next;
     void wait.then(() => {
-      if (seq !== this.commitSeq) return;
+      if (seq !== this.commitSeq) { finish('canceled'); return; }
       this.parts = next;
       this.pendingTarget = null;
-    });
+      painted();
+    }, () => finish('error'));
   }
 
   /** The hash as route segments (and the share/room-invite token capture). */

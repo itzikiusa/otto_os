@@ -19,6 +19,7 @@
 // This file must stay tiny and import no page: the entry (App.svelte at the
 // root) uses it to start the first page's chunk alongside the shell's.
 
+import { startMeasurement } from '../lib/telemetry';
 import type { Component } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
 
@@ -141,13 +142,16 @@ export function loadPage(key: string): Promise<PageComponent> {
     const load = LOADERS[key];
     if (!load) return Promise.reject(new Error(`no page "${key}"`));
     failed.delete(key);
+    const measured = startMeasurement('ui.chunk', key);
     p = load().then(
       (m) => {
+        measured?.finish();
         resolved.set(key, m.default);
         pending.delete(key);
         return m.default;
       },
       (e: unknown) => {
+        measured?.finish('error');
         pending.delete(key);
         failed.set(key, e instanceof Error ? e.message : String(e));
         throw e;

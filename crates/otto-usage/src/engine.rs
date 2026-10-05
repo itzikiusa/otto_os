@@ -629,6 +629,20 @@ impl UsageEngine {
         self.ch()
     }
 
+    /// Resolve the shared engine for a local telemetry exporter. A dead child
+    /// raises the existing recovery signal; the caller retries with the new
+    /// handle and endpoint after the usage engine has recovered.
+    pub fn telemetry_clickhouse(&self) -> Result<Arc<ClickHouse>> {
+        let ch = self
+            .ch()
+            .ok_or_else(|| otto_core::Error::Upstream("usage engine offline".into()))?;
+        if !ch.server_alive() {
+            self.heal.store(true, Ordering::SeqCst);
+            return Err(otto_core::Error::Upstream("usage engine recovering".into()));
+        }
+        Ok(ch)
+    }
+
     // ── Raw passthroughs (sibling stores: k8s monitor) ──────────────────────
 
     /// Raw DDL/DML for sibling stores. Errors (instead of no-op) when the

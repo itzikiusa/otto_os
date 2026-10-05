@@ -7,6 +7,7 @@
   // their own sessions (`summary.scope === 'own'`). All data comes from the
   // daemon's /usage/* endpoints (otto-usage engine).
   import { onMount } from 'svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import { onTabKey } from '../../lib/tabKeys';
   import Icon from '../../lib/components/Icon.svelte';
@@ -37,7 +38,15 @@
   const admin = $derived(auth.isRoot);
   const canView = $derived(auth.isRoot || auth.can('usage', 'view'));
   /** Overview dashboard vs the ccusage-style report tables. */
-  let view = $state<'overview' | 'report'>('overview');
+  let view = $state<'overview' | 'report' | 'otto'>('overview');
+  const ottoUsage = () => import('./OttoUsage.svelte');
+  let telemetryDirty = $state(false);
+  async function selectView(next: typeof view): Promise<void> {
+    if (next === view) return;
+    if (telemetryDirty && !await confirmer.ask('You have unsaved telemetry settings. Leaving now discards them.', { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' })) return;
+    telemetryDirty = false;
+    view = next;
+  }
 
   // Navigate to a session from the top-sessions table (click-through drill-down).
   function openSession(sessionId: string): void {
@@ -70,7 +79,7 @@
   let budgetsOpen = $state(false);
   let budgetsDirty = $state(false);
   let budgetValidated = $state(false);
-  $effect(() => guardUnsaved(() => budgetsDirty, { what: 'your budgets' }));
+  $effect(() => guardUnsaved(() => budgetsDirty || telemetryDirty, { what: 'your usage settings' }));
   const budgetWindowInvalid = $derived(!Number.isInteger(budgetCfg.window_days) || budgetCfg.window_days < 1 || budgetCfg.window_days > 3650);
   const budgetValidation = $derived.by(() => {
     if (budgetWindowInvalid)
@@ -130,11 +139,11 @@
   $effect(() =>
     registry.register('usage', [
       { id: 'usage.refresh', title: 'Refresh usage', group: 'Usage', keywords: 'reload tokens cost', run: () => void usage.loadAll() },
-      { id: 'usage.view-overview', title: 'Show usage overview', group: 'Usage', keywords: 'dashboard charts', run: () => (view = 'overview') },
-      { id: 'usage.view-report', title: 'Show usage report tables', group: 'Usage', keywords: 'ccusage daily monthly table', run: () => (view = 'report') },
+      { id: 'usage.view-overview', title: 'Show usage overview', group: 'Usage', keywords: 'dashboard charts', run: () => void selectView('overview') },
+      { id: 'usage.view-report', title: 'Show usage report tables', group: 'Usage', keywords: 'ccusage daily monthly table', run: () => void selectView('report') },
       ...WINDOWS.map((w) => ({ id: `usage.window-${w.days}`, title: `Show the last ${w.days} days`, group: 'Usage', keywords: `usage window range ${w.label}`, run: () => usage.setDays(w.days) })),
       { id: 'usage.export-summary', title: 'Export usage summary (JSON)', group: 'Usage', keywords: 'download save json report', run: exportSummary },
-      ...(admin ? [{ id: 'usage.settings', title: 'Open usage storage and retention', group: 'Usage', keywords: 'clickhouse retention interval settings', run: () => { if (!configOpen) toggleSettings(); } }] : []),
+      ...(admin ? [{ id: 'usage.view-otto', title: 'Show Otto performance and profiling', group: 'Usage', keywords: 'telemetry cpu ram slow traces', run: () => void selectView('otto') }, { id: 'usage.settings', title: 'Open usage storage and retention', group: 'Usage', keywords: 'clickhouse retention interval settings', run: () => { if (!configOpen) toggleSettings(); } }] : []),
     ]),
   );
 
@@ -409,15 +418,16 @@
     subtitle={admin ? 'Tokens by provider, model and session, with estimated cost and system load' : 'Tokens used by your sessions, with estimated cost'}
   >
     {#snippet tabs()}
-      {#if usage.status?.available}
+      {#if usage.status?.available || admin}
         <div class="segmented" role="tablist" aria-label="Usage view">
-          <button role="tab" aria-selected={view === 'overview'} tabindex={view === 'overview' ? 0 : -1} class:active={view === 'overview'} onclick={() => (view = 'overview')} onkeydown={onTabKey}>Overview</button>
-          <button role="tab" aria-selected={view === 'report'} tabindex={view === 'report' ? 0 : -1} class:active={view === 'report'} onclick={() => (view = 'report')} onkeydown={onTabKey} data-testid="usage-view-report">Report</button>
+          <button role="tab" aria-selected={view === 'overview'} tabindex={view === 'overview' ? 0 : -1} class:active={view === 'overview'} onclick={() => void selectView('overview')} onkeydown={onTabKey}>Overview</button>
+          <button role="tab" aria-selected={view === 'report'} tabindex={view === 'report' ? 0 : -1} class:active={view === 'report'} onclick={() => void selectView('report')} onkeydown={onTabKey} data-testid="usage-view-report">Report</button>
+          {#if admin}<button role="tab" aria-selected={view === 'otto'} tabindex={view === 'otto' ? 0 : -1} class:active={view === 'otto'} onclick={() => void selectView('otto')} onkeydown={onTabKey}>Otto usage</button>{/if}
         </div>
       {/if}
     {/snippet}
     {#snippet actions()}
-      {#if usage.status?.available}
+      {#if usage.status?.available && view !== 'otto'}
         <button
           class="icon-btn"
           onclick={() => usage.loadAll()}
@@ -459,6 +469,9 @@
   </PageHeader>
 
   <PageBody>
+    {#if view === 'otto' && admin}
+      {#await ottoUsage()}<LoadState what="Otto usage" loading empty />{:then module}<module.default bind:dirty={telemetryDirty} />{:catch}<p role="alert">Could not load Otto usage. <button class="btn" onclick={() => view = 'overview'}>Return to Overview</button></p>{/await}
+    {:else}
     <!-- What the numbers cover: who, how far back, how fresh. In the page body,
          not the header, so the header keeps to tabs + Refresh / Export / settings. -->
     {#if usage.status?.available}
@@ -1243,6 +1256,7 @@
         {/if}
         {/if}
       </div>
+    {/if}
     {/if}
   </PageBody>
 </div>

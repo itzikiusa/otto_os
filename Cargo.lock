@@ -3908,6 +3908,7 @@ dependencies = [
  "otto-rbac",
  "otto-ssh",
  "otto-state",
+ "otto-telemetry",
  "redis",
  "reqwest",
  "rustls",
@@ -3960,6 +3961,7 @@ dependencies = [
  "notify",
  "otto-core",
  "otto-state",
+ "otto-telemetry",
  "reqwest",
  "serde",
  "serde_json",
@@ -4234,6 +4236,7 @@ dependencies = [
  "otto-ssh",
  "otto-state",
  "otto-swarm",
+ "otto-telemetry",
  "otto-transcript",
  "otto-usage",
  "otto-vault",
@@ -4359,6 +4362,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-telemetry"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hex",
+ "otto-usage",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "otto-transcript"
 version = "0.2.0"
 dependencies = [
@@ -4454,6 +4475,7 @@ dependencies = [
  "otto-skills",
  "otto-state",
  "otto-swarm",
+ "otto-telemetry",
  "otto-usage",
  "otto-vault",
  "otto-workgraph",

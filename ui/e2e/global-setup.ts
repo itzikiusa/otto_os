@@ -1,8 +1,10 @@
 import { request, type FullConfig } from '@playwright/test';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
+import type { TelemetryConfig, TelemetryStatus } from '../src/lib/api/types';
+import globalTeardown from './global-teardown';
 
 // Stand up an ISOLATED ottod for the whole E2E run:
 //   - fresh temp data dir  -> fresh SQLite, no real sessions/DBs touched
@@ -188,7 +190,45 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
       2,
     ),
   );
-  writeFileSync(META_FILE, JSON.stringify({ pid: child.pid, dataDir, port: PORT }));
+  const telemetry = process.env.OTTO_E2E_TELEMETRY === '1';
+  const identity = telemetry ? {
+    command: execFileSync('ps', ['-p', String(child.pid), '-o', 'command='], { encoding: 'utf8' }).trim(),
+    startedAt: execFileSync('ps', ['-p', String(child.pid), '-o', 'lstart='], { encoding: 'utf8' }).trim(),
+  } : undefined;
+  writeFileSync(META_FILE, JSON.stringify({ pid: child.pid, dataDir, port: PORT, ...(telemetry ? { telemetry, ...identity } : {}) }));
+  if (telemetry) {
+    try {
+      const headers = { Authorization: `Bearer ${token}` };
+      const original = await ctx.get(`${API}/telemetry/config`, { headers, timeout: 10_000 });
+      if (!original.ok()) throw new Error(`[e2e] telemetry config unavailable: HTTP ${original.status()}`);
+      const config = await original.json() as TelemetryConfig;
+      await original.dispose();
+      const enabled = await ctx.put(`${API}/telemetry/config`, { headers, data: { ...config, enabled: true }, timeout: 15_000 });
+      if (!enabled.ok()) throw new Error(`[e2e] enabling telemetry failed: HTTP ${enabled.status()}`);
+      await enabled.dispose();
+      const collectorDeadline = Date.now() + 360_000;
+      let ready = false;
+      let lastError: string | null = null;
+      while (Date.now() < collectorDeadline) {
+        const response = await ctx.get(`${API}/telemetry/status`, { headers, timeout: 10_000 });
+        if (!response.ok()) throw new Error(`[e2e] telemetry status failed: HTTP ${response.status()}`);
+        const status = await response.json() as TelemetryStatus;
+        await response.dispose();
+        lastError = status.last_error;
+        if (status.enabled && status.collector_ready) { ready = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (!ready) throw new Error(`[e2e] collector readiness timed out: ${lastError ?? 'no collector status error'}`);
+      // eslint-disable-next-line no-console
+      console.log('[e2e] application telemetry enabled; managed collector ready.');
+    } catch (error) {
+      // Metadata/state already exist: use the same exact-owned-process cleanup
+      // as normal teardown if installation or readiness fails after opt-in.
+      await ctx.dispose();
+      await globalTeardown();
+      throw error;
+    }
+  }
   await ctx.dispose();
   // eslint-disable-next-line no-console
   console.log(`[e2e] test daemon ready (pid ${child.pid}); root onboarded.`);

@@ -148,6 +148,11 @@ jobs:
       - name: cargo nextest (ignored scale gates)
         run: cargo nextest run --workspace --profile ci --run-ignored only -E 'test(/_at_50k_revisions_/)'
 
+      # Exercise the real pinned collector/exporter and isolated crash fixtures.
+      # Keep process recovery serial and separate from the shared test fan-out.
+      - name: Telemetry delivery and collector recovery
+        run: cargo test -p otto-telemetry --lib -- --ignored --test-threads=1
+
       # Daemon-side terminal budgets (perf 01 F7/N4): snapshot capture /
       # format / reflow / feed throughput, release profile, ×3 for shared
       # runners, best-of-N rounds. BLOCKING — unlike the advisory perf-gates

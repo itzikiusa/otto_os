@@ -2255,9 +2255,18 @@ impl DbViewerService {
         let started = Instant::now();
         match pre.filter(|(_, at)| at.elapsed() < PRE_SNAPSHOT_REUSE) {
             Some((snap, _)) => self.query_eligible_snap(&snap, user_id, req, &r).await?,
-            None => self.query_eligible(conn_id, user_id, req, &r).await?,
+            None => {
+                otto_telemetry::context::measure_result(
+                    "db.access.check",
+                    self.query_eligible(conn_id, user_id, req, &r),
+                )
+                .await?
+            }
         }
-        let execution = r.with_lifecycle(r.driver.run_tracked(&r.config, req, token));
+        let execution = otto_telemetry::context::measure_result(
+            "db.driver.execute",
+            r.with_lifecycle(r.driver.run_tracked(&r.config, req, token)),
+        );
         tokio::pin!(execution);
         // The check above just ran: the first re-check is one tick away (a
         // plain `interval` fires immediately and re-read everything at t=0).
@@ -2279,7 +2288,11 @@ impl DbViewerService {
                 }
             }
         };
-        self.query_eligible(conn_id, user_id, req, &r).await?;
+        otto_telemetry::context::measure_result(
+            "db.access.check",
+            self.query_eligible(conn_id, user_id, req, &r),
+        )
+        .await?;
         let elapsed = started.elapsed().as_millis() as i64;
 
         // Apply server-side PII masking when the request opts in. Raw cell values

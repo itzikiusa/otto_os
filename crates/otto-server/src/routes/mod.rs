@@ -55,6 +55,7 @@ pub mod slash_commands;
 pub mod snips;
 pub mod swarm_ingest;
 pub mod swarm_webhook;
+pub mod telemetry;
 pub mod transcript;
 pub mod ui_commands;
 pub mod usage;
@@ -408,6 +409,27 @@ pub fn protected_routes() -> Router<ServerCtx> {
             get(crate::mcp_capabilities::proof_pack),
         )
         // --- Usage tracking & system metrics (embedded ClickHouse) -------
+        .route(
+            "/telemetry/config",
+            get(telemetry::config).put(telemetry::put_config),
+        )
+        .route("/telemetry/status", get(telemetry::status))
+        .route("/telemetry/overview", get(telemetry::overview))
+        .route("/telemetry/suggestions", get(telemetry::suggestions))
+        .route("/telemetry/analyze", post(telemetry::analyze))
+        .route(
+            "/telemetry/suggestions/{id}/dismiss",
+            post(telemetry::dismiss),
+        )
+        .route("/telemetry/traces/{id}", get(telemetry::trace))
+        .route(
+            "/telemetry/profile",
+            get(telemetry::latest_profile).post(telemetry::profile),
+        )
+        .route(
+            "/telemetry/ingest",
+            post(telemetry::ingest).layer(axum::extract::DefaultBodyLimit::max(131_072)),
+        )
         .route("/usage/status", get(usage::status))
         .route("/usage/summary", get(usage::summary))
         .route("/usage/by-kind", get(usage::by_kind))

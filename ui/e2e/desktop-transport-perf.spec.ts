@@ -341,7 +341,14 @@ test('chromium: M5 — the tray idles without polling', async ({ browser, baseUR
       // Stage 2: the tray is event-fed (filtered /ws/events) with a 5 min
       // safety net — no request while nothing changes.
       expect(seen.ws, 'tray opens the event socket').toContain('/ws/events');
-      expect(seen.req, 'tray HTTP requests while idle').toBeLessThanOrEqual(1);
+      const telemetryRequests = Object.entries(seen.paths)
+        .filter(([path]) => path.startsWith('/api/v1/telemetry/'))
+        .reduce((sum, [, count]) => sum + count, 0);
+      expect(seen.req - telemetryRequests, 'tray business-data requests while idle').toBeLessThanOrEqual(1);
+      // Opt-in adds the settled boot batch and the 30-second consent check.
+      // Keep its budget separate so it cannot hide renewed session polling.
+      expect(telemetryRequests, 'bounded opt-in telemetry traffic')
+        .toBeLessThanOrEqual(process.env.OTTO_E2E_TELEMETRY === '1' ? 3 : 0);
     }
   } finally {
     await ctx.close().catch(() => {});

@@ -22,6 +22,7 @@ import type {
   ReviewProofPack,
   ReviewProofPackExport,
 } from './types';
+import { apiComponent, startMeasurement } from '../telemetry';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
 import { inheritedLane, type Lane } from './lane';
 
@@ -272,16 +273,28 @@ export function laneBase(lane: Lane): string {
  *  Streams (k8s follow, DB export/import, S3 downloads) use it directly. */
 export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}): Promise<Response> {
   const base = laneBase(lane);
+  const measured = !path.startsWith('/telemetry') ? startMeasurement('http.client', apiComponent(path), 'client') : null;
+  if (measured) {
+    const headers = new Headers(init.headers);
+    headers.set('traceparent', measured.traceparent);
+    init = { ...init, headers };
+  }
+  let status = 0;
   try {
     const resp = await fetch(`${base}/api/v1${path}`, init);
     if (base !== baseUrl()) altRetryMs = ALT_RETRY_MIN_MS;
+    status = resp.status;
     return resp;
   } catch (e) {
     if (base === baseUrl() || isAbortError(e)) throw e;
     altNetworkFailure(base);
     const method = (init.method ?? 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') throw e;
-    return fetch(`${baseUrl()}/api/v1${path}`, init);
+    const resp = await fetch(`${baseUrl()}/api/v1${path}`, init);
+    status = resp.status;
+    return resp;
+  } finally {
+    measured?.finish(status > 0 && status < 400 ? 'ok' : 'error', { 'http.request.method': (init.method ?? 'GET').toUpperCase(), ...(status ? { 'http.response.status_code': status } : {}), 'otto.lane': lane });
   }
 }
 
@@ -340,8 +353,16 @@ async function request<T>(
   // Accepted responses may carry a job/review object. Only an actually empty
   // successful body is void; an empty error must still reject above.
   if (resp.status === 204) return undefined as T;
-  const text = await resp.text();
-  return text.trim() === '' ? undefined as T : JSON.parse(text) as T;
+  const decode = !path.startsWith('/telemetry') ? startMeasurement('ui.response.decode', apiComponent(path)) : null;
+  try {
+    const text = await resp.text();
+    const result = text.trim() === '' ? undefined as T : JSON.parse(text) as T;
+    decode?.finish();
+    return result;
+  } catch (error) {
+    decode?.finish('error');
+    throw error;
+  }
 }
 
 // Background-request lane. Poll ticks, live-query refetches and reconnect /
@@ -469,7 +490,10 @@ async function withBgSlot<T>(run: () => Promise<T>, signal?: AbortSignal): Promi
  *  ambient `inLane` scope applies); `bg` goes through the slot caps. */
 function send<T>(method: string, path: string, body: unknown, signal: AbortSignal | undefined, lane?: Lane): Promise<T> {
   const eff = resolveLane(path, signal, lane);
-  if (eff === 'bg') return withBgSlot(() => request<T>(method, path, body, signal, 'bg'), signal);
+  if (eff === 'bg') {
+    const queued = !path.startsWith('/telemetry') ? startMeasurement('ui.request.queue', apiComponent(path)) : null;
+    return withBgSlot(() => { queued?.finish(); return request<T>(method, path, body, signal, 'bg'); }, signal).catch((error: unknown) => { queued?.finish('error'); throw error; });
+  }
   return request<T>(method, path, body, signal, eff);
 }
 
