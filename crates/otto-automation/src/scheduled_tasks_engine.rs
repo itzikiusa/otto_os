@@ -20,7 +20,6 @@
 //! [`Orchestrator::run_agent`]: otto_orchestrator::Orchestrator::run_agent
 //! [`ScheduledTask`]: otto_core::domain::ScheduledTask
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -36,17 +35,15 @@ use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
-use crate::agent_run::{run_with_recovery, watch_for_result};
 use crate::cadence;
-use crate::cancel_signal::CancelSignal;
 // Report + delivery mechanics are shared with the personal-agents engine; the
 // old `scheduled_tasks_engine::*` paths remain valid via these re-exports.
+use crate::agent::{FailReason, RunOutcome};
 use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
 pub use crate::report_delivery::{
     deliver_webhook, delivery_message, destination_kind, extract_summary, report_hash,
 };
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
-use crate::state::ServerCtx;
+use crate::AutomationCtx;
 
 /// Marker the prompt-wrap embeds so the offline E2E stub
 /// (`otto_orchestrator::e2e_stub`) returns a representative report instead of "OK".
@@ -171,101 +168,14 @@ fn run_semaphore() -> &'static Arc<Semaphore> {
     })
 }
 
-/// Task ids with a run in flight. ONE set shared by the scheduler tick and the
-/// manual "Run now" path: the scheduler used to keep its own private set while
-/// Run-now only checked the newest DB row, so a scheduled occurrence fired on
-/// top of a manual run still in progress (two agents, two worktrees, two
-/// deliveries), and two quick Run-now clicks could both pass the row check.
-#[derive(Clone, Default)]
-pub(crate) struct InFlightSet(Arc<Mutex<HashSet<String>>>);
-
-impl InFlightSet {
-    /// Claim `task_id`; `None` when a run of it is already in flight. The
-    /// claim is released when the returned guard drops — including on panic,
-    /// so a crashed run can't wedge its task "in flight" until a restart.
-    pub(crate) fn claim(&self, task_id: &str) -> Option<InFlightGuard> {
-        let mut set = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(task_id.to_string()).then(|| InFlightGuard {
-            set: self.clone(),
-            id: task_id.to_string(),
-        })
-    }
-}
-
-/// Releases a task's [`InFlightSet`] claim on drop. Poison-tolerant.
-pub(crate) struct InFlightGuard {
-    set: InFlightSet,
-    id: String,
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.set
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
-    }
-}
-
-/// Cancel handles of in-flight runs (run id → signal), behind
-/// `POST /scheduled-tasks/runs/{run_id}/cancel` and its personal-agents twin.
-/// A running run used to be unstoppable: killing its session only made the
-/// retry loop open a fresh one.
-#[derive(Default)]
-pub(crate) struct RunCancels(Mutex<HashMap<String, CancelSignal>>);
-
-impl RunCancels {
-    /// Register `run_id` for the life of the returned guard.
-    pub(crate) fn register(&'static self, run_id: &str) -> RunCancelGuard {
-        let signal = CancelSignal::new();
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(run_id.to_string(), signal.clone());
-        RunCancelGuard {
-            reg: self,
-            id: run_id.to_string(),
-            signal,
-        }
-    }
-
-    /// Signal `run_id`'s run to stop; false when it isn't running here.
-    pub(crate) fn cancel(&self, run_id: &str) -> bool {
-        match self.0.lock().unwrap_or_else(|e| e.into_inner()).get(run_id) {
-            Some(sig) => {
-                sig.cancel();
-                true
-            }
-            None => false,
-        }
-    }
-}
-
-/// A run's [`RunCancels`] registration; removed on drop (incl. panic).
-pub(crate) struct RunCancelGuard {
-    reg: &'static RunCancels,
-    id: String,
-    pub(crate) signal: CancelSignal,
-}
-
-impl Drop for RunCancelGuard {
-    fn drop(&mut self) {
-        self.reg
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
-    }
-}
-
-/// Resolves once `sig` is cancelled.
-pub(crate) async fn until_cancelled(sig: &CancelSignal) {
-    while !sig.sleep(Duration::from_secs(3600)).await {}
-}
+// Run bookkeeping (in-flight claims, run cancel registry) is shared with the
+// personal-agents engine and lives in `otto_core::cancel_signal`.
+pub use otto_core::cancel_signal::{
+    until_cancelled, InFlightGuard, InFlightSet, RunCancelGuard, RunCancels,
+};
 
 /// The process-wide [`RunCancels`] for scheduled-task runs.
-pub(crate) fn run_cancels() -> &'static RunCancels {
+pub fn run_cancels() -> &'static RunCancels {
     static REG: OnceLock<RunCancels> = OnceLock::new();
     REG.get_or_init(RunCancels::default)
 }
@@ -277,13 +187,13 @@ pub fn cancel_run(run_id: &str) -> bool {
 }
 
 /// The process-wide [`InFlightSet`] for scheduled tasks.
-pub(crate) fn in_flight() -> &'static InFlightSet {
+pub fn in_flight() -> &'static InFlightSet {
     static SET: OnceLock<InFlightSet> = OnceLock::new();
     SET.get_or_init(InFlightSet::default)
 }
 
-fn emit(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str, status: &str) {
-    let _ = ctx.events.send(Event::ScheduledTaskRunUpdated {
+fn emit(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &str, status: &str) {
+    let _ = ctx.events().send(Event::ScheduledTaskRunUpdated {
         workspace_id: task.workspace_id.clone(),
         task_id: task.id.clone(),
         run_id: run_id.to_string(),
@@ -294,7 +204,11 @@ fn emit(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str, status: &str) {
 /// Run a task once. Opens a run row, executes the agent, writes + delivers the
 /// report, and (for `trigger == "schedule"`) advances the cursor. Returns the run
 /// id; the run row carries the outcome (`ok`/`error`) so a manual caller can poll.
-pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> Result<String> {
+pub async fn run_task(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    trigger: &str,
+) -> Result<String> {
     let run = open_run(ctx, task, trigger).await?;
     complete_run(ctx, task, &run.id, trigger).await
 }
@@ -309,7 +223,7 @@ pub async fn run_task(ctx: &ServerCtx, task: &ScheduledTask, trigger: &str) -> R
 /// Refuses (409) while another run of the task — manual or scheduled — is
 /// still in flight.
 pub async fn spawn_run(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     trigger: &str,
 ) -> Result<ScheduledTaskRun> {
@@ -319,7 +233,7 @@ pub async fn spawn_run(
         ));
     };
     let busy = ctx
-        .scheduled_tasks
+        .scheduled_tasks()
         .list_runs(&task.id, 1)
         .await?
         .first()
@@ -348,12 +262,13 @@ pub async fn spawn_run(
 /// Content-only edits apply to subsequent captures; an already captured prompt
 /// and destination stay together. Disabling/retiming invalidates pending scans,
 /// including disable-enable and retime-away-back transitions.
-async fn open_run(
-    ctx: &ServerCtx,
+#[doc(hidden)] // otto-server admission tests drive the boundary directly
+pub async fn open_run(
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     trigger: &str,
 ) -> Result<ScheduledTaskRun> {
-    let run = ctx.scheduled_tasks.admit_run(task, trigger).await?;
+    let run = ctx.scheduled_tasks().admit_run(task, trigger).await?;
     emit(ctx, task, &run.id, "running");
     Ok(run)
 }
@@ -361,12 +276,12 @@ async fn open_run(
 /// Execute an opened run to completion and settle its row (+ the cursor for
 /// a scheduled run). Returns the run id.
 async fn complete_run(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     run_id: &str,
     trigger: &str,
 ) -> Result<String> {
-    let repo = &ctx.scheduled_tasks;
+    let repo = ctx.scheduled_tasks();
     let run_id = run_id.to_string();
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
@@ -381,7 +296,7 @@ async fn complete_run(
         Ok(out) => {
             let now = Utc::now();
             let rel = report_rel(&task.id, now);
-            let abs = ctx.data_dir.join("scheduled").join(&rel);
+            let abs = ctx.data_dir().join("scheduled").join(&rel);
             let (report_path, report_rel_opt) = match write_report(&abs, &out.report).await {
                 Ok(()) => (Some(abs.to_string_lossy().to_string()), Some(rel.clone())),
                 Err(e) => {
@@ -459,7 +374,7 @@ async fn complete_run(
             let (report_path, report_rel_opt, summary) = match fail.report.as_deref() {
                 Some(report) => {
                     let rel = report_rel(&task.id, Utc::now());
-                    let abs = ctx.data_dir.join("scheduled").join(&rel);
+                    let abs = ctx.data_dir().join("scheduled").join(&rel);
                     match write_report(&abs, report).await {
                         Ok(()) => (
                             Some(abs.to_string_lossy().to_string()),
@@ -531,7 +446,8 @@ async fn record_finish(repo: &otto_state::ScheduledTasksRepo, run_id: &str, f: F
 
 /// Shared success/error/cancellation settlement boundary. Run history is written
 /// separately before this updates the scheduled occurrence's cursor.
-async fn settle_schedule(
+#[doc(hidden)] // otto-server admission tests
+pub async fn settle_schedule(
     repo: &otto_state::ScheduledTasksRepo,
     task: &ScheduledTask,
     status: &str,
@@ -554,38 +470,31 @@ async fn settle_schedule(
 /// first failed run (or failed delivery) of a streak notices once; a clean run
 /// ends the streak. Clicking it opens the task's runs.
 async fn task_notice(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     run_id: &str,
     error: Option<&str>,
     delivery_error: Option<&str>,
 ) {
-    let key = crate::run_notices::streak_key("scheduled_task", &task.id);
-    let (title, body) = match (error, delivery_error) {
-        (Some(e), _) => (
+    let failure = match (error, delivery_error) {
+        (Some(e), _) => Some((
             format!("Scheduled task “{}” failed", task.name),
             e.to_string(),
-        ),
-        (None, Some(d)) => (
+        )),
+        (None, Some(d)) => Some((
             format!("Scheduled task “{}” couldn’t deliver its report", task.name),
             d.to_string(),
-        ),
-        (None, None) => {
-            crate::run_notices::clear_streak(&key);
-            return;
-        }
+        )),
+        // A clean run ends the streak.
+        (None, None) => None,
     };
-    crate::run_notices::notify_failure(
-        ctx,
-        crate::run_notices::RunNotice {
-            key,
-            severity: otto_core::domain::NoticeSeverity::Error,
-            title,
-            body,
-            route: format!("scheduled-tasks/{}/runs/{run_id}", task.id),
-            workspace_id: Some(task.workspace_id.clone()),
-            user_id: task.created_by.clone(),
-        },
+    ctx.run_notice(
+        "scheduled_task",
+        &task.id,
+        failure,
+        format!("scheduled-tasks/{}/runs/{run_id}", task.id),
+        Some(task.workspace_id.clone()),
+        task.created_by.clone(),
     )
     .await;
 }
@@ -593,17 +502,17 @@ async fn task_notice(
 /// A user stopped the run: kill the agent session it drove and cancel the
 /// workflow run it handed off to (both recorded on the run row as they
 /// started). The execution future itself was already dropped by the caller.
-async fn stop_run(ctx: &ServerCtx, run_id: &str) -> ExecFailure {
-    let row = ctx.scheduled_tasks.get_run(run_id).await.ok();
+async fn stop_run(ctx: &impl AutomationCtx, run_id: &str) -> ExecFailure {
+    let row = ctx.scheduled_tasks().get_run(run_id).await.ok();
     let session_id = row.as_ref().and_then(|r| r.session_id.clone());
     let workflow_run_id = row.as_ref().and_then(|r| r.workflow_run_id.clone());
     if let Some(sid) = &session_id {
-        if let Err(e) = ctx.manager.kill_session(sid).await {
+        if let Err(e) = ctx.manager().kill_session(sid).await {
             warn!(run = %run_id, "scheduled task stop: kill session {sid}: {e}");
         }
     }
     if let Some(wr) = &workflow_run_id {
-        let _ = otto_state::WorkflowsRepo::new(ctx.pool.clone())
+        let _ = otto_state::WorkflowsRepo::new(ctx.pool().clone())
             .request_cancel(wr)
             .await;
     }
@@ -641,7 +550,7 @@ fn failure_finish(
 
 /// Dispatch a task by kind/provider: a handed-off workflow, a shell command, or
 /// (the default) an agent run.
-async fn execute(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
+async fn execute(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
     if task.kind == "workflow" {
         return execute_workflow(ctx, task, run_id).await;
     }
@@ -652,13 +561,10 @@ async fn execute(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> ExecRes
 }
 
 /// Build the wrapped + skill-composed prompt for an agent run.
-fn build_prompt(ctx: &ServerCtx, task: &ScheduledTask) -> String {
+fn build_prompt(ctx: &impl AutomationCtx, task: &ScheduledTask) -> String {
     let wrapped = wrap_prompt(&task.name, &task.prompt);
     match task.skill.as_deref().filter(|s| !s.is_empty()) {
-        Some(skill) => {
-            let skill_text = crate::modules::resolve_skill_inline(&ctx.context_library, skill);
-            crate::modules::compose_draft_prompt(&skill_text, &wrapped)
-        }
+        Some(skill) => ctx.compose_skill_prompt(skill, &wrapped),
         None => wrapped,
     }
 }
@@ -666,16 +572,16 @@ fn build_prompt(ctx: &ServerCtx, task: &ScheduledTask) -> String {
 /// `<data_dir>/scheduled/<task_id>` — the per-task working area. Task ids are
 /// daemon-generated ULIDs, but re-validate before the join so a hostile id
 /// fails closed to a never-existing name instead of escaping the data dir.
-fn task_data_dir(ctx: &ServerCtx, task_id: &str) -> std::path::PathBuf {
+fn task_data_dir(ctx: &impl AutomationCtx, task_id: &str) -> std::path::PathBuf {
     let id = otto_core::paths::safe_component(task_id).unwrap_or("invalid");
-    ctx.data_dir.join("scheduled").join(id)
+    ctx.data_dir().join("scheduled").join(id)
 }
 
 /// Run the task's agent. Under `OTTO_E2E` this uses the deterministic headless
 /// stub (no real CLI). Otherwise every run is a **real, openable session** of the
 /// task's provider (claude/codex/agy/custom), retried up to `1 + max_retries`
 /// times, capturing the Markdown report the agent writes to a file.
-async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
+async fn execute_agent(ctx: &impl AutomationCtx, task: &ScheduledTask, run_id: &str) -> ExecResult {
     let cwd = resolve_cwd(ctx, task).await?;
     let prompt = build_prompt(ctx, task);
     let model = (!task.model.trim().is_empty()).then_some(task.model.as_str());
@@ -690,7 +596,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
     // CLI fail fast on purpose).
     if matches!(std::env::var("OTTO_E2E").as_deref(), Ok("1") | Ok("true")) {
         let report = ctx
-            .orchestrator
+            .orchestrator()
             .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
             .await?;
         let summary = extract_summary(&report);
@@ -720,7 +626,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
                 .into());
             }
             let report = ctx
-                .orchestrator
+                .orchestrator()
                 .run_agent(&prompt, &cwd, model, RUN_NO_PROGRESS)
                 .await?;
             let summary = extract_summary(&report);
@@ -733,7 +639,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
             });
         }
     };
-    let ws = ctx.workspaces.get(&task.workspace_id).await?;
+    let ws = ctx.workspaces().get(&task.workspace_id).await?;
 
     // The agent writes its report here; the watcher returns its contents.
     // run_id is daemon-generated too, but it lands in a file name — same
@@ -753,12 +659,8 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
     let captured_sid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let attempts = Arc::new(std::sync::atomic::AtomicI64::new(0));
 
-    let outcome = run_with_recovery(
-        &ctx.manager,
-        max_attempts,
-        &RETRY_BACKOFF,
-        None,
-        |_attempt| {
+    let outcome = ctx
+        .run_with_recovery(max_attempts, &RETRY_BACKOFF, None, |_attempt| {
             let captured = captured_sid.clone();
             let attempts = attempts.clone();
             let ws = ws.clone();
@@ -773,9 +675,8 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
                 )
                 .await
             }
-        },
-    )
-    .await;
+        })
+        .await;
     // The watcher already read the report into `outcome`; the scratch file
     // would otherwise pile up one per run (for a personal agent, inside the
     // folder its next runs work in — where they could read stale reports).
@@ -821,7 +722,7 @@ async fn execute_agent(ctx: &ServerCtx, task: &ScheduledTask, run_id: &str) -> E
 /// prompt, and watch for the report file. Mirrors the PR-review agent path.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_agent_session(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     ws: &otto_core::domain::Workspace,
     owner: &str,
     task: &ScheduledTask,
@@ -830,9 +731,7 @@ async fn run_one_agent_session(
     prompt: &str,
     out_path: &std::path::Path,
     captured_sid: &Arc<Mutex<Option<String>>>,
-) -> crate::agent_run::RunOutcome {
-    use crate::agent_run::{FailReason, RunOutcome};
-
+) -> RunOutcome {
     let _ = std::fs::remove_file(out_path);
     let mut meta = json!({ "source": "scheduled_task", "task_id": task.id, "run_id": run_id });
     // Carry the task's model into meta so SessionManager can inject `--model
@@ -850,7 +749,11 @@ async fn run_one_agent_session(
         model: None,
         meta: Some(meta),
     };
-    let session = match ctx.manager.create(ws, &owner.to_string(), req, None).await {
+    let session = match ctx
+        .manager()
+        .create(ws, &owner.to_string(), req, None)
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             warn!(task = %task.id, "scheduled task: create session ({}): {e}", task.provider);
@@ -860,20 +763,22 @@ async fn run_one_agent_session(
     let sid = session.id.clone();
     *captured_sid.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid.clone());
     // Persist the session id immediately so the UI can Open the run live.
-    let _ = ctx.scheduled_tasks.set_run_session(run_id, &sid).await;
+    let _ = ctx.scheduled_tasks().set_run_session(run_id, &sid).await;
 
-    if wait_for_tui(&ctx.manager, &sid).await {
-        let _ = ctx.manager.input(&sid, &bracketed_paste(prompt)).await;
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        let _ = ctx.manager.input(&sid, b"\r").await;
-        if !dispatched(&ctx.manager, &sid, before).await {
-            let _ = ctx.manager.input(&sid, b"\r").await;
+    if ctx.wait_for_tui(&sid).await {
+        let _ = ctx
+            .manager()
+            .input(&sid, &ctx.bracketed_paste(prompt))
+            .await;
+        tokio::time::sleep(ctx.paste_to_enter()).await;
+        let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+        let _ = ctx.manager().input(&sid, b"\r").await;
+        if !ctx.dispatched(&sid, before).await {
+            let _ = ctx.manager().input(&sid, b"\r").await;
         }
     }
 
-    watch_for_result(
-        &ctx.manager,
+    ctx.watch_for_result(
         &sid,
         &task.provider,
         session.provider_session_id.as_deref(),
@@ -890,7 +795,7 @@ async fn run_one_agent_session(
 
 /// Run a `provider == "shell"` task: execute the prompt as a shell command in the
 /// resolved cwd, capturing stdout/stderr + exit code as the Markdown report.
-async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> ExecResult {
+async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecResult {
     let cwd = resolve_cwd(ctx, task).await?;
     let _permit = run_semaphore()
         .acquire()
@@ -939,7 +844,7 @@ async fn execute_shell(ctx: &ServerCtx, task: &ScheduledTask) -> ExecResult {
 /// Run `/bin/sh -c <cmd>` up to `1 + max_retries` times (clamped to 6), returning
 /// the final attempt's captured output and the number of attempts made. Retries on
 /// spawn error, timeout, or non-zero exit, sleeping `backoff[min(i, len-1)]` between
-/// attempts. `ServerCtx`-free and provider-agnostic so it is directly unit-tested.
+/// attempts. Context-free and provider-agnostic so it is directly unit-tested.
 async fn run_shell_with_retry(
     cmd: &str,
     cwd: &str,
@@ -1079,7 +984,11 @@ fn kill_process_group(_pid: Option<u32>) {}
 
 /// Hand off to a workflow: launch a [`WorkflowRun`], wait (bounded) for it to
 /// reach a terminal state, and summarise the node statuses as the report.
-async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &str) -> ExecResult {
+async fn execute_workflow(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    sched_run_id: &str,
+) -> ExecResult {
     use otto_state::WorkflowsRepo;
 
     let wf_id = task
@@ -1087,7 +996,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
         .as_deref()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| Error::Invalid("workflow task has no workflow_id".into()))?;
-    let repo = WorkflowsRepo::new(ctx.pool.clone());
+    let repo = WorkflowsRepo::new(ctx.pool().clone());
     let workflow = repo.get(&wf_id.to_string()).await?;
     if workflow.workspace_id != task.workspace_id {
         return Err(Error::Invalid("workflow belongs to a different workspace".into()).into());
@@ -1099,7 +1008,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
     // and agents.
     // The check and the insert are one write transaction (`admit_run_if_idle`):
     // a separate has_active_run → create_run let a trigger admit between them.
-    let ws = ctx.workspaces.get(&task.workspace_id).await?;
+    let ws = ctx.workspaces().get(&task.workspace_id).await?;
     let input = json!({ "trigger": "scheduled_task", "task_id": task.id, "task_name": task.name });
     let Some(run) = repo
         .admit_run_if_idle(&workflow.id, &workflow.workspace_id, &input, None)
@@ -1115,11 +1024,10 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
     // Linked at once: the run row can open it while it runs, and a Stop
     // cancels it.
     let _ = ctx
-        .scheduled_tasks
+        .scheduled_tasks()
         .set_run_workflow_run(sched_run_id, &run_id)
         .await;
-    crate::workflow_engine::spawn_run(
-        ctx.clone(),
+    ctx.spawn_workflow_run(
         ws.clone(),
         workflow.clone(),
         run_id.clone(),
@@ -1200,7 +1108,7 @@ async fn execute_workflow(ctx: &ServerCtx, task: &ScheduledTask, sched_run_id: &
 /// the task's `cwd` if it exists, else a per-task scratch dir. NOTE: `cwd` is NOT
 /// a security boundary — a coding agent can read/write anywhere the daemon user
 /// can; the worktree isolates the *git working tree*, not the filesystem.
-async fn resolve_cwd(ctx: &ServerCtx, task: &ScheduledTask) -> Result<String> {
+async fn resolve_cwd(ctx: &impl AutomationCtx, task: &ScheduledTask) -> Result<String> {
     let trimmed = task.cwd.trim();
     let base_dir = (!trimmed.is_empty() && std::path::Path::new(trimmed).is_dir())
         .then(|| trimmed.to_string());
@@ -1258,7 +1166,11 @@ fn plan_cwd(sandbox: &str, base_dir_present: bool) -> CwdPlan {
 /// Provision a fresh git worktree for a sandboxed run (best-effort). Returns the
 /// worktree path, or `None` if `repo_path` isn't a git repo / the add failed (the
 /// caller then falls back to running in `repo_path` directly).
-async fn make_worktree(ctx: &ServerCtx, task: &ScheduledTask, repo_path: &str) -> Option<String> {
+async fn make_worktree(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    repo_path: &str,
+) -> Option<String> {
     let git = otto_git::LocalGit::new(repo_path);
     let base = git.current_branch().await.unwrap_or_else(|_| "HEAD".into());
     let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
@@ -1385,7 +1297,7 @@ fn workflow_report(name: &str, run: &otto_core::workflows::WorkflowRun) -> Strin
 /// Build a proof pack for a run: the report (+ run metadata) as evidence, status
 /// recomputed. Returns the pack id. Best-effort — never fails the run.
 async fn build_proof_pack(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     run_id: &str,
     out: &ExecOutcome,
@@ -1394,7 +1306,7 @@ async fn build_proof_pack(
 
     let created_by = task.created_by.clone().unwrap_or_else(|| "system".into());
     let pack = ctx
-        .proof_repo
+        .proof_repo()
         .ensure_pack(
             &task.workspace_id,
             WorkItemKind::Task,
@@ -1412,23 +1324,23 @@ async fn build_proof_pack(
         "workflow_run_id": out.workflow_run_id,
         "attempts": out.attempts,
     });
-    let _ = crate::proof::upsert_content_artifact(
-        ctx,
-        &pack,
-        ProofArtifactKind::Log,
-        "Scheduled run report",
-        &out.report,
-        ProofArtifactStatus::Info,
-        meta,
-        &created_by,
-    )
-    .await;
-    let _ = crate::proof::recompute_and_emit(ctx, &pack.id).await;
+    let _ = ctx
+        .proof_upsert_content_artifact(
+            &pack,
+            ProofArtifactKind::Log,
+            "Scheduled run report",
+            &out.report,
+            ProofArtifactStatus::Info,
+            meta,
+            &created_by,
+        )
+        .await;
+    let _ = ctx.proof_recompute_and_emit(&pack.id).await;
     Some(pack.id)
 }
 
-async fn prune(ctx: &ServerCtx, task_id: &str) {
-    if let Ok(old) = ctx.scheduled_tasks.prune_runs(task_id, KEEP_RUNS).await {
+async fn prune(ctx: &impl AutomationCtx, task_id: &str) {
+    if let Ok(old) = ctx.scheduled_tasks().prune_runs(task_id, KEEP_RUNS).await {
         for p in old {
             let _ = tokio::fs::remove_file(&p).await;
         }
@@ -1442,7 +1354,7 @@ async fn prune(ctx: &ServerCtx, task_id: &str) {
 /// Deliver the report to the task's destination via the shared helper.
 /// Returns `(delivered, error?)`.
 async fn deliver(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     task: &ScheduledTask,
     summary: &str,
     report: &str,
@@ -1464,213 +1376,6 @@ async fn deliver(
 mod tests {
     use super::*;
     use serde_json::json;
-
-    async fn admission_fixture() -> (tempfile::TempDir, ServerCtx, ScheduledTask) {
-        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pool = mem_pool().await;
-        seed_workspace(&pool, "snapshot-ws").await;
-        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        let mut new = otto_state::NewScheduledTask::defaults(
-            "snapshot-ws".into(),
-            "Captured occurrence".into(),
-        );
-        new.schedule = json!({"cadence":"once","run_at":"2000-01-01T10:00:00Z"});
-        ctx.scheduled_tasks.create(new).await.unwrap();
-        // The scheduler actually captures these rows before spawning run_task.
-        let captured = ctx.scheduled_tasks.list_enabled().await.unwrap().remove(0);
-        assert!(cadence::is_due_since(
-            &captured.schedule,
-            None,
-            None,
-            Utc::now(),
-            chrono_tz::UTC,
-        ));
-        (tmp, ctx, captured)
-    }
-
-    async fn stale_schedule_admission(edits: Vec<otto_state::ScheduledTaskPatch>) {
-        let (_tmp, ctx, captured) = admission_fixture().await;
-        let mut events = ctx.events.subscribe();
-        let (release, wait) = tokio::sync::oneshot::channel();
-        let pending_ctx = ctx.clone();
-        let pending_task = captured.clone();
-        let pending = tokio::spawn(async move {
-            wait.await.unwrap();
-            // This is the actual run_task / spawn_run admission boundary, before
-            // complete_run can execute a provider or deliver output.
-            open_run(&pending_ctx, &pending_task, "schedule").await
-        });
-        for edit in edits {
-            ctx.scheduled_tasks
-                .update(&captured.id, edit)
-                .await
-                .unwrap();
-        }
-        let edited = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
-        release.send(()).unwrap();
-        let result = pending.await.unwrap();
-        let rows = ctx
-            .scheduled_tasks
-            .list_runs(&captured.id, 10)
-            .await
-            .unwrap();
-        assert!(rows.is_empty(), "stale scheduled snapshot opened a run row");
-        assert!(
-            result.is_err(),
-            "stale admission must stop before execution"
-        );
-        assert!(
-            events.try_recv().is_err(),
-            "rejected admission announced a run"
-        );
-        let after = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
-        assert_eq!(after.schedule, edited.schedule);
-        assert_eq!(after.enabled, edited.enabled);
-        assert_eq!(after.last_run_at, edited.last_run_at);
-        assert_eq!(after.schedule_generation, edited.schedule_generation);
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_rejects_disabled_snapshot() {
-        stale_schedule_admission(vec![otto_state::ScheduledTaskPatch {
-            enabled: Some(false),
-            ..Default::default()
-        }])
-        .await;
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_rejects_retimed_snapshot() {
-        stale_schedule_admission(vec![otto_state::ScheduledTaskPatch {
-            schedule: Some(json!({"cadence":"once","run_at":"2099-01-01T10:00:00Z"})),
-            ..Default::default()
-        }])
-        .await;
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_rejects_disable_enable_aba() {
-        stale_schedule_admission(vec![
-            otto_state::ScheduledTaskPatch {
-                enabled: Some(false),
-                ..Default::default()
-            },
-            otto_state::ScheduledTaskPatch {
-                enabled: Some(true),
-                ..Default::default()
-            },
-        ])
-        .await;
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_rejects_retime_aba() {
-        stale_schedule_admission(vec![
-            otto_state::ScheduledTaskPatch {
-                schedule: Some(json!({"cadence":"once","run_at":"2099-01-01T10:00:00Z"})),
-                ..Default::default()
-            },
-            otto_state::ScheduledTaskPatch {
-                schedule: Some(json!({"cadence":"once","run_at":"2000-01-01T10:00:00Z"})),
-                ..Default::default()
-            },
-        ])
-        .await;
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_fresh_resumed_snapshot_runs() {
-        let (_tmp, ctx, captured) = admission_fixture().await;
-        for enabled in [false, true] {
-            ctx.scheduled_tasks
-                .update(
-                    &captured.id,
-                    otto_state::ScheduledTaskPatch {
-                        enabled: Some(enabled),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .unwrap();
-        }
-        let fresh = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
-        // Eligibility changes must not invalidate an already-admitted run's
-        // settlement identity (the review4_once_pause tests cover completion).
-        assert_eq!(fresh.schedule_generation, captured.schedule_generation);
-        let run = open_run(&ctx, &fresh, "schedule").await.unwrap();
-        assert_eq!(run.trigger, "schedule");
-        assert_eq!(
-            ctx.scheduled_tasks
-                .list_runs(&fresh.id, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_content_edit_preserves_eligibility() {
-        let (_tmp, ctx, captured) = admission_fixture().await;
-        ctx.scheduled_tasks
-            .update(
-                &captured.id,
-                otto_state::ScheduledTaskPatch {
-                    name: Some("Renamed".into()),
-                    prompt: Some("New prompt".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let run = open_run(&ctx, &captured, "schedule").await.unwrap();
-        assert_eq!(run.task_id, captured.id);
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_manual_run_allows_disabled_task() {
-        let (_tmp, ctx, captured) = admission_fixture().await;
-        let disabled = ctx
-            .scheduled_tasks
-            .update(
-                &captured.id,
-                otto_state::ScheduledTaskPatch {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-        let run = open_run(&ctx, &disabled, "manual").await.unwrap();
-        assert_eq!(run.trigger, "manual");
-        assert_eq!(
-            ctx.scheduled_tasks
-                .list_runs(&disabled.id, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn review5_scheduled_admission_same_snapshot_has_one_running_row() {
-        let (_tmp, ctx, captured) = admission_fixture().await;
-        let (first, second) = tokio::join!(
-            open_run(&ctx, &captured, "schedule"),
-            open_run(&ctx, &captured, "schedule"),
-        );
-        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
-        assert_eq!(
-            ctx.scheduled_tasks
-                .list_runs(&captured.id, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
 
     async fn paused_once_settlement(status: &str, resume_before_completion: bool) {
         let pool = otto_state::db::test_pool().await;
@@ -1855,121 +1560,6 @@ mod tests {
                 chrono_tz::UTC
             ));
             assert_eq!(repo.get_run(&run.id).await.unwrap().status, status);
-        }
-    }
-
-    #[tokio::test]
-    async fn review4_schedule_http_edit_and_away_back_fence_actual_settlement() {
-        use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
-        use tower::ServiceExt;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pool = mem_pool().await;
-        seed_workspace(&pool, "ws").await;
-        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
-        let app = crate::routes::scheduled_tasks::routes().with_state(ctx.clone());
-        for status in ["ok", "error", "canceled"] {
-            for old_schedule in [
-                json!({"cadence":"once","run_at":"2099-10-05T10:00:00Z"}),
-                json!({"cadence":"interval","every_min":60}),
-            ] {
-                let mut new = otto_state::NewScheduledTask::defaults("ws".into(), status.into());
-                new.schedule = old_schedule;
-                let dispatched = ctx.scheduled_tasks.create(new).await.unwrap();
-                let run = ctx
-                    .scheduled_tasks
-                    .create_run(NewScheduledRun {
-                        task_id: dispatched.id.clone(),
-                        workspace_id: "ws".into(),
-                        trigger: "schedule".into(),
-                    })
-                    .await
-                    .unwrap();
-                for time in ["11:00:00", "10:00:00"] {
-                    let body = json!({"schedule":{"cadence":"once","run_at":format!("2099-10-05T{time}Z")}});
-                    let mut request = axum::http::Request::builder()
-                        .method("PATCH")
-                        .uri(format!("/scheduled-tasks/{}", dispatched.id))
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(body.to_string()))
-                        .unwrap();
-                    request
-                        .extensions_mut()
-                        .insert(otto_core::auth::AuthUser(root_user()));
-                    let response = app.clone().oneshot(request).await.unwrap();
-                    assert_eq!(response.status(), axum::http::StatusCode::OK);
-                }
-                let retimed = ctx.scheduled_tasks.get(&dispatched.id).await.unwrap();
-                assert_eq!(
-                    retimed.schedule_generation,
-                    dispatched.schedule_generation + 2
-                );
-                ctx.scheduled_tasks
-                    .finish_run(
-                        &run.id,
-                        FinishRun {
-                            status: status.into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap();
-                settle_schedule(
-                    &ctx.scheduled_tasks,
-                    &dispatched,
-                    status,
-                    "2099-10-05T10:02:00Z".parse().unwrap(),
-                )
-                .await
-                .unwrap();
-                let after = ctx.scheduled_tasks.get(&dispatched.id).await.unwrap();
-                assert_eq!(after.next_run_at, retimed.next_run_at);
-                assert!(after.last_run_at.is_none());
-                assert!(cadence::is_due_since(
-                    &after.schedule,
-                    None,
-                    None,
-                    "2099-10-05T10:00:00Z".parse().unwrap(),
-                    chrono_tz::UTC
-                ));
-                assert_eq!(
-                    ctx.scheduled_tasks.get_run(&run.id).await.unwrap().status,
-                    status
-                );
-                // Ordinary content changes preserve this generation; its own
-                // completion still consumes exactly this new occurrence.
-                let edited = ctx
-                    .scheduled_tasks
-                    .update(
-                        &after.id,
-                        otto_state::ScheduledTaskPatch {
-                            name: Some("renamed".into()),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(edited.schedule_generation, after.schedule_generation);
-                settle_schedule(
-                    &ctx.scheduled_tasks,
-                    &after,
-                    "ok",
-                    "2099-10-05T10:03:00Z".parse().unwrap(),
-                )
-                .await
-                .unwrap();
-                let done = ctx.scheduled_tasks.get(&after.id).await.unwrap();
-                let cursor = done
-                    .last_run_at
-                    .as_deref()
-                    .map(|s| s.parse::<DateTime<Utc>>().unwrap());
-                assert!(!cadence::is_due_since(
-                    &done.schedule,
-                    cursor,
-                    None,
-                    "2099-10-05T11:00:00Z".parse().unwrap(),
-                    chrono_tz::UTC
-                ));
-            }
         }
     }
 

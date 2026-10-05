@@ -4130,7 +4130,7 @@ running in the checkout. PATCHing a `workflow`-kind task's `workflow_id` to null
 a 400.
 
 Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0086); scheduler:
-`otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
+`otto_automation::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
 advance-cursor-on-completion, startup reaper, global run semaphore); engine:
 `scheduled_tasks_engine` (session-based provider-agnostic agent runs via
 `agent_run`, shell, and workflow handoff); cadence: `cadence` (tz + cron); live

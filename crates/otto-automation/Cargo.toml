@@ -1,0 +1,26 @@
+[package]
+name = "otto-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Scheduled tasks + Goal Loops engines (cadence, report delivery) behind the AutomationCtx trait"
+
+[dependencies]
+otto-core = { workspace = true }
+otto-agent-run = { workspace = true }
+otto-state = { workspace = true }
+otto-sessions = { workspace = true }
+otto-orchestrator = { workspace = true }
+otto-git = { workspace = true }
+otto-channels = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = "0.10.4"
+tracing = { workspace = true }
+tempfile = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+sqlx = { workspace = true }

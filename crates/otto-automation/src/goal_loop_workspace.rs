@@ -9,14 +9,14 @@
 use otto_core::domain::GoalLoop;
 use otto_core::{Error, Result};
 
-use crate::state::ServerCtx;
+use crate::AutomationCtx;
 
 /// Directory holding a loop's worktree. Ids are daemon-generated ULIDs, but
 /// re-validate before joining under the data dir so a hostile id fails closed
 /// to a never-existing name instead of escaping it.
-fn worktree_dir(ctx: &ServerCtx, loop_id: &str) -> std::path::PathBuf {
+fn worktree_dir(ctx: &impl AutomationCtx, loop_id: &str) -> std::path::PathBuf {
     let id = otto_core::paths::safe_component(loop_id).unwrap_or("invalid");
-    ctx.data_dir.join("goal-loops").join(id).join("work")
+    ctx.data_dir().join("goal-loops").join(id).join("work")
 }
 
 /// Ensure the loop has an isolated worktree + branch, returning
@@ -28,7 +28,7 @@ fn worktree_dir(ctx: &ServerCtx, loop_id: &str) -> std::path::PathBuf {
 /// HEAD. A pre-existing path with no record is an error (we never reuse foreign
 /// or stale trees, and never force-reset a branch).
 pub async fn provision_worktree(
-    ctx: &ServerCtx,
+    ctx: &impl AutomationCtx,
     loop_: &GoalLoop,
 ) -> Result<(String, String, String)> {
     if loop_.config.mode == "research" {

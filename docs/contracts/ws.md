@@ -769,7 +769,7 @@ persisted + verified findings ingested into memory):
 
 ## Goal-loop progress (Goal Loops)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/goal_loop.rs` on every loop
+Workspace-scoped. Emitted by `crates/otto-automation/src/goal_loop.rs` on every loop
 transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
 iteration, after each evaluation, and when an executor's live state flips (e.g.
 → `waiting`). The Loops UI updates the list row directly from these fields and
@@ -1081,7 +1081,7 @@ blind timer.
   "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
-- Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
+- Emitted by `otto_automation::scheduled_tasks_engine` when a scheduled-task run
   starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick

@@ -9,6 +9,7 @@ members = [
     "crates/otto-pty",
     "crates/otto-sessions",
     "crates/otto-connections",
+    "crates/otto-automation",
     "crates/otto-aws",
     "crates/otto-k8s",
     "crates/otto-dbviewer",
@@ -57,6 +58,7 @@ license = "MIT"
 otto-core = { path = "crates/otto-core" }
 otto-state = { path = "crates/otto-state" }
 otto-rbac = { path = "crates/otto-rbac" }
+otto-automation = { path = "crates/otto-automation" }
 otto-keychain = { path = "crates/otto-keychain" }
 otto-pty = { path = "crates/otto-pty" }
 otto-sessions = { path = "crates/otto-sessions" }

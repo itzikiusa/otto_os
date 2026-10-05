@@ -3808,6 +3808,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-automation"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "otto-agent-run",
+ "otto-channels",
+ "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-state",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-aws"
 version = "0.2.0"
 dependencies = [
@@ -4383,6 +4405,7 @@ dependencies = [
  "otto-agent-run",
  "otto-apiclient",
  "otto-assistant",
+ "otto-automation",
  "otto-aws",
  "otto-brokers",
  "otto-browser",

@@ -103,12 +103,7 @@ pub fn classify_test_kind(cmd: &str) -> &'static str {
 // Command execution (capture stdout+stderr+exit+duration)
 // ---------------------------------------------------------------------------
 
-pub struct CmdRun {
-    pub success: bool,
-    pub exit_code: i32,
-    pub output: String,
-    pub duration_ms: u64,
-}
+pub use otto_core::proof::CmdRun;
 
 /// Run `sh -c <cmd>` in `cwd`, capturing combined output, exit code, and wall
 /// time. Bounded by `timeout_secs`.
