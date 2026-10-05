@@ -143,8 +143,10 @@
         icon: 'edit',
         action: async () => {
           const name = await confirmer.promptText('Room name', { title: 'Rename room', confirmLabel: 'Rename', initial: r.room.name });
-          if (name) {
-            void personalAgents.renameRoom(r.room.id, name).catch((e) => toasts.error('Couldn’t rename the room', loadErrorText(e)));
+          // A blank (or whitespace-only) name is not a rename.
+          const trimmed = name?.trim();
+          if (trimmed && trimmed !== r.room.name) {
+            void personalAgents.renameRoom(r.room.id, trimmed).catch((e) => toasts.error('Couldn’t rename the room', loadErrorText(e)));
           }
         },
       },

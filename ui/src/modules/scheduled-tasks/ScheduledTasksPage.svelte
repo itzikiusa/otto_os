@@ -688,6 +688,26 @@
     void scheduledTasks.loadRuns(t.id);
   }
 
+  /** "Workflow run" opens THAT run — not the task's current workflow (which
+   *  may have been re-pointed since). The run names its own workflow. */
+  async function openWorkflowRun(runId: string, fallbackWorkflowId: string | null | undefined): Promise<void> {
+    let workflowId = fallbackWorkflowId ?? null;
+    try {
+      workflowId = (await api.get<{ workflow_id: string }>(`/workflow-runs/${encodeURIComponent(runId)}`)).workflow_id;
+    } catch {
+      /* fall back to the task's workflow */
+    }
+    if (!workflowId) return;
+    if (!(await router.goChecked(`workflows/${encodeURIComponent(workflowId)}`))) return;
+    try {
+      const { workflowsPagePort } = await import('../../lib/uiCommands/workflows');
+      const page = await workflowsPagePort.get(new AbortController().signal);
+      if (await page.open(workflowId)) await page.openRun(workflowId, runId);
+    } catch (e) {
+      toasts.error('Couldn’t open the workflow run', errText(e));
+    }
+  }
+
   function openSession(sessionId: string | null | undefined): void {
     if (sessionId) ws.navigateToSession(sessionId);
   }
@@ -926,9 +946,11 @@
       </div>
 
       <div class="frow">
-        <label class="field">
-          <span>Destination</span>
-          <select class="input" bind:value={fDestType}>
+        <!-- A div, not a <label>: the hints and their buttons sat inside the
+             label and became part of the select's accessible name. -->
+        <div class="field">
+          <label for="sched-dest-type">Destination</label>
+          <select id="sched-dest-type" class="input" bind:value={fDestType} aria-describedby="sched-dest-hint-ch sched-dest-hint-email">
             <option value="none">None (store only)</option>
             <option value="slack" disabled={destBlocked('slack')}>Slack{destBlocked('slack') ? ' — not set up' : ''}</option>
             <option value="telegram" disabled={destBlocked('telegram')}>Telegram{destBlocked('telegram') ? ' — not set up' : ''}</option>
@@ -936,18 +958,18 @@
             <option value="webhook">HTTP webhook</option>
           </select>
           {#if destReady && (!destReady.slack || !destReady.telegram)}
-            <span class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
+            <span id="sched-dest-hint-ch" class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
               {fDestType === 'slack' && !destReady.slack ? 'Slack isn’t set up for this workspace.' : fDestType === 'telegram' && !destReady.telegram ? 'Telegram isn’t set up for this workspace.' : 'Slack / Telegram need a workspace integration.'}
               <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Channels</button>
             </span>
           {/if}
           {#if destReady && !destReady.email}
-            <span class="field-hint" class:bad={fDestType === 'email'}>
+            <span id="sched-dest-hint-email" class="field-hint" class:bad={fDestType === 'email'}>
               Email needs a verified sender.
               <button type="button" class="btn small ghost" onclick={() => router.go('settings/sharing')}>Set up in Settings → Sharing</button>
             </span>
           {/if}
-        </label>
+        </div>
         {#if fDestType === 'slack' || fDestType === 'telegram'}
           <label class="field">
             <span>Chat / channel id (optional)</span>
@@ -1122,7 +1144,7 @@
                     {#if r.delivery_error}<Badge tone="warn" label="Delivery failed" title={r.delivery_error ?? undefined} />{/if}
                     {#if r.proof_pack_id}<Badge tone="ok" label="Proof" title="A proof pack is attached to this run" />{/if}
                     {#if r.workflow_run_id && t.workflow_id}
-                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => router.go(`workflows/${t.workflow_id}`)}>Workflow run</button>
+                      <button class="btn small" title={`Open the workflow this run launched (run ${r.workflow_run_id})`} onclick={() => void openWorkflowRun(r.workflow_run_id!, t.workflow_id)}>Workflow run</button>
                     {:else if r.workflow_run_id}<Badge label="Workflow run" title={`Workflow run ${r.workflow_run_id}`} />{/if}
                     <!-- Why it failed / why it wasn't delivered, readable without
                          hovering (a failed run used to say only "No summary"). -->
@@ -1222,7 +1244,7 @@
   /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
   .frow .field { flex: 1; min-width: 180px; }
   .field { margin-bottom: 0; font-size: var(--fs-s); color: var(--text); min-width: 0; }
-  .field > span { color: var(--text-dim); font-weight: 500; }
+  .field > span, .field > label { color: var(--text-dim); font-weight: 500; }
   .field :global(.input) { width: 100%; }
   .field :global(.mono) { font-family: var(--font-mono); }
   .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
