@@ -6529,6 +6529,17 @@ export interface RunInsightsResp {
   run_id?: string | null;
   /** Human-readable explanation when started === false (e.g. skill not installed). */
   reason?: string | null;
+  /** True when a run for this period was already generating and this request
+   *  attached to it (`run_id` is that run) instead of starting a second one. */
+  attached?: boolean;
+}
+
+/** `GET /insights/runs/active` row — an insights run still generating. */
+export interface ActiveInsightsRun {
+  run_id: string;
+  report_key: string;
+  report_revision: string | null;
+  started_at: string;
 }
 
 export interface InsightReportStatus {
@@ -6555,6 +6566,12 @@ export interface ShareInfo {
   created_at: string;
   /** FIXED expiry (created_at + ttl); never slid for share tokens. */
   expires_at: string;
+}
+
+/** `GET /auth/shares` row — one of the caller's live links, any session. */
+export interface MyShare extends ShareInfo {
+  /** The shared session's title; null when the session no longer exists. */
+  session_title: string | null;
 }
 
 /** `POST /api/v1/sessions/{id}/share` request body. */

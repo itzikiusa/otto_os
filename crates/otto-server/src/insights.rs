@@ -523,6 +523,122 @@ const INSIGHTS_SKILL: &str = "insights";
 /// Timeout for one insights run (the skill collects, classifies, renders HTML).
 const RUN_TIMEOUT: Duration = Duration::from_secs(900);
 
+// ---------------------------------------------------------------------------
+// In-progress runs — one per report period
+// ---------------------------------------------------------------------------
+
+/// One insights run in flight: the session doing the work and the report it
+/// will (re)write. Serialized as `GET /insights/runs/active` rows so a page
+/// that was left and re-opened restores its "generating…" banner.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ActiveRun {
+    pub run_id: String,
+    pub report_key: String,
+    /// HTML revision before the run — a different one means it has landed.
+    pub report_revision: Option<String>,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Runs in flight, keyed by `<insights dir>|<period key>` (the dir keeps two
+/// daemons/tests in one process apart). A second "Run" for the same period
+/// ATTACHES to the live run instead of spawning a duplicate agent.
+#[derive(Default)]
+pub struct ActiveRuns {
+    runs: std::collections::HashMap<String, ActiveRun>,
+}
+
+impl ActiveRuns {
+    fn slot(dir: &Path, key: &str) -> String {
+        format!("{}|{key}", dir.display())
+    }
+
+    pub fn register(&mut self, dir: &Path, run: ActiveRun) {
+        self.runs.insert(Self::slot(dir, &run.report_key), run);
+    }
+
+    /// The live run for a period, pruning it when `alive` says it's over
+    /// (session gone, report landed, or past the run timeout).
+    pub fn live(
+        &mut self,
+        dir: &Path,
+        key: &str,
+        alive: impl Fn(&ActiveRun) -> bool,
+    ) -> Option<ActiveRun> {
+        let slot = Self::slot(dir, key);
+        let run = self.runs.get(&slot)?.clone();
+        if alive(&run) {
+            Some(run)
+        } else {
+            self.runs.remove(&slot);
+            None
+        }
+    }
+
+    /// Every run under `dir` that `alive` keeps (dead ones are pruned).
+    pub fn all_live(&mut self, dir: &Path, alive: impl Fn(&ActiveRun) -> bool) -> Vec<ActiveRun> {
+        let prefix = format!("{}|", dir.display());
+        self.runs
+            .retain(|slot, run| !slot.starts_with(&prefix) || alive(run));
+        let mut out: Vec<ActiveRun> = self
+            .runs
+            .iter()
+            .filter(|(slot, _)| slot.starts_with(&prefix))
+            .map(|(_, r)| r.clone())
+            .collect();
+        out.sort_by_key(|r| r.started_at);
+        out
+    }
+
+    pub fn remove_run(&mut self, dir: &Path, run_id: &str) -> Option<ActiveRun> {
+        let prefix = format!("{}|", dir.display());
+        let slot = self
+            .runs
+            .iter()
+            .find(|(slot, r)| slot.starts_with(&prefix) && r.run_id == run_id)
+            .map(|(slot, _)| slot.clone())?;
+        self.runs.remove(&slot)
+    }
+}
+
+/// Process-wide registry; held across check → spawn → register so two
+/// concurrent requests can't both start a run for one period.
+static ACTIVE_RUNS: std::sync::LazyLock<Mutex<ActiveRuns>> =
+    std::sync::LazyLock::new(|| Mutex::new(ActiveRuns::default()));
+
+/// Is this registered run still working? Its session must be alive, its report
+/// must not have changed since it started, and it must be inside the timeout.
+async fn run_alive(ctx: &ServerCtx, dir: &Path, run: &ActiveRun) -> bool {
+    if Utc::now() - run.started_at > chrono::Duration::from_std(RUN_TIMEOUT).unwrap_or_default() {
+        return false;
+    }
+    let session_live = match ctx.manager.get(&run.run_id.clone().into()).await {
+        Ok(s) => s.status != otto_core::domain::SessionStatus::Exited && !s.archived,
+        Err(_) => false,
+    };
+    if !session_live {
+        return false;
+    }
+    let (d, k) = (dir.to_path_buf(), run.report_key.clone());
+    let now_rev = crate::offload::blocking(move || report_status(&d, &k, false))
+        .await
+        .ok()
+        .and_then(|s| s.html_revision);
+    now_rev == run.report_revision
+}
+
+/// Live runs under `dir`, with liveness evaluated (async) before the prune.
+async fn live_runs(ctx: &ServerCtx, dir: &Path) -> Vec<ActiveRun> {
+    let candidates = ACTIVE_RUNS.lock().await.all_live(dir, |_| true);
+    let mut dead = Vec::new();
+    for r in &candidates {
+        if !run_alive(ctx, dir, r).await {
+            dead.push(r.run_id.clone());
+        }
+    }
+    let mut reg = ACTIVE_RUNS.lock().await;
+    reg.all_live(dir, |r| !dead.contains(&r.run_id))
+}
+
 /// Manual requests explicitly regenerate; catch-up keeps per-period idempotency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunMode {
@@ -655,6 +771,33 @@ pub async fn run_insights(
     };
     otto_sessions::trust::ensure_trusted(&provider, &cwd);
 
+    // One run per period: a live run for the same report is returned instead of
+    // spawning a second agent (a double-click, or Run after leaving the page).
+    let dir = insights_dir(ctx);
+    let report_key = requested_period(kind, offset.max(0), as_of)
+        .map(|(s, e)| period_key(kind, s, e))
+        .ok_or_else(|| otto_core::Error::Invalid("report offset is out of range".into()))?;
+    if let Some(run) = live_runs(ctx, &dir)
+        .await
+        .into_iter()
+        .find(|r| r.report_key == report_key)
+    {
+        info!(session = %run.run_id, key = %report_key, "insights: attaching to the run already in progress");
+        return Ok(Some(run.run_id.into()));
+    }
+    let mut registry = ACTIVE_RUNS.lock().await;
+    // Re-check under the lock (another request may have registered meanwhile).
+    if let Some(run) = registry.live(&dir, &report_key, |_| true) {
+        return Ok(Some(run.run_id.into()));
+    }
+    let report_revision = {
+        let (d, k) = (dir.clone(), report_key.clone());
+        crate::offload::blocking(move || report_status(&d, &k, false))
+            .await
+            .ok()
+            .and_then(|s| s.html_revision)
+    };
+
     let collector = materialize_collector(&insights_dir(ctx))
         .map_err(|e| otto_core::Error::Internal(format!("prepare insights collector: {e}")))?;
     let prompt = build_run_prompt(kind, offset, as_of, &collector, mode);
@@ -675,6 +818,16 @@ pub async fn run_insights(
     let session = ctx.manager.create(&ws, &user_id, req, None).await?;
     let sid = session.id.clone();
     info!(session = %sid, kind = kind.word(), offset, provider = %provider, "insights: started run");
+    registry.register(
+        &dir,
+        ActiveRun {
+            run_id: sid.to_string(),
+            report_key,
+            report_revision,
+            started_at: Utc::now(),
+        },
+    );
+    drop(registry);
 
     // Inject the prompt once the TUI has drawn + settled, then let it run
     // headlessly (no result-file watch — the skill writes its own artifacts).
@@ -756,6 +909,10 @@ pub struct RunResp {
     /// Set when `started == false` to explain why (e.g. skill not installed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// True when a run for this period was already in progress and this
+    /// request attached to it (`run_id` is that run) instead of starting one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attached: bool,
 }
 
 /// Insights API routes. Paths are relative to the `/api/v1` mount; auth is
@@ -767,6 +924,36 @@ pub fn routes() -> Router<ServerCtx> {
         .route("/insights/report", get(get_report))
         .route("/insights/report-status", get(get_report_status))
         .route("/insights/run", post(post_run))
+        .route("/insights/runs/active", get(get_active_runs))
+        .route("/insights/runs/{id}/cancel", post(cancel_run))
+}
+
+/// `GET /insights/runs/active` — runs still generating (oldest first), so the
+/// page restores its progress banner after being left and re-opened.
+async fn get_active_runs(State(ctx): State<ServerCtx>) -> ApiResult<Json<Vec<ActiveRun>>> {
+    let dir = insights_dir(&ctx);
+    Ok(Json(live_runs(&ctx, &dir).await))
+}
+
+/// `POST /insights/runs/{id}/cancel` — stop a run: kill its session and drop
+/// it from the registry. Root only, like starting one. 404 for an unknown run.
+async fn cancel_run(
+    State(ctx): State<ServerCtx>,
+    CurrentUser(user): CurrentUser,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<axum::http::StatusCode> {
+    require_root(&user)?;
+    let dir = insights_dir(&ctx);
+    let run = ACTIVE_RUNS
+        .lock()
+        .await
+        .remove_run(&dir, &id)
+        .ok_or_else(|| ApiError(otto_core::Error::NotFound("insights run".into())))?;
+    let sid: otto_core::Id = run.run_id.into();
+    let _ = ctx.manager.kill_session(&sid).await;
+    let _ = ctx.manager.archive(&sid).await;
+    info!(session = %sid, "insights: run cancelled");
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 async fn get_config(State(ctx): State<ServerCtx>) -> ApiResult<Json<InsightsConfig>> {
@@ -892,6 +1079,22 @@ async fn post_run(
 
     let dir = insights_dir(&ctx);
     let key = period_key(kind, start, end);
+    // A run for this period is already generating: attach to it (same run id,
+    // its pre-run revision) instead of starting a duplicate agent.
+    if let Some(run) = live_runs(&ctx, &dir)
+        .await
+        .into_iter()
+        .find(|r| r.report_key == key)
+    {
+        return Ok(Json(RunResp {
+            started: true,
+            run_id: Some(run.run_id),
+            report_key: Some(run.report_key),
+            report_revision: run.report_revision,
+            reason: None,
+            attached: true,
+        }));
+    }
     let report_revision = crate::offload::blocking(move || report_status(&dir, &key, false))
         .await
         .map_err(ApiError)?
@@ -904,12 +1107,14 @@ async fn post_run(
             report_key: Some(period_key(kind, start, end)),
             report_revision,
             reason: None,
+            attached: false,
         })),
         Ok(None) => Ok(Json(RunResp {
             started: false,
             run_id: None,
             report_key: None,
             report_revision: None,
+            attached: false,
             reason: Some(format!(
                 "the '{INSIGHTS_SKILL}' skill is not installed, or no workspace is available to host the run"
             )),
@@ -1067,6 +1272,59 @@ impl InsightsScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(id: &str, key: &str) -> ActiveRun {
+        ActiveRun {
+            run_id: id.into(),
+            report_key: key.into(),
+            report_revision: Some("r0".into()),
+            started_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_second_run_for_the_same_period_attaches_to_the_live_one() {
+        let (a, b) = (Path::new("/tmp/otto-a"), Path::new("/tmp/otto-b"));
+        let mut reg = ActiveRuns::default();
+        reg.register(a, run("s1", "daily:20261004_20261004"));
+        // Same dir + key while alive: the existing run is returned (attach).
+        let live = reg.live(a, "daily:20261004_20261004", |_| true).unwrap();
+        assert_eq!(live.run_id, "s1");
+        // Another period, or another daemon's dir, is a different slot.
+        assert!(reg.live(a, "weekly:20260928_20261004", |_| true).is_none());
+        assert!(reg.live(b, "daily:20261004_20261004", |_| true).is_none());
+        // A finished run is pruned, so the next request starts fresh.
+        assert!(reg.live(a, "daily:20261004_20261004", |_| false).is_none());
+        assert!(reg.all_live(a, |_| true).is_empty());
+    }
+
+    #[test]
+    fn active_runs_list_and_cancel_are_scoped_to_the_insights_dir() {
+        let (a, b) = (Path::new("/tmp/otto-a"), Path::new("/tmp/otto-b"));
+        let mut reg = ActiveRuns::default();
+        reg.register(a, run("s1", "daily:1"));
+        reg.register(a, run("s2", "weekly:1"));
+        reg.register(b, run("s3", "daily:1"));
+        let ids: Vec<_> = reg
+            .all_live(a, |r| r.run_id != "s2")
+            .into_iter()
+            .map(|r| r.run_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["s1".to_string()],
+            "dead s2 pruned, b's s3 not listed"
+        );
+        assert!(
+            reg.remove_run(a, "s3").is_none(),
+            "can't cancel another dir's run"
+        );
+        assert_eq!(
+            reg.remove_run(a, "s1").map(|r| r.run_id).as_deref(),
+            Some("s1")
+        );
+        assert_eq!(reg.all_live(b, |_| true).len(), 1);
+    }
 
     #[test]
     fn status_io_is_constant_for_300_and_1000_reports_and_requires_new_html() {

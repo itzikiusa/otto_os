@@ -931,8 +931,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/insights/config" {
         return Require(Insights, if put { Admin } else { View });
     }
-    if p == "/insights/run" {
+    if p == "/insights/run" || p == "/insights/runs/{id}/cancel" {
         return Require(Insights, Edit);
+    }
+    if p == "/insights/runs/active" {
+        return Require(Insights, View);
     }
     if p == "/insights/reports" || p == "/insights/report" || p == "/insights/report-status" {
         return Require(Insights, View);
