@@ -603,8 +603,16 @@ async fn cancel_run(
         .await
         .map_err(ApiError)?;
     require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
-    if run.status != "running" || !scheduled_tasks_engine::cancel_run(&run_id) {
+    if run.status != "running" {
         return Err(ApiError(Error::Conflict("the run is not running".into())));
+    }
+    if !scheduled_tasks_engine::cancel_run(&run_id) {
+        // The row still says running but execution already ended: it is
+        // writing/delivering its report, which can't be stopped midway (S3-12).
+        return Err(ApiError(Error::Conflict(
+            "the run is finishing (saving and delivering its report) and can no longer be stopped"
+                .into(),
+        )));
     }
     Ok(Json(json!({"ok": true})))
 }

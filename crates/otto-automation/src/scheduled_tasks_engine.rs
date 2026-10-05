@@ -210,7 +210,8 @@ pub async fn run_task(
     trigger: &str,
 ) -> Result<String> {
     let run = open_run(ctx, task, trigger).await?;
-    complete_run(ctx, task, &run.id, trigger).await
+    let cancel = run_cancels().register(&run.id);
+    complete_run(ctx, task, &run.id, trigger, cancel).await
 }
 
 /// Start a run in the BACKGROUND and return its freshly-opened (`running`)
@@ -244,6 +245,10 @@ pub async fn spawn_run(
         ));
     }
     let run = open_run(ctx, task, trigger).await?;
+    // Stoppable from the moment the `running` row is returned — registering
+    // inside the spawned task left a window where Stop got "not running"
+    // for a row that said running (S3-12).
+    let cancel = run_cancels().register(&run.id);
     let (ctx2, task2, run_id, trigger2) = (
         ctx.clone(),
         task.clone(),
@@ -253,7 +258,7 @@ pub async fn spawn_run(
     tokio::spawn(async move {
         // Held until the run settles, so the scheduler skips this task meanwhile.
         let _guard = guard;
-        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2).await;
+        let _ = complete_run(&ctx2, &task2, &run_id, &trigger2, cancel).await;
     });
     Ok(run)
 }
@@ -280,12 +285,15 @@ async fn complete_run(
     task: &ScheduledTask,
     run_id: &str,
     trigger: &str,
+    // Registered by the caller as soon as the run row opened. Dropped once
+    // execution ends: delivery/proof can't be stopped midway, and the cancel
+    // route then answers "finishing" instead of a false "not running".
+    cancel: RunCancelGuard,
 ) -> Result<String> {
     let repo = ctx.scheduled_tasks();
     let run_id = run_id.to_string();
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
-    let cancel = run_cancels().register(&run_id);
     let result = tokio::select! {
         r = execute(ctx, task, &run_id) => r,
         _ = until_cancelled(&cancel.signal) => Err(stop_run(ctx, &run_id).await),
