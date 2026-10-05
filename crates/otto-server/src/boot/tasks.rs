@@ -42,6 +42,7 @@ impl Background {
 /// channel supervisor (none until onboarding).
 pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> Background {
     let mut bg = Background::default();
+    crate::host_guard::warm_own_mdns_names();
 
     // Idle-connection reapers + session sweeps.
     spawn_brokers_reaper(ctx);

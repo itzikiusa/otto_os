@@ -89,6 +89,10 @@ pub(crate) fn tailscale_name_allowed(host: &str, extra: &[String]) -> bool {
 ///
 /// Only these are trusted (S8-11) — not every `*.local`: any LAN peer can
 /// answer mDNS for `evil.local` and rebind it to 127.0.0.1.
+///
+/// The one `scutil` spawn is warmed off the async workers at boot
+/// ([`warm_own_mdns_names`]); a request that races the warm-up pays it once.
+#[allow(clippy::disallowed_methods)] // one-shot ~ms probe, memoized; warmed via spawn_blocking at boot
 fn own_mdns_names() -> &'static [String] {
     static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
@@ -107,6 +111,14 @@ fn own_mdns_names() -> &'static [String] {
         }
         names
     })
+}
+
+/// Resolve [`own_mdns_names`] on a blocking thread so the first guarded
+/// request doesn't run `scutil` on an async worker.
+pub fn warm_own_mdns_names() {
+    tokio::task::spawn_blocking(|| {
+        let _ = own_mdns_names();
+    });
 }
 
 /// Pure verdict for a (port-stripped, lower-cased) host, given the trusted
