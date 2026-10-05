@@ -525,8 +525,20 @@
   let exitProbes = 0;
   const MAX_EXIT_PROBES = 30;
 
+  /** Guest (share-link) sockets refused before ever opening, in a row. A
+   *  lapsed/revoked share is refused at the upgrade forever; retrying it every
+   *  5 s with no cap just fed the daemon's failure throttle (S1-05). Owners
+   *  keep retrying (a daemon restart also refuses for a while); a guest stops
+   *  after `MAX_GUEST_REFUSALS` and keeps the "Reconnect now" button. */
+  let guestRefusals = 0;
+  const MAX_GUEST_REFUSALS = 8;
+
   function scheduleReconnect(afterExit = false): void {
     if (closedByUs || reconnectTimer) return;
+    if (shareToken && guestRefusals >= MAX_GUEST_REFUSALS) {
+      reconnecting = false;
+      return;
+    }
     if (exitCode !== null && !afterExit) return;
     reconnecting = true;
     const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
@@ -895,7 +907,10 @@
   /** This component's handlers on `s` — a socket it just opened, or one it
    *  adopted from the parking lot (already open: onopen never fires). */
   function wireSocket(s: WebSocket): void {
+    let opened = s.readyState === WebSocket.OPEN;
     s.onopen = () => {
+      opened = true;
+      guestRefusals = 0;
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
@@ -1036,6 +1051,7 @@
       connected = false;
       compactQueue.cancel(compactClient);
       if (closedByUs) return;
+      if (!opened) guestRefusals++;
       if (exitCode === null) {
         disconnected = true;
         scheduleReconnect();
@@ -2976,7 +2992,7 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="ov-status">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; connect({ view: false }); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { reconnectAttempts = 0; guestRefusals = 0; connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
