@@ -988,6 +988,9 @@ pub fn parse_hunks(text: &str) -> Vec<Hunk> {
 }
 
 struct FileState {
+    /// Inside a combined (`diff --cc`) block's `@@@` hunks: not unified
+    /// hunks, so everything up to the next file is ignored.
+    in_combined_hunks: bool,
     git_old: Option<String>,
     git_new: Option<String>,
     minus_path: Option<String>, // from "--- a/…"
@@ -1035,6 +1038,7 @@ impl FileState {
             added_lines: 0,
             deleted_lines: 0,
             hunks_seen: 0,
+            in_combined_hunks: false,
             kept_lines: 0,
             kept_bytes: 0,
             file_cap: None,
@@ -1058,6 +1062,10 @@ impl FileState {
     }
 
     fn feed(&mut self, line: &str) {
+        if self.in_combined_hunks || line.starts_with("@@@") {
+            self.in_combined_hunks = true;
+            return;
+        }
         if let Some(rest) = line.strip_prefix("@@") {
             if let Some((old_start, new_start)) = parse_hunk_header(rest) {
                 self.hunks_seen += 1;
