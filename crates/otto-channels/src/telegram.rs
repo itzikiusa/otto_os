@@ -280,6 +280,15 @@ impl Adapter for TelegramAdapter {
             "text": text,
         });
         let tg: TgResponse<serde_json::Value> = self.post_json("editMessageText", &body).await?;
+        if !tg.ok
+            && tg
+                .description
+                .as_deref()
+                .is_some_and(|d| d.contains("message is not modified"))
+        {
+            // Same text as already shown — nothing to change, not a failure.
+            return Ok(());
+        }
         if !tg.ok {
             return Err(anyhow::anyhow!(
                 "Telegram editMessageText failed: {}",
