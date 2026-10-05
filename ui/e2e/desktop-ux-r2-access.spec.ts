@@ -2,12 +2,27 @@ import {test, expect} from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import {apiCtx, seedWorkspace} from './seed';
 import {openApiEditor, expectFullyInViewport} from './helpers';
+import {mkdtempSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 test.use({serviceWorkers:'block'});
 
-test('API response editor initializes browser LSP and renders server diagnostics', async ({page}, info) => {
+// The API client's editors deliberately never attach a language server (perf,
+// desktop-api-scale-perf.spec.ts); the Files panel's viewer is the editor that
+// does, so the browser-LSP handshake + diagnostics are exercised there.
+test('Files viewer initializes browser LSP and renders server diagnostics', async ({page}, info) => {
   const {ctx, base} = await apiCtx();
-  const id = await seedWorkspace(ctx, base); await ctx.dispose();
-  await page.addInitScript(id => {localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');}, id);
+  const id = await seedWorkspace(ctx, base);
+  const dir = mkdtempSync(join(tmpdir(), 'otto-e2e-lsp-'));
+  writeFileSync(join(dir, 'response.json'), '{\n  "answer": 42\n}');
+  const sess = await ctx.post(`${base}/api/v1/workspaces/${id}/sessions`, {data: {kind: 'agent', provider: 'shell', title: 'LSP files', cwd: dir, meta: {origin: 'e2e'}}});
+  expect(sess.ok(), await sess.text()).toBeTruthy();
+  const sid = (await sess.json()).id as string;
+  await ctx.dispose();
+  await page.addInitScript(id => {
+    localStorage.setItem('otto_workspace',id);localStorage.setItem('otto_firstrun_dismissed','1');
+    localStorage.setItem('otto_right_open','1');localStorage.setItem('otto_right_tab','files');
+  }, id);
   const messages: {method:string;params:any}[] = [];
   const warnings:string[] = [];
   page.on('console',m => {if(m.text().includes('externalized')) warnings.push(m.text());});
@@ -20,16 +35,14 @@ test('API response editor initializes browser LSP and renders server diagnostics
       if(msg.method === 'textDocument/hover') socket.send(JSON.stringify({jsonrpc:'2.0',id:msg.id,result:{contents:{kind:'plaintext',value:'Fixture JSON hover'}}}));
     });
   });
-  await page.route('**/api-client/execute',r => r.fulfill({json:{status:200,status_text:'OK',headers:[{key:'Content-Type',value:'application/json'}],body:'{"answer":42}',body_base64:'',truncated:false,too_large:false,duration_ms:7,size_bytes:13,content_type:'application/json',trace:[]}}));
-  await openApiEditor(page);
-  await page.getByLabel('Request URL',{exact:true}).fill('https://fixture.invalid/lsp');
-  await page.getByRole('button',{name:'Send',exact:true}).click();
-  await expect(page.locator('.cm-content')).toContainText('answer');
+  await page.goto(`/#/agents/${sid}`);
+  await page.locator('.tree-row.is-file', {hasText: 'response.json'}).click();
+  await expect(page.locator('.code-scroll .cm-content')).toContainText('answer');
   await expect.poll(() => messages.map(m=>m.method)).toContain('textDocument/didOpen');
-  expect(messages.find(m=>m.method === 'textDocument/didOpen')?.params.textDocument).toMatchObject({languageId:'json',text:'{\n  "answer": 42\n}',uri:'file://response.json'});
+  expect(messages.find(m=>m.method === 'textDocument/didOpen')?.params.textDocument).toMatchObject({languageId:'json',text:'{\n  "answer": 42\n}'});
   await expect(page.locator('.cm-lintRange-warning')).toBeVisible();
   expect(warnings).toEqual([]);
-  await page.screenshot({animations:'disabled',path:info.outputPath('lsp-response.png')});
+  await page.screenshot({animations:'disabled',path:info.outputPath('lsp-files.png')});
 });
 
 test('pointer-opened nested sheets return focus to Browse after Escape',async ({page}) => {
