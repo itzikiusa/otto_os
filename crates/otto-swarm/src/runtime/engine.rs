@@ -1905,14 +1905,22 @@ async fn list_standing_goals_h(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let swarm = ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
-    // Seed defaults on first read so the UI has something to edit.
-    crate::runtime::verify::ensure_standing_goals(
-        &ctx,
-        &swarm.id,
-        &swarm.workspace_id,
-        &swarm.created_by,
-    )
-    .await;
+    // A Viewer GET never writes (S4-24). Swarms that predate seeding get
+    // their defaults lazily — but only on an Editor's read.
+    if ctx
+        .roles()
+        .check(&user.0, &swarm.workspace_id, WorkspaceRole::Editor)
+        .await
+        .is_ok()
+    {
+        crate::runtime::verify::ensure_standing_goals(
+            &ctx,
+            &swarm.id,
+            &swarm.workspace_id,
+            &swarm.created_by,
+        )
+        .await;
+    }
     Ok(Json(
         ctx.swarm_repo()
             .list_standing_goals(&sid)
@@ -1935,23 +1943,21 @@ async fn put_standing_goals_h(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let swarm = ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    for g in ctx
-        .swarm_repo()
-        .list_standing_goals(&sid)
-        .await
-        .unwrap_or_default()
-    {
-        let _ = ctx.swarm_repo().delete_goal(&g.id).await;
-    }
-    for (i, r) in req.goals.into_iter().enumerate() {
-        let mut ng = new_goal_from(r, &swarm.id, &swarm.workspace_id, None, None, &user.0.id);
-        ng.kind = "standing".into();
-        ng.order_idx = i as i64;
-        let _ = ctx.swarm_repo().create_goal(ng).await;
-    }
+    let goals = req
+        .goals
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut ng = new_goal_from(r, &swarm.id, &swarm.workspace_id, None, None, &user.0.id);
+            ng.kind = "standing".into();
+            ng.order_idx = i as i64;
+            ng
+        })
+        .collect();
+    // One transaction, errors propagated (S4-24).
     Ok(Json(
         ctx.swarm_repo()
-            .list_standing_goals(&sid)
+            .replace_standing_goals(&sid, goals)
             .await
             .map_err(ApiError)?,
     ))

@@ -241,9 +241,27 @@ async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id
 /// success so the Coordinator can route handoffs/subtasks/reviews.
 pub async fn run_turn(ctx: SwarmRt, run: SwarmRun) -> Option<SwarmTurnResult> {
     let cancel = register_cancel(ctx.swarm_run_cancels(), &run.id);
-    let res = run_turn_inner(&ctx, &run, &cancel).await;
-    unregister_cancel(ctx.swarm_run_cancels(), &run.id);
-    res
+    // RAII (S4-25b): the registry entry and the `$TMPDIR` result file go away
+    // however the turn ends — including a panic or a dropped future.
+    let _cleanup = TurnCleanup {
+        reg: ctx.swarm_run_cancels().clone(),
+        run_id: run.id.clone(),
+    };
+    run_turn_inner(&ctx, &run, &cancel).await
+}
+
+/// Drop guard for [`run_turn`]: unregisters the cancel flag and deletes the
+/// turn's result file (it was never cleaned up, so one file leaked per run).
+struct TurnCleanup {
+    reg: CancelRegistry,
+    run_id: String,
+}
+
+impl Drop for TurnCleanup {
+    fn drop(&mut self) {
+        unregister_cancel(&self.reg, &self.run_id);
+        let _ = std::fs::remove_file(out_path(&self.run_id));
+    }
 }
 
 async fn run_turn_inner(
@@ -1103,6 +1121,21 @@ pub(crate) fn forget_swarm_files(swarm_id: &str) {
 #[cfg(test)]
 mod shared_files_tests {
     use super::*;
+
+    /// S4-25b: the guard unregisters the run and removes its result file.
+    #[test]
+    fn turn_cleanup_unregisters_and_removes_the_out_file() {
+        let reg: CancelRegistry = Default::default();
+        let rid = format!("cleanup-test-{}", std::process::id());
+        let _flag = register_cancel(&reg, &rid);
+        std::fs::write(out_path(&rid), "{}").unwrap();
+        drop(TurnCleanup {
+            reg: reg.clone(),
+            run_id: rid.clone(),
+        });
+        assert!(reg.lock().unwrap().get(&rid).is_none());
+        assert!(!out_path(&rid).exists());
+    }
 
     #[test]
     fn forgetting_the_last_branch_drops_the_swarm_entry() {
