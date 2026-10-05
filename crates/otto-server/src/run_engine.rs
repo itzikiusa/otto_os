@@ -28,7 +28,6 @@ use crate::state::ServerCtx;
 const EXEC_NO_PROGRESS: Duration = Duration::from_secs(300);
 /// Poll cadence + caps for the async sub-steps (review, goal loop).
 const POLL_EVERY: Duration = Duration::from_secs(2);
-const REVIEW_POLL_MAX: u32 = 150; // ~5 min
 /// The review wait (O4 / SI-07): wakes on the review's own `ReviewChanged`
 /// event; this slow re-check only covers a missed or lagged event.
 const REVIEW_SAFETY_RECHECK: Duration = Duration::from_secs(30);
@@ -485,7 +484,7 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         return Ok(());
     }
 
-    let (review_id, _base, _no_changes) = crate::modules::run_review_for_branch(
+    let (review_id, resolved, _no_changes) = crate::modules::run_review_for_branch(
         ctx,
         &repo_id,
         &wt,
@@ -505,7 +504,15 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
             },
         )
         .await?;
-    let (total, _open, blocker) = poll_review(ctx, &review_id).await;
+    // Wait as long as the review itself may legitimately take (agents +
+    // summarizer), sized off the same diff the reviewers received.
+    let diff_len = otto_git::LocalGit::new(&wt)
+        .review_diff_text(&resolved.diff_ref)
+        .await
+        .map(|d| d.len())
+        .unwrap_or(usize::MAX);
+    let budget = crate::modules::review_wait_budget(ctx, &repo_id, diff_len).await;
+    let (total, _open, blocker) = poll_review(ctx, &review_id, budget).await?;
     ctx.runs
         .set_fields(
             &run.id,
@@ -621,29 +628,62 @@ async fn e2e_commit_note(wt: &str, run: &OttoRun) {
         .await;
 }
 
-async fn poll_review(ctx: &ServerCtx, review_id: &Id) -> (u64, u64, u64) {
-    use otto_core::domain::ReviewStatus;
+async fn poll_review(ctx: &ServerCtx, review_id: &Id, budget: Duration) -> Result<(u64, u64, u64)> {
     // Event-driven (O4 / SI-07): subscribe BEFORE the first status read so a
     // transition between the read and the wait is never missed, then re-read
     // the status column only when this review's `ReviewChanged` arrives (or
-    // every 30 s as a safety net) instead of every 2 s for up to 5 min.
+    // every 30 s as a safety net). The deadline is the review's own budget —
+    // a shorter one read the counts of a still-running review as "0 findings
+    // (0 blocking)" and put THAT in front of the approver.
     let mut rx = ctx.events.subscribe();
-    let total = POLL_EVERY * REVIEW_POLL_MAX;
     let id = review_id.clone();
     wait_until_event(
         &mut rx,
         |ev| matches!(ev, Event::ReviewChanged { review_id, .. } if *review_id == id),
         || async {
-            matches!(
-                ctx.reviews_store.review_status(review_id).await,
-                Ok(ReviewStatus::Done | ReviewStatus::Error)
-            )
+            ctx.reviews_store
+                .review_status(review_id)
+                .await
+                .is_ok_and(|s| review_is_terminal(s))
         },
         REVIEW_SAFETY_RECHECK,
-        total,
+        budget,
     )
     .await;
-    crate::modules::review_findings_counts(ctx, review_id).await
+    let status = ctx.reviews_store.review_status(review_id).await.ok();
+    review_outcome(status, budget)?;
+    Ok(crate::modules::review_findings_counts(ctx, review_id).await)
+}
+
+fn review_is_terminal(s: otto_core::domain::ReviewStatus) -> bool {
+    use otto_core::domain::ReviewStatus;
+    matches!(
+        s,
+        ReviewStatus::Done | ReviewStatus::Error | ReviewStatus::Cancelled
+    )
+}
+
+/// Whether the finding counts of a review in `status` may be reported. Only a
+/// `Done` review has final counts; anything else fails the stage so the
+/// approval prompt never shows a fabricated "0 findings (0 blocking)".
+fn review_outcome(status: Option<otto_core::domain::ReviewStatus>, budget: Duration) -> Result<()> {
+    use otto_core::domain::ReviewStatus;
+    match status {
+        Some(ReviewStatus::Done) => Ok(()),
+        Some(ReviewStatus::Error) => Err(Error::Internal(
+            "code review failed — finding counts unknown".into(),
+        )),
+        Some(ReviewStatus::Cancelled) => Err(Error::Internal(
+            "code review was cancelled — finding counts unknown".into(),
+        )),
+        Some(ReviewStatus::Running) => Err(Error::Internal(format!(
+            "code review still running after {}s — finding counts unknown",
+            budget.as_secs()
+        ))),
+        None => Err(Error::Internal(
+            "code review status unreadable — finding counts unknown".into(),
+        )),
+    }
 }
 
 /// Re-run `check` until it is true or `total` elapses, waking on events that
@@ -935,6 +975,26 @@ mod tests {
         // t = 0, 50, …, 250: one read per safety window (≈6), then give up.
         let n = checks.load(Ordering::SeqCst);
         assert!((4..=7).contains(&n), "{n} checks");
+    }
+
+    // Only a Done review reports counts; running/error/cancelled fail the
+    // stage instead of feeding "0 findings (0 blocking)" to the approval.
+    #[test]
+    fn review_outcome_only_trusts_done() {
+        use super::{review_is_terminal, review_outcome};
+        use otto_core::domain::ReviewStatus;
+        let b = Duration::from_secs(60);
+        assert!(review_outcome(Some(ReviewStatus::Done), b).is_ok());
+        for s in [
+            ReviewStatus::Running,
+            ReviewStatus::Error,
+            ReviewStatus::Cancelled,
+        ] {
+            assert!(review_outcome(Some(s), b).is_err(), "{s:?}");
+        }
+        assert!(review_outcome(None, b).is_err());
+        assert!(review_is_terminal(ReviewStatus::Cancelled));
+        assert!(!review_is_terminal(ReviewStatus::Running));
     }
 
     use super::*;

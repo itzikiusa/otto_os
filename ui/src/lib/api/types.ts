@@ -3818,6 +3818,8 @@ export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'er
 export interface ReviewFinding {
   path: string | null;
   line: number | null;
+  /** Last line (inclusive) of a multi-line finding, when the reviewer gave one. */
+  line_end?: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
   /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
@@ -3874,6 +3876,12 @@ export interface ReviewComment {
   state: ReviewCommentState;
   posted: boolean;
   created_at: string;
+}
+
+/** PATCH /pr-review-comments/{cid}: edit a draft's body and/or restore a declined comment. */
+export interface EditReviewCommentReq {
+  body?: string;
+  restore_draft?: boolean;
 }
 
 export interface Review {

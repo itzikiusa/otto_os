@@ -969,6 +969,20 @@ impl CommentSeverity {
         }
     }
 
+    /// Total, case-insensitive mapping from ANY reviewer/summarizer severity
+    /// token (`Critical`, `HIGH`, `medium`, `blocker`, …) onto the comment
+    /// scale, through [`crate::finding::FindingSeverity::normalize`]. The
+    /// exact-match [`Self::parse`] collapsed every summarizer severity outside
+    /// `info|warn|bug` to `info`, so a "critical" finding became a nit.
+    pub fn normalize(s: &str) -> Self {
+        use crate::finding::FindingSeverity;
+        match FindingSeverity::normalize(s) {
+            FindingSeverity::Critical | FindingSeverity::High => Self::Bug,
+            FindingSeverity::Medium => Self::Warn,
+            FindingSeverity::Low | FindingSeverity::Info => Self::Info,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -1083,6 +1097,9 @@ impl ReviewMode {
 pub struct ReviewFinding {
     pub path: Option<String>,
     pub line: Option<u32>,
+    /// Last line of a multi-line finding (inclusive), when the agent gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<u32>,
     /// "info" | "warn" | "bug".
     pub severity: String,
     pub body: String,
@@ -2731,6 +2748,26 @@ impl Feature {
 
 #[cfg(test)]
 mod tests {
+    /// Summarizer severities beyond `info|warn|bug` (any case) keep their
+    /// weight instead of collapsing to `info`.
+    #[test]
+    fn comment_severity_normalize_is_total_and_case_insensitive() {
+        use super::CommentSeverity as C;
+        for (raw, want) in [
+            ("Critical", C::Bug),
+            ("HIGH", C::Bug),
+            ("bug", C::Bug),
+            ("blocker", C::Bug),
+            ("Medium", C::Warn),
+            ("warning", C::Warn),
+            ("Low", C::Info),
+            ("nit", C::Info),
+            ("???", C::Info),
+        ] {
+            assert_eq!(C::normalize(raw), want, "{raw}");
+        }
+    }
+
     use super::{Capability, Feature, ReviewStatus};
 
     #[test]

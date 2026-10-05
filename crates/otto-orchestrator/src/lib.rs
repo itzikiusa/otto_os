@@ -53,7 +53,7 @@ pub struct OrchestratorContext {
 impl OrchestratorContext {
     /// The provider enum for the plan prompt + validation: the live registry
     /// names, or [`DEFAULT_PROVIDERS`] when none were supplied.
-    fn allowed_providers(&self) -> Vec<String> {
+    pub fn allowed_providers(&self) -> Vec<String> {
         if self.available_providers.is_empty() {
             DEFAULT_PROVIDERS.iter().map(|s| s.to_string()).collect()
         } else {

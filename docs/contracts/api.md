@@ -80,7 +80,7 @@ connection library unusable for every non-root account.)
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, or when the provider's active-conversation guard refuses a fork. Resume errors propagate; this never falls back to an unconditional restart. |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
-| 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
+| 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` — the plan is re-validated against the live workspace first (1..=10 actions, known providers/sessions/connections, `spawn_sessions.count` 1..=8); an invalid plan is 400 and nothing runs. |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
 | 26 | POST /api/v1/workspaces/{id}/connections | ws editor | UpsertConnectionReq | Connection |
 | 27 | PATCH /api/v1/connections/{id} | ws editor (global: `Connections:Admin`) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
@@ -1275,6 +1275,7 @@ run keeps its status and counts but `result_dropped: true`.
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
 | POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
+| PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
@@ -1305,6 +1306,10 @@ carries `lens?` — the lens slug that produced it: orchestrator-mode rows run e
 lens as sub-agents and keep the label through the merge, so one row's findings span
 several lenses. Such a row's own `lens` is empty (it is not one lens's row), which
 also means it is never superseded by the same-lens "already covered" rule above.
+Entries also carry an optional `line_end?` (inclusive end of a multi-line finding).
+A reviewer's findings file is parsed element by element and leniently (`line` as a
+number or numeric-prefix string such as `"42-45"`, which also yields `line_end`;
+any/null `severity`); only an element that is not a finding object is skipped.
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |

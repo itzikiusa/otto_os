@@ -84,6 +84,33 @@ pub fn build_hunk_patch_bytes(
     hunk_header: &str,
     lines: Option<&[usize]>,
 ) -> Result<Vec<u8>> {
+    build_hunk_patch_dir(raw_diff, path, hunk_idx, hunk_header, lines, false)
+}
+
+/// [`build_hunk_patch_bytes`] for a patch that will be applied with
+/// `--reverse` (Unstage, Discard). A reverse apply runs against the POST-image
+/// (the index / the worktree), so a partial selection inverts: an unselected
+/// `+` is on disk and must stay → CONTEXT; an unselected `-` is not on disk
+/// and must not come back → dropped. Using the forward rules here made every
+/// partial Unstage/Discard fail to apply (or touch the wrong lines).
+pub fn build_reverse_hunk_patch_bytes(
+    raw_diff: &[u8],
+    path: &str,
+    hunk_idx: usize,
+    hunk_header: &str,
+    lines: Option<&[usize]>,
+) -> Result<Vec<u8>> {
+    build_hunk_patch_dir(raw_diff, path, hunk_idx, hunk_header, lines, true)
+}
+
+fn build_hunk_patch_dir(
+    raw_diff: &[u8],
+    path: &str,
+    hunk_idx: usize,
+    hunk_header: &str,
+    lines: Option<&[usize]>,
+    reverse: bool,
+) -> Result<Vec<u8>> {
     // `split_inclusive` keeps every line's own terminator: CRLF endings and a
     // missing final newline round-trip byte for byte. `lines()` normalises both.
     let all: Vec<&[u8]> = raw_diff.split_inclusive(|b| *b == b'\n').collect();
@@ -196,9 +223,12 @@ pub fn build_hunk_patch_bytes(
     if selected.is_some() {
         let (mut old_marked, mut new_marked) = (false, false);
         for (i, (line, marker)) in body.iter().enumerate() {
-            let (in_old, in_new) = match line.first().copied().unwrap_or(b' ') {
-                b'+' => (false, is_sel(i)),
-                b'-' => (true, !is_sel(i)),
+            let (in_old, in_new) = match (line.first().copied().unwrap_or(b' '), reverse) {
+                (b'+', false) => (false, is_sel(i)),
+                (b'-', false) => (true, !is_sel(i)),
+                // Reverse: an unselected `+` is context, an unselected `-` is gone.
+                (b'+', true) => (!is_sel(i), true),
+                (b'-', true) => (is_sel(i), false),
                 _ => (true, true),
             };
             if (in_old && old_marked) || (in_new && new_marked) {
@@ -227,20 +257,34 @@ pub fn build_hunk_patch_bytes(
         out.extend_from_slice(l);
     }
 
-    // Counts are recomputed for the SELECTION: `old` = context + every `-`
-    // (kept or converted), `new` = context + kept `+` + converted `-`.
+    // Counts are recomputed for the SELECTION. Forward: `old` = context +
+    // every `-` (kept or converted), `new` = context + kept `+` + converted
+    // `-`. Reverse: `old` = context + kept `-` + converted `+`, `new` =
+    // context + every `+` (kept or converted).
     let (mut old_count, mut new_count) = (0u32, 0u32);
     let mut body_out: Vec<u8> = Vec::new();
     for (i, (line, marker)) in body.iter().enumerate() {
         match line.first().copied().unwrap_or(b' ') {
             b'+' => {
-                // An unselected `+` exists on neither side — it goes, and its
-                // marker goes with it.
                 if is_sel(i) {
                     body_out.extend_from_slice(line);
                     push_marker(&mut body_out, *marker);
                     new_count += 1;
+                } else if reverse {
+                    // Reverse: the unselected `+` is in the post-image the
+                    // patch is applied against — it must survive → context.
+                    body_out.push(b' ');
+                    body_out.extend_from_slice(&line[1..]);
+                    push_marker(&mut body_out, *marker);
+                    old_count += 1;
+                    new_count += 1;
                 }
+                // Forward: an unselected `+` exists on neither side — it goes,
+                // and its marker goes with it.
+            }
+            b'-' if reverse && !is_sel(i) => {
+                // Reverse: the unselected `-` is NOT in the post-image and must
+                // not be restored — it exists on neither side of the patch.
             }
             b'-' => {
                 if is_sel(i) {
@@ -514,7 +558,13 @@ pub(crate) async fn run_hunk_op(git: &LocalGit, req: &StageHunkReq) -> Result<St
     if req.fingerprint != hex::encode(Sha256::digest(raw.as_slice())) {
         return Err(Error::Conflict(STALE.into()));
     }
-    let patch = build_hunk_patch_bytes(
+    // Unstage/Discard reverse-apply the patch, so the selection must be
+    // built with the reverse rules (see `build_reverse_hunk_patch_bytes`).
+    let build = match req.op {
+        HunkOp::Stage => build_hunk_patch_bytes,
+        HunkOp::Unstage | HunkOp::Discard => build_reverse_hunk_patch_bytes,
+    };
+    let patch = build(
         &raw,
         &req.path,
         req.hunk_index,
@@ -1257,6 +1307,54 @@ index 1111111..2222222 100644
             .expect("stages the deletion half");
         let staged = String::from_utf8(git_bytes(&dir, &["diff", "--cached"])).unwrap();
         assert!(staged.contains("deleted file mode 120000"), "{staged}");
+    }
+
+    /// `line 2`,`line 3` → `A`,`B` in one hunk; body indices:
+    /// 0 ` line 1`, 1 `-line 2`, 2 `-line 3`, 3 `+A`, 4 `+B`, …
+    fn replace_two_repo() -> (tempfile::TempDir, PathBuf, LocalGit) {
+        let (tmp, dir, git) = repo();
+        write(&dir, "r.txt", "line 1\nline 2\nline 3\nline 4\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        write(&dir, "r.txt", "line 1\nA\nB\nline 4\n");
+        (tmp, dir, git)
+    }
+
+    /// Partial Unstage (line-level, reverse apply): only `line 2 → A` leaves
+    /// the index; `line 3 → B` stays staged; the worktree is untouched.
+    #[tokio::test]
+    async fn partial_unstage_reverses_only_the_selected_lines() {
+        let (_tmp, dir, git) = replace_two_repo();
+        sh_git(&dir, &["add", "r.txt"]);
+        let h = header_of(&git, DiffTarget::Staged, "r.txt", 0).await;
+        let request = StageHunkReq {
+            lines: Some(vec![1, 3]),
+            ..req("r.txt", 0, &h, HunkOp::Unstage)
+        };
+        run_test_hunk_op(&git, &request)
+            .await
+            .expect("partial unstage applies");
+        let index = String::from_utf8(git_bytes(&dir, &["show", ":r.txt"])).unwrap();
+        assert_eq!(index, "line 1\nline 2\nB\nline 4\n");
+        let disk = std::fs::read_to_string(dir.join("r.txt")).unwrap();
+        assert_eq!(disk, "line 1\nA\nB\nline 4\n");
+    }
+
+    /// Partial Discard (line-level, reverse apply on the worktree): only the
+    /// selected pair is reverted.
+    #[tokio::test]
+    async fn partial_discard_reverts_only_the_selected_lines() {
+        let (_tmp, dir, git) = replace_two_repo();
+        let h = header_of(&git, DiffTarget::Worktree, "r.txt", 0).await;
+        let request = StageHunkReq {
+            lines: Some(vec![1, 3]),
+            ..req("r.txt", 0, &h, HunkOp::Discard)
+        };
+        run_test_hunk_op(&git, &request)
+            .await
+            .expect("partial discard applies");
+        let disk = std::fs::read_to_string(dir.join("r.txt")).unwrap();
+        assert_eq!(disk, "line 1\nline 2\nB\nline 4\n");
     }
 
     #[tokio::test]
