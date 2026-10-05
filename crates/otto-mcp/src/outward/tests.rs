@@ -1307,6 +1307,11 @@ fn pin_verdict_denies_what_it_cannot_verify() {
     // Every tool classified unverifiable really is denied to a pin.
     for t in PIN_UNVERIFIABLE {
         assert!(pin_verdict(&pinned, t, &json!({})).is_some(), "{t}");
+        // …even when the caller echoes the pin back as `workspace_id`.
+        assert!(
+            pin_verdict(&pinned, t, &json!({"workspace_id":"ws-a"})).is_some(),
+            "{t}: pin echo must not pass"
+        );
     }
     // Global rows are fine without a workspace.
     assert!(pin_verdict(&pinned, "k8s_top", &json!({"cluster_id":"C"})).is_none());

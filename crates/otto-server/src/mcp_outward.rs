@@ -375,10 +375,23 @@ pub(crate) async fn governed_invoke(
         .is_some_and(|scope| scope.allow_writes)
         && trust_token_write_grant(ctx).await;
     let args_hash = canonical_hash(arguments);
-    let ws = arguments
-        .get("workspace_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    // The DECISION workspace (auto-approve scope, approval card, audit) is
+    // established server-side, never taken from a caller's say-so: by here a
+    // `workspace_id` is either one the executor consumes (the self-call's
+    // own RBAC checks it) or one resolution filled in / verified (a repo, an
+    // artifact, a vault, a workspace-scoped object looked up within it, a
+    // probed id-only object). Global-row tools and the unverifiable ones
+    // ignore the argument entirely, so a caller-sent value there would only
+    // pick which workspace's rules apply — it is dropped.
+    let ws = if pin_global(&short) || PIN_UNVERIFIABLE.contains(&short.as_str()) {
+        None
+    } else {
+        arguments
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+    };
     // The RESOLVED workspace (a named object / repo / artifact's own) wins.
     if let Some(w) = ws.clone().or_else(|| session_ws.clone()) {
         audit.workspace_id = Some(w);
@@ -415,12 +428,15 @@ pub(crate) async fn governed_invoke(
         match ctx
             .mcp
             .approvals()
-            .find_usable(
+            .find_usable_in(
                 ws.as_deref(),
                 None,
                 tool,
                 &args_hash,
                 Some(&auth.effective_user.id),
+                // Bound to the requesting session: a sibling agent session
+                // of the same owner cannot spend this session's approval.
+                Some(audit.caller_session_id.as_deref()),
             )
             .await
             .map_err(ApiError)?
@@ -444,7 +460,14 @@ pub(crate) async fn governed_invoke(
                 let pending = ctx
                     .mcp
                     .approvals()
-                    .find_pending(ws.as_deref(), None, tool, &args_hash, &user.id)
+                    .find_pending_in(
+                        ws.as_deref(),
+                        None,
+                        tool,
+                        &args_hash,
+                        &user.id,
+                        Some(audit.caller_session_id.as_deref()),
+                    )
                     .await
                     .map_err(ApiError)?;
                 let appr_id = match pending {
@@ -509,7 +532,20 @@ pub(crate) async fn governed_invoke(
                 }
                 match wait_for_decision(ctx, &appr_id, wait_seconds).await {
                     Some(true) => {
-                        let _ = ctx.mcp.approvals().consume(&appr_id).await;
+                        // Single use: two calls waiting on the SAME card (a
+                        // shared pending card, parallel tool calls) both wake on
+                        // one decision — only the one that consumes it runs. An
+                        // approval that expired since the read is not used.
+                        if !ctx
+                            .mcp
+                            .approvals()
+                            .consume(&appr_id)
+                            .await
+                            .map_err(ApiError)?
+                        {
+                            audit.approval_id = Some(appr_id.clone());
+                            return Ok(deny_audit(ctx, &mut audit, "approval already used").await);
+                        }
                         audit.approval_id = Some(appr_id.clone());
                     }
                     Some(false) => {
@@ -864,6 +900,7 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
     if s("workspace_id").is_some_and(|w| !crate::agent_refs::looks_like_id(&w)) {
         return true;
     }
+    let has_ws = s("workspace_id").is_some();
     for (t, arg, kind) in REF_ARGS {
         if *t != tool {
             continue;
@@ -878,8 +915,12 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
                 }
             }
             Some(v) => {
+                // A workspace-owned object is looked up (within the call's
+                // workspace) whenever that workspace matters: under a pin,
+                // or when the caller NAMES one — which then scopes the
+                // approval / auto-approve decision, so it must be verified.
                 if !crate::agent_refs::looks_like_id(&v)
-                    || (pinned && k.scope == crate::agent_refs::Scope::Workspace)
+                    || ((pinned || has_ws) && k.scope == crate::agent_refs::Scope::Workspace)
                 {
                     return true;
                 }
@@ -891,11 +932,12 @@ fn refs_need_lookup(tool: &str, args: &Value, pinned: bool) -> bool {
     {
         return true;
     }
-    pinned
-        && s("workspace_id").is_none()
-        && PIN_PROBES
-            .iter()
-            .any(|(t, arg, _, _)| *t == tool && s(arg).is_some())
+    // An id-only object is ALWAYS probed: a caller-supplied `workspace_id`
+    // (which the executor ignores) proves nothing, and the probed workspace
+    // is what the pin, the audit and the approval decision key on.
+    PIN_PROBES
+        .iter()
+        .any(|(t, arg, ..)| *t == tool && (pinned || s(arg).is_some()))
 }
 
 /// Resolve every friendly reference in a governed call (see [`REF_ARGS`]), a
@@ -993,7 +1035,11 @@ async fn fill_refs_with(
         let value = text(&out, arg);
         let needs = match &value {
             None => kind.sole_default,
-            Some(v) => !looks_like_id(v) || (pinned && kind.scope == Scope::Workspace),
+            Some(v) => {
+                !looks_like_id(v)
+                    || ((pinned || text(&out, "workspace_id").is_some())
+                        && kind.scope == Scope::Workspace)
+            }
         };
         if !needs {
             continue;
@@ -1047,9 +1093,16 @@ async fn fill_refs_with(
         }
     }
 
-    // 4. Pinned token, id-only object: learn its real workspace.
-    if pinned && text(&out, "workspace_id").is_none() {
-        if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
+    // 4. Pinned token, id-only object: learn its real workspace. The probed
+    // value REPLACES any caller-supplied one (the executor ignores it, so
+    // echoing the pin back must not pass the pin check); no id, a failed
+    // probe or a probe without a workspace leaves none ⇒ `pin_verdict`
+    // denies (fail closed).
+    // Unpinned callers are probed too (when they name the object), so the
+    // approval decision keys on the object's workspace, never a spoofed one.
+    if let Some((_, arg, prefix, ptr)) = PIN_PROBES.iter().find(|(t, ..)| *t == tool) {
+        if pinned || text(&out, arg).is_some() {
+            out.remove("workspace_id");
             if let Some(id) = text(&out, arg) {
                 let v = caller.get(&format!("{prefix}{}", seg(&id))).await?;
                 if let Some(ws) = v.pointer(ptr).and_then(Value::as_str) {
@@ -1902,7 +1955,16 @@ mod tests {
             &json!({"session_id": id}),
             true
         ));
-        assert!(!refs_need_lookup(
+        // A pinned probe runs even when the caller names a workspace (the
+        // pin-echo bypass): the executor ignores it for every probed tool.
+        for (t, arg, ..) in PIN_PROBES {
+            assert!(
+                refs_need_lookup(t, &json!({ (*arg): id, "workspace_id": "ws-pin" }), true),
+                "{t}"
+            );
+        }
+        // Unpinned too: the probed workspace keys the approval decision.
+        assert!(refs_need_lookup(
             "get_session",
             &json!({"session_id": id}),
             false
