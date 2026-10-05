@@ -4474,8 +4474,12 @@ fn tool_result(value: &Value, is_error: bool) -> Value {
 async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = msg.get("id").cloned();
-    // Notifications carry no `id` and MUST NOT be answered.
-    let is_notification = id.is_none();
+    // Notifications carry no `id` and MUST NOT be answered — nor executed:
+    // a notification-form `tools/call` would run a tool (possibly a writer)
+    // whose result nobody receives.
+    if id.is_none() {
+        return None;
+    }
 
     match method {
         "initialize" => {
@@ -4605,7 +4609,6 @@ async fn handle(ctx: &Ctx, msg: Value) -> Option<Value> {
                 }
             }
         }
-        _ if is_notification => None,
         _ => Some(rpc_err(
             id.unwrap_or(Value::Null),
             -32601,
@@ -5283,6 +5286,22 @@ mod tests {
         .unwrap();
         assert_eq!(resp["result"]["protocolVersion"], json!(PROTOCOL_VERSION));
         assert_eq!(resp["result"]["serverInfo"]["name"], json!("otto"));
+    }
+
+    /// S5-10: a notification-form `tools/call` (no `id`) is neither executed
+    /// nor answered — not even the argument check runs.
+    #[tokio::test]
+    async fn a_notification_tools_call_is_not_executed_or_answered() {
+        let ctx = test_ctx();
+        let resp = handle(
+            &ctx,
+            json!({ "jsonrpc": "2.0", "method": "tools/call",
+                    "params": { "name": "otto_api_execute", "arguments": {} } }),
+        )
+        .await;
+        assert!(resp.is_none(), "no reply to a notification: {resp:?}");
+        let resp = handle(&ctx, json!({ "jsonrpc": "2.0", "method": "ping" })).await;
+        assert!(resp.is_none());
     }
 
     #[tokio::test]

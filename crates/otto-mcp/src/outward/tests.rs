@@ -1839,3 +1839,13 @@ fn pick_vault_workspace_prefers_writable_for_mutating_tools() {
     );
     assert_eq!(pick_vault_workspace(&[], false), None);
 }
+
+#[test]
+fn initialize_negotiates_to_a_supported_protocol_version() {
+    use super::jsonrpc::negotiate_protocol_version as n;
+    assert_eq!(n(Some("2024-11-05")), "2024-11-05");
+    assert_eq!(n(Some("2025-06-18")), "2025-06-18");
+    // An unknown (future) revision is not echoed back.
+    assert_eq!(n(Some("2099-01-01")), "2025-03-26");
+    assert_eq!(n(None), "2025-03-26");
+}

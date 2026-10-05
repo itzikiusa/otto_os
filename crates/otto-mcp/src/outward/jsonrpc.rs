@@ -39,9 +39,9 @@ pub trait OutwardTools: Send + Sync {
     async fn call(&self, auth: &AuthContext, tool: &str, args: &Value) -> Result<Value, Error>;
 }
 
-/// The protocol version we advertise when a client does not request one. We echo
-/// the client's requested `protocolVersion` when present (maximising
-/// compatibility across client versions), falling back to this otherwise.
+/// The protocol version we advertise when a client does not request one (or
+/// requests one we do not support); a supported requested `protocolVersion`
+/// is echoed (see [`negotiate_protocol_version`]).
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// `GET /api/v1/mcp/http` — we do not offer a standalone server→client SSE
@@ -103,14 +103,19 @@ async fn handle_one<T: OutwardTools + ?Sized>(
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let id = msg.get("id").cloned();
     let is_notification = id.is_none();
+    // A notification (no `id`) is never answered — and never EXECUTED: a
+    // notification-form `tools/call` must not run a (possibly mutating) tool
+    // whose result nobody can receive.
+    if is_notification {
+        return None;
+    }
     match method {
         "initialize" => {
-            let requested = msg
-                .get("params")
-                .and_then(|p| p.get("protocolVersion"))
-                .and_then(Value::as_str)
-                .unwrap_or(DEFAULT_PROTOCOL_VERSION)
-                .to_string();
+            let requested = negotiate_protocol_version(
+                msg.get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(Value::as_str),
+            );
             Some(rpc_ok(
                 id,
                 json!({
@@ -154,9 +159,21 @@ async fn handle_one<T: OutwardTools + ?Sized>(
             };
             Some(rpc_ok(id, result))
         }
-        _ if is_notification => None,
         _ => Some(rpc_err(id, -32601, format!("method not found: {method}"))),
     }
+}
+
+/// MCP protocol revisions this server speaks, newest first.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The `initialize` answer's `protocolVersion`: the client's request when this
+/// server supports it, else the server's default (never an unknown future
+/// revision echoed back). Pure — unit-tested.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> String {
+    requested
+        .filter(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+        .unwrap_or(DEFAULT_PROTOCOL_VERSION)
+        .to_string()
 }
 
 /// Wrap a governed envelope as an MCP tool result (text content + isError).
