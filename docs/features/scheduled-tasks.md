@@ -19,7 +19,13 @@ runs, `cwd` not a sandbox, one-agent-run-per-task):
 
 - **Any provider** — `provider` is `claude | codex | agy | shell | <custom slug>`.
   Agent runs are provider-agnostic (the agent writes its report to a file we read);
-  `shell` runs the prompt as a command and captures stdout/stderr/exit-code.
+  `shell` runs the prompt as a command and captures stdout/stderr/exit-code. When
+  Settings → process sandbox is on for `shell` (the default provider set), the
+  command runs under the same Seatbelt profile as a shell agent session, with a
+  scrubbed environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+  `TMPDIR`, `TERM` only). Changing a task's prompt, provider, model, cwd,
+  sandbox, workflow or destination is limited to its owner (it runs as them)
+  or a workspace admin; any Editor can still retime, pause or resume it.
 - **Local timezone** — a per-task IANA `timezone` (the create form defaults to your
   browser's). Daily/weekly/cron times are interpreted there, DST-correctly.
 - **Cron** — `schedule = {cadence:"cron", expr:"0 9 * * 1"}` (standard 5-field cron,

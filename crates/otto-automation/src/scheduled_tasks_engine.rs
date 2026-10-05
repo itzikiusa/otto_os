@@ -831,10 +831,20 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
         .await
         .map_err(|_| Error::Internal("scheduled-task semaphore closed".into()))?;
     let cmd = task.prompt.clone();
+    // Confined like a `shell` agent session when the process sandbox applies
+    // to `shell` (S3-04) — any Editor can author a shell task.
+    let confine = shell_confinement(ctx, &cwd, &cmd).await;
     // The retry policy applies to shell tasks too: a failing command (spawn error,
     // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
-    let (res, attempts) =
-        run_shell_with_retry(&cmd, &cwd, task.max_retries, SHELL_TIMEOUT, &RETRY_BACKOFF).await;
+    let (res, attempts) = run_shell_with_retry(
+        &cmd,
+        &cwd,
+        task.max_retries,
+        SHELL_TIMEOUT,
+        &RETRY_BACKOFF,
+        confine.as_ref(),
+    )
+    .await;
     // A spawn error / timeout on the final attempt → no report.
     let run = res.map_err(|error| ExecFailure {
         attempts,
@@ -881,13 +891,14 @@ async fn run_shell_with_retry(
     max_retries: i64,
     timeout: Duration,
     backoff: &[Duration],
+    confine: Option<&ShellArgv>,
 ) -> (Result<std::process::Output>, i64) {
     let max_attempts = (1 + max_retries).clamp(1, 6);
     let mut attempts = 0i64;
     let mut last: Option<Result<std::process::Output>> = None;
     for i in 0..max_attempts {
         attempts += 1;
-        let res = run_shell_once(cmd, cwd, timeout).await;
+        let res = run_shell_once(cmd, cwd, timeout, confine).await;
         let success = matches!(&res, Ok(out) if out.status.success());
         last = Some(res);
         if success {
@@ -935,17 +946,64 @@ async fn drain_shell_stream(
     Ok(kept)
 }
 
+/// A confined shell argv: `(program, args)` from `sandboxed_shell_argv`.
+type ShellArgv = (String, Vec<String>);
+
+/// The environment a SANDBOXED shell task keeps — enough for a POSIX
+/// toolchain, nothing of the daemon's own.
+const SHELL_ENV_KEEP: [&str; 8] = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM"];
+
+/// The sandbox argv for a shell task, when the `process_sandbox` setting
+/// confines `shell` (see `otto_sessions::manager::sandboxed_shell_argv`).
+async fn shell_confinement(ctx: &impl AutomationCtx, cwd: &str, cmd: &str) -> Option<ShellArgv> {
+    let cfg = otto_state::SettingsRepo::new(ctx.pool().clone())
+        .get("process_sandbox")
+        .await
+        .ok()
+        .flatten()?;
+    otto_sessions::manager::sandboxed_shell_argv(
+        &cfg,
+        std::path::Path::new(cwd),
+        ctx.data_dir(),
+        cmd,
+    )
+    .await
+}
+
 /// Run `/bin/sh -c cmd` once in its OWN process group, bounded by `timeout`.
 /// On timeout the whole group is killed: the old `timeout(…, output())` only
 /// dropped the future, and tokio does not kill a child on drop by default —
 /// every timed-out attempt left its shell (and whatever it started: `ssh`, a
 /// test run stuck on a prompt) running, each retry added another copy, and the
 /// released permit let the next scheduled occurrence stack more on top.
-async fn run_shell_once(cmd: &str, cwd: &str, timeout: Duration) -> Result<std::process::Output> {
-    let mut spec = tokio::process::Command::new("/bin/sh");
-    spec.arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
+///
+/// `confine` (a sandbox-exec argv that already embeds `/bin/sh -c cmd`) runs
+/// it confined, with a scrubbed environment: the daemon's own variables
+/// (tokens, Otto internals) never reach a sandboxed command.
+async fn run_shell_once(
+    cmd: &str,
+    cwd: &str,
+    timeout: Duration,
+    confine: Option<&ShellArgv>,
+) -> Result<std::process::Output> {
+    let mut spec = match confine {
+        Some((program, args)) => {
+            let mut c = tokio::process::Command::new(program);
+            c.args(args).env_clear();
+            for key in SHELL_ENV_KEEP {
+                if let Some(v) = std::env::var_os(key) {
+                    c.env(key, v);
+                }
+            }
+            c
+        }
+        None => {
+            let mut c = tokio::process::Command::new("/bin/sh");
+            c.arg("-c").arg(cmd);
+            c
+        }
+    };
+    spec.current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1785,6 +1843,7 @@ mod tests {
             "head -c 700000 /dev/zero; head -c 700000 /dev/zero >&2; exit 7",
             "/tmp",
             Duration::from_secs(10),
+            None,
         )
         .await
         .unwrap();
@@ -1795,6 +1854,52 @@ mod tests {
         }
     }
 
+    /// S3-04: the process-sandbox setting gates scheduled shell tasks like a
+    /// `shell` agent session, and a confined command gets a scrubbed env.
+    #[tokio::test]
+    async fn sandboxed_shell_tasks_follow_the_setting_and_scrub_the_env() {
+        use otto_sessions::manager::sandboxed_shell_argv;
+        let cwd = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let off = serde_json::json!({ "enabled": false });
+        let not_shell = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        let on = serde_json::json!({ "enabled": true });
+        assert!(sandboxed_shell_argv(&off, cwd.path(), data.path(), "true").await.is_none());
+        assert!(sandboxed_shell_argv(&not_shell, cwd.path(), data.path(), "true")
+            .await
+            .is_none());
+        let wrapped = sandboxed_shell_argv(&on, cwd.path(), data.path(), "echo hi").await;
+        if otto_sandbox_supported() {
+            let (program, args) = wrapped.expect("shell is in the default provider set");
+            assert_eq!(program, "/usr/bin/sandbox-exec");
+            assert_eq!(&args[args.len() - 3..], ["/bin/sh", "-c", "echo hi"]);
+        }
+        // The confined path never forwards the daemon's own env.
+        std::env::set_var("OTTO_S304_PROBE", "leaked");
+        let argv: ShellArgv = (
+            "/bin/sh".into(),
+            vec!["-c".into(), "printf %s \"$OTTO_S304_PROBE\"".into()],
+        );
+        let cwd_s = cwd.path().to_string_lossy();
+        let out = run_shell_once("", &cwd_s, Duration::from_secs(10), Some(&argv))
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+        let out = run_shell_once(
+            "printf %s \"$OTTO_S304_PROBE\"",
+            &cwd_s,
+            Duration::from_secs(10),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "leaked");
+    }
+
+    fn otto_sandbox_supported() -> bool {
+        cfg!(target_os = "macos") && std::path::Path::new("/usr/bin/sandbox-exec").exists()
+    }
+
     #[tokio::test]
     async fn shell_retry_counts_attempts_and_stops_on_success() {
         let cwd = std::env::temp_dir();
@@ -1803,18 +1908,18 @@ mod tests {
         // An always-failing command runs 1 + max_retries times, and still returns
         // its (failed) output so a report can be built.
         let (res, attempts) =
-            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 3", &cwd, 2, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 3);
         let out = res.expect("output captured even when the command fails");
         assert!(!out.status.success());
         // A succeeding command runs exactly once.
         let (res, attempts) =
-            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 0", &cwd, 2, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 1);
         assert!(res.unwrap().status.success());
         // max_retries = 0 ⇒ a single attempt even on failure.
         let (_res, attempts) =
-            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero).await;
+            run_shell_with_retry("exit 1", &cwd, 0, Duration::from_secs(10), &zero, None).await;
         assert_eq!(attempts, 1);
     }
 
@@ -1830,6 +1935,7 @@ mod tests {
             "(sleep 1; touch orphan-ran) & sleep 30",
             &cwd,
             Duration::from_millis(300),
+            None,
         )
         .await;
         assert!(res.is_err(), "timed out");
