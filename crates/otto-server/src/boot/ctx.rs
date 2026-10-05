@@ -174,7 +174,7 @@ impl ServerCtx {
             mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
             discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
             canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-            product_agent_cancels: crate::product_run::new_cancel_registry(),
+            product_agent_cancels: otto_product::run::new_cancel_registry(),
             design_jobs: crate::design_blender::new_job_registry(),
             memory,
             // Vault v3 — the file-backed docs home (markdown vaults on disk,

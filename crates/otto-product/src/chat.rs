@@ -29,9 +29,8 @@ use otto_state::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+use crate::host::ProductStudioHost;
+use crate::http::{ApiError, ApiResult, CurrentUser};
 
 /// Total context-bundle char budget (oldest/least-relevant trimmed first).
 const CTX_BUDGET: usize = 24_000;
@@ -93,19 +92,19 @@ pub struct ApplyResult {
 // Workspace resolution helper
 // ---------------------------------------------------------------------------
 
-async fn chat_with_role(
-    ctx: &ServerCtx,
+async fn chat_with_role<C: ProductStudioHost>(
+    ctx: &C,
     user: &User,
     cid: &Id,
     role: WorkspaceRole,
 ) -> ApiResult<DiscoveryChat> {
     let chat = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .get_chat(cid)
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("discovery chat {cid}"))))?;
-    crate::auth::require_ws_role(ctx, user, &chat.workspace_id, role).await?;
+    ctx.roles().check(user, &chat.workspace_id, role).await?;
     Ok(chat)
 }
 
@@ -115,22 +114,24 @@ async fn chat_with_role(
 
 /// `POST /product/stories/{sid}/discovery-chats` — start a discovery chat on a
 /// story (Editor). Allocates a fresh scratch working dir for the agent.
-pub async fn create_chat(
+pub async fn create_chat<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     body: Option<Json<CreateChatReq>>,
 ) -> ApiResult<Json<DiscoveryChat>> {
     let req = body.map(|b| b.0).unwrap_or_default();
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // Prefer the story's cwd (a real repo) so the agent can research code; else a
     // fresh scratch dir under data_dir.
     let cwd = match &story.cwd {
         Some(c) if !c.trim().is_empty() => c.clone(),
         _ => ctx
-            .data_dir
+            .data_dir()
             .join("product/discovery-chat")
             .join(new_id())
             .to_string_lossy()
@@ -142,7 +143,7 @@ pub async fn create_chat(
         .unwrap_or_else(|| "Discovery".to_string());
 
     let chat = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .create_chat(NewDiscoveryChat {
             story_id: story.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -157,15 +158,17 @@ pub async fn create_chat(
 }
 
 /// `GET /product/stories/{sid}/discovery-chats` — list a story's chats (Viewer).
-pub async fn list_chats(
+pub async fn list_chats<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<DiscoveryChat>>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
     let chats = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .list_for_story(&sid)
         .await
         .map_err(ApiError)?;
@@ -173,14 +176,14 @@ pub async fn list_chats(
 }
 
 /// `GET /product/discovery-chats/{cid}` — a chat + its transcript (Viewer).
-pub async fn get_chat(
+pub async fn get_chat<C: ProductStudioHost>(
     Path(cid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<ChatDetail>> {
     let chat = chat_with_role(&ctx, &user, &cid, WorkspaceRole::Viewer).await?;
     let messages = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .get_messages(&cid)
         .await
         .map_err(ApiError)?;
@@ -188,14 +191,14 @@ pub async fn get_chat(
 }
 
 /// `POST /product/discovery-chats/{cid}/archive` — archive a chat (Editor).
-pub async fn archive_chat(
+pub async fn archive_chat<C: ProductStudioHost>(
     Path(cid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<DiscoveryChat>> {
     chat_with_role(&ctx, &user, &cid, WorkspaceRole::Editor).await?;
     let chat = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .set_status(&cid, "archived")
         .await
         .map_err(ApiError)?;
@@ -205,9 +208,9 @@ pub async fn archive_chat(
 /// `POST /product/discovery-chats/{cid}/messages` — one conversational turn
 /// (Editor). Assembles context, runs the agent, splits prose from proposed
 /// actions, persists both messages.
-pub async fn send_message(
+pub async fn send_message<C: ProductStudioHost>(
     Path(cid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<SendMessageReq>,
 ) -> ApiResult<Json<ChatTurn>> {
@@ -218,7 +221,7 @@ pub async fn send_message(
 
     // Persist the user message with the bundle in meta.
     let user_message = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .add_message(NewDiscoveryChatMessage {
             chat_id: cid.clone(),
             role: "user".into(),
@@ -234,7 +237,7 @@ pub async fn send_message(
     // framing + the refreshed context + the new message, NOT a replayed history.
     let prompt = build_chat_prompt(&context, &[], &req.body);
     let ws = ctx
-        .workspaces
+        .workspaces()
         .get(&chat.workspace_id)
         .await
         .map_err(ApiError)?;
@@ -253,29 +256,28 @@ pub async fn send_message(
     {
         meta["model"] = json!(m);
     }
-    let (raw, sid) = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        chat.session_id.as_ref(),
-        &format!("Discovery: {}", chat.title),
-        &chat.cwd,
-        &default_provider,
-        meta,
-        &prompt,
-        crate::agent_session::STUCK_IDLE,
-        |_| {},
-    )
-    .await?;
+    let (raw, sid) = ctx
+        .run_session_turn(
+            &ws,
+            &user,
+            chat.session_id.as_ref(),
+            &format!("Discovery: {}", chat.title),
+            &chat.cwd,
+            &default_provider,
+            meta,
+            &prompt,
+            ctx.session_stuck_idle(),
+        )
+        .await?;
     // Link the session on the first turn so later turns resume it.
     if chat.session_id.is_none() {
-        let _ = ctx.discovery_chat_repo.set_session(&cid, &sid).await;
+        let _ = ctx.discovery_chat_repo().set_session(&cid, &sid).await;
     }
 
     let (markdown, actions_json) = split_actions(&raw);
 
     let agent_message = ctx
-        .discovery_chat_repo
+        .discovery_chat_repo()
         .add_message(NewDiscoveryChatMessage {
             chat_id: cid.clone(),
             role: "agent".into(),
@@ -294,9 +296,9 @@ pub async fn send_message(
 
 /// `POST /product/discovery-chats/{cid}/apply` — apply ONE proposed action
 /// (Editor). Dispatched by the action's `type` field.
-pub async fn apply_action(
+pub async fn apply_action<C: ProductStudioHost>(
     Path(cid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ApplyReq>,
 ) -> ApiResult<Json<ApplyResult>> {
@@ -313,14 +315,14 @@ pub async fn apply_action(
             let title = match action.get("title").and_then(|t| t.as_str()) {
                 Some(t) if !t.trim().is_empty() => t.to_string(),
                 _ => {
-                    ctx.product_repo
+                    ctx.product_repo()
                         .get_story(&chat.story_id)
                         .await
                         .map_err(ApiError)?
                         .title
                 }
             };
-            ctx.product
+            ctx.product()
                 .update_draft_body(&chat.story_id, &title, body_md, &user.id)
                 .await
                 .map_err(ApiError)?;
@@ -334,7 +336,7 @@ pub async fn apply_action(
                         continue;
                     }
                     let created = ctx
-                        .product_repo
+                        .product_repo()
                         .create_question(NewQuestion {
                             story_id: chat.story_id.clone(),
                             analysis_id: None,
@@ -365,7 +367,7 @@ pub async fn apply_action(
                         continue;
                     }
                     let created = ctx
-                        .product_repo
+                        .product_repo()
                         .create_note(NewNote {
                             story_id: chat.story_id.clone(),
                             section: Some("discovery".into()),
@@ -391,7 +393,7 @@ pub async fn apply_action(
                 .to_string();
             let doc = canvas_doc_from_action(action, &title);
             let scene = ctx
-                .canvas_repo
+                .canvas_repo()
                 .create(NewScene {
                     workspace_id: chat.workspace_id.clone(),
                     story_id: Some(chat.story_id.clone()),
@@ -421,8 +423,8 @@ pub async fn apply_action(
 /// Build the relevance-bounded context string for a story. Pulls the latest
 /// relevant version, attachments (text mockups inlined), the most recent
 /// discovery report, open questions and notes. Bounded by `CTX_BUDGET`.
-async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
-    let story = match ctx.product_repo.get_story(story_id).await {
+async fn assemble_context<C: ProductStudioHost>(ctx: &C, story_id: &Id) -> String {
+    let story = match ctx.product_repo().get_story(story_id).await {
         Ok(s) => s,
         Err(_) => return String::new(),
     };
@@ -431,7 +433,7 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
     let mut body = String::new();
     for kind in ["suggested", "draft", "source"] {
         if let Ok(Some(v)) = ctx
-            .product_repo
+            .product_repo()
             .latest_version_of_kind(story_id, kind)
             .await
         {
@@ -447,12 +449,12 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
 
     // Attachments — inline text mockups; list raster images by absolute path.
     let mut attachments: Vec<(String, String, String, Option<String>)> = Vec::new();
-    if let Ok(atts) = ctx.attachment_repo.list_for_story(story_id).await {
+    if let Ok(atts) = ctx.attachments().list_for_story(story_id).await {
         for a in atts {
             // Confine the stored path's join under the data dir — a traversing
             // storage_path drops the attachment instead of reading outside it
             // (rust/path-injection).
-            let Some(path) = otto_core::paths::confine_join(&ctx.data_dir, &a.storage_path) else {
+            let Some(path) = otto_core::paths::confine_join(ctx.data_dir(), &a.storage_path) else {
                 continue;
             };
             let inlined = if is_text_mockup(&a.mime, &a.filename) {
@@ -470,7 +472,7 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
 
     // Most recent discovery report.
     let discovery = ctx
-        .discovery_repo
+        .discovery_repo()
         .list_for_story(story_id)
         .await
         .ok()
@@ -480,7 +482,7 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
 
     // Open questions + notes.
     let questions: Vec<String> = ctx
-        .product_repo
+        .product_repo()
         .list_questions(story_id)
         .await
         .unwrap_or_default()
@@ -489,7 +491,7 @@ async fn assemble_context(ctx: &ServerCtx, story_id: &Id) -> String {
         .map(|q| q.text)
         .collect();
     let notes: Vec<String> = ctx
-        .product_repo
+        .product_repo()
         .list_notes(story_id)
         .await
         .unwrap_or_default()

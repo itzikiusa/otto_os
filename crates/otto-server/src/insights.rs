@@ -10,7 +10,7 @@
 //! missed period per cadence).
 //!
 //! A "run" = spawning a real, headless agent session that executes the
-//! `insights` skill for that period (mirroring how `product_run::run_lens_session`
+//! `insights` skill for that period (mirroring how `product_agent::run_lens_session`
 //! runs a product lens). The session runs on the global default provider in a
 //! neutral cwd (the Otto data dir). If the `insights` skill is not installed in
 //! the Library, the run is SKIPPED and a warning logged (it's a manual-install

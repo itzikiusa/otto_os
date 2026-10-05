@@ -11,7 +11,7 @@ in Canvas. When the draft is ready you publish it as a Jira story or a Confluenc
 RFC from the usual Product flow.
 
 > **Where this lives in the code.** Handlers + context assembly:
-> `crates/otto-server/src/product_chat.rs`. Persistence:
+> `crates/otto-product/src/chat.rs`. Persistence:
 > `crates/otto-state/src/product_chat.rs` (`DiscoveryChatRepo`), migrations
 > `0073_product_discovery_chats.sql` (chats + messages) and `0074_session_links.sql`
 > (the backing session id). UI: `ui/src/modules/product/{ChatTab,DiscoveryChat,ActionCard}.svelte`
@@ -36,7 +36,7 @@ RFC from the usual Product flow.
 
 | Concern | Source |
 |---|---|
-| Handlers + context assembly + action dispatch | `crates/otto-server/src/product_chat.rs` |
+| Handlers + context assembly + action dispatch | `crates/otto-product/src/chat.rs` |
 | One managed agent turn (create/resume) | `crates/otto-server/src/agent_session.rs` (`run_session_turn`) |
 | Persistence + repo | `crates/otto-state/src/product_chat.rs` (`DiscoveryChat`, `DiscoveryChatMessage`, `DiscoveryChatRepo`) |
 | Draft / questions / notes / canvas writes | `crates/otto-product/` (`update_draft_body`, `create_question`, `create_note`) · `crates/otto-state/src/canvas.rs` (`CanvasRepo::create`) |

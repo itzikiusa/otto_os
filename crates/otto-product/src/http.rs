@@ -71,15 +71,18 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
 // Error → response
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ApiErr(pub Error);
+/// `otto_core::Error` as an RFC-7807-ish `Problem` response (same status
+/// mapping as `otto-server`'s `ApiError`).
+#[derive(Debug)]
+pub struct ApiError(pub Error);
 
-impl From<Error> for ApiErr {
+impl From<Error> for ApiError {
     fn from(e: Error) -> Self {
-        ApiErr(e)
+        ApiError(e)
     }
 }
 
-impl IntoResponse for ApiErr {
+impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
             Error::NotFound(_) => StatusCode::NOT_FOUND,
@@ -92,6 +95,9 @@ impl IntoResponse for ApiErr {
             Error::Upstream(_) => StatusCode::BAD_GATEWAY,
             Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        if status == StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!("internal error: {}", self.0);
+        }
         let problem = Problem {
             code: self.0.code().to_string(),
             message: self.0.to_string(),
@@ -100,7 +106,31 @@ impl IntoResponse for ApiErr {
     }
 }
 
-type ApiResult<T> = std::result::Result<T, ApiErr>;
+pub type ApiResult<T> = std::result::Result<T, ApiError>;
+
+/// Extractor for the authenticated user (the [`AuthUser`] extension the
+/// host's auth middleware inserts); rejects with 401 when absent. Mirrors
+/// `otto-server`'s `auth::CurrentUser` for the handlers that moved here.
+#[derive(Debug, Clone)]
+pub struct CurrentUser(pub otto_core::domain::User);
+
+impl<S> axum::extract::FromRequestParts<S> for CurrentUser
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<AuthUser>()
+            .map(|a| CurrentUser(a.0.clone()))
+            .ok_or(ApiError(Error::Unauthorized))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Path extractors — collection tier (workspace-scoped)

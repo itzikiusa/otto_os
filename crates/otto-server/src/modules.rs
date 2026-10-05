@@ -582,7 +582,7 @@ impl otto_product::ProductCtx for ServerCtx {
         Some(&self.swarm_repo)
     }
     fn attachments_root(&self) -> Option<std::path::PathBuf> {
-        Some(self.data_dir.join(crate::product_media::ATTACH_ROOT))
+        Some(self.data_dir.join(otto_product::media::ATTACH_ROOT))
     }
     fn mockup_scratch_root(&self) -> Option<std::path::PathBuf> {
         Some(self.data_dir.join(crate::mockup_assist::SCRATCH_ROOT))
@@ -757,32 +757,35 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         .route("/workspaces/{id}/sessions/open", post(open_agent_session))
         .route(
             "/workspaces/{id}/product/stories/{sid}/analyze",
-            post(analyze),
+            post(otto_product::analysis::analyze::<ServerCtx>),
         )
         // Curated analysis-lens catalog the Analysis tab renders as configurable
         // checks. Read-only (Viewer); the prefix policy gates it as Product/View.
-        .route("/workspaces/{id}/product/lenses", get(product_lenses))
+        .route(
+            "/workspaces/{id}/product/lenses",
+            get(otto_product::analysis::product_lenses::<ServerCtx>),
+        )
         .route(
             "/workspaces/{id}/product/stories/{sid}/rewrite",
-            post(rewrite),
+            post(otto_product::analysis::rewrite::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/testcases/generate",
-            post(generate_tests),
+            post(otto_product::analysis::generate_tests::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/plan/generate",
-            post(generate_plan),
+            post(otto_product::analysis::generate_plan::<ServerCtx>),
         )
         .route(
             "/workspaces/{id}/product/stories/{sid}/plan",
-            post(save_plan),
+            post(otto_product::analysis::save_plan::<ServerCtx>),
         )
         // Product → Swarm: turn a refined story into a runnable swarm project.
         // Flat item route (resolves the workspace from the owning story).
         .route(
             "/product/stories/{sid}/to-swarm",
-            post(crate::product_swarm::story_to_swarm),
+            post(otto_product::swarm::story_to_swarm::<ServerCtx>),
         )
         // Discovery: launch a repeatable INVESTIGATION swarm from a story (Editor),
         // then list/read the runs (Viewer). Discovery projects are NOT story-linked
@@ -790,20 +793,20 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // the run row carries the linkage.
         .route(
             "/product/stories/{sid}/discover",
-            post(crate::product_swarm::discover_story),
+            post(otto_product::swarm::discover_story::<ServerCtx>),
         )
         .route(
             "/product/stories/{sid}/discovery-runs",
-            get(crate::product_swarm::list_discovery_runs),
+            get(otto_product::swarm::list_discovery_runs::<ServerCtx>),
         )
         // Product → Canvas: list the Canvas scenes linked to a story (Viewer).
         .route(
             "/product/stories/{sid}/linked-canvases",
-            get(crate::product_swarm::list_linked_canvases),
+            get(otto_product::swarm::list_linked_canvases::<ServerCtx>),
         )
         .route(
             "/product/discovery-runs/{rid}",
-            get(crate::product_swarm::get_discovery_run),
+            get(otto_product::swarm::get_discovery_run::<ServerCtx>),
         )
         // Talk-to-agent refinement: a conversational thread on a story. Create +
         // list its threads (story-scoped), then read/converse/archive a thread
@@ -811,19 +814,20 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // runs the agent inline and may write a new `suggested` story version.
         .route(
             "/product/stories/{sid}/refinement-threads",
-            post(crate::product_refine::create_thread).get(crate::product_refine::list_threads),
+            post(otto_product::refine::create_thread::<ServerCtx>)
+                .get(otto_product::refine::list_threads::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}",
-            get(crate::product_refine::get_thread),
+            get(otto_product::refine::get_thread::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}/messages",
-            post(crate::product_refine::send_message),
+            post(otto_product::refine::send_message::<ServerCtx>),
         )
         .route(
             "/product/refinement-threads/{tid}/archive",
-            post(crate::product_refine::archive_thread),
+            post(otto_product::refine::archive_thread::<ServerCtx>),
         )
         // Discovery Chat: a lightweight conversational agent on a story (works
         // from an empty draft) for early discovery/research. Each turn assembles
@@ -831,23 +835,24 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // applies explicitly. Covered by the `/product/` policy prefix.
         .route(
             "/product/stories/{sid}/discovery-chats",
-            post(crate::product_chat::create_chat).get(crate::product_chat::list_chats),
+            post(otto_product::chat::create_chat::<ServerCtx>)
+                .get(otto_product::chat::list_chats::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}",
-            get(crate::product_chat::get_chat),
+            get(otto_product::chat::get_chat::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/messages",
-            post(crate::product_chat::send_message),
+            post(otto_product::chat::send_message::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/archive",
-            post(crate::product_chat::archive_chat),
+            post(otto_product::chat::archive_chat::<ServerCtx>),
         )
         .route(
             "/product/discovery-chats/{cid}/apply",
-            post(crate::product_chat::apply_action),
+            post(otto_product::chat::apply_action::<ServerCtx>),
         )
         // Canvas agent-assist: turn a prompt into diagram blocks (needs the
         // orchestrator, so it lives here rather than in the otto-canvas crate).
@@ -866,21 +871,21 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         // the ~33 % base64 inflation (raw content cap is enforced at 25 MB).
         .route(
             "/product/stories/{sid}/attachments",
-            post(crate::product_media::upload_attachment)
+            post(otto_product::media::upload_attachment::<ServerCtx>)
                 .layer(DefaultBodyLimit::max(40 * 1024 * 1024))
-                .get(crate::product_media::list_attachments),
+                .get(otto_product::media::list_attachments::<ServerCtx>),
         )
         .route(
             "/product/attachments/{aid}",
-            get(crate::product_media::serve_attachment)
-                .patch(crate::product_media::patch_attachment)
-                .delete(crate::product_media::delete_attachment),
+            get(otto_product::media::serve_attachment::<ServerCtx>)
+                .patch(otto_product::media::patch_attachment::<ServerCtx>)
+                .delete(otto_product::media::delete_attachment::<ServerCtx>),
         )
         // Design arena: save an edited artifact from the UI editor. Same 40 MB
         // body cap as the upload (base64 inflation over the 25 MB raw cap).
         .route(
             "/product/attachments/{aid}/content",
-            put(crate::product_media::put_attachment_content)
+            put(otto_product::media::put_attachment_content::<ServerCtx>)
                 .layer(DefaultBodyLimit::max(40 * 1024 * 1024)),
         )
         // In-place design agent: generate / refine an artifact (html | mermaid |
@@ -910,28 +915,28 @@ pub fn orchestrator_routes() -> Router<ServerCtx> {
         )
         .route(
             "/product/attachments/{aid}/annotations",
-            get(crate::product_media::list_annotations)
-                .post(crate::product_media::create_annotation),
+            get(otto_product::media::list_annotations::<ServerCtx>)
+                .post(otto_product::media::create_annotation::<ServerCtx>),
         )
         .route(
             "/product/annotations/{id}",
-            patch(crate::product_media::patch_annotation)
-                .delete(crate::product_media::delete_annotation),
+            patch(otto_product::media::patch_annotation::<ServerCtx>)
+                .delete(otto_product::media::delete_annotation::<ServerCtx>),
         )
         // Approve lives here (not in otto-product) so it can trigger self-improvement.
         .route(
             "/product/testcase-runs/{rid}/approve",
-            post(approve_testcase_run),
+            post(otto_product::analysis::approve_testcase_run::<ServerCtx>),
         )
         // Per-agent retry: re-run a single failed/stuck analysis lens agent.
         .route(
             "/product/analyses/{aid}/agents/{agent_id}/retry",
-            post(retry_analysis_agent),
+            post(otto_product::analysis::retry_analysis_agent::<ServerCtx>),
         )
         // Per-agent stop: kill a running/waiting analysis agent on demand.
         .route(
             "/product/analyses/{aid}/agents/{agent_id}/stop",
-            post(stop_analysis_agent),
+            post(otto_product::analysis::stop_analysis_agent::<ServerCtx>),
         )
 }
 
@@ -1094,582 +1099,6 @@ async fn workspace_relay(
             resolved.text
         },
     }))
-}
-
-/// `GET /workspaces/{id}/product/lenses` — the curated analysis-lens catalog
-/// the Analysis tab renders as configurable checks. Read-only: Viewer role.
-async fn product_lenses(
-    Path(ws_id): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<otto_core::api::ProductLens>>> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(otto_product::analysis_lenses()))
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/analyze` — create a
-/// `ProductAnalysis` row and spawn the multi-agent fan-out in the background.
-async fn analyze(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<otto_product::types::AnalyzeReq>,
-) -> ApiResult<Json<otto_state::ProductAnalysis>> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    // Load story and verify it belongs to the requested workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check the workspace budget before
-    // spawning any agent sessions. Mirrors the review start_review gate exactly.
-    {
-        let verdict = crate::routes::usage::check_budget(
-            &ctx, &ws_id, "", // provider resolved below; gate workspace-level cap here
-        )
-        .await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — analysis blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring the
-    // `orchestrate` handler exactly.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-
-    // Build the flat AgentSpec list: one entry per (lens × provider). Each lens
-    // can be analyzed by multiple providers (claude/codex/agy), each as its own
-    // real, openable session — exactly like a PR-review fan-out.
-    let specs: Vec<crate::product_run::AgentSpec> = if !req.agents.is_empty() {
-        req.agents
-            .into_iter()
-            .flat_map(|a| {
-                let name = a.name.clone().unwrap_or_else(|| a.skill.clone());
-                // An agent with no providers defaults to the default provider.
-                let providers = if a.providers.is_empty() {
-                    vec![default_provider.clone()]
-                } else {
-                    a.providers.clone()
-                };
-                let skill = a.skill.clone();
-                let model = a.model.clone();
-                providers
-                    .into_iter()
-                    .filter(|p| !p.trim().is_empty())
-                    .map(move |provider| crate::product_run::AgentSpec {
-                        provider,
-                        model: model.clone(),
-                        skill: skill.clone(),
-                        name: name.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    } else {
-        // Default three-lens set, each on the resolved default provider.
-        [
-            ("po-story-overview", "PO Overview"),
-            ("story-architecture-overview", "Architecture"),
-            ("story-clarifying-questions", "Clarifying Questions"),
-        ]
-        .iter()
-        .map(|(skill, name)| crate::product_run::AgentSpec {
-            provider: default_provider.clone(),
-            model: None,
-            skill: skill.to_string(),
-            name: name.to_string(),
-        })
-        .collect()
-    };
-
-    // Summarizer provider: request override → default provider.
-    let summarizer_provider = req
-        .summarizer_provider
-        .clone()
-        .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| default_provider.clone());
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Latest source version id for the analysis row.
-    let source_version_id = ctx
-        .product_repo
-        .latest_source_version(&sid)
-        .await
-        .map_err(ApiError)?
-        .map(|v| v.id);
-
-    // Persist the analysis row (status = "running").
-    let analysis = ctx
-        .product_repo
-        .create_analysis(otto_state::NewAnalysis {
-            story_id: sid.clone(),
-            source_version_id,
-            status: "running".to_string(),
-            created_by: user.id.clone(),
-        })
-        .await
-        .map_err(ApiError)?;
-
-    // Spawn the fan-out; errors are isolated inside run_analysis. Each lens
-    // (and the summarizer) runs as a real session on behalf of the current
-    // user, mirroring the PR-review mechanism.
-    tokio::spawn(crate::product_run::run_analysis(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid.clone(),
-        analysis.id.clone(),
-        specs,
-        summarizer_provider,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(Json(analysis))
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/rewrite` — spawn the writer
-/// agent as a background task and return 202 Accepted immediately.
-async fn rewrite(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::RewriteReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — rewrite blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring analyze.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-    let provider = req.provider.clone().unwrap_or(default_provider);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_rewrite.
-    tokio::spawn(crate::product_run::run_rewrite(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        provider,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/testcases/generate` — spawn
-/// the test-case generation agent as a background task and return 202 Accepted.
-async fn generate_tests(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::GenerateTestsReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — test generation blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-    let provider = req.provider.clone().unwrap_or(default_provider);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_generate_tests.
-    tokio::spawn(crate::product_run::run_generate_tests(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        provider,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/plan/generate` — spawn the
-/// task-breakdown agent as a background task and return 202 Accepted. Mirrors
-/// `rewrite`/`generate_tests`.
-async fn generate_plan(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    body: Option<Json<otto_product::types::GeneratePlanReq>>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    let req = body.map(|b| b.0).unwrap_or_default();
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Point-of-action budget gate (A2): check workspace-level cap before spawning.
-    {
-        let verdict = crate::routes::usage::check_budget(&ctx, &ws_id, "").await;
-        if verdict.blocked {
-            return Err(ApiError(Error::Invalid(format!(
-                "Budget exceeded — plan generation blocked: {}",
-                verdict.reason.unwrap_or_else(|| "cap reached".to_string())
-            ))));
-        }
-    }
-
-    // Resolve default provider (workspace → global → "claude"), mirroring rewrite.
-    let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let default_provider = otto_core::provider::resolve_provider(&[
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
-
-    // Resolve the planning provider list (multi-agent). Prefer `providers`
-    // (non-empty); else the single back-compat `provider`; else the default.
-    // Blanks are dropped, and an empty result falls back to the default provider.
-    let providers: Vec<String> = {
-        let mut list: Vec<String> = req
-            .providers
-            .iter()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty())
-            .collect();
-        if list.is_empty() {
-            list = vec![req
-                .provider
-                .clone()
-                .map(|p| p.trim().to_string())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| default_provider.clone())];
-        }
-        list
-    };
-
-    // Summarizer provider: request override → default provider.
-    let summarizer_provider = req
-        .summarizer_provider
-        .clone()
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| default_provider.clone());
-
-    // Interactivity: `None` ⇒ non-interactive (the default). `Some(true)` only
-    // when the UI explicitly turned the autonomy toggle OFF.
-    let interactive = req.interactive.unwrap_or(false);
-
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
-
-    // Spawn background task; errors are isolated inside run_generate_plan.
-    tokio::spawn(crate::product_run::run_generate_plan(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid,
-        providers,
-        summarizer_provider,
-        interactive,
-        req.model,
-        cwd,
-        req.focus,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /workspaces/{id}/product/stories/{sid}/plan` — persist PO checkbox
-/// toggles by overwriting the latest `kind="plan"` version's body in place (no
-/// new version, so we never spam the version history). Returns 204 No Content.
-async fn save_plan(
-    Path((ws_id, sid)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-    Json(req): Json<otto_product::types::SavePlanReq>,
-) -> ApiResult<StatusCode> {
-    crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-
-    // Load story and verify it belongs to this workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    if story.workspace_id != ws_id {
-        return Err(ApiError(Error::NotFound(
-            "story not found in workspace".into(),
-        )));
-    }
-
-    // Find the latest plan version and overwrite its body in place (preserving
-    // its existing title — reuses the 3-arg update_version_body repo method).
-    let plan = ctx
-        .product_repo
-        .latest_plan_version(&sid)
-        .await
-        .map_err(ApiError)?
-        .ok_or_else(|| ApiError(Error::NotFound("no plan version for story".into())))?;
-
-    ctx.product_repo
-        .update_version_body(&plan.id, &plan.title, &req.body_md)
-        .await
-        .map_err(ApiError)?;
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `POST /product/testcase-runs/{rid}/approve` — approve all testcases in the
-/// run and trigger a background self-improvement pass on the `story-test-cases`
-/// skill using the PO's review outcomes as the learning signal.
-///
-/// This handler lives in otto-server (not otto-product) so it can access the
-/// `ImprovementEngine`. The otto-product router no longer registers this route
-/// to avoid an axum duplicate-route panic.
-async fn approve_testcase_run(
-    Path(rid): Path<Id>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<otto_state::ProductTestcaseRun>> {
-    // Resolve workspace via run → story, then role-check.
-    let run = ctx
-        .product_repo
-        .get_testcase_run(&rid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&run.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Flip all testcases in this run to "approved", and mark the run row approved
-    // so clients can read the run's aggregate status (spec: approve "marks the run approved").
-    ctx.product_repo
-        .approve_run_testcases(&rid)
-        .await
-        .map_err(ApiError)?;
-    ctx.product_repo
-        .set_testcase_run(&rid, Some("approved"), None, None)
-        .await
-        .map_err(ApiError)?;
-
-    // Fetch the cases (now approved) for the improvement narrative.
-    let cases = ctx
-        .product_repo
-        .list_testcases(&rid)
-        .await
-        .map_err(ApiError)?;
-
-    // Build the narrative describing what the PO did with the test cases.
-    let narrative = crate::product_run::build_improve_narrative_from_tests(&story, &cases);
-
-    // Spawn background self-improvement — don't block the response.
-    let engine = Arc::clone(&ctx.improve_engine);
-    let ws_id = story.workspace_id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = engine
-            .run_for_narrative(
-                &ws_id,
-                "test-cases",
-                &narrative,
-                &["story-test-cases".to_string()],
-                otto_core::domain::ImprovementTrigger::Manual,
-            )
-            .await
-        {
-            tracing::warn!("test-case skill improvement failed: {e}");
-        }
-    });
-
-    // Return the (now-approved) run row.
-    let updated = ctx
-        .product_repo
-        .get_testcase_run(&rid)
-        .await
-        .map_err(ApiError)?;
-    Ok(Json(updated))
-}
-
-/// `POST /product/analyses/{aid}/agents/{agent_id}/retry` — re-run a single
-/// failed or stuck analysis lens agent without re-running the full analysis.
-///
-/// Resolves the workspace via agent → analysis → story → workspace, performs
-/// an Editor role check, then spawns `retry_analysis_agent` as a background
-/// task and returns 202 Accepted immediately (exactly like a PR-review retry).
-async fn retry_analysis_agent(
-    Path((aid, agent_id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    // Resolve workspace: agent → analysis → story → workspace, then role-check.
-    let analysis = ctx
-        .product_repo
-        .get_analysis(&aid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&analysis.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Resolve workspace domain object (needed by run_lens_session → session create).
-    let ws = ctx
-        .workspaces
-        .get(&story.workspace_id)
-        .await
-        .map_err(ApiError)?;
-
-    // Spawn background retry; errors are isolated inside retry_analysis_agent.
-    tokio::spawn(crate::product_run::retry_analysis_agent(
-        ctx.clone(),
-        ws,
-        user.id.clone(),
-        aid,
-        agent_id,
-    ));
-
-    Ok(StatusCode::ACCEPTED)
-}
-
-/// `POST /product/analyses/{aid}/agents/{agent_id}/stop` — stop a running/waiting
-/// analysis agent on demand. Trips its cancel flag (so the recovery loop does NOT
-/// treat the kill as a failure and retry), kills the live session, and marks the
-/// agent errored ("stopped by user"). Idempotent.
-async fn stop_analysis_agent(
-    Path((aid, agent_id)): Path<(Id, Id)>,
-    State(ctx): State<ServerCtx>,
-    CurrentUser(user): CurrentUser,
-) -> ApiResult<StatusCode> {
-    let analysis = ctx
-        .product_repo
-        .get_analysis(&aid)
-        .await
-        .map_err(ApiError)?;
-    let story = ctx
-        .product_repo
-        .get_story(&analysis.story_id)
-        .await
-        .map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
-
-    // Signal the in-flight recovery loop FIRST so the kill below is seen as
-    // intentional (no auto-retry).
-    crate::product_run::signal_cancel(&ctx.product_agent_cancels, &agent_id);
-
-    // Kill the current live session, if any.
-    if let Ok(agent) = ctx.product_repo.get_analysis_agent(&agent_id).await {
-        if let Some(sid) = agent.session_id.as_ref() {
-            let _ = ctx.manager.kill_session(sid).await;
-        }
-    }
-
-    // Mark terminal so the UI reflects it immediately.
-    let _ = ctx
-        .product_repo
-        .set_agent_status(&agent_id, "error", None, Some("stopped by user"), true)
-        .await;
-
-    Ok(StatusCode::ACCEPTED)
 }
 
 /// Per-request plan executor scoped to one workspace and acting user.

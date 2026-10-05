@@ -1,7 +1,7 @@
 //! Story attachments + mockup pinned-annotation routes.
 //!
-//! Lives in `otto-server` (not `otto-product`) because attachment storage needs
-//! `ServerCtx.data_dir` — `otto-product`'s `ProductCtx` exposes no filesystem.
+//! Attachment storage needs the daemon data dir, which the host provides via
+//! [`ProductStudioHost::data_dir`](crate::host::ProductStudioHost::data_dir).
 //!
 //! Attachment storage root is `data_dir/product/attachments/<story_id>/<id><ext>`;
 //! the on-disk name is the daemon-generated attachment id (the original filename
@@ -42,14 +42,13 @@ use otto_state::{
 };
 use serde::Deserialize;
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+use crate::host::ProductStudioHost;
+use crate::http::{ApiError, ApiResult, CurrentUser};
 
 /// Maximum raw (decoded) attachment size: 25 MB.
-pub(crate) const MAX_RAW_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_RAW_BYTES: usize = 25 * 1024 * 1024;
 /// Storage sub-path under `data_dir` for story attachments.
-pub(crate) const ATTACH_ROOT: &str = "product/attachments";
+pub const ATTACH_ROOT: &str = "product/attachments";
 
 // ---------------------------------------------------------------------------
 // Request / response bodies
@@ -111,7 +110,7 @@ pub struct AnnotationPatchReq {
 /// absent here (combined with the magic-byte sniff for the binary types). No
 /// `text/x-python`: a Blender script is a server-side EXPORT of a validated
 /// `scene3d` document, never an uploaded or agent-written file.
-pub(crate) fn allowed_mime(mime: &str) -> bool {
+pub fn allowed_mime(mime: &str) -> bool {
     matches!(
         mime,
         "image/png"
@@ -138,7 +137,7 @@ pub(crate) fn allowed_mime(mime: &str) -> bool {
 /// types (excalidraw/scene3d/gltf) must be UTF-8 opening with `{` after optional
 /// whitespace (a full parse happens where the schema is known — `scene3d` is
 /// validated by `design_scene3d::validate` on save).
-pub(crate) fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
+pub fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
     match declared {
         "image/png" => bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
         "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
@@ -163,7 +162,7 @@ pub(crate) fn sniff_ok(declared: &str, bytes: &[u8]) -> bool {
 }
 
 /// Storage extension for a MIME (matches `allowed_mime`).
-pub(crate) fn ext_for_mime(mime: &str) -> &'static str {
+pub fn ext_for_mime(mime: &str) -> &'static str {
     match mime {
         "image/png" => ".png",
         "image/jpeg" => ".jpg",
@@ -185,7 +184,7 @@ pub(crate) fn ext_for_mime(mime: &str) -> &'static str {
 /// Is this a text artifact whose source rides on `MockupUpdated.content`
 /// (vs. a binary the client re-fetches)? Payloads above `MAX_EVENT_CONTENT`
 /// are sent as `null` too so a giant board doesn't flood every WS client.
-pub(crate) fn event_content(mime: &str, bytes: &[u8]) -> Option<String> {
+pub fn event_content(mime: &str, bytes: &[u8]) -> Option<String> {
     if bytes.len() > MAX_EVENT_CONTENT {
         return None;
     }
@@ -269,14 +268,16 @@ fn canonicalize_lexical(p: &Path) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// `POST /product/stories/{sid}/attachments` — Editor. Base64 JSON upload.
-pub async fn upload_attachment(
+pub async fn upload_attachment<C: ProductStudioHost>(
     AxPath(sid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UploadReq>,
 ) -> ApiResult<Json<ProductAttachment>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // Validate the declared MIME against the allow-list.
     if !allowed_mime(&req.mime) {
@@ -311,12 +312,12 @@ pub async fn upload_attachment(
     let rel = format!("{ATTACH_ROOT}/{sid}/{id}{ext}");
     // `sid` is a route param — confine both joins under the attachments root so
     // a hostile id can't steer the writes (rust/path-injection).
-    let dir = otto_core::paths::confine_join(&ctx.data_dir.join(ATTACH_ROOT), &sid)
+    let dir = otto_core::paths::confine_join(&ctx.data_dir().join(ATTACH_ROOT), &sid)
         .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {sid}"))))?;
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| ApiError(Error::Internal(format!("create attachment dir: {e}"))))?;
-    let full = otto_core::paths::confine_join(&ctx.data_dir, &rel)
+    let full = otto_core::paths::confine_join(ctx.data_dir(), &rel)
         .ok_or_else(|| ApiError(Error::Invalid(format!("unsafe story id {sid}"))))?;
     tokio::fs::write(&full, &bytes)
         .await
@@ -328,7 +329,7 @@ pub async fn upload_attachment(
         .filter(|k| !k.trim().is_empty())
         .unwrap_or_else(|| default_kind_for_mime(&req.mime));
     let att = ctx
-        .attachment_repo
+        .attachments()
         .create(NewAttachment {
             story_id: story.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -348,15 +349,17 @@ pub async fn upload_attachment(
 }
 
 /// `GET /product/stories/{sid}/attachments` — Viewer.
-pub async fn list_attachments(
+pub async fn list_attachments<C: ProductStudioHost>(
     AxPath(sid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<ProductAttachment>>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
     let atts = ctx
-        .attachment_repo
+        .attachments()
         .list_for_story(&story.id)
         .await
         .map_err(ApiError)?;
@@ -367,18 +370,20 @@ pub async fn list_attachments(
 /// content-type, `Content-Disposition: inline`, and `X-Content-Type-Options:
 /// nosniff`. Canonicalizes the resolved path and asserts containment under the
 /// attachments root before reading (defense in depth — paths are daemon-managed).
-pub async fn serve_attachment(
+pub async fn serve_attachment<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Response> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Viewer)
+        .await?;
 
-    let root = ctx.data_dir.join(ATTACH_ROOT);
+    let root = ctx.data_dir().join(ATTACH_ROOT);
     // Confine the stored path's join under the data dir (rust/path-injection)…
     let full =
-        otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
+        otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path).ok_or_else(|| {
             ApiError(Error::Forbidden(
                 "attachment path escapes the data dir".into(),
             ))
@@ -408,16 +413,18 @@ pub async fn serve_attachment(
 }
 
 /// `PATCH /product/attachments/{aid}` — Editor. Update `kind`/`filename`.
-pub async fn patch_attachment(
+pub async fn patch_attachment<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<AttachmentPatchReq>,
 ) -> ApiResult<Json<ProductAttachment>> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Editor)
+        .await?;
     let updated = ctx
-        .attachment_repo
+        .attachments()
         .update(
             &aid,
             AttachmentPatch {
@@ -438,20 +445,22 @@ pub async fn patch_attachment(
 /// bad document). Persists via `set_assist_result` (size + `updated_at`, meta
 /// untouched) and broadcasts `MockupUpdated` — `content` is the source for text
 /// formats and `null` for binaries / oversized payloads.
-pub async fn put_attachment_content(
+pub async fn put_attachment_content<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ContentPutReq>,
 ) -> ApiResult<Json<ProductAttachment>> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Editor)
+        .await?;
     check_base_updated_at(req.base_updated_at.as_deref(), &att.updated_at).map_err(ApiError)?;
     let bytes = decode_content(&att.mime, &req.data_b64).map_err(ApiError)?;
 
-    let root = ctx.data_dir.join(ATTACH_ROOT);
+    let root = ctx.data_dir().join(ATTACH_ROOT);
     let full =
-        otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path).ok_or_else(|| {
+        otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path).ok_or_else(|| {
             ApiError(Error::Forbidden(
                 "attachment path escapes the data dir".into(),
             ))
@@ -471,12 +480,12 @@ pub async fn put_attachment_content(
         .map_err(|e| ApiError(Error::Internal(format!("write attachment: {e}"))))?;
 
     let updated = ctx
-        .attachment_repo
+        .attachments()
         .set_assist_result(&aid, bytes.len() as i64, None, att.meta_json.clone())
         .await
         .map_err(ApiError)?;
 
-    let _ = ctx.events.send(Event::MockupUpdated {
+    let _ = ctx.events().send(Event::MockupUpdated {
         workspace_id: att.workspace_id.clone(),
         story_id: att.story_id.clone(),
         attachment_id: aid,
@@ -492,7 +501,7 @@ pub async fn put_attachment_content(
 /// `base_updated_at` is a 400; a parseable one that differs from the row's
 /// `updated_at` (compared as instants, so formatting differences don't matter)
 /// is a 409.
-pub(crate) fn check_base_updated_at(
+pub fn check_base_updated_at(
     base: Option<&str>,
     current: &chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Error> {
@@ -516,7 +525,7 @@ pub(crate) fn check_base_updated_at(
 /// mime must be allowed, the base64 must decode to a non-empty payload under the
 /// raw cap that sniffs as the declared type, and a `scene3d` document must
 /// validate against its schema.
-pub(crate) fn decode_content(mime: &str, data_b64: &str) -> Result<Vec<u8>, Error> {
+pub fn decode_content(mime: &str, data_b64: &str) -> Result<Vec<u8>, Error> {
     if !allowed_mime(mime) {
         return Err(Error::Invalid(format!(
             "attachment type {mime} is not editable"
@@ -547,19 +556,21 @@ pub(crate) fn decode_content(mime: &str, data_b64: &str) -> Result<Vec<u8>, Erro
 
 /// `DELETE /product/attachments/{aid}` — Editor. Removes the DB row + the file
 /// (best effort).
-pub async fn delete_attachment(
+pub async fn delete_attachment<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
-    ctx.attachment_repo.delete(&aid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    ctx.attachments().delete(&aid).await.map_err(ApiError)?;
     // Best-effort file removal (DB row is the source of truth).
     // Path-sandbox: only unlink if the confined (rust/path-injection) resolved
     // path is within the attachments root.
-    let root = ctx.data_dir.join(ATTACH_ROOT);
-    if let Some(full) = otto_core::paths::confine_join(&ctx.data_dir, &att.storage_path) {
+    let root = ctx.data_dir().join(ATTACH_ROOT);
+    if let Some(full) = otto_core::paths::confine_join(ctx.data_dir(), &att.storage_path) {
         if path_within(&root, &full) {
             let _ = tokio::fs::remove_file(&full).await;
         }
@@ -572,15 +583,17 @@ pub async fn delete_attachment(
 // ---------------------------------------------------------------------------
 
 /// `GET /product/attachments/{aid}/annotations` — Viewer.
-pub async fn list_annotations(
+pub async fn list_annotations<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<MockupAnnotation>>> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Viewer).await?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Viewer)
+        .await?;
     let list = ctx
-        .mockup_repo
+        .mockup_repo()
         .list_for_attachment(&aid)
         .await
         .map_err(ApiError)?;
@@ -589,16 +602,18 @@ pub async fn list_annotations(
 
 /// `POST /product/attachments/{aid}/annotations` — Editor. Resolves the
 /// attachment → story/workspace for the new row.
-pub async fn create_annotation(
+pub async fn create_annotation<C: ProductStudioHost>(
     AxPath(aid): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<AnnotationCreateReq>,
 ) -> ApiResult<Json<MockupAnnotation>> {
     let att = load_attachment(&ctx, &aid).await?;
-    crate::auth::require_ws_role(&ctx, &user, &att.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &att.workspace_id, WorkspaceRole::Editor)
+        .await?;
     let ann = ctx
-        .mockup_repo
+        .mockup_repo()
         .create(NewAnnotation {
             attachment_id: aid,
             story_id: att.story_id.clone(),
@@ -614,17 +629,19 @@ pub async fn create_annotation(
 }
 
 /// `PATCH /product/annotations/{id}` — Editor.
-pub async fn patch_annotation(
+pub async fn patch_annotation<C: ProductStudioHost>(
     AxPath(id): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<AnnotationPatchReq>,
 ) -> ApiResult<Json<MockupAnnotation>> {
-    let ann = ctx.mockup_repo.get(&id).await.map_err(ApiError)?;
+    let ann = ctx.mockup_repo().get(&id).await.map_err(ApiError)?;
     let ann = ann.ok_or_else(|| ApiError(Error::NotFound(format!("annotation {id}"))))?;
-    crate::auth::require_ws_role(&ctx, &user, &ann.workspace_id, WorkspaceRole::Editor).await?;
+    ctx.roles()
+        .check(&user, &ann.workspace_id, WorkspaceRole::Editor)
+        .await?;
     let updated = ctx
-        .mockup_repo
+        .mockup_repo()
         .update(
             &id,
             AnnotationPatch {
@@ -638,15 +655,17 @@ pub async fn patch_annotation(
 }
 
 /// `DELETE /product/annotations/{id}` — Editor.
-pub async fn delete_annotation(
+pub async fn delete_annotation<C: ProductStudioHost>(
     AxPath(id): AxPath<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
-    let ann = ctx.mockup_repo.get(&id).await.map_err(ApiError)?;
+    let ann = ctx.mockup_repo().get(&id).await.map_err(ApiError)?;
     let ann = ann.ok_or_else(|| ApiError(Error::NotFound(format!("annotation {id}"))))?;
-    crate::auth::require_ws_role(&ctx, &user, &ann.workspace_id, WorkspaceRole::Editor).await?;
-    ctx.mockup_repo.delete(&id).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &ann.workspace_id, WorkspaceRole::Editor)
+        .await?;
+    ctx.mockup_repo().delete(&id).await.map_err(ApiError)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -655,8 +674,8 @@ pub async fn delete_annotation(
 // ---------------------------------------------------------------------------
 
 /// Load an attachment by id, mapping absence to a 404.
-async fn load_attachment(ctx: &ServerCtx, aid: &Id) -> ApiResult<ProductAttachment> {
-    ctx.attachment_repo
+async fn load_attachment<C: ProductStudioHost>(ctx: &C, aid: &Id) -> ApiResult<ProductAttachment> {
+    ctx.attachments()
         .get(aid)
         .await
         .map_err(ApiError)?
@@ -667,7 +686,7 @@ async fn load_attachment(ctx: &ServerCtx, aid: &Id) -> ApiResult<ProductAttachme
 /// `image`, the Design-arena formats (Excalidraw / scene3d / glTF) get `design`
 /// so the arena lists them, everything else gets `file`. ("mockup" is set
 /// explicitly via PATCH.)
-pub(crate) fn default_kind_for_mime(mime: &str) -> String {
+pub fn default_kind_for_mime(mime: &str) -> String {
     if mime.starts_with("image/") {
         "image".into()
     } else if matches!(
@@ -685,7 +704,7 @@ pub(crate) fn default_kind_for_mime(mime: &str) -> String {
 
 /// Strip any directory components from a user-supplied filename, keeping only the
 /// final path segment for display (the on-disk name is the attachment id).
-pub(crate) fn sanitize_filename(name: &str) -> String {
+pub fn sanitize_filename(name: &str) -> String {
     let trimmed = name.trim();
     let base = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed).trim();
     if base.is_empty() || base == "." || base == ".." {

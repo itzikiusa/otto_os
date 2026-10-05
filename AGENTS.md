@@ -64,7 +64,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |
-| `otto-product` | Jira/Confluence product workflows |
+| `otto-product` | Product Story Analysis — Jira/Confluence story workflows, the analysis/rewrite/test/plan runners, story watcher, discovery chat, refinement, attachments/annotations, design formats, Product↔Swarm (host hooks via `ProductCtx` / `ProductRunHost` / `ProductStudioHost`) |
 | `otto-swarm` | Agent Swarm (role agents, org tree, coordinator) |
 | `otto-server` | Axum routes wiring the crates together; also hosts the multi-agent code-review engine, swarm runtime, workflow engine & plugin supervisor. `boot/` is the daemon composition root (`open_state` → `build_ctx` → recovery → `spawn_background`; `ServerCtx::from_parts` is the one context literal, shared with `ServerCtx::for_tests`) |
 | `ottod` | The daemon binary: process setup, single-instance lock, listeners, shutdown; drives `otto_server::boot` |

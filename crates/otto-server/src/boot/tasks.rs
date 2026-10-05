@@ -515,7 +515,7 @@ async fn start_channel_manager(
 
 /// Story watcher (polls watched stories for new comments).
 fn start_story_watcher(ctx: &ServerCtx) -> impl Send + 'static {
-    let watcher = crate::product_watcher::WatcherManager::new(
+    let watcher = otto_product::watcher::WatcherManager::new(
         otto_state::ProductRepo::new(ctx.pool.clone()),
         Arc::clone(&ctx.product),
         Arc::clone(&ctx.orchestrator),
@@ -579,7 +579,7 @@ fn start_conversation_view(ctx: &ServerCtx) -> impl Send + 'static {
 /// once at startup; any analysis agent still 'running'/'waiting' has no
 /// surviving task, so it is re-run (capped) or marked errored + notified.
 fn spawn_product_orphan_reaper(ctx: &ServerCtx) {
-    tokio::spawn(crate::product_run::reap_orphaned_agents_on_startup(
+    tokio::spawn(otto_product::run::reap_orphaned_agents_on_startup(
         ctx.clone(),
     ));
 }

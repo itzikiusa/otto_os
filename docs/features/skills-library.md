@@ -343,7 +343,7 @@ nudges you toward **Settings → Skills** to install/update them. (See
 
 The Product feature runs a per-skill agent fan-out. For each analysis lens it
 resolves the skill body **library-first, then the bundled `otto-product` body, then
-empty** (`crates/otto-server/src/product_run.rs`: `context_library.get_skill(...)`
+empty** (`crates/otto-product/src/run.rs`: `context_library.get_skill(...)`
 `.or_else(|| otto_product::skill_body(...))`), builds the prompt from that skill +
 context + an output contract, and runs it as a real session. So editing the installed
 copy of, e.g., `po-story-overview` changes how Product analysis behaves. (See

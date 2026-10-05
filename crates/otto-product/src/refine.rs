@@ -34,9 +34,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 
-use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiResult};
-use crate::state::ServerCtx;
+use crate::host::ProductStudioHost;
+use crate::http::{ApiError, ApiResult, CurrentUser};
 
 /// No-progress window for a refinement turn — a *stuck* window, NOT a wall-clock
 /// cap (the hard PTY cap lives in `claude_pty.rs`). Matches the discovery planner.
@@ -100,24 +99,24 @@ pub struct TurnResp {
 
 /// Load a thread, resolve its story → workspace, and role-check the caller.
 /// Returns the loaded thread on success (404 when the thread is absent).
-async fn thread_with_role(
-    ctx: &ServerCtx,
+async fn thread_with_role<C: ProductStudioHost>(
+    ctx: &C,
     user: &User,
     tid: &Id,
     role: WorkspaceRole,
 ) -> ApiResult<RefinementThread> {
     let thread = ctx
-        .refinement_repo
+        .refinement_repo()
         .get_thread(tid)
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("refinement thread {tid}"))))?;
     let story = ctx
-        .product_repo
+        .product_repo()
         .get_story(&thread.story_id)
         .await
         .map_err(ApiError)?;
-    crate::auth::require_ws_role(ctx, user, &story.workspace_id, role).await?;
+    ctx.roles().check(user, &story.workspace_id, role).await?;
     Ok(thread)
 }
 
@@ -130,17 +129,19 @@ async fn thread_with_role(
 /// linked discovery run's repo path when present + resolvable, else a fresh
 /// scratch dir under `data_dir/product/refine/`). The dir is created lazily in
 /// the turn engine, not here.
-pub async fn create_thread(
+pub async fn create_thread<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     body: Option<Json<CreateThreadReq>>,
 ) -> ApiResult<Json<RefinementThread>> {
     let req = body.map(|b| b.0).unwrap_or_default();
 
     // Resolve the story + Editor role-check via its workspace.
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Editor).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Editor)
+        .await?;
 
     // Pick the working dir: prefer the repo path the discovery used (when the
     // request links a resolvable run AND the story has a cwd); else a fresh,
@@ -149,7 +150,7 @@ pub async fn create_thread(
     let discovery_run_id = req.discovery_run_id.filter(|r| !r.trim().is_empty());
     let mut cwd: Option<String> = None;
     if let Some(run_id) = &discovery_run_id {
-        if let Ok(Some(_run)) = ctx.discovery_repo.get(run_id).await {
+        if let Ok(Some(_run)) = ctx.discovery_repo().get(run_id).await {
             if let Some(story_cwd) = &story.cwd {
                 if !story_cwd.trim().is_empty() {
                     cwd = Some(story_cwd.clone());
@@ -158,7 +159,7 @@ pub async fn create_thread(
         }
     }
     let cwd = cwd.unwrap_or_else(|| {
-        ctx.data_dir
+        ctx.data_dir()
             .join("product/refine")
             .join(new_id())
             .to_string_lossy()
@@ -171,7 +172,7 @@ pub async fn create_thread(
         .unwrap_or_else(|| "Refinement".to_string());
 
     let thread = ctx
-        .refinement_repo
+        .refinement_repo()
         .create_thread(NewRefinementThread {
             story_id: story.id.clone(),
             workspace_id: story.workspace_id.clone(),
@@ -188,15 +189,17 @@ pub async fn create_thread(
 
 /// `GET /product/stories/{sid}/refinement-threads` — list a story's refinement
 /// threads, newest first (Viewer).
-pub async fn list_threads(
+pub async fn list_threads<C: ProductStudioHost>(
     Path(sid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<Vec<RefinementThread>>> {
-    let story = ctx.product_repo.get_story(&sid).await.map_err(ApiError)?;
-    crate::auth::require_ws_role(&ctx, &user, &story.workspace_id, WorkspaceRole::Viewer).await?;
+    let story = ctx.product_repo().get_story(&sid).await.map_err(ApiError)?;
+    ctx.roles()
+        .check(&user, &story.workspace_id, WorkspaceRole::Viewer)
+        .await?;
     let threads = ctx
-        .refinement_repo
+        .refinement_repo()
         .list_threads_for_story(&sid)
         .await
         .map_err(ApiError)?;
@@ -205,14 +208,14 @@ pub async fn list_threads(
 
 /// `GET /product/refinement-threads/{tid}` — a thread + its full transcript
 /// (Viewer).
-pub async fn get_thread(
+pub async fn get_thread<C: ProductStudioHost>(
     Path(tid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<ThreadDetail>> {
     let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Viewer).await?;
     let messages = ctx
-        .refinement_repo
+        .refinement_repo()
         .list_messages(&tid)
         .await
         .map_err(ApiError)?;
@@ -221,18 +224,18 @@ pub async fn get_thread(
 
 /// `POST /product/refinement-threads/{tid}/archive` — archive a thread (Editor),
 /// returning the reloaded (archived) thread.
-pub async fn archive_thread(
+pub async fn archive_thread<C: ProductStudioHost>(
     Path(tid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<Json<RefinementThread>> {
     thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
-    ctx.refinement_repo
+    ctx.refinement_repo()
         .archive_thread(&tid)
         .await
         .map_err(ApiError)?;
     let thread = ctx
-        .refinement_repo
+        .refinement_repo()
         .get_thread(&tid)
         .await
         .map_err(ApiError)?
@@ -255,23 +258,23 @@ pub async fn archive_thread(
 ///   9. Persist the agent message (with `{story_updated, version_no}` meta) +
 ///      record a Product event.
 ///  10. Return the user + agent messages and the update result.
-pub async fn send_message(
+pub async fn send_message<C: ProductStudioHost>(
     Path(tid): Path<Id>,
-    State(ctx): State<ServerCtx>,
+    State(ctx): State<C>,
     CurrentUser(user): CurrentUser,
     Json(req): Json<SendMessageReq>,
 ) -> ApiResult<Json<TurnResp>> {
     // 1. Resolve thread + Editor role-check.
     let thread = thread_with_role(&ctx, &user, &tid, WorkspaceRole::Editor).await?;
     let story = ctx
-        .product_repo
+        .product_repo()
         .get_story(&thread.story_id)
         .await
         .map_err(ApiError)?;
 
     // 2. Persist the user message.
     let user_message = ctx
-        .refinement_repo
+        .refinement_repo()
         .create_message(NewRefinementMessage {
             thread_id: tid.clone(),
             role: "user".into(),
@@ -283,7 +286,7 @@ pub async fn send_message(
 
     // 3a. Current story body: latest `suggested` → `source` → the title.
     let story_body = match ctx
-        .product_repo
+        .product_repo()
         .latest_version_of_kind(&thread.story_id, "suggested")
         .await
         .ok()
@@ -292,7 +295,7 @@ pub async fn send_message(
     {
         Some(b) if !b.trim().is_empty() => b,
         _ => match ctx
-            .product_repo
+            .product_repo()
             .latest_version_of_kind(&thread.story_id, "source")
             .await
             .ok()
@@ -306,7 +309,7 @@ pub async fn send_message(
 
     // 3b. Attachments by absolute path (never copied — the agent opens them).
     let attachment_lines: Vec<String> = ctx
-        .attachment_repo
+        .attachments()
         .list_for_story(&thread.story_id)
         .await
         .unwrap_or_default()
@@ -316,7 +319,7 @@ pub async fn send_message(
                 "- {} ({}) at {}",
                 a.filename,
                 a.mime,
-                ctx.data_dir.join(&a.storage_path).display()
+                ctx.data_dir().join(&a.storage_path).display()
             )
         })
         .collect();
@@ -325,9 +328,9 @@ pub async fn send_message(
     let mut discovery_report: Option<String> = None;
     let mut discovery_task_summaries: Vec<String> = Vec::new();
     if let Some(run_id) = &thread.discovery_run_id {
-        if let Ok(Some(run)) = ctx.discovery_repo.get(run_id).await {
+        if let Ok(Some(run)) = ctx.discovery_repo().get(run_id).await {
             discovery_report = run.report_md.filter(|r| !r.trim().is_empty());
-            if let Ok(tasks) = ctx.swarm_repo.list_tasks(&run.project_id).await {
+            if let Ok(tasks) = ctx.swarms().list_tasks(&run.project_id).await {
                 discovery_task_summaries = tasks
                     .into_iter()
                     .map(|t| t.title)
@@ -339,7 +342,7 @@ pub async fn send_message(
 
     // 3d. History — replay the last `HISTORY_TURN_CAP` messages (chronological).
     let all_history = ctx
-        .refinement_repo
+        .refinement_repo()
         .list_messages(&tid)
         .await
         .unwrap_or_default();
@@ -376,7 +379,7 @@ pub async fn send_message(
     //    and drivable by any configured provider. Provider precedence:
     //    request → workspace default → global default → claude.
     let ws = ctx
-        .workspaces
+        .workspaces()
         .get(&story.workspace_id)
         .await
         .map_err(ApiError)?;
@@ -396,20 +399,19 @@ pub async fn send_message(
     {
         meta["model"] = json!(m);
     }
-    let (raw, _sid) = crate::agent_session::run_session_turn(
-        &ctx,
-        &ws,
-        &user,
-        None,
-        &format!("Refine: {}", story.title),
-        &thread.cwd,
-        &provider,
-        meta,
-        &prompt,
-        REFINE_NO_PROGRESS,
-        |_| {},
-    )
-    .await?;
+    let (raw, _sid) = ctx
+        .run_session_turn(
+            &ws,
+            &user,
+            None,
+            &format!("Refine: {}", story.title),
+            &thread.cwd,
+            &provider,
+            meta,
+            &prompt,
+            REFINE_NO_PROGRESS,
+        )
+        .await?;
 
     // 7. Parse — tolerant; malformed/missing → reply=raw, no update.
     let (reply, updated_story_md, summary) = parse_turn(&raw);
@@ -419,7 +421,7 @@ pub async fn send_message(
     let mut version_no: Option<i64> = None;
     if let Some(updated) = updated_story_md.as_ref().filter(|u| !u.trim().is_empty()) {
         let v = ctx
-            .product_repo
+            .product_repo()
             .add_version(NewVersion {
                 story_id: thread.story_id.clone(),
                 kind: "suggested".into(),
@@ -433,7 +435,7 @@ pub async fn send_message(
             .map_err(ApiError)?;
         version_no = Some(v.version_no);
         story_updated = true;
-        let _ = ctx.events.send(otto_core::event::Event::ProductChanged {
+        let _ = ctx.events().send(otto_core::event::Event::ProductChanged {
             workspace_id: story.workspace_id.clone(),
             story_id: thread.story_id.clone(),
             section: "refine".into(),
@@ -443,7 +445,7 @@ pub async fn send_message(
 
     // 9. Persist the agent message (with the turn-outcome meta) + a Product event.
     let agent_message = ctx
-        .refinement_repo
+        .refinement_repo()
         .create_message(NewRefinementMessage {
             thread_id: tid.clone(),
             role: "agent".into(),
@@ -455,7 +457,7 @@ pub async fn send_message(
         .await
         .map_err(ApiError)?;
     let _ = ctx
-        .product_repo
+        .product_repo()
         .add_event(otto_state::NewEvent {
             story_id: thread.story_id.clone(),
             section: "refine".into(),
