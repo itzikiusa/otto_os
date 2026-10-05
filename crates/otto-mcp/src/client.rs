@@ -518,7 +518,20 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             if resp.status() == reqwest::StatusCode::NOT_FOUND && session_id.is_some() {
                 return Err(OpError::NotDelivered("mcp session expired".into()));
             }
-            let msg = parse_http_message(resp, id)
+            // Server→client requests on the stream are answered with a POST
+            // of their own (spawned: the stream is still being read).
+            let answer = |reply: Value| {
+                let (client, url, headers, sid) = (
+                    client.clone(),
+                    url.clone(),
+                    headers.clone(),
+                    session_id.clone(),
+                );
+                tokio::spawn(async move {
+                    let _ = http_send(&client, &url, &headers, reply, sid).await;
+                });
+            };
+            let msg = parse_http_message_answering(resp, id, &answer)
                 .await
                 .map_err(OpError::Failed)?;
             msg.get("result").cloned().ok_or_else(|| {
@@ -535,7 +548,20 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
 /// Read the JSON-RPC response to request `want_id` from an HTTP response,
 /// honoring content negotiation (a JSON body, or an SSE `text/event-stream`).
 /// Body is size-capped.
-async fn parse_http_message(mut resp: reqwest::Response, want_id: i64) -> Result<Value, String> {
+async fn parse_http_message(resp: reqwest::Response, want_id: i64) -> Result<Value, String> {
+    parse_http_message_answering(resp, want_id, &|_| {}).await
+}
+
+/// [`parse_http_message`], answering every server→client request seen on an
+/// SSE stream through `answer` (a POST back to the server) AS IT ARRIVES —
+/// a server that blocks on the answer before sending the result no longer
+/// holds the stream open to the timeout. The SSE body is parsed
+/// incrementally and the call returns as soon as its response is read.
+async fn parse_http_message_answering(
+    mut resp: reqwest::Response,
+    want_id: i64,
+    answer: &(dyn Fn(Value) + Sync),
+) -> Result<Value, String> {
     let status = resp.status();
     let ct = resp
         .headers()
@@ -543,6 +569,45 @@ async fn parse_http_message(mut resp: reqwest::Response, want_id: i64) -> Result
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    if status.is_success() && ct.contains("text/event-stream") {
+        let mut parser = SseParser::default();
+        let mut fallback = None;
+        let mut total = 0usize;
+        loop {
+            let chunk = resp.chunk().await.map_err(|e| format!("read body: {e}"))?;
+            let mut msgs = Vec::new();
+            match &chunk {
+                Some(c) => {
+                    total += c.len();
+                    if total > MAX_BODY_BYTES {
+                        return Err("response exceeded size cap".into());
+                    }
+                    parser.feed(c, &mut msgs);
+                }
+                None => parser.finish(&mut msgs),
+            }
+            for m in msgs {
+                if let Some(reply) = server_request_answer(&m) {
+                    answer(reply);
+                    continue;
+                }
+                if !is_response(&m) {
+                    continue;
+                }
+                if m.get("id").and_then(Value::as_i64) == Some(want_id) {
+                    return Ok(m);
+                }
+                fallback.get_or_insert(m);
+            }
+            if chunk.is_none() {
+                break;
+            }
+        }
+        if !parser.saw_data {
+            return Err("empty SSE stream".into());
+        }
+        return fallback.ok_or_else(|| "no response for this request in SSE stream".into());
+    }
     if resp
         .content_length()
         .is_some_and(|len| len > MAX_BODY_BYTES as u64)
@@ -581,40 +646,91 @@ async fn parse_http_message(mut resp: reqwest::Response, want_id: i64) -> Result
 /// same stream BEFORE the result — those are skipped, not concatenated into
 /// the result (which used to make the whole body unparseable).
 fn pick_sse_response(text: &str, want_id: i64) -> Result<Value, String> {
+    let mut p = SseParser::default();
     let mut msgs = Vec::new();
-    let mut data: Option<String> = None;
-    let mut saw_data = false;
-    let flush = |data: &mut Option<String>, msgs: &mut Vec<Value>| {
-        if let Some(d) = data.take() {
-            if let Ok(v) = serde_json::from_str::<Value>(&d) {
-                msgs.push(v);
-            }
+    p.feed(text.as_bytes(), &mut msgs);
+    p.finish(&mut msgs);
+    if !p.saw_data {
+        return Err("empty SSE stream".into());
+    }
+    pick_response(msgs, want_id).ok_or_else(|| "no response for this request in SSE stream".into())
+}
+
+/// The answer to a server→client REQUEST (a message with `method` AND `id`):
+/// `ping` → `{}`; anything else (`sampling/createMessage`,
+/// `elicitation/create`, `roots/list`, …) → -32601, since Otto offers none of
+/// those capabilities. `None` for a notification or a response. A server
+/// that blocks on the answer must get one — else the call hangs to the
+/// timeout and the session is dropped.
+fn server_request_answer(msg: &Value) -> Option<Value> {
+    let method = msg.get("method").and_then(Value::as_str)?;
+    let id = msg.get("id")?;
+    Some(if method == "ping" {
+        json!({"jsonrpc":"2.0","id":id,"result":{}})
+    } else {
+        json!({"jsonrpc":"2.0","id":id,
+            "error":{"code":-32601,"message":"method not found"}})
+    })
+}
+
+/// Incremental `text/event-stream` → JSON-RPC message parser: events are
+/// blank-line separated, an event's `data:` lines join with `\n` (SSE spec),
+/// and each event is one JSON-RPC message. Fed chunk by chunk, so a message
+/// is acted on as soon as its event completes — not when the body ends.
+#[derive(Default)]
+struct SseParser {
+    /// Bytes of an incomplete line (a chunk may split a line or a UTF-8 char).
+    pending: Vec<u8>,
+    data: Option<String>,
+    saw_data: bool,
+}
+
+impl SseParser {
+    fn feed(&mut self, chunk: &[u8], out: &mut Vec<Value>) {
+        self.pending.extend_from_slice(chunk);
+        while let Some(i) = self.pending.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.pending.drain(..=i).collect();
+            let line = String::from_utf8_lossy(&raw[..raw.len() - 1]).into_owned();
+            self.line(line.strip_suffix('\r').unwrap_or(&line), out);
         }
-    };
-    for line in text.lines() {
-        let line = line.strip_suffix('\r').unwrap_or(line);
+    }
+
+    /// End of stream: the last line and event need no trailing terminator.
+    fn finish(&mut self, out: &mut Vec<Value>) {
+        if !self.pending.is_empty() {
+            let raw = std::mem::take(&mut self.pending);
+            let line = String::from_utf8_lossy(&raw).into_owned();
+            self.line(line.strip_suffix('\r').unwrap_or(&line), out);
+        }
+        self.flush(out);
+    }
+
+    fn line(&mut self, line: &str, out: &mut Vec<Value>) {
         if line.is_empty() {
-            flush(&mut data, &mut msgs);
-            continue;
+            self.flush(out);
+            return;
         }
         if let Some(rest) = line.strip_prefix("data:") {
-            saw_data = true;
+            self.saw_data = true;
             let rest = rest.strip_prefix(' ').unwrap_or(rest);
-            match &mut data {
+            match &mut self.data {
                 Some(d) => {
                     d.push('\n');
                     d.push_str(rest);
                 }
-                None => data = Some(rest.to_string()),
+                None => self.data = Some(rest.to_string()),
             }
         }
         // `event:` / `id:` / `retry:` / `:comment` lines carry no payload.
     }
-    flush(&mut data, &mut msgs);
-    if !saw_data {
-        return Err("empty SSE stream".into());
+
+    fn flush(&mut self, out: &mut Vec<Value>) {
+        if let Some(d) = self.data.take() {
+            if let Ok(v) = serde_json::from_str::<Value>(&d) {
+                out.push(v);
+            }
+        }
     }
-    pick_response(msgs, want_id).ok_or_else(|| "no response for this request in SSE stream".into())
 }
 
 /// Is `msg` a JSON-RPC *response* (not a notification / server request)?
@@ -695,15 +811,9 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin, W: AsyncWriteExt + Unpin>(
             Ok(v) => v,
             Err(_) => continue, // tolerate stray non-JSON noise on stdout
         };
-        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+        if msg.get("method").is_some() {
             // Server→client request (has an id) or notification (no id).
-            if let (Some(id), Some(w)) = (msg.get("id"), reply.as_deref_mut()) {
-                let answer = if method == "ping" {
-                    json!({"jsonrpc":"2.0","id":id,"result":{}})
-                } else {
-                    json!({"jsonrpc":"2.0","id":id,
-                        "error":{"code":-32601,"message":"method not found"}})
-                };
+            if let (Some(answer), Some(w)) = (server_request_answer(&msg), reply.as_deref_mut()) {
                 let _ = write_line(w, &answer).await;
             }
             continue;
@@ -859,6 +969,71 @@ mod tests {
         // cargo sets this for the test process; it must not leak through.
         assert!(std::env::var("CARGO_MANIFEST_DIR").is_ok());
         assert!(!base.iter().any(|(k, _)| k == "CARGO_MANIFEST_DIR"));
+    }
+
+    /// S5-09: a server→client request on the SSE stream is answered (-32601,
+    /// ping → {}) WHILE the stream is open, and the result that follows it
+    /// is returned without waiting for the body to end.
+    #[tokio::test]
+    async fn a_server_request_on_the_stream_is_answered_while_it_is_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<String>();
+        let server = tokio::spawn(async move {
+            // 1. The call: stream a server request, then hold the stream.
+            let (mut call, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = call.read(&mut buf).await;
+            call.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            let ev =
+                "data: {\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"sampling/createMessage\"}\n\n";
+            call.write_all(format!("{:x}\r\n{ev}\r\n", ev.len()).as_bytes())
+                .await
+                .unwrap();
+            // 2. Our answer arrives on a second connection.
+            let (mut ans, _) = listener.accept().await.unwrap();
+            let mut abuf = vec![0u8; 8192];
+            let n = ans.read(&mut abuf).await.unwrap();
+            let _ = ans
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = seen_tx.send(String::from_utf8_lossy(&abuf[..n]).into_owned());
+            // 3. Only now the result (the stream stays open after it).
+            let ev = "data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true}}\n\n";
+            call.write_all(format!("{:x}\r\n{ev}\r\n", ev.len()).as_bytes())
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{address}/mcp");
+        let resp = http_send(&client, &url, &BTreeMap::new(), init_request(), None)
+            .await
+            .unwrap();
+        let (c2, u2) = (client.clone(), url.clone());
+        let answer = move |reply: Value| {
+            let (c, u) = (c2.clone(), u2.clone());
+            tokio::spawn(async move {
+                let _ = http_send(&c, &u, &BTreeMap::new(), reply, None).await;
+            });
+        };
+        let msg = tokio::time::timeout(
+            Duration::from_secs(5),
+            parse_http_message_answering(resp, 5, &answer),
+        )
+        .await
+        .expect("returned on the result, not the stream's end")
+        .unwrap();
+        assert_eq!(msg["result"]["ok"], json!(true));
+        let posted = seen_rx.await.unwrap();
+        assert!(posted.contains("\"id\":99"), "{posted}");
+        assert!(posted.contains("-32601"), "{posted}");
+        server.abort();
     }
 
     #[test]
