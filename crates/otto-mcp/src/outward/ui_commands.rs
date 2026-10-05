@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The embedded catalog text (also served verbatim by `GET /ui/commands/catalog`).
-pub const CATALOG_JSON: &str = include_str!("../../../docs/contracts/ui-commands.json");
+pub const CATALOG_JSON: &str = include_str!("../../../../docs/contracts/ui-commands.json");
 
 /// Prefix every catalog command carries as a governed tool (`ui_<name>`).
 pub const TOOL_PREFIX: &str = "ui_";

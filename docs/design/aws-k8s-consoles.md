@@ -495,7 +495,7 @@ Write tools (documented as mutating in the module doc comment):
 then polls `aws_athena_get_query`), `aws_sqs_send {account_id,url,body}`,
 `k8s_action {cluster_id,action,kind,namespace,name,params?}`.
 Also register the same set on the **outward** governed surface
-(`crates/otto-server/src/mcp_outward.rs`): reads in `DEFAULT_ENABLED`, the
+(`crates/otto-mcp/src/outward/`): reads in `DEFAULT_ENABLED`, the
 three writers in `DANGEROUS` (so they need human approval by default), with
 `route_for` mappings + the classification tests updated. Update
 `docs/features/mcp-control-plane.md` tool lists.

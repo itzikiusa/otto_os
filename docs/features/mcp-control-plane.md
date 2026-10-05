@@ -14,7 +14,8 @@ scheduled tasks, …) — to other agents (Claude Code, Copilot, …) over a **r
 token**, itself governed by the same pipeline.
 
 This is the definitive end-user + operator guide. It documents what the code in
-`crates/otto-mcp/` (the engine), `crates/otto-server/src/mcp_outward.rs` +
+`crates/otto-mcp/` (the engine, incl. `src/outward/` — the outward tool catalog,
+policy lists, `route_for` and the JSON-RPC transport), `crates/otto-server/src/mcp_outward.rs` +
 `mcp_capabilities.rs` + `routes/mcp_cp.rs` (the outward server, gateway, token
 rotation, session attachment, and capability endpoints),
 `crates/ottod/src/mcp_server.rs` + `mcp_tools.rs` (the two stdio binaries),
@@ -85,7 +86,7 @@ the token kind, and the routes.
 | **Risk labeling** | `crates/otto-mcp/src/risk.rs` | `read`/`write`/`dangerous` + `low`/`medium`/`high` injection from annotations + keywords. |
 | **Policy engine** | `crates/otto-mcp/src/policy.rs` | Most-restrictive-wins matcher (`mcp_policies`). |
 | **Control-plane HTTP** | `crates/otto-mcp/src/http.rs` (`api_router`) | The `/mcp/*` + `/workspaces/{wid}/mcp/*` governance routes. |
-| **Outward server** | `crates/otto-server/src/mcp_outward.rs` | `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway, the categorised `otto.*` tool catalog (`otto_tool_specs` + the pure `route_for` map). |
+| **Outward server** | `crates/otto-mcp/src/outward/` + `crates/otto-server/src/mcp_outward.rs` | The categorised `otto.*` tool catalog (`otto_tool_specs`), policy lists, the pure `route_for` map and the Streamable-HTTP JSON-RPC framing live in `otto_mcp::outward`; the server glue keeps `/mcp/otto-tools/invoke`, `/mcp/otto-server`, the gateway and the governed pipeline. |
 | **CP extensions** | `crates/otto-server/src/routes/mcp_cp.rs` | Per-token rotation and per-workspace session attachment. |
 | **Capability endpoints** | `crates/otto-server/src/mcp_capabilities.rs` | `code-search`, `context-packet`, `proof-pack` (injection-safe). |
 | **stdio binaries** | `crates/ottod/src/{mcp_server,mcp_tools}.rs` | The outward (`ottod mcp-server`) + inward (`ottod mcp-tools`) servers. |

@@ -99,7 +99,7 @@ and deliver it to Slack, email, or a webhook. Also driveable over MCP."*
 | **Engine** | `crates/otto-server/src/scheduled_tasks_engine.rs` | `run_task`: open a run row → run the agent → extract summary → write report → deliver → advance cursor. |
 | **Scheduler** | `crates/otto-server/src/scheduled_tasks_scheduler.rs` | The 60-s supervisor tick + per-task in-flight guard + startup reaper. |
 | **HTTP routes** | `crates/otto-server/src/routes/scheduled_tasks.rs` | The `/scheduled-tasks/*` endpoints + the preset list + the report server. |
-| **MCP surface** | `crates/otto-server/src/mcp_outward.rs` | The 7 `otto.*` scheduled-task tools (read + write). |
+| **MCP surface** | `crates/otto-mcp/src/outward/` (catalog + routing) | The 7 `otto.*` scheduled-task tools (read + write). |
 | **Persistence** | `migrations/0084_scheduled_tasks.sql` (+ v2 `0086_scheduled_tasks_v2.sql`) + repo | `scheduled_tasks` + `scheduled_task_runs` tables. |
 | **Domain types** | `otto-core` | `ScheduledTask`, `ScheduledTaskRun`, `ScheduledTaskPreset`, `Feature::ScheduledTasks`, `Event::ScheduledTaskRunUpdated`. |
 | **UI** | `ui/src/modules/scheduled-tasks/ScheduledTasksPage.svelte` | The list, the create/edit form, the runs drill-down, and the report modal. |
@@ -561,6 +561,6 @@ tool itself must also be enabled in the Otto Server tab.
   and `docs/contracts/ws.md` (`scheduled_task_run_updated`).
 - **Source:** `crates/otto-server/src/{scheduled_tasks_engine,scheduled_tasks_scheduler,cadence}.rs`,
   `crates/otto-server/src/routes/scheduled_tasks.rs`,
-  `crates/otto-server/src/mcp_outward.rs`,
+  `crates/otto-mcp/src/outward/`,
   `crates/otto-state/migrations/0084_scheduled_tasks.sql` (+ `0086_scheduled_tasks_v2.sql`),
   `ui/src/modules/scheduled-tasks/`.
