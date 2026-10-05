@@ -544,3 +544,24 @@ test('loadAll: obsolete A failure cannot clear the loading state of a newer A vi
   }
   assert.equal(v.loading, false); assert.equal(v.environments[0]?.id, 'A-current');
 });
+
+test('lists stay pending until this workspace settles once — a refetch never re-enters "not loaded"', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(r => {release = r;});
+  let held = true;
+  const {v,ws} = setup({get: async () => { if (held) await gate; return []; }});
+  // Before the page's effect starts loadAll, `loading` is still false; the store
+  // must not read as "loaded and empty" (that flashed onboarding).
+  assert.equal(v.loading, false);
+  assert.equal(v.listsPending, true);
+  const first = v.loadAll();
+  assert.equal(v.listsPending, true);
+  release(); await first;
+  assert.equal(v.listsPending, false);
+  held = false;
+  await v.loadAll({force: true});
+  assert.equal(v.listsPending, false);
+  // Another workspace has not settled yet.
+  ws.currentId = 'B';
+  assert.equal(v.listsPending, true);
+});

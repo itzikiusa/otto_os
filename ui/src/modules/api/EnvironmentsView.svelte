@@ -199,11 +199,11 @@
     {/if}
   </header>
 
-  {#if apiClient.environments.length === 0 && (apiClient.envLoadError || apiClient.loading)}
+  {#if apiClient.environments.length === 0 && (apiClient.envLoadError || apiClient.listsPending)}
     <!-- A failed/in-flight load is not "No environments yet". -->
     <LoadState
       what="environments"
-      loading={apiClient.loading}
+      loading={apiClient.listsPending}
       error={apiClient.envLoadError}
       empty
       onretry={() => void apiClient.loadAll()}

@@ -43,6 +43,8 @@ async function cloudFixture(page: Page) {
     else if (path.endsWith('/resource')) json = { manifest: { metadata: { name: pod.name }, spec: { containers: [{ name: 'app' }] } }, describe: 'Name: ' + pod.name, events: [] };
     else if (path.endsWith('/containers')) json = { containers: [{ name: 'app', image: 'checkout:v1', ready: true, state: 'running', restarts: 0, init: false }] };
     else if (path.endsWith('/logs')) return r.fulfill({ contentType: 'text/plain', body: 'checkout started\nrequest complete\n' });
+    // The Metrics tab's Monitor history: no samples (an empty series, not `{}`).
+    else if (path.endsWith('/monitor/series')) json = { metric: new URL(r.request().url()).searchParams.get('metric'), kind: 'gauge', step_secs: 60, points: [] };
     return r.fulfill({ json });
   });
 }
@@ -97,7 +99,8 @@ test('Kubernetes splitter supports RTL pointer and keyboard resize', async ({ pa
   await page.setViewportSize({ width: 1600, height: 900 });
   await page.addInitScript(() => localStorage.setItem('otto_direction', 'rtl'));
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
-  const splitter = page.getByRole('slider', { name: 'Resize details' });
+  // The ARIA window splitter: a focusable separator carrying aria-valuenow.
+  const splitter = page.getByRole('separator', { name: 'Resize details' });
   const drawer = page.getByTestId('k8s-drawer');
   const before = (await drawer.boundingBox())!.width;
   const box = (await splitter.boundingBox())!;
@@ -109,7 +112,7 @@ test('Kubernetes splitter supports RTL pointer and keyboard resize', async ({ pa
   await page.keyboard.press('ArrowRight');
   expect((await drawer.boundingBox())!.width).toBeGreaterThan(dragged);
   await page.keyboard.press('Home');
-  await expect(splitter).toHaveValue('320');
+  await expect(splitter).toHaveAttribute('aria-valuenow', '320');
 });
 
 test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', async ({ page }) => {
@@ -124,7 +127,7 @@ test('Kubernetes RTL logs retain LTR punctuation and metrics retry recovers', as
   await drawer.getByRole('tab', { name: 'Metrics', exact: true }).click();
   await expect(drawer.getByText('Metrics temporarily unavailable', { exact: false })).toBeVisible();
   failed = false;
-  await drawer.getByRole('button', { name: 'Retry' }).click();
+  await drawer.getByTestId('load-error').getByRole('button', { name: 'Retry' }).click();
   await expect(drawer.getByRole('meter', { name: 'app CPU' })).toBeVisible();
   // perf K8s R5: the Metrics tab asks for this one pod, not the namespace.
   expect(podParam).toBe(pod.name);

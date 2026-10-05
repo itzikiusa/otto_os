@@ -302,11 +302,11 @@
     {/if}
   </div>
 
-  {#if isEmpty && (apiClient.requestsLoadError || apiClient.loading)}
+  {#if isEmpty && (apiClient.requestsLoadError || apiClient.listsPending)}
     <LoadState
       what="saved requests"
       variant="compact"
-      loading={apiClient.loading}
+      loading={apiClient.listsPending}
       error={apiClient.requestsLoadError}
       empty
       onretry={() => void apiClient.loadAll()}

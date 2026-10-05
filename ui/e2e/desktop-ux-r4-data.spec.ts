@@ -237,6 +237,9 @@ test('Kafka schema tablet gives versions usable width and supports keyboard navi
   await page.route('**/schema-registry/subjects',r=>r.fulfill({json:[{subject:'customer-reporting-events-value',id:1,version:2,schema_type:'AVRO',schema}]}));
   let fail=true;
   await page.route('**/schema-registry/subjects/*/versions',r=>fail?r.fulfill({status:503,json:{code:'upstream',message:'Synthetic versions unavailable'}}):r.fulfill({json:[{version:1,id:1,schema_type:'AVRO',schema:'{"type":"record","name":"CustomerEvent","fields":[]}'},{version:2,id:2,schema_type:'AVRO',schema}]}));
+  // The list carries version numbers only; each compared body is its own detail fetch.
+  const bodies:Record<string,string>={'1':'{"type":"record","name":"CustomerEvent","fields":[]}','2':schema};
+  await page.route('**/schema-registry/subjects/*/versions/*',r=>{const v=r.request().url().split('/').pop()!;return r.fulfill({json:{subject:'customer-reporting-events-value',version:Number(v),id:Number(v),schema_type:'AVRO',schema:bodies[v]}});});
   let checked:any;await page.route('**/schema-registry/subjects/*/compatibility',r=>{checked=r.request().postDataJSON();return r.fulfill({json:{compatible:true,messages:[]}});});
   await broker(page);await page.locator('.tabs button',{hasText:'Schema Registry'}).click();
   await expect(page.locator('.schema .view .payload')).toContainText('customer_identifier');
@@ -254,10 +257,10 @@ for(const engine of ['redis','mongodb'] as const)test(`${engine} result editing 
   const rows=engine==='redis'?{columns:[{name:'value',type_hint:'String'}],rows:[['Original value']]}:{columns:[{name:'_id',type_hint:'ObjectId'},{name:'status',type_hint:'String'},{name:'items',type_hint:'Array'}],rows:[[{ $oid:'507f1f77bcf86cd799439011'},'pending',[{qty:1}]]]};
   let queries=0;await page.route('**/db/query',r=>{queries++;expect(r.request().postDataJSON().statement).toBe(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');return r.fulfill({json:{...rows,stats:{duration_ms:2,row_count:1},truncated:false}});});
   await openPage(page,'database');await page.locator('.conn-list .conn-name',{hasText:conn.name}).click();await page.locator('.qe-edit .cm-content').fill(engine==='redis'?'GET synthetic:customer':'db.synthetic_customers.find({})');await page.getByRole('button',{name:/^Run\s+⌘/}).click();
-  await page.getByRole('tab',{name:'Grid',exact:true}).click();await expect(page.locator('.gt-edit-hint')).toBeVisible();
+  await page.getByRole('group',{name:'Result view'}).getByRole('button',{name:'Grid',exact:true}).click();await expect(page.locator('.gt-edit-hint')).toBeVisible();
   if(engine==='redis'){await page.getByText('Original value',{exact:true}).dblclick();await page.locator('.cell-input').fill('Updated value');await page.locator('.cell-input').press('Enter');}
   else {await page.locator('.cell.json').first().click();await page.locator('.cell-viewer').getByRole('button',{name:'Edit',exact:true}).click();await page.locator('.cv-edit').fill('[{"qty":2}]');await page.locator('.cell-viewer').getByRole('button',{name:/^Save/}).click();}
   await page.getByTestId('pending-edits-bar').getByRole('button',{name:'Review & apply',exact:true}).click();await expect(page.locator('.review-modal')).toBeVisible();
   const command=await page.locator('.review-sql').inputValue();expect(command).toContain(engine==='redis'?'SET synthetic:customer "Updated value"':'updateOne');if(engine==='mongodb')expect(command).toContain('"qty":2');
-  mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/${engine}-review.png`});await page.locator('.review-modal').getByRole('button',{name:'Cancel',exact:true}).click();expect(queries).toBe(1);
+  mkdirSync(shots,{recursive:true});await page.screenshot({animations:'disabled',path:`${shots}/${engine}-review.png`});await page.getByRole('dialog').filter({has:page.locator('.review-modal')}).getByRole('button',{name:'Cancel',exact:true}).click();expect(queries).toBe(1);
 });

@@ -213,7 +213,7 @@
   let started = $state(false);
   const onboarding = $derived(
     !started &&
-      !apiClient.loading &&
+      !apiClient.listsPending &&
       !apiClient.loadError &&
       apiClient.collections.length === 0 &&
       apiClient.requests.length === 0 &&
@@ -343,7 +343,10 @@
         </EmptyState>
       </div>
     {:else}
-      <div class="api-page">
+      <!-- Busy while this workspace's lists are in flight: the editor is usable
+           meanwhile, and an untouched empty workspace swaps to onboarding once
+           they settle. -->
+      <div class="api-page" aria-busy={apiClient.listsPending}>
         {#if showList}
           <aside class="api-side" style:width={viewport.isPhone ? null : `${sideW}px`} aria-label="Collections, automations and history">
             <div class="segmented side-seg" role="tablist" aria-label="Show">
