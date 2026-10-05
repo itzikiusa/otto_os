@@ -118,6 +118,12 @@ function pruneCss(src, gone, rel, report) {
     (c) => !new RegExp(String.raw`class="[^"]*(?<![\w-])${c}(?![\w-])|class:${c}(?![\w-])|class=\{[^}]*['"\`\s]${c}['"\`\s]`).test(markup),
   );
   if (dead.length === 0) return src;
+  // An interpolated class (`class="st {r.status}"`) can produce any name at
+  // run time — Svelte keeps such rules too — so prune nothing there.
+  if (/\bclass="[^"]*\{/.test(markup)) {
+    report.push(`${rel}: dynamic class names — left CSS for ${dead.map((c) => '.' + c).join(' ')} in place`);
+    return src;
+  }
   const deadRe = new RegExp(String.raw`\.(?:${dead.map((c) => c.replace(/[-]/g, '\\-')).join('|')})(?![\w-])`);
   // Rules start after the <style> tag itself; a selector never holds `<`.
   const open = /<style\b[^>]*>/.exec(src.slice(styleAt))[0];
