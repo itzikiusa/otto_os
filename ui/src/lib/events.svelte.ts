@@ -1,7 +1,7 @@
 // Events WS client (/ws/events) with auto-reconnect + exponential backoff.
 // Feeds the workspace store (session statuses) and the toast store (notices).
 
-import { getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
+import { api, getToken, resumeAltLoopback, suspendAltLoopback, wsConnect } from './api/client';
 import { inLane } from './api/lane';
 import { invalidateMissionSummary } from './api/missionControl';
 import { auth } from './stores/auth.svelte';
@@ -400,6 +400,27 @@ export type EventsState = 'connecting' | 'connected' | 'offline';
  *  a new event-fed view never has to be added to `resyncAfterReconnect`. */
 export const liveEvents = appLive;
 
+/** Event types whose handler failure was already reported this page life. */
+const reportedHandlerErrors = new Set<string>();
+
+/** A WS event handler threw: console + one `/client/errors` report per type. */
+function reportHandlerError(type: unknown, e: unknown): void {
+  const kind = typeof type === 'string' ? type : 'unknown';
+  console.error(`[otto] /ws/events handler for "${kind}" failed`, e);
+  if (reportedHandlerErrors.has(kind)) return;
+  reportedHandlerErrors.add(kind);
+  const err = e as { message?: unknown; stack?: unknown } | null;
+  void api.bg
+    .post('/client/errors', {
+      kind: 'ws_event_handler',
+      message: `${kind}: ${String(err?.message ?? e)}`.slice(0, 2000),
+      stack: String(err?.stack ?? '').slice(0, 4000),
+      route: typeof location !== 'undefined' ? location.hash : '',
+      action: 'none',
+    })
+    .catch(() => {});
+}
+
 class EventsClient {
   state: EventsState = $state('offline');
 
@@ -683,8 +704,13 @@ class EventsClient {
     };
     this.sock.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data !== 'string') return;
+      let data: unknown;
       try {
-        const data: unknown = JSON.parse(ev.data);
+        data = JSON.parse(ev.data);
+      } catch {
+        return; // malformed frame — ignore
+      }
+      try {
         // Per-connection `resync` (ws.md): the daemon's bounded bus dropped
         // events for this socket — refetch like after a reconnect.
         if ((data as Partial<EventsResyncFrame> | null)?.type === 'resync') {
@@ -926,8 +952,12 @@ class EventsClient {
           if (parsed.type === 'session_meta_updated' || parsed.type === 'session_removed') uiControl.applyEvent(parsed);
           ws.applyEvent(parsed);
         }
-      } catch {
-        /* malformed frame — ignore */
+      } catch (e) {
+        // A store handler threw (S13-06): this used to vanish with the
+        // "malformed frame" catch, hiding contract drift (a field the TS
+        // union calls required, missing on the wire). Log it, and report it
+        // once per event type to the daemon log.
+        reportHandlerError((data as { type?: unknown } | null)?.type, e);
       }
     };
     this.sock.onclose = () => {

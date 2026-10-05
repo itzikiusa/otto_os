@@ -35,6 +35,7 @@ function setup() {
         },
         resumeAltLoopback() {},
         suspendAltLoopback() {},
+        api: { bg: { post: async (path: string, body: any) => { log.push(`report ${path} ${body.kind} ${body.message.split(':')[0]}`); } } },
       };
     }
     if (p === './api/lane') return { inLane: (_l: string, fn: () => void) => fn() };
@@ -69,7 +70,7 @@ function setup() {
   runInNewContext(out, {
     exports, require, $state, $derived: (v: unknown) => v,
     setTimeout, clearTimeout, Promise, JSON, Object, Math, Date, Set, Map,
-    WebSocket: { OPEN: 1 }, window: target, document: target,
+    WebSocket: { OPEN: 1 }, window: target, document: target, console: { error() {} }, String,
   });
   return { events: exports.events, sockets, log, fire, setToken: (t: string | null) => (token = t) };
 }
@@ -135,4 +136,17 @@ test('a stopped client ignores auth changes', () => {
   h.setToken('other');
   h.fire('otto:auth-changed');
   assert.equal(h.sockets.length, 1);
+});
+
+test('a throwing event handler is reported once per type, a malformed frame is ignored (S13-06)', async () => {
+  const h = setup();
+  h.events.start();
+  h.sockets[0].onopen();
+  h.log.length = 0;
+  h.sockets[0].onmessage({ data: '{not json' });
+  // The workspace stub has no applyEvent: the session_status handler throws.
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'session_status', session_id: 's', workspace_id: 'w', status: 'idle' }) });
+  h.sockets[0].onmessage({ data: JSON.stringify({ type: 'session_status', session_id: 's', workspace_id: 'w', status: 'idle' }) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(h.log, ['report /client/errors ws_event_handler session_status']);
 });
