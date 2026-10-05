@@ -1,0 +1,79 @@
+name: macOS (daemon)
+
+# The shipping platform's daemon code, compiled, linted and tested on Darwin
+# for every PR that touches Rust. Linux CI (ci.yml) never compiles the macOS
+# cfg branches: the objc2 Vision FFI (otto-server rooms/recap_engines/
+# vision.rs), the resource monitor's Darwin probes (otto-server monitor.rs,
+# otto-telemetry resource.rs), ottod's launchd/Keychain wiring and otto-pty's
+# Darwin PTY plumbing. Kept apart from macos.yml so a crate-only PR does not
+# also pay for the Tauri desktop build.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.config/nextest.toml'
+      - '.github/workflows/macos-server.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-server-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  daemon:
+    name: Daemon crates (server · telemetry · ottod · pty, macOS)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: macos-daemon
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2.87.25
+        with:
+          tool: cargo-nextest@0.9.146
+
+      # otto-server links otto-brokers → rdkafka-sys, which builds librdkafka
+      # with CMake (libcurl headers ship in the macOS SDK).
+      - name: Ensure cmake
+        run: command -v cmake || brew install cmake
+
+      - name: cargo clippy (macOS cfg)
+        run: cargo clippy -p otto-server -p otto-telemetry -p ottod -p otto-pty --all-targets -- -D warnings
+
+      # Unit tests of all four crates plus ottod's/otto-pty's integration
+      # binaries. otto-server's `it` binary is platform-neutral HTTP/DB
+      # coverage that Linux CI already runs in full; skipping it here keeps
+      # this job to the code whose behavior actually differs on Darwin.
+      - name: cargo nextest
+        run: >-
+          cargo nextest run -p otto-server -p otto-telemetry -p ottod -p otto-pty
+          --profile ci --no-fail-fast
+          -E 'not (package(otto-server) & binary(it))'

@@ -154,18 +154,5 @@ impl std::ops::Deref for SwarmRt {
 }
 
 /// `spawn_blocking(f).await`, with a panic in `f` re-raised on the caller —
-/// the server's `offload::blocking`, same telemetry span name.
-pub(crate) async fn blocking<T, F>(f: F) -> T
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    match otto_telemetry::context::measure("server.blocking", tokio::task::spawn_blocking(f)).await
-    {
-        Ok(v) => v,
-        Err(e) => match e.try_into_panic() {
-            Ok(payload) => std::panic::resume_unwind(payload),
-            Err(e) => panic!("blocking task cancelled: {e}"),
-        },
-    }
-}
+/// the one shared copy in otto-agent-run (same telemetry span name).
+pub(crate) use otto_agent_run::offload::blocking;

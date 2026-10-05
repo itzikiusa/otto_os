@@ -880,7 +880,7 @@ fn parse_assist(raw: &str) -> AssistResult {
             ..Default::default()
         };
     }
-    if let Some(v) = otto_swarm::recruiter::extract_json(raw) {
+    if let Some(v) = otto_core::text::extract_json(raw) {
         let has_elements = v
             .get("elements")
             .and_then(|e| e.as_array())

@@ -554,7 +554,7 @@ fn build_refinement_prompt(
 /// update (never panics, never loses the agent's words). JSON `null` (or empty)
 /// for `updated_story_md`/`summary` → `None`.
 fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
-    let Some(v) = otto_swarm::recruiter::extract_json(raw) else {
+    let Some(v) = otto_core::text::extract_json(raw) else {
         return (raw.to_string(), None, None);
     };
     let reply = v

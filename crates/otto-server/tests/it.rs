@@ -48,6 +48,8 @@ mod rbac_matrix;
 mod rooms_api;
 #[path = "route_inventory.rs"]
 mod route_inventory;
+#[path = "router_mount.rs"]
+mod router_mount;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
 #[path = "share_api.rs"]

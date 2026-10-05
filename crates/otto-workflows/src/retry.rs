@@ -47,20 +47,13 @@ pub fn retry_backoff(
             policy.max_attempts.max(4),
             label.to_string(),
         ),
-        None => (cur_backoff_ms, policy.max_attempts, truncate(err, 120)),
+        None => (
+            cur_backoff_ms,
+            policy.max_attempts,
+            otto_core::text::clip_bytes(err, 120),
+        ),
     };
     (attempt <= max_eff).then_some((sleep_ms, max_eff, reason))
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
