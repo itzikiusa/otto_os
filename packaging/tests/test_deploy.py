@@ -9,7 +9,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 
 class FinishVerification(unittest.TestCase):
-    def run_finish(self, scenario, action="finish"):
+    def run_finish(self, scenario, action="finish", previous_app=False, inspect=None):
         with tempfile.TemporaryDirectory(prefix="otto-deploy-test-") as directory:
             root = Path(directory)
             app = root / "built/Otto.app/Contents/MacOS"
@@ -21,6 +21,10 @@ class FinishVerification(unittest.TestCase):
             deployed.write_text("old daemon")
             installed = root / "installed/Otto.app"
             installed.parent.mkdir()
+            if previous_app:
+                (installed / "Contents/MacOS").mkdir(parents=True)
+                (installed / "Contents/MacOS/otto-desktop").write_text("previous desktop")
+                (installed / "Contents/MacOS/ottod").write_text("previous daemon")
             (root / "functions.sh").write_text((REPO / "packaging/deploy.sh").read_text().split("\nLOG_DIR=")[0])
             script = r'''
 source "$TEST_ROOT/functions.sh"
@@ -32,7 +36,7 @@ deployed_daemon_path() { echo "$TEST_ROOT/Library/Application Support/Otto/bin/o
 RUNNING=0
 osascript() { return 0; }
 pgrep() { if [[ "$RUNNING" == 1 ]]; then echo 222; else return 1; fi; }
-pkill() { return 0; }
+pkill() { RUNNING=0; return 0; }
 SLEEPS=0
 sleep() {
  SLEEPS=$((SLEEPS+1))
@@ -42,13 +46,13 @@ sleep() {
  return 0
 }
 rm() { return 0; }
-ditto() { command cp -R "$APP" "$INSTALLED_APP"; }
+ditto() { command cp -R "$1" "$2"; }
 open() {
  RUNNING=1
  if [[ "$SCENARIO" != hash_mismatch && "$SCENARIO" != delayed_daemon ]]; then
   command cp "$APP/Contents/MacOS/ottod" "$TEST_ROOT/Library/Application Support/Otto/bin/ottod"
  fi
- if [[ "$SCENARIO" == app_mismatch ]]; then echo wrong > "$INSTALLED_APP/Contents/MacOS/otto-desktop"; fi
+ if [[ "$SCENARIO" == app_mismatch && -z "${MISMATCHED:-}" ]]; then MISMATCHED=1; echo wrong > "$INSTALLED_APP/Contents/MacOS/otto-desktop"; fi
 }
 launchctl() {
  if [[ "$RUNNING" == 0 || "$SCENARIO" == stale_pid ]]; then echo 'pid = 111'; else echo 'pid = 333'; fi
@@ -106,6 +110,8 @@ esac
                 env={**os.environ, "TEST_ROOT": str(root), "REPO": str(REPO), "SCENARIO": scenario, "TEST_ACTION": action},
                 capture_output=True, text=True,
             )
+            if inspect:
+                inspect(root, result)
             return result
 
     def test_build_only_stops_before_any_install_action(self):
@@ -181,6 +187,51 @@ esac
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("DEPLOY-RECEIPT", result.stdout)
         self.assertIn("DEPLOY-FINISH EXIT=0", result.stdout)
+
+    def test_failed_verify_rolls_back_to_the_previous_app(self):
+        seen = {}
+
+        def inspect(root, result):
+            desktop = root / "installed/Otto.app/Contents/MacOS/otto-desktop"
+            seen["installed"] = desktop.read_text() if desktop.exists() else None
+            seen["leftovers"] = sorted(p.name for p in (root / "installed").iterdir())
+
+        for scenario in ("unhealthy", "placeholder", "app_mismatch"):
+            with self.subTest(scenario=scenario):
+                result = self.run_finish(scenario, previous_app=True, inspect=inspect)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("ROLLED BACK", result.stdout + result.stderr)
+                self.assertEqual(seen["installed"], "previous desktop")
+                # The failed app is set aside (rm is mocked out here); no staging
+                # copy and no orphaned .old sibling remain.
+                self.assertNotIn(".Otto.app.old", " ".join(seen["leftovers"]))
+                self.assertFalse(any(n.startswith(".Otto.app.staging") for n in seen["leftovers"]))
+
+    def test_verified_install_keeps_the_previous_app(self):
+        seen = {}
+
+        def inspect(root, result):
+            desktop = root / "installed/Otto.app/Contents/MacOS/otto-desktop"
+            seen["installed"] = desktop.read_text()
+            kept = root / "installed/.Otto.app.previous/Contents/MacOS/otto-desktop"
+            seen["kept"] = kept.read_text() if kept.exists() else None
+
+        result = self.run_finish("ok", previous_app=True, inspect=inspect)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("DEPLOY-RECEIPT", result.stdout)
+        self.assertEqual(seen["installed"], "new desktop")
+        self.assertEqual(seen["kept"], "previous desktop")
+
+    def test_bad_staged_signature_never_touches_the_installed_app(self):
+        seen = {}
+
+        def inspect(root, result):
+            seen["installed"] = (root / "installed/Otto.app/Contents/MacOS/otto-desktop").read_text()
+
+        result = self.run_finish("invalid_signature", previous_app=True, inspect=inspect)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(seen["installed"], "previous desktop")
+        self.assertNotIn("ROLLBACK", result.stdout)
 
     def test_rejects_false_success(self):
         for scenario in ("hash_mismatch", "app_mismatch", "stale_pid", "wrong_app_path", "wrong_daemon_path", "invalid_signature", "unhealthy", "failed_ui_fetch", "placeholder"):

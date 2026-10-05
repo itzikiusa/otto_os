@@ -25,7 +25,27 @@ packaging/make-cert.sh
 packaging/deploy.sh
 ```
 
-`deploy.sh` reuses an existing frontend build with `SKIP_UI=1 packaging/deploy.sh`.
+`deploy.sh` always rebuilds the frontend: the build receipt binds the installed
+app to a fresh `ui/dist`, so `SKIP_UI=1` is rejected. It runs `npm ci` first when
+`ui/package-lock.json` is newer than `ui/node_modules` (`--force-ci` forces it).
+The repo-root `./deploy.sh` is a thin wrapper that forwards to
+`packaging/deploy.sh` — there is one deploy implementation.
+
+**Safety.** The signed build is staged to `/Applications/.Otto.app.staging.<pid>`
+and verified before the running app is touched; the install is two same-volume
+renames, so a killed deploy never leaves a half-copied `Otto.app`. If the
+post-install verification fails (or the phase dies after the swap), the previous
+app is renamed back and relaunched — its supervisor reinstalls the previous
+daemon. A verified deploy keeps the previous app as
+`/Applications/.Otto.app.previous` and the previous daemon as
+`~/Library/Application Support/Otto/bin/ottod.prev`; a daemon that finds pending
+schema migrations first snapshots `otto.db` to
+`~/Library/Application Support/Otto/backups/` (newest 3 kept). One deploy runs at
+a time (`~/Library/Logs/Otto/deploy.lock`). Before building, the script prints
+how many live sessions the daemon restart will end and, on a terminal, asks to
+continue (`--yes` / `OTTO_DEPLOY_YES=1` skips the prompt). Deploy logs beyond the
+newest 20 (`KEEP_DEPLOY_LOGS`) are pruned, and exited `com.otto.deploy-once.*`
+launchd jobs from the old root script are booted out.
 
 **Running it from inside Otto (an agent/shell session):** steps 6–7 (install →
 relaunch → verify) run as a one-shot launchd agent, `com.otto.deploy-finish`,
@@ -35,7 +55,8 @@ owns itself — a script running inline there can die with exit 137 mid-verify
 safe default). The
 foreground only tails `~/Library/Logs/Otto/deploy-finish-<ts>.log`; if it gets
 killed, the phase still completes. Read the outcome with
-`packaging/deploy.sh --status` (exit 0 = deployed and healthy). `DETACH=0`
+`packaging/deploy.sh --status` (exit 0 = deployed and healthy; non-zero when
+the phase failed, is still running, or `/Applications/Otto.app` is missing). `DETACH=0`
 runs the phase inline (fine from a plain Terminal).
 
 **Disk:** both deploy entrypoints preserve Cargo caches by default (`PRUNE=0`).

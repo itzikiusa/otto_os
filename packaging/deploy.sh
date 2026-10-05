@@ -12,8 +12,15 @@
 # below) so a fresh checkout deploys cleanly without manual intervention.
 #
 # Usage:  packaging/deploy.sh            full deploy
+#         packaging/deploy.sh --yes      no confirmation prompt (live sessions)
+#         packaging/deploy.sh --dmg      also write Otto.dmg next to the bundle
+#         packaging/deploy.sh --force-ci always `npm ci` before the UI build
 #         packaging/deploy.sh --status   show the log of the last install/verify phase
+#                                        (non-zero when it failed, is running, or
+#                                        /Applications/Otto.app is missing)
 # Env:    SKIP_UI=1    rejected: a source receipt requires a fresh UI build
+#         OTTO_DEPLOY_YES=1 same as --yes
+#         KEEP_DEPLOY_LOGS=20 deploy logs kept in ~/Library/Logs/Otto
 #         EMBED_UI=0   build ottod WITHOUT the SPA baked in (see step 2)
 #         DETACH=0     run steps 6–7 inline instead of under launchd (see below)
 #         PRUNE=0      default: preserve Cargo caches (skip step 5)
@@ -32,6 +39,18 @@
 # ~/Library/Logs/Otto/deploy-finish-<ts>.log; the foreground just tails that
 # log, and if the foreground dies the phase still completes — read the outcome
 # later with `packaging/deploy.sh --status`.
+#
+# SAFETY (ported from the old root deploy.sh): the new bundle is staged to a
+# hidden sibling (/Applications/.Otto.app.staging.<pid>) and verified BEFORE
+# the running app is touched; the install is two same-volume renames (old →
+# .Otto.app.old.<pid>, staging → Otto.app), so a killed deploy never leaves a
+# half-copied app. If the post-install verification fails — or the phase dies
+# after the swap — the previous app is renamed back and relaunched (its
+# supervisor reinstalls the previous daemon). After a verified deploy the
+# previous app is kept as /Applications/.Otto.app.previous (and the previous
+# daemon as bin/ottod.prev) for a manual rollback. A lock dir
+# (~/Library/Logs/Otto/deploy.lock) refuses concurrent deploys; the build
+# foreground hands it to the detached finish job.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,14 +62,37 @@ BUILD_RECEIPT="$APP_SRC/target/release/deploy-build.receipt"
 
 cd "$ROOT"
 
-if [[ "${1:-}" == "--status" ]]; then
-    latest="$HOME/Library/Logs/Otto/deploy-finish-latest.log"
-    [[ -f "$latest" ]] || { echo "no detached deploy phase has run yet"; exit 2; }
+LOG_DIR_DEFAULT="$HOME/Library/Logs/Otto"
+LOCK_DIR="$LOG_DIR_DEFAULT/deploy.lock"
+WANT_STATUS=0
+ASSUME_YES="${OTTO_DEPLOY_YES:-0}"
+WANT_DMG=0
+FORCE_CI=0
+for arg in "$@"; do
+    case "$arg" in
+        --status) WANT_STATUS=1 ;;
+        --yes|-y) ASSUME_YES=1 ;;
+        --dmg) WANT_DMG=1 ;;
+        --force-ci) FORCE_CI=1 ;;
+        -h|--help) sed -n '2,/^set -euo pipefail/{ /^set -euo pipefail/d; s/^# \{0,1\}//; p; }' "$0"; exit 0 ;;
+        *) echo "unknown flag: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+if [[ "$WANT_STATUS" == 1 ]]; then
+    latest="$LOG_DIR_DEFAULT/deploy-finish-latest.log"
+    if [[ -d "$LOCK_DIR" ]] && holder="$(cat "$LOCK_DIR/pid" 2>/dev/null)" && kill -0 "$holder" 2>/dev/null; then
+        echo "== deploy lock held by pid $holder"
+    fi
+    app_rc=0
+    [[ -d "$INSTALLED_APP" ]] || { echo "== $INSTALLED_APP is MISSING — restore /Applications/.Otto.app.previous or redeploy"; app_rc=5; }
+    [[ -f "$latest" ]] || { echo "no detached deploy phase has run yet"; exit $(( app_rc ? app_rc : 2 )); }
     echo "== $(readlink "$latest" || echo "$latest")"
-    grep -v "^DEPLOY-FINISH EXIT=" "$latest"
+    grep -v "^DEPLOY-FINISH EXIT=" "$latest" || true
     if line="$(grep "^DEPLOY-FINISH EXIT=" "$latest" | tail -1)" && [[ -n "$line" ]]; then
         rc="${line#DEPLOY-FINISH EXIT=}"
         [[ "$rc" == "0" ]] && echo "== finished OK" || echo "== FAILED (exit $rc)"
+        [[ "$app_rc" == 0 ]] || exit "$app_rc"
         exit "$rc"
     fi
     if launchctl print "gui/$(id -u)/com.otto.deploy-finish" 2>/dev/null | grep -q 'state = running'; then
@@ -153,34 +195,6 @@ verify_install() {
         "$(sha256 "$dep")" "$current_app_pid" "$current_pid" "${EMBED_UI:-1}"
 }
 
-finish_phase() {
-local old_pid old_hash
-old_pid="$(daemon_pid)" || old_pid=""
-dep="$(deployed_daemon_path)"
-old_hash=""
-[[ ! -f "$dep" ]] || old_hash="$(sha256 "$dep")"
-echo "==> 6/7  Install & relaunch"
-# The app redeploys the daemon ONLY at start, so it must be quit first (the
-# launchd agent has KeepAlive, so quitting the app doesn't stop the daemon).
-# Under launchd, osascript may lack Automation rights for Otto (TCC) and quit
-# silently does nothing — fall back to a plain TERM on the shell process; the
-# daemon is a separate launchd job, so nothing user-facing is lost.
-osascript -e 'quit app "Otto"' 2>/dev/null || true
-for _ in $(seq 1 12); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
-if pgrep -x otto-desktop >/dev/null; then
-    echo "    app did not quit via AppleScript — terminating it"
-    pkill -TERM -x otto-desktop || true
-    for _ in $(seq 1 10); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
-fi
-if pgrep -x otto-desktop >/dev/null; then fail_verify "old app did not exit"; return 1; fi
-rm -rf "$INSTALLED_APP"
-ditto "$APP" "$INSTALLED_APP"
-open "$INSTALLED_APP"
-
-echo "==> 7/7  Verify (+ self-heal codesigning crash-loop)"
-
-dep="$(deployed_daemon_path)"
-side="$APP/Contents/MacOS/ottod"
 LABEL="com.otto.daemon"
 GUI_DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -250,10 +264,133 @@ heal_codesign_inode() {
     launchctl kickstart -k "gui/$(id -u)/com.otto.daemon" 2>/dev/null || true
 }
 
+# ---- staged install, atomic swap, rollback --------------------------------
+# State read by rollback_install / finish_cleanup (also from an EXIT trap).
+STAGED_APP=""     # hidden staged copy of the signed build (delete on failure)
+PREVIOUS_APP=""   # the app the swap moved aside (restore on failure)
+SWAP_DONE=0       # 1 once the new app sits at $INSTALLED_APP
+apps_dir() { dirname "$INSTALLED_APP"; }
+
+# Copy + verify the signed build next to the final path while the old app and
+# daemon still run: a failure here leaves the running install untouched.
+stage_app() {
+    STAGED_APP="$(apps_dir)/.Otto.app.staging.$$"
+    rm -rf "$STAGED_APP"
+    ditto "$APP" "$STAGED_APP" || { fail_verify "could not stage the app at $STAGED_APP"; return 1; }
+    codesign --verify --deep --strict "$STAGED_APP" ||
+        { fail_verify 'staged app failed signature verification'; return 1; }
+}
+
+# Two same-volume renames — each atomic — so /Applications never holds a
+# half-written Otto.app; if the second fails the first is undone.
+swap_app() {
+    PREVIOUS_APP=""
+    if [[ -d "$INSTALLED_APP" ]]; then
+        PREVIOUS_APP="$(apps_dir)/.Otto.app.old.$$"
+        mv "$INSTALLED_APP" "$PREVIOUS_APP" ||
+            { PREVIOUS_APP=""; fail_verify 'could not move the installed app aside'; return 1; }
+    fi
+    if ! mv "$STAGED_APP" "$INSTALLED_APP"; then
+        [[ -z "$PREVIOUS_APP" ]] || mv "$PREVIOUS_APP" "$INSTALLED_APP"
+        PREVIOUS_APP=""
+        fail_verify 'swap failed — previous app restored'; return 1
+    fi
+    STAGED_APP=""
+    SWAP_DONE=1
+}
+
+# The app redeploys the daemon ONLY at start, so it must be quit first (the
+# launchd agent has KeepAlive, so quitting the app doesn't stop the daemon).
+# Under launchd, osascript may lack Automation rights for Otto (TCC) and quit
+# silently does nothing — fall back to a plain TERM on the shell process; the
+# daemon is a separate launchd job, so nothing user-facing is lost.
+quit_app() {
+    osascript -e 'quit app "Otto"' 2>/dev/null || true
+    for _ in $(seq 1 12); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
+    if pgrep -x otto-desktop >/dev/null; then
+        echo "    app did not quit via AppleScript — terminating it"
+        pkill -TERM -x otto-desktop || true
+        for _ in $(seq 1 10); do pgrep -x otto-desktop >/dev/null || break; sleep 0.5; done
+    fi
+    if pgrep -x otto-desktop >/dev/null; then fail_verify "app did not exit"; return 1; fi
+}
+
+# Put the previous app back after a failed verify (or a phase that died after
+# the swap) and relaunch it. Its supervisor sees bundle sidecar != bin/ottod
+# and reinstalls the PREVIOUS daemon, so the daemon rolls back with it.
+rollback_install() {
+    [[ "$SWAP_DONE" == 1 ]] || return 0
+    if [[ -z "$PREVIOUS_APP" || ! -d "$PREVIOUS_APP" ]]; then
+        echo "    ROLLBACK: no previous app to restore — leaving the new one in place" >&2
+        return 1
+    fi
+    echo "==> ROLLBACK  restoring the previous Otto.app"
+    quit_app || true
+    local failed
+    failed="$(apps_dir)/.Otto.app.failed.$$"
+    if [[ -d "$INSTALLED_APP" ]] && ! mv "$INSTALLED_APP" "$failed"; then
+        echo "    ROLLBACK FAILED: could not move the new app aside" >&2; return 1
+    fi
+    if ! mv "$PREVIOUS_APP" "$INSTALLED_APP"; then
+        [[ ! -d "$failed" ]] || mv "$failed" "$INSTALLED_APP"
+        echo "    ROLLBACK FAILED: could not restore $PREVIOUS_APP" >&2; return 1
+    fi
+    PREVIOUS_APP=""
+    SWAP_DONE=0
+    rm -rf "$failed"
+    open "$INSTALLED_APP" || true
+    if poll_health 20; then
+        echo "    ROLLED BACK: previous app relaunched, daemon healthy"
+    else
+        echo "    ROLLED BACK: previous app restored, but the daemon is not healthy yet — check ~/Library/Logs/Otto/" >&2
+    fi
+    echo "    note: migrations the new daemon applied stay applied; pre-migration DB snapshots are in ~/Library/Application Support/Otto/backups/"
+}
+
+# Last-resort cleanup on ANY exit of the install phase (set -e, a signal).
+finish_cleanup() {
+    local rc="$1"
+    if [[ "$rc" != 0 && "$SWAP_DONE" == 1 ]]; then rollback_install || true; fi
+    # Killed between the two renames: the old app is aside and nothing is installed.
+    if [[ -n "$PREVIOUS_APP" && -d "$PREVIOUS_APP" && ! -d "$INSTALLED_APP" ]]; then
+        mv "$PREVIOUS_APP" "$INSTALLED_APP" && echo "    restored the previous $INSTALLED_APP" >&2
+    fi
+    [[ -z "$STAGED_APP" ]] || rm -rf "$STAGED_APP"
+}
+
+# A verified deploy keeps ONE previous app for a manual rollback.
+keep_previous_app() {
+    [[ -n "$PREVIOUS_APP" && -d "$PREVIOUS_APP" ]] || return 0
+    local keep
+    keep="$(apps_dir)/.Otto.app.previous"
+    rm -rf "$keep"
+    mv "$PREVIOUS_APP" "$keep" || rm -rf "$PREVIOUS_APP"
+    PREVIOUS_APP=""
+    echo "    previous app kept as $keep"
+}
+
+finish_phase() {
+local old_pid old_hash
+old_pid="$(daemon_pid)" || old_pid=""
+dep="$(deployed_daemon_path)"
+side="$APP/Contents/MacOS/ottod"
+old_hash=""
+[[ ! -f "$dep" ]] || old_hash="$(sha256 "$dep")"
+echo "==> 6/7  Stage, install & relaunch"
+# Sweep stale siblings a killed earlier run may have left (never .previous).
+rm -rf "$(apps_dir)"/.Otto.app.staging.* "$(apps_dir)"/.Otto.app.failed.* 2>/dev/null || true
+stage_app || return 1
+quit_app || return 1
+swap_app || return 1
+open "$INSTALLED_APP"
+
+echo "==> 7/7  Verify (+ self-heal codesigning crash-loop)"
+
 if poll_health 20; then
     echo "    daemon healthy: $(curl -s localhost:7700/api/v1/health)"
 else
-    reason="$(launchctl print "$GUI_DOMAIN/$LABEL" 2>/dev/null | grep -i 'last exit reason' | head -1 | xargs)"
+    # `|| true`: no "last exit reason" line must not kill the phase (set -e + pipefail).
+    reason="$(launchctl print "$GUI_DOMAIN/$LABEL" 2>/dev/null | grep -i 'last exit reason' | head -1 | xargs || true)"
     daemon_loaded || reason="${reason:-service not registered with launchd}"
     echo "    daemon not healthy yet — ${reason:-no launchd reason}"
     if echo "$reason" | grep -qi 'CODESIGNING'; then
@@ -272,11 +409,97 @@ else
     fi
 fi
 
-verify_install || return 1
+if ! verify_install; then
+    rollback_install || true
+    return 1
+fi
+keep_previous_app
 echo "done."
 }
 
-LOG_DIR="$HOME/Library/Logs/Otto"
+# ---- single-deploy lock ---------------------------------------------------
+# mkdir is atomic. A lock whose pid is dead is stale and swept. The build
+# foreground hands the lock to the detached finish job by passing its own pid
+# as OTTO_DEPLOY_LOCK_HANDOFF; that job then takes the lock over.
+LOCK_HELD=0
+lock_acquire() {
+    local holder
+    mkdir -p "$(dirname "$LOCK_DIR")"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+        if [[ -n "$holder" && "$holder" != "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]] && kill -0 "$holder" 2>/dev/null; then
+            fail_verify "another deploy is running (pid $holder) — see packaging/deploy.sh --status"
+            return 1
+        fi
+        [[ "$holder" == "${OTTO_DEPLOY_LOCK_HANDOFF:-}" ]] || echo "    sweeping stale deploy lock (pid ${holder:-?} is gone)"
+    fi
+    echo "$$" > "$LOCK_DIR/pid"
+    LOCK_HELD=1
+}
+lock_release() {
+    [[ "$LOCK_HELD" == 1 ]] || return 0
+    [[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" == "$$" ]] && rm -rf "$LOCK_DIR"
+    LOCK_HELD=0
+}
+
+# ---- live sessions a deploy will end (read-only) --------------------------
+# The relaunch restarts ottod: shell terminals and workflow / swarm / scheduled
+# agents die with it (only manual foreground agents run in PTY holders). Count
+# what is live so the person deploying can decide. Read-only GET; needs a
+# token (OTTO_API_TOKEN, else the session's OTTO_MCP_TOKEN) — without one the
+# count is simply unknown. Prints "<total> <shells> <agents>" or nothing.
+live_session_counts() {
+    local token="${OTTO_API_TOKEN:-${OTTO_MCP_TOKEN:-}}" body
+    [[ -n "$token" ]] || return 1
+    body="$(curl -fsS --max-time 4 -H "Authorization: Bearer $token" \
+        http://127.0.0.1:7700/api/v1/sessions 2>/dev/null)" || return 1
+    printf '%s' "$body" | /usr/bin/python3 -c '
+import json, sys
+rows = json.load(sys.stdin)
+live = [r for r in rows if r.get("status") in ("running", "working", "idle")]
+shells = sum(1 for r in live if r.get("kind") == "shell")
+print(len(live), shells, len(live) - shells)
+' 2>/dev/null
+}
+confirm_session_loss() {
+    local counts total shells agents answer
+    if counts="$(live_session_counts)" && [[ -n "$counts" ]]; then
+        read -r total shells agents <<< "$counts"
+        echo "==> This deploy restarts the daemon: $total live session(s) visible to this token ($shells shell, $agents agent)."
+        echo "    Shell terminals and workflow/swarm/scheduled agents are terminated; manual agents in PTY holders survive."
+        [[ "$total" -gt 0 ]] || return 0
+    else
+        echo "==> This deploy restarts the daemon (live session count unavailable — no token or daemon down)."
+        echo "    Shell terminals and workflow/swarm/scheduled agents are terminated; manual agents in PTY holders survive."
+    fi
+    [[ "$ASSUME_YES" != 1 && -t 0 ]] || return 0
+    read -r -p "    Continue? [y/N] " answer
+    case "$answer" in y|Y|yes|YES) return 0 ;; *) echo "aborted — nothing was changed"; return 1 ;; esac
+}
+
+# ---- launchd / log hygiene ------------------------------------------------
+# Leftover one-shot jobs from the old root deploy.sh self-detach
+# (`com.otto.deploy-once.<ts>.<pid>`) stay registered after they exit. Boot out
+# only the ones that are no longer running.
+sweep_deploy_once_jobs() {
+    local label
+    for label in $(launchctl list 2>/dev/null | awk '$3 ~ /^com\.otto\.deploy-once\./ {print $3}'); do
+        launchctl print "gui/$(id -u)/$label" 2>/dev/null | grep -q 'state = running' && continue
+        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null && echo "    removed stale launchd job $label"
+    done
+    return 0
+}
+# Keep the newest KEEP_DEPLOY_LOGS deploy logs of each kind.
+prune_deploy_logs() {
+    local keep="${KEEP_DEPLOY_LOGS:-20}" pattern old
+    for pattern in 'deploy-finish-[0-9]*.log' 'deploy-[0-9]*.log'; do
+        while IFS= read -r old; do
+            [[ -n "$old" ]] && rm -f "$old"
+        done < <(cd "$1" 2>/dev/null && ls -1t $pattern 2>/dev/null | tail -n +$((keep + 1)) | sed "s|^|$1/|")
+    done
+}
+
+LOG_DIR="$LOG_DIR_DEFAULT"
 FINISH_LABEL="com.otto.deploy-finish"
 FINISH_PLIST="$HOME/Library/Application Support/Otto/deploy/$FINISH_LABEL.plist"
 FINISH_LATEST="$LOG_DIR/deploy-finish-latest.log"
@@ -290,8 +513,21 @@ esac
 
 # Detached-phase entry: run steps 5–6, stamp the exit code on the last line so
 # the foreground (or a later --status) can tell "still running" from "done".
+# The EXIT trap also rolls a half-finished install back (finish_cleanup) and
+# releases the lock, on every exit path — set -e and signals included.
+finish_trap() {
+    local rc="$1"
+    trap - EXIT
+    finish_cleanup "$rc"
+    lock_release
+    echo "$SENTINEL$rc"
+    exit "$rc"
+}
 if [[ "${OTTO_DEPLOY_PHASE:-}" == "finish" ]]; then
-    trap 'echo "$SENTINEL$?"' EXIT   # stamped on every exit path, set -e included
+    trap 'finish_trap $?' EXIT   # stamped on every exit path, set -e included
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    lock_acquire
     validate_build_receipt
     sleep "${FINISH_DELAY_SECONDS:-0}"
     validate_build_receipt
@@ -299,11 +535,25 @@ if [[ "${OTTO_DEPLOY_PHASE:-}" == "finish" ]]; then
     exit 0
 fi
 
+# A real deploy (not BUILD_ONLY) holds the lock from the start, so a second
+# run can't rebuild the bundle under a finish phase that is installing it,
+# and asks before it ends live sessions — up front, not after the build.
+if [[ "${BUILD_ONLY:-0}" != "1" ]]; then
+    lock_acquire || exit 1
+    trap 'lock_release' EXIT
+    confirm_session_loss || exit 1
+fi
+
 if [[ "${OTTO_DEPLOY_PHASE:-}" != "queue-finish" ]]; then
 [[ -z "$(git status --porcelain --untracked-files=normal)" ]] || { fail_verify "build requires a clean source tree"; exit 1; }
 BUILD_SOURCE_COMMIT="$(git rev-parse HEAD)"
 [[ "${SKIP_UI:-0}" != 1 ]] || { fail_verify "receipted deployment requires a fresh UI build; unset SKIP_UI"; exit 1; }
 echo "==> 1/7  Frontend → ui/dist"
+# A pull that changed package-lock.json needs `npm ci` first, or the build
+# fails on a missing module.
+need_ci="$FORCE_CI"
+if [[ ! -d ui/node_modules ]] || [[ ui/package-lock.json -nt ui/node_modules/.package-lock.json ]]; then need_ci=1; fi
+if [[ "$need_ci" == 1 ]]; then ( cd ui && npm ci ); fi
 ( cd ui && npm run build )
 
 # `embed-ui` bakes ui/dist into the binary so the daemon serves the SPA
@@ -330,6 +580,9 @@ echo "==> 3/7  Desktop app (Tauri bundle)"
 
 echo "==> 4/7  Sign (+ ensure 'Otto Dev Signing' is trusted for code signing)"
 bash "$HERE/sign.sh" "$APP" "$ROOT/target/release/ottod"
+if [[ "$WANT_DMG" == 1 ]]; then
+    bash "$HERE/dmg.sh" "$APP" "$APP_SRC/target/release/bundle/Otto.dmg"
+fi
 
 # Cargo does not touch Fresh artifacts, so a dependency's age or a newer hash
 # cannot prove it is unused. Preserve caches unless disk cleanup is requested.
@@ -349,7 +602,11 @@ if [[ "${BUILD_ONLY:-0}" == "1" ]]; then exit 0; fi
 fi
 validate_build_receipt
 
+sweep_deploy_once_jobs
+prune_deploy_logs "$LOG_DIR"
+
 if [[ "${DETACH:-1}" == "0" ]]; then
+    trap 'rc=$?; trap - EXIT; finish_cleanup "$rc"; lock_release; exit "$rc"' EXIT
     finish_phase
     exit $?
 fi
@@ -373,6 +630,7 @@ cat > "$FINISH_PLIST" <<PLIST
   </array>
   <key>EnvironmentVariables</key><dict>
     <key>OTTO_DEPLOY_PHASE</key><string>finish</string>
+    <key>OTTO_DEPLOY_LOCK_HANDOFF</key><string>$$</string>
     <key>FINISH_DELAY_SECONDS</key><string>${FINISH_DELAY_SECONDS:-0}</string>
     <key>EMBED_UI</key><string>${EMBED_UI:-1}</string>
     <key>HOME</key><string>$HOME</string>
@@ -387,10 +645,19 @@ cat > "$FINISH_PLIST" <<PLIST
 PLIST
 
 # A previous run leaves the (exited) job registered; bootstrap would then fail
-# with "already bootstrapped" and RunAtLoad would never fire. Clear it first.
+# with "already bootstrapped" and RunAtLoad would never fire. Clear it first —
+# but never a finish phase that is still RUNNING (it would be killed mid-swap;
+# the lock normally stops a second deploy long before this point).
+if launchctl print "gui/$(id -u)/$FINISH_LABEL" 2>/dev/null | grep -q 'state = running'; then
+    fail_verify "$FINISH_LABEL is still running an install — see packaging/deploy.sh --status"
+    exit 1
+fi
 launchctl bootout "gui/$(id -u)/$FINISH_LABEL" 2>/dev/null || true
 for _ in $(seq 1 40); do launchctl print "gui/$(id -u)/$FINISH_LABEL" >/dev/null 2>&1 || break; sleep 0.25; done
 launchctl bootstrap "gui/$(id -u)" "$FINISH_PLIST"
+# The finish job takes the lock over (OTTO_DEPLOY_LOCK_HANDOFF); this shell
+# must not release it on exit.
+LOCK_HELD=0
 echo "    log: $FINISH_LOG"
 echo "    (if this shell is killed by the restart, run: packaging/deploy.sh --status)"
 if [[ "${OTTO_DEPLOY_PHASE:-}" == "queue-finish" ]]; then
