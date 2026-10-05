@@ -9,8 +9,9 @@ use serde_json::Value;
 // --- Swarms ----------------------------------------------------------------
 
 /// Optional present-or-absent budget fields. `Some(None)` clears a limit
-/// (unlimited); `None` (absent) leaves it untouched. Used by `UpdateSwarmReq`.
-fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+/// (unlimited); `None` (absent) leaves it untouched. Used by every PATCH DTO
+/// with a clearable field (S4-17: also goals/triggers in `runtime::engine`).
+pub(crate) fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -183,18 +184,6 @@ pub struct UpdateProjectReq {
     pub status: Option<String>,
     #[serde(default)]
     pub order_idx: Option<i64>,
-}
-
-/// `Option<Option<T>>` for PATCH bodies: absent → `None` (leave unchanged),
-/// explicit `null` → `Some(None)` (clear), value → `Some(Some(v))`. Plain
-/// `#[serde(default)]` folds `null` into "absent", so a cleared field could
-/// never be removed (S4-17).
-pub(crate) fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    serde::Deserialize::deserialize(de).map(Some)
 }
 
 // --- Tasks -----------------------------------------------------------------
