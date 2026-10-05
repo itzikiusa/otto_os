@@ -12,7 +12,7 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { refineNote, refineSession, resetRefineSession, vaultNote, writeVaultNote } from '../../lib/api/vault';
@@ -269,7 +269,7 @@
   {#if sessionId}
     <div class="term">
       {#key sessionId}
-        <Terminal sessionId={sessionId} preferDom />
+        <LazyTerminal sessionId={sessionId} preferDom />
       {/key}
     </div>
   {:else}

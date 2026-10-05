@@ -19,7 +19,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { severityLabel } from '../../lib/labels';
@@ -548,7 +548,7 @@
               {/if}
               {#if fx.session_id && fixTermOpen}
                 <div class="lr-fix-term">
-                  <Terminal sessionId={fx.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={fx.session_id} preferDom resumeOnOpen={false} />
                 </div>
               {/if}
             {/if}

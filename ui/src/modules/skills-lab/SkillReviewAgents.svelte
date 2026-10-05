@@ -10,7 +10,7 @@
   import { skillReviewApi } from '../../lib/api/skillReview';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { severityLabel } from '../../lib/labels';
@@ -100,7 +100,7 @@
         <div class="rp-term">
           <!-- No {#key}: Terminal retargets its own WS when sessionId changes; a
                {#key} under a frequently-refetching parent causes a reconnect storm. -->
-          <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
+          <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

@@ -13,7 +13,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { toastError } from '../../lib/toastError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import MockupLivePreview from './MockupLivePreview.svelte';
   import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import type { DesignFormat, ProductAttachment } from './types';
@@ -134,7 +134,7 @@
       <div class="ma-shell">
         {#if mockupAssist.sessionId}
           {#key mockupAssist.sessionId}
-            <Terminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark preferDom />
+            <LazyTerminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark preferDom />
           {/key}
         {:else}
           <div class="ma-empty">
