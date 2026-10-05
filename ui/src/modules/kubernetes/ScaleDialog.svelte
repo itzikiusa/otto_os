@@ -36,7 +36,7 @@
         <input id="k8s-scale-n" class="input mono" type="number" min="0" max="1000" bind:value={replicas} onkeydown={(e) => { if (e.key === 'Enter') submit(); }} />
         <button class="btn" onclick={() => (replicas = Math.min(1000, replicas + 1))} aria-label="More replicas" title="More replicas"><Icon name="plus" size={13} /></button>
       </div>
-      {#if replicas === 0}<span class="hint danger">Scaling to 0 stops every pod. You'll be asked to type the name to confirm.</span>{/if}
+      {#if replicas === 0}<span class="hint danger">Scaling to 0 stops every pod. You’ll be asked to type the name to confirm.</span>{/if}
     </div>
   </div>
   {#snippet footer()}

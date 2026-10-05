@@ -9,6 +9,7 @@
 // bumping `rev` (so the editor is not yanked mid-drag).
 
 import { api, getToken } from '../api/client';
+import { NO_WORKSPACE } from '../labels';
 import { ws } from './workspace.svelte';
 import { defaultAgentProvider } from '../providers';
 import { loadErrorText } from '../loadError';
@@ -181,7 +182,7 @@ class CanvasStore {
 
   async create(title: string, doc?: unknown, storyId?: string | null): Promise<CanvasScene> {
     const wsId = ws.currentId;
-    if (!wsId) throw new Error('No workspace selected');
+    if (!wsId) throw new Error(NO_WORKSPACE);
     const created = await api.post<CanvasScene>(`/workspaces/${wsId}/canvas/scenes`, {
       title,
       doc: doc ?? emptyScene(title),

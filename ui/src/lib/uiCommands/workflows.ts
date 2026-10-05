@@ -129,7 +129,7 @@ registerUiCommands('workflows', {
     }));
     if (!ok) throw new UiCommandError('cancelled_by_user', 'The user declined the run.');
     const r = await p.start(input !== undefined ? { input } : {});
-    if (!r) throw new UiCommandError('failed', `“${wf.name}” didn't start — the page shows why (validation issues or the error).`);
+    if (!r) throw new UiCommandError('failed', `“${wf.name}” didn’t start — the page shows why (validation issues or the error).`);
     toasts.info(`Started “${wf.name}”`, who);
     return { workflow: wf.name, run: runSummary(r) };
   },
@@ -147,7 +147,7 @@ registerUiCommands('workflows', {
     } catch (e) {
       throw asUiError(e);
     }
-    toasts.info('Cancelling run…', agentLabel(ctx.agent));
+    toasts.info('Canceling run…', agentLabel(ctx.agent));
     return { run_id: args.run_id, cancelling: true };
   },
 });

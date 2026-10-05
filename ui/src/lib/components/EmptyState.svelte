@@ -33,6 +33,15 @@
     children?: Snippet;
   }
   let { icon = 'box', title, body, actionLabel, actionIcon, onaction, actionKind = 'primary', variant = 'panel', tone = 'neutral', headingLevel = 3, children }: Props = $props();
+
+  // A label without a handler would render a dead button, so the CTA needs
+  // both — and a caller that passes only the label is told, not silently
+  // left without its action.
+  $effect(() => {
+    if (import.meta.env.DEV && actionLabel && !onaction) {
+      console.warn(`EmptyState “${title}”: actionLabel “${actionLabel}” has no onaction — the CTA is not rendered.`);
+    }
+  });
 </script>
 
 <div class="empty" class:page={variant === 'page'} role={tone === 'error' ? 'alert' : undefined} data-testid={variant === 'page' ? 'page-empty' : undefined}>

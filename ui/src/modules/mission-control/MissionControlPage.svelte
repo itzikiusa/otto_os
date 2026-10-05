@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import { paneResizer, pxWide, RESIZE_TITLE } from '../../lib/paneResizer';
+  import { loadPaneWidth } from '../../lib/paneResizer';
+  import { onTabKey } from '../../lib/tabKeys';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { dialogFocus } from '../../lib/dialogFocus';
   import Icon from '../../lib/components/Icon.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -39,12 +41,6 @@
   let backfilling = $state(false);
 
   let view = $state<'list' | 'graph'>('list');
-  function onViewKey(e: KeyboardEvent): void {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-    e.preventDefault();
-    view = e.key === 'Home' ? 'list' : e.key === 'End' ? 'graph' : view === 'list' ? 'graph' : 'list';
-    (e.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]')[view === 'list' ? 0 : 1]?.focus();
-  }
   let selectedId = $state<string | null>(null);
   let detailPane: ReturnType<typeof WorkItemDetail> | undefined = $state();
   let selectionGeneration = 0;
@@ -251,38 +247,10 @@
   }
 
   // ── Detail pane width (drag-resizable, persisted) ──────────────────────────
-  // Mirrors the DatabasePage sidebar idiom: the chosen width survives reloads.
-  // Applied via a CSS var so the ≤900px fullscreen overlay still wins.
-  const DETAIL_W_DEFAULT = 380;
-  let detailW = $state(loadDetailW());
-  function loadDetailW(): number {
-    if (typeof localStorage === 'undefined') return DETAIL_W_DEFAULT;
-    const v = Number(localStorage.getItem('mc.detailW'));
-    return Number.isFinite(v) && v >= 300 ? v : DETAIL_W_DEFAULT;
-  }
-  function persistDetailW(): void {
-    try {
-      localStorage.setItem('mc.detailW', String(Math.round(detailW)));
-    } catch {
-      /* storage unavailable — non-fatal */
-    }
-  }
-  function startDetailResize(e: PointerEvent): void {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = detailW;
-    const onMove = (ev: PointerEvent): void => {
-      // The pane is anchored RIGHT, so dragging LEFT widens it.
-      detailW = Math.max(300, Math.min(720, startW + (startX - ev.clientX)));
-    };
-    const onUp = (): void => {
-      persistDetailW();
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }
+  // The shared PaneDivider owns drag, keys, reset and persistence. Applied via a
+  // CSS var so the ≤1024px fullscreen sheet still wins.
+  const DETAIL_W = { default: 380, min: 300, max: 720 } as const;
+  let detailW = $state(loadPaneWidth('mc.detailW', DETAIL_W.default, DETAIL_W.min, DETAIL_W.max));
   // Below the 1024 breakpoint the detail is a full-viewport sheet over the page:
   // it must behave as a dialog — register as modal, trap Tab, Esc closes, focus
   // returns to the row that opened it (the same wiring as the k8s ResourceDrawer).
@@ -297,10 +265,6 @@
       untrack(() => ui.popModal());
     };
   });
-  function resetDetailW(): void {
-    detailW = DETAIL_W_DEFAULT;
-    persistDetailW();
-  }
 </script>
 
 <div class="mc-page">
@@ -359,7 +323,7 @@
       <input class="input search" type="search" placeholder="Search titles…" bind:value={q} oninput={onQInput} aria-label="Search work items" />
       {#if hasFilters}<button class="btn ghost small" onclick={clearFilters}>Clear filters</button>{/if}
     </div>
-    <div class="segmented view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onViewKey}>
+    <div class="segmented view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onTabKey}>
       <button role="tab" tabindex={view === 'list' ? 0 : -1} aria-selected={view === 'list'} class:active={view === 'list'} onclick={() => (view = 'list')}>
         <Icon name="format" size={12} /> List
       </button>
@@ -415,6 +379,17 @@
     </div>
 
     {#if selectedId}
+      {#if !detailSheet}
+        <PaneDivider
+          bind:width={detailW}
+          storageKey="mc.detailW"
+          label="Resize the detail pane"
+          min={DETAIL_W.min}
+          max={DETAIL_W.max}
+          defaultWidth={DETAIL_W.default}
+          invert
+        />
+      {/if}
       <div
         class="mc-detail"
         bind:this={detailEl}
@@ -423,19 +398,6 @@
         aria-modal={detailSheet ? 'true' : undefined}
         aria-label={detailSheet ? 'Work item details' : undefined}
       >
-        <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
-        <div
-          class="detail-resizer"
-          role="separator"
-          tabindex="0"
-          aria-orientation="vertical"
-          aria-label="Resize the detail pane"
-          title={RESIZE_TITLE}
-          ondblclick={resetDetailW}
-          onpointerdown={startDetailResize}
-          use:paneResizer={{ value: detailW, min: 300, max: 720, step: 24, invert: true, onChange: (w) => { detailW = w; persistDetailW(); }, onReset: resetDetailW, text: pxWide }}
-        ></div>
-        <!-- ↑ a focusable separator: drag, or ←/→ to resize; Enter / double-click resets. -->
         <WorkItemDetail
           bind:this={detailPane}
           wsId={ws.currentId ?? ''}
@@ -561,24 +523,7 @@
     overflow: hidden;
     border: 1px solid var(--border);
     align-self: stretch;
-    position: relative; /* anchors the drag handle on the inline-start edge */
-  }
-  /* Draggable divider on the detail pane's inline-start edge (the pane clips
-     its overflow, so the handle sits just inside the border). */
-  .detail-resizer {
-    position: absolute;
-    inset-block: 0;
-    inset-inline-start: 0;
-    width: 6px;
-    cursor: col-resize;
-    background: transparent;
-    z-index: 2;
-    touch-action: none;
-  }
-  .detail-resizer:hover,
-  .detail-resizer:focus-visible {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
-    outline: none;
+    position: relative;
   }
   /* Tablet and phone (the 1024 breakpoint): the detail is a full sheet. */
   @media (max-width: 1024px) {
@@ -595,10 +540,6 @@
       flex: none;
       border: none;
       border-radius: 0;
-    }
-    /* Fullscreen overlay — nothing to drag. */
-    .detail-resizer {
-      display: none;
     }
   }
   @media (max-width: 640px) {

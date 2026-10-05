@@ -35,8 +35,7 @@
       <span class="chip epic" title={epicLabel}><Icon name="ticket" size={12} /> <span class="epic-t">{epicLabel}</span></span>
     {/if}
     <div class="meta">
-      {plural(stats.artifacts, 'artifact')} · {stats.studios.length}
-      studio{stats.studios.length === 1 ? '' : 's'} · updated {rel(stats.updatedAt)}
+      {plural(stats.artifacts, 'artifact')} · {plural(stats.studios.length, 'studio')} · updated {rel(stats.updatedAt)}
     </div>
     <div class="summary tone-{summary.tone}">{summary.text}</div>
   </div>

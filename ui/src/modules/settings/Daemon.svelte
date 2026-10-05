@@ -254,7 +254,7 @@
         </select>
       </div>
       {#if sandboxEnabled && sandboxNetwork !== 'full'}
-        <p class="warn-note indent"><Icon name="warning" size={12} /> Without full network access, agent CLIs can't reach their model API — use this only for offline shells.</p>
+        <p class="warn-note indent"><Icon name="warning" size={12} /> Without full network access, agent CLIs can’t reach their model API — use this only for offline shells.</p>
       {/if}
     </div>
 

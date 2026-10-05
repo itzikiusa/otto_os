@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { loadErrorText } from '../../lib/loadError';
   // What Otto learned from your team (`#/design/learned[/pending|rules|memory|
   // signals|settings][/<edit id>]`). Learning v1 is suggest-only: a
   // deterministic extractor turns repeated design signals (≥ 3 across ≥ 2
@@ -242,7 +243,7 @@
     try {
       const r = await extractRules(w);
       if (r.mode === 'off') toasts.info('Learning is off', 'Turn it on in Settings to get rule proposals.');
-      else if (r.proposed.length) toasts.success(`${r.proposed.length} new rule${r.proposed.length === 1 ? '' : 's'} to review`, 'Nothing applies until you accept it.');
+      else if (r.proposed.length) toasts.success(`${plural(r.proposed.length, 'new rule')} to review`, 'Nothing applies until you accept it.');
       else toasts.info('No new rules', `${r.candidates.filter((c) => !c.ready).length} pattern(s) are still forming.`);
       await load();
     } catch (e) {
@@ -265,7 +266,7 @@
     } catch (e) {
       toasts.error(
         'Couldn’t change learning mode',
-        e instanceof ApiError && e.status === 403 ? 'Only workspace admins can change this.' : e instanceof Error ? e.message : String(e),
+        e instanceof ApiError && e.status === 403 ? 'Only workspace admins can change this.' : loadErrorText(e),
       );
     } finally {
       savingMode = false;
@@ -397,7 +398,7 @@
         body="Atomic preferences (“avoid”, “prefer”, “pattern”) land here when agents or people save them to the design collection." />
     {:else}
       <label class="search"><Icon name="search" size={13} />
-        <input class="input" type="search" placeholder="Search memories" aria-label="Search design memories" bind:value={memQ} /></label>
+        <input class="input" type="search" placeholder="Filter memories…" aria-label="Filter design memories" bind:value={memQ} /></label>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Kind</th><th>Memory</th><th>Source</th><th>Created</th></tr></thead>
@@ -587,7 +588,7 @@
   .split.with-evidence {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
   }
-  @media (max-width: 1000px) {
+  @media (max-width: 1024px) {
     .split.with-evidence {
       grid-template-columns: minmax(0, 1fr);
     }

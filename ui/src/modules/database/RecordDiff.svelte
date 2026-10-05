@@ -48,7 +48,7 @@
 </script>
 
 <script lang="ts">
-  import { plural } from '../../lib/plural';
+  import { plural, pluralNoun } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { copyText } from './results-format';
@@ -83,7 +83,7 @@
   <div class="rd" data-testid="record-diff">
     <div class="rd-bar">
       <span class="rd-count">
-        {#if diffCount === 0}No differences — the records are identical.{:else}<strong>{diffCount}</strong> difference{diffCount === 1 ? '' : 's'} across {plural(rows.length, 'field')}{/if}
+        {#if diffCount === 0}No differences — the records are identical.{:else}<strong>{diffCount}</strong> {pluralNoun(diffCount, 'difference')} across {plural(rows.length, 'field')}{/if}
       </span>
       <span class="grow"></span>
       <label class="rd-only"><input type="checkbox" bind:checked={onlyDiff} /> only differences</label>

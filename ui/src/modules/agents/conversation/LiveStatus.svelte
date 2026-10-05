@@ -74,7 +74,7 @@
           </ul>
         {/if}
       {/each}
-      <p class="w-body">Pick an answer in the terminal — the chat can't send a choice for you.</p>
+      <p class="w-body">Pick an answer in the terminal — the chat can’t send a choice for you.</p>
     {:else if line}
       <p class="w-body">
         {agentName} wants to {line.base}

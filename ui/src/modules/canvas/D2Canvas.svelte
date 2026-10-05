@@ -14,6 +14,7 @@
   // via "Ask Otto", (2) directly in the Code panel, (3) — nothing is converted to
   // Mermaid/Excalidraw; this stays D2. Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -288,7 +289,7 @@
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'd2', source: src, sketch }, sceneId);
       canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
-      toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
+      toastAgentEdit(sceneId, 'Otto edited the diagram', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
@@ -386,7 +387,7 @@
           <div class="empty">
             <Icon name="shapes" size={28} />
             <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It's labelled D2 but contains an Excalidraw scene. Create a new
+            <p class="hint">It’s labeled D2 but contains an Excalidraw scene. Create a new
               <strong>Excalidraw</strong> canvas to edit those shapes.</p>
           </div>
         {:else if !renderError}

@@ -7,6 +7,7 @@
   // tool and writes its proposed SQL, surfaced below with Insert / Run. The
   // session is hidden from the Agents section (meta.source = 'db_assist').
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
@@ -153,8 +154,9 @@
       {/key}
     {:else}
       <div class="da-empty">
-        <p class="lead">{info.title}</p>
-        <p class="hint">{info.hint}</p>
+        <!-- Nothing running yet: the shared empty state names the mode; the
+             composer under it starts the agent. -->
+        <EmptyState icon="db" title={info.title} body={info.hint} />
         {#if providers.length > 1}
           <div class="da-providers" role="radiogroup" aria-label="Agent">
             {#each providers as p (p)}
@@ -307,17 +309,6 @@
     align-items: center;
     gap: 10px;
     max-width: 360px;
-  }
-  .da-empty .lead {
-    margin: 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .da-empty .hint {
-    margin: 0;
-    font-size: var(--fs-s);
-    line-height: 1.5;
   }
   .da-empty .sub {
     margin: 0;

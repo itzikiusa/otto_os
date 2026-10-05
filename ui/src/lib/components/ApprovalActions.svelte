@@ -34,6 +34,9 @@
     approveBusyLabel?: string;
     /** What a denial stops, for the sheet hint ("the PR draft", "this edit"). */
     denyTarget?: string;
+    /** The sheet's hint in full, when a denial has a consequence to state
+     *  ("Deny removes the run's worktree."); overrides the denyTarget default. */
+    denyHint?: string;
     denyTitle?: string;
     /** Ask for an optional reason via the DenySheet (default). Pass false when
      *  the endpoint has nowhere to record one — Deny then fires immediately
@@ -55,6 +58,7 @@
     approveLabel = 'Approve',
     approveBusyLabel = 'Approving…',
     denyTarget,
+    denyHint,
     denyTitle = 'Deny request',
     askReason = true,
     decided = null,
@@ -98,7 +102,7 @@
   <DenySheet
     action={denyTarget ?? 'proceed'}
     title={denyTitle}
-    hint={denyTarget ? `${denyTarget[0].toUpperCase()}${denyTarget.slice(1)} is not approved. Your reason is recorded with the decision.` : undefined}
+    hint={denyHint ?? (denyTarget ? `${denyTarget[0].toUpperCase()}${denyTarget.slice(1)} is not approved. Your reason is recorded with the decision.` : undefined)}
     onclose={() => (denying = false)}
     ondeny={confirmDeny}
   />

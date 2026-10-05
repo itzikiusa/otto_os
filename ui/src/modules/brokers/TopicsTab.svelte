@@ -368,7 +368,7 @@
                   title={stats[t.name] === 'err' ? 'Count unavailable — click "Retry counts" to try again' : undefined}
                 >{countText(t.name)}</td>
                 <td class="num" title="Production rate (msg/s) — high-watermark delta between polls">{rateText(t.name)}</td>
-                <td class="num muted" title="On-disk size isn't exposed by this Kafka client">—</td>
+                <td class="num muted" title="On-disk size isn’t exposed by this Kafka client">—</td>
               </tr>
             {/each}
           </tbody>

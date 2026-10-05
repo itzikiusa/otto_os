@@ -616,7 +616,7 @@
           placeholder={kind === 'ssh' ? '22' : kind === 'redis' ? '6379' : kind === 'clickhouse' ? '8123' : kind === 'postgres' ? '5432' : '3306'}
         />
         {#if kind === 'clickhouse'}
-          <span class="hint">Use the HTTP interface — 8123 (plain, the default when empty) or 8443 (TLS). The native ports 9000 / 9440 aren't supported.</span>
+          <span class="hint">Use the HTTP interface — 8123 (plain, the default when empty) or 8443 (TLS). The native ports 9000 / 9440 aren’t supported.</span>
         {/if}
       </div>
       <div class="field grow">
@@ -751,7 +751,7 @@
             <label for="cf-tun-host">Tunnel host</label>
             <input id="cf-tun-host" class="input mono" bind:value={tunHost} placeholder="bastion.example.com" spellcheck="false" />
             {#if !tunHost.trim()}
-              <span class="hint">Required — without a host the tunnel isn't saved.</span>
+              <span class="hint">Required — without a host the tunnel isn’t saved.</span>
             {/if}
           </div>
           <div class="field tun-port">

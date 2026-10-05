@@ -266,7 +266,7 @@
     if (typed === null || !current()) return;
     if (typed !== groupId) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Offsets not reset', `The name you typed didn't match "${selected}".`);
+      toasts.warn('Offsets not reset', `The name you typed didn’t match "${selected}".`);
       return;
     }
 
@@ -302,7 +302,7 @@
         <p class="muted">{accessMsg}</p>
         <p class="muted">
           Lag and connected consumers need <code>DescribeGroup</code> permission on the broker.
-          Otto probed once and won't keep retrying (so it stops hitting the broker with denied
+          Otto probed once and won’t keep retrying (so it stops hitting the broker with denied
           requests); grant the ACL and re-test the cluster, and this tab will populate.
         </p>
       </div>

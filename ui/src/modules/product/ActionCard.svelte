@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // ActionCard — renders ONE agent-proposed DiscoveryAction as a trustworthy
   // card with an explicit Apply button. Nothing is applied until the PO clicks;
   // every apply is reversible (sticky "✓ … · Undo" row) and toasted.
@@ -67,7 +68,7 @@
       appliedLabel = 'Draft replaced';
       toasts.success('Draft replaced');
     } catch (e) {
-      toasts.error('Couldn’t replace draft', product.errMsg(e));
+      toastError('Couldn’t replace draft', e);
     } finally {
       applying = false;
     }
@@ -85,7 +86,7 @@
       applied = false;
       toasts.success('Draft restored');
     } catch (e) {
-      toasts.error('Couldn’t undo', product.errMsg(e));
+      toastError('Couldn’t undo', e);
     } finally {
       undoing = false;
     }
@@ -131,7 +132,7 @@
       appliedLabel = `Added ${plural(picked.length, 'question')}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Couldn’t add questions', product.errMsg(e));
+      toastError('Couldn’t add questions', e);
     } finally {
       applying = false;
     }
@@ -153,7 +154,7 @@
       appliedLabel = `Added ${plural(picked.length, 'note')}`;
       toasts.success(appliedLabel);
     } catch (e) {
-      toasts.error('Couldn’t add notes', product.errMsg(e));
+      toastError('Couldn’t add notes', e);
     } finally {
       applying = false;
     }
@@ -176,7 +177,7 @@
       applied = false;
       toasts.success('Undone');
     } catch (e) {
-      toasts.error('Couldn’t undo', product.errMsg(e));
+      toastError('Couldn’t undo', e);
     } finally {
       undoing = false;
     }
@@ -219,7 +220,7 @@
         toasts.success('Canvas created');
       }
     } catch (e) {
-      toasts.error('Couldn’t create canvas', product.errMsg(e));
+      toastError('Couldn’t create canvas', e);
     } finally {
       applying = false;
     }
@@ -343,7 +344,7 @@
           onclick={applyNotes}
           disabled={applying || checkedCount === 0}
         >
-          {applying ? 'Adding…' : `Add note${checkedCount === 1 ? '' : 's'}`}
+          {applying ? 'Adding…' : checkedCount === 1 ? 'Add note' : 'Add notes'}
         </button>
       </div>
     {:else if action.type === 'create_canvas'}
@@ -440,7 +441,7 @@
     overflow: hidden;
     position: relative;
     -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent);
-    mask-image: linear-gradient(to bottom, #000 55%, transparent);
+    mask-image: linear-gradient(to bottom, #000 55%, transparent); /* ui-guards: allow — mask alpha, not a color */
   }
 
   /* ── Item lists (questions / notes) ─────────────────────────────────────── */

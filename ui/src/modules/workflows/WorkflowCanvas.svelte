@@ -336,7 +336,11 @@
   onwheel={onWheel}
 >
   <div class="dots"></div>
-  <div class="viewport" style="transform: translate({tx}px,{ty}px) scale({scale});">
+  <!-- Graph coordinates are physical (x grows right; edges are SVG paths and
+       cards use left/top from the saved layout), so the world layer is pinned
+       LTR: under RTL the cards would mirror but the edges and ports wouldn't.
+       Card text still reads in its own direction (dir="auto" on .body). -->
+  <div class="viewport" dir="ltr" style="transform: translate({tx}px,{ty}px) scale({scale});">
     <svg class="edges" width="6000" height="4000">
       {#each graph.edges as e (e.id)}
         {@const s = nodeOf(e.source)}
@@ -399,7 +403,7 @@
           <span class="stripe"></span>
           <span class="head">
             <span class="ic"><Icon name={asIcon(spec(n.kind)?.icon, 'box')} size={14} /></span>
-            <span class="body">
+            <span class="body" dir="auto">
               <span class="title" title={nodeLabel(n)}>{nodeLabel(n)}</span>
               <span class="kind">{spec(n.kind)?.label ?? n.kind}</span>
             </span>
@@ -446,8 +450,8 @@
   </div>
 
   <div class="hud">
-    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in">+</button>
-    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out">−</button>
+    <button class="zbtn" onclick={() => (scale = Math.min(2, scale * 1.15))} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={12} /></button>
+    <button class="zbtn" onclick={() => (scale = Math.max(0.3, scale * 0.87))} title="Zoom out" aria-label="Zoom out"><Icon name="minus" size={12} /></button>
     <button class="zbtn" onclick={fit} title="Reset view" aria-label="Reset view"><Icon name="maximize" size={12} /></button>
     <span class="zpct">{Math.round(scale * 100)}%</span>
   </div>
@@ -484,13 +488,13 @@
   .viewport {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     transform-origin: 0 0;
   }
   .edges {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     overflow: visible;
     pointer-events: none;
   }
@@ -662,7 +666,7 @@
   }
   .stripe {
     position: absolute;
-    left: 0;
+    left: 0; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     top: 8px;
     bottom: 8px;
     width: 4px;
@@ -741,10 +745,10 @@
     top: calc(50% - 6px);
   }
   .port.in {
-    left: -7px;
+    left: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
   }
   .port.out {
-    right: -7px;
+    right: -7px; /* ui-guards: allow — the graph world layer is dir="ltr" (physical coordinates) */
     padding: 0;
     cursor: crosshair;
   }

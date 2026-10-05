@@ -10,6 +10,8 @@
   import { getContext, tick } from 'svelte';
   import { toastError } from '../../../lib/toastError';
   import Icon from '../../../lib/components/Icon.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../../lib/loadError';
   import VirtualList from '../../../lib/components/VirtualList.svelte';
   import ImageBlock from './ImageBlock.svelte';
   import InlineDiff from './InlineDiff.svelte';
@@ -45,6 +47,7 @@
   let full = $state<ToolResult | null>(null);
   let fullFor = $state<string | null>(null);
   let fullState = $state<'idle' | 'loading' | 'error'>('idle');
+  let fullError = $state('');
   const loaded = $derived(fullFor === block.id);
   const result = $derived(effectiveResult(block, loaded ? full : null));
   const previewOnly = $derived(isElided(block) && !loaded);
@@ -60,8 +63,10 @@
         full = r;
         fullState = 'idle';
       },
-      () => {
-        if (block.id === id) fullState = 'error';
+      (e) => {
+        if (block.id !== id) return;
+        fullError = loadErrorText(e);
+        fullState = 'error';
       },
     );
   }
@@ -288,10 +293,7 @@
       {/if}
       {#if previewOnly}
         {#if fullState === 'error'}
-          <div class="trunc-note load-err" role="alert">
-            Couldn’t load the full output.
-            <button class="link-btn" onclick={loadFull}>Retry</button>
-          </div>
+          <LoadState variant="compact" what="the full output" error={fullError} empty onretry={loadFull} />
         {:else if fullState === 'loading' || !ctx.sessionId}
           <div class="trunc-note" aria-live="polite">{ctx.sessionId ? 'Loading the full output…' : `Preview of ${fmtBytes(result?.bytes ?? 0)}.`}</div>
         {/if}
@@ -477,7 +479,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    padding-block: 5px; padding-inline: 10px 4px;
+    padding-block: 4px; padding-inline: 10px 4px;
     min-width: 0;
     direction: ltr;
   }
@@ -629,12 +631,6 @@
   .trunc-note {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .load-err {
-    color: var(--danger);
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
   }
   .imgs {
     display: flex;

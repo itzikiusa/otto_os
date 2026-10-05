@@ -389,18 +389,10 @@
     width: 100%;
     background: color-mix(in srgb, var(--accent) 70%, transparent);
     transform-origin: left;
-    animation: fill linear forwards;
+    animation: otto-grow-x linear forwards;
   }
   :global([dir='rtl']) .progress i {
     transform-origin: right;
-  }
-  @keyframes fill {
-    from {
-      transform: scaleX(0);
-    }
-    to {
-      transform: scaleX(1);
-    }
   }
   @media (prefers-reduced-motion: reduce) {
     .progress i {
@@ -447,15 +439,13 @@
     display: none;
   }
   /* The slide-in plays each time a space is shown: a CSS animation restarts
-     when its element leaves display:none (no remount needed). */
+     when its element leaves display:none (no remount needed). The shared
+     edge slide (--slide-from is set per direction on the element) plus the
+     entrance fade. */
   .view:not([hidden]) {
-    animation: view-in var(--dur-enter) var(--ease-out);
-  }
-  @keyframes view-in {
-    from {
-      opacity: 0;
-      transform: translateX(var(--slide-from, 48px));
-    }
+    animation:
+      otto-slide-in var(--dur-enter) var(--ease-out),
+      otto-fade-in var(--dur-enter) var(--ease-out);
   }
   @media (prefers-reduced-motion: reduce) {
     .view:not([hidden]) {

@@ -111,7 +111,7 @@
   // ⌘K: the Evaluator's verbs while it's on screen.
   $effect(() =>
     registry.register('skills-eval', [
-      { id: 'skills-eval.new', title: 'New skill evaluation', group: 'Skills Lab', keywords: 'evaluate eval start run score', run: () => { setTab('runs'); compareMode = false; newRun(); } },
+      { id: 'skills-eval.new', title: 'New skill evaluation…', group: 'Skills Lab', keywords: 'evaluate eval start run score', run: () => { setTab('runs'); compareMode = false; newRun(); } },
       { id: 'skills-eval.golden', title: 'Open golden tasks', group: 'Skills Lab', keywords: 'regression corpus eval', run: () => setTab('golden') },
       { id: 'skills-eval.matrix', title: 'Open eval matrix', group: 'Skills Lab', keywords: 'provider skill prompt grid compare', run: () => setTab('matrix') },
     ]),
@@ -279,7 +279,6 @@
       <span class="se-side-title">Evaluations</span>
       <button
         class="icon-btn"
-        class:active={compareMode}
         aria-pressed={compareMode}
         onclick={toggleCompare}
         title={compareTitle}
@@ -333,7 +332,7 @@
         {/each}
         {#if nextCursor}
           <button class="btn small ghost se-more" onclick={() => void loadMore()} disabled={loadingMore}>
-            {loadingMore ? 'Loading…' : 'Load older evaluations'}
+            {loadingMore ? 'Loading older evaluations…' : 'Load older evaluations'}
           </button>
         {/if}
       {/if}
@@ -508,7 +507,7 @@
   }
   .se-dot.st-running {
     background: var(--info);
-    animation: pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
   .se-dot.st-done {
     background: var(--status-working);
@@ -541,11 +540,6 @@
       animation: none;
     }
   }
-  @keyframes pulse {
-    50% {
-      opacity: 0.35;
-    }
-  }
   .se-main {
     flex: 1;
     min-width: 0;
@@ -570,10 +564,6 @@
     background: var(--accent-solid);
     color: var(--accent-contrast);
     border-color: var(--accent-solid);
-  }
-  .btn.active {
-    background: var(--accent-soft);
-    color: var(--text);
   }
   .grow {
     flex: 1;

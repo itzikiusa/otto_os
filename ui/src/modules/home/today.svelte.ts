@@ -29,6 +29,7 @@ import { assistant } from '../../lib/stores/assistant.svelte';
 import { notifications } from '../../lib/stores/notifications.svelte';
 import { ws } from '../../lib/stores/workspace.svelte';
 import { livePoll, type Poller } from './boxes/poll';
+import { plural } from '../../lib/plural';
 
 /** One glance row. `open` runs on click; `live` pulses its dot. */
 export interface TodayRow {
@@ -144,7 +145,7 @@ class TodayStore {
     if (this.workApprovals > 0) {
       rows.push({
         id: 'work-approvals',
-        title: `${this.workApprovals} work item${this.workApprovals === 1 ? '' : 's'} awaiting approval`,
+        title: `${plural(this.workApprovals, 'work item')} awaiting approval`,
         detail: 'Mission Control',
         icon: 'radar',
         tone: 'warning',

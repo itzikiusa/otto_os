@@ -389,7 +389,7 @@
   function writeError(e: unknown, what: 'upload' | 'delete'): string {
     const msg = e instanceof Error ? e.message : String(e);
     if (e instanceof ApiError && e.status === 403) {
-      const reason = `You don't have ${what === 'upload' ? 'upload (s3_write)' : 'delete (s3_delete)'} access to ${bucket} — ask an admin for aws_s3:Edit on this account. (${msg})`;
+      const reason = `You don’t have ${what === 'upload' ? 'upload (s3_write)' : 'delete (s3_delete)'} access to ${bucket} — ask an admin for aws_s3:Edit on this account. (${msg})`;
       if (what === 'upload') writeDenied = reason;
       else deleteDenied = reason;
       return reason;
@@ -492,11 +492,11 @@
               await awsS3Upload(account.id, bucket, key, f, { overwrite: true });
               okCount++;
             } catch (e2) {
-              toasts.error(`Upload failed: ${f.name}`, writeError(e2, 'upload'));
+              toasts.error(`Couldn’t upload ${f.name}`, writeError(e2, 'upload'));
               if (e2 instanceof ApiError && e2.status === 403) break;
             }
           } else {
-            toasts.error(`Upload failed: ${f.name}`, writeError(e, 'upload'));
+            toasts.error(`Couldn’t upload ${f.name}`, writeError(e, 'upload'));
             if (e instanceof ApiError && e.status === 403) break;
           }
         }
@@ -721,7 +721,7 @@
         </table>
         {#if nextToken}
           <div class="more-row">
-            <button class="btn" onclick={() => void loadObjects(true)} disabled={objLoading}>{objLoading ? 'Loading…' : 'Load more'}</button>
+            <button class="btn" onclick={() => void loadObjects(true)} disabled={objLoading}>{objLoading ? 'Loading more objects…' : 'Load more'}</button>
           </div>
         {/if}
       {/if}

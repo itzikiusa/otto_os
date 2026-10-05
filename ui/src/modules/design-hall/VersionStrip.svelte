@@ -57,7 +57,7 @@
 
 <div class="strip" data-testid="design-version-strip">
   <span class="label"><Icon name="clock" size={14} /> Versions</span>
-  <div class="chips" bind:this={scroller} role="group" aria-label="Versions">
+  <div class="chips scroll-thin" bind:this={scroller} role="group" aria-label="Versions">
     {#if loading && !versions.length}
       <span class="dim">Loading versions…</span>
     {:else if error && !versions.length}
@@ -125,7 +125,6 @@
     align-items: center;
     gap: 6px;
     overflow-x: auto;
-    scrollbar-width: thin;
     padding-block: 4px;
   }
   .vchip {

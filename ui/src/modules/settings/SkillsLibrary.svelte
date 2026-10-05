@@ -207,7 +207,7 @@
       if (failed.length > 0) {
         // Name every failure: the rest of the batch still installed.
         toasts.error(
-          `${failed.length} ${category} skill${failed.length === 1 ? '' : 's'} failed to install`,
+          `${plural(failed.length, `${category} skill`)} failed to install`,
           failed.map((f) => `${f.name}: ${f.error}`).join('\n') + (n > 0 ? `\nInstalled ${plural(n, 'other')}.` : ''),
         );
       } else if (n === 0) {
@@ -219,11 +219,11 @@
         );
       } else if (b > 0) {
         toasts.success(
-          `Installed ${n} ${category} skill${n === 1 ? '' : 's'}`,
+          `Installed ${plural(n, `${category} skill`)}`,
           `${b} existing cop${b === 1 ? 'y was' : 'ies were'} backed up first.`,
         );
       } else {
-        toasts.success(`Installed ${n} ${category} skill${n === 1 ? '' : 's'}`);
+        toasts.success(`Installed ${plural(n, `${category} skill`)}`);
       }
       await load();
     } catch (e) {
@@ -261,7 +261,7 @@
         variant="page"
         icon="box"
         title="No bundled skills"
-        body="This build of Otto doesn't ship any skills. Add your own in Settings → Context library."
+        body="This build of Otto doesn’t ship any skills. Add your own in Settings → Context library."
       />
     {/snippet}
     <div class="toolbar">
@@ -271,7 +271,7 @@
           type="search"
           class="filter-input"
           bind:value={query}
-          placeholder="Filter skills"
+          placeholder="Filter skills…"
           aria-label="Filter skills"
           autocomplete="off"
           spellcheck="false"

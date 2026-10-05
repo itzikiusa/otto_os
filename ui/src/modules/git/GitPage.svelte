@@ -358,7 +358,7 @@
         {:else if !landingFocus && git.allRepos.length > 0}
           <!-- Adding a repository lives in the + tab (and the empty state) —
                no second "Add repository" primary here. -->
-          <button class="btn ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
+          <button class="btn small ghost" data-icon="zap" onclick={() => (landingFocus = true)} title="Your pull requests and Jira work across repositories">
             <Icon name="zap" size={14} /> Focus
           </button>
         {/if}
@@ -423,7 +423,8 @@
                 class="repo-search-input"
                 type="search"
                 bind:value={repoFilter}
-                placeholder="Search repositories by name, path or remote…"
+                placeholder="Filter repositories by name, path or remote…"
+                aria-label="Filter repositories"
                 spellcheck="false"
                 onkeydown={(e) => {
                   if (e.key === 'Escape' && repoFilter !== '') {

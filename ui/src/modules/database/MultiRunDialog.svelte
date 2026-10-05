@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // "Run on…" — the SAME script on several targets (connections × databases)
   // and/or once per parameter value. Four stages in one sheet:
   //   setup    → pick targets, give each placeholder its value list, options;
@@ -593,9 +594,9 @@
                   <span class="mr-idx mono">#{r.index + 1}</span>
                   <span class="mr-name">{r.label}</span>
                   <EnvBadge env={t.environment} readOnly={t.read_only} />
-                  {#if r.is_write}<span class="mr-tag warn">write</span>{/if}
-                  {#if r.needs_confirm}<span class="mr-tag danger">needs confirm</span>{/if}
-                  {#if r.on_cluster?.length}<span class="mr-tag info">ON CLUSTER ×{r.on_cluster.length}</span>{/if}
+                  {#if r.is_write}<Badge tone="warn" label="Write" />{/if}
+                  {#if r.needs_confirm}<Badge tone="bad" label="Needs confirm" />{/if}
+                  {#if r.on_cluster?.length}<Badge tone="info" label={`ON CLUSTER ×${r.on_cluster.length}`} />{/if}
                 </summary>
                 <!-- svelte-ignore a11y_no_noninteractive_tabindex (a scrollable block must be keyboard-reachable) -->
                 <pre class="mr-code mono" tabindex="0">{r.statement}</pre>
@@ -969,24 +970,6 @@
   .mr-idx {
     color: var(--text-dim);
     font-size: var(--fs-xs);
-  }
-  .mr-tag {
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
-  .mr-tag.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .mr-tag.danger {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-  .mr-tag.info {
-    background: var(--info-soft);
-    color: var(--info);
   }
   .mr-cl {
     display: flex;

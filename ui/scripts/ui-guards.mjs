@@ -65,11 +65,16 @@
 //                     `color:` in the rule set) stay on --accent.
 //   outline-removed   `outline: none|0` in a rule set that (a) has no :focus
 //                     in its selector (:focus/-visible/-within), (b) sets no
-//                     border-color / box-shadow itself, in a file that (c) has
-//                     no :focus-within rule and no :focus/:focus-visible rule
-//                     setting border-color / box-shadow / outline. That is the
-//                     "bare input, nothing lights up" case → use `.input` or
-//                     `.input-group` (app.css), or add a :focus-within ring.
+//                     border-color / box-shadow itself, and (c) whose OWN
+//                     selector (its last class, else its element) has no
+//                     replacement ring in the file: no `:focus` / `:focus-visible`
+//                     rule on that class setting border-color / box-shadow /
+//                     outline, and no `:focus-within` ring on an ancestor
+//                     (`.box:focus-within` for `.box textarea`). Judged per
+//                     selector — one ring elsewhere in the file no longer
+//                     excuses every other bare control. That is the "bare
+//                     input, nothing lights up" case → use `.input` or
+//                     `.input-group` (app.css), or add a ring for that control.
 //
 //   hover-only-reveal a rule set hiding a control (`opacity: 0` /
 //                     `visibility: hidden`) that the file reveals on `:hover`
@@ -82,6 +87,14 @@
 //                     three.
 //   heavy-weight      font-weight ≥ 650 / bold (or the same inside a `font:`
 //                     shorthand) — chrome uses 400/500/600.
+//   local-pill-class  a component rule set that DRAWS a pill — it sets a
+//                     background, border-radius or padding — on a local
+//                     `.pill` / `.chip` / `.badge` / `.tag` class (compounds
+//                     like `.chip.status-open` / `.row .tag` count; `:global(…)`
+//                     and differently named classes don't). Layout-only tweaks
+//                     (margin, flex, font-size) don't count either. → <Badge
+//                     tone label> (lib/components/Badge.svelte), the one
+//                     tinted pill.
 //
 // One ratcheted rule scans MARKUP:
 //
@@ -217,12 +230,13 @@ const RULES = {
   'local-button-class': 'local style redefining the shared button system (.tb-btn, bare .btn/.icon-btn) — use the global .btn / .icon-btn; a page-specific class for layout tweaks',
   'accent-text': 'color: var(--accent) as text — use var(--accent-text)',
   'accent-fill': 'text on background: var(--accent) — fill with var(--accent-solid) and set color: var(--accent-contrast)',
-  'outline-removed': 'outline: none with no replacement focus indicator — add a :focus-visible / :focus-within border-color + box-shadow ring (app.css .input / .input-group)',
+  'outline-removed': 'outline: none on a control with no ring of its own — add a :focus / :focus-visible ring on that class (or a :focus-within ring on its wrapper): border-color + box-shadow as app.css .input / .input-group',
   'raw-set-interval': 'raw setInterval — use pollWhileVisible / liveQuery (lib/poll.ts, lib/live.ts); clocks go on INTERVAL_ALLOW',
   'status-as-text': 'color: var(--status-*) — status tokens are for dots/bars; text uses --success/--danger/--warning/--text-dim',
   'token-fallback': 'var(--token, fallback) on a token defined in lib/tokens.css — drop the fallback',
   'radius-literal': 'off-scale border-radius literal — use var(--radius-s|m|l) (0, 1-2px hairlines, 50%, 999px allowed)',
   'heavy-weight': 'font-weight ≥ 650 (or bold in a font: shorthand) — chrome uses 400/500/600',
+  'local-pill-class': 'local pill look (background / radius / padding on a local .pill/.chip/.badge/.tag) — use <Badge> (lib/components/Badge.svelte)',
   'hover-only-reveal': 'control hidden until :hover with no :focus-visible/:focus-within reveal and no (hover: none) fallback — use .reveal-on-hover (app.css)',
   'a11y-ignore': 'svelte-ignore a11y_… — fix the markup (real <button>, label) instead of silencing the check',
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
@@ -362,7 +376,7 @@ for (const f of files) {
           if (n >= 2 && (n <= 24 ? n % 2 : n % 4)) hit('off-grid-spacing', f, vAt + m.index, `${prop}: …${m[0]}`);
         }
       }
-      if (prop === 'letter-spacing' && !/^\s*(?:\.06em|0\.06em|-0?\.01em|0|normal|inherit)\s*$/.test(value)) hit('letter-spacing-literal', f, at, `letter-spacing:${value.trimEnd()}`);
+      if (prop === 'letter-spacing' && !/^\s*(?:\.06em|0\.06em|-0?\.01em|0|normal|inherit)\s*(?:!important\s*)?$/.test(value)) hit('letter-spacing-literal', f, at, `letter-spacing:${value.trimEnd()}`);
       if (prop === 'padding' || prop === 'margin' || prop === 'inset') {
         const parts = splitTop(value.replace(/!important/, '').trim());
         if (parts.length === 4 && parts[1] !== parts[3]) hit('physical-shorthand', f, at, `${prop}:${value.trimEnd()}`);
@@ -391,7 +405,10 @@ for (const f of files) {
 // are reached through their leaf rules). Simple on purpose: no cascade, no
 // cross-file knowledge.
 const LEAF = /(?<=^|[{};])([^{};]*)\{([^{}]*)\}/g;
-const declsOf = (body) => [...body.matchAll(/(^|;)\s*([a-zA-Z-]+)\s*:([^;]*)/g)].map((d) => ({ prop: d[2].toLowerCase(), value: d[3].trim(), at: d.index + d[1].length }));
+const isPillClass = (c) => /^(?:pill|chip|badge|tag)$/.test(c);
+// `at` is the property name itself (not the whitespace before it), so a
+// same-line `ui-guards: allow` comment is found.
+const declsOf = (body) => [...body.matchAll(/(^|;)\s*([a-zA-Z-]+)\s*:([^;]*)/g)].map((d) => ({ prop: d[2].toLowerCase(), value: d[3].trim(), at: d.index + d[0].indexOf(d[2]) }));
 for (const f of files) {
   const blocks = styleBlocks(f).map(({ css, offset }) => ({ css: css.replace(/\/\*[\s\S]*?\*\//g, blank), offset }));
   const sets = [];
@@ -403,11 +420,27 @@ for (const f of files) {
       sets.push({ sel, decls: declsOf(m[2]).map((d) => ({ ...d, at: bodyAt + d.at })) });
     }
   }
-  const sets_ = (re) => sets.filter((s) => re.test(s.sel));
-  const sets2 = (s, props) => s.decls.some((d) => props.includes(d.prop) && !/^(none|0)\b/.test(d.value));
-  const fileHasFocusRing =
-    sets_(/:focus-within/).length > 0 ||
-    sets_(/:focus(?!-within)/).some((s) => sets2(s, ['border-color', 'box-shadow', 'outline', 'outline-color']));
+  // A declaration "sets" a ring unless its WHOLE value is none/0 — `box-shadow:
+  // 0 0 0 3px …` (the .input ring) starts with 0 and still counts.
+  const sets2 = (s, props) => s.decls.some((d) => props.includes(d.prop) && !/^(?:none|0)\s*(?:!important)?$/.test(d.value));
+  const RING = ['border-color', 'border', 'box-shadow', 'outline', 'outline-color', 'background', 'background-color'];
+  // The control a selector part styles: its last class, else its last element name.
+  const subjectOf = (part) => {
+    const last = part.trim().replace(/:global\(([^()]*)\)/g, '$1').split(/[\s>+~]+/).pop() ?? '';
+    return /\.([\w-]+)/.exec(last.replace(/:{1,2}[\w-]+(\([^)]*\))?/g, ''))?.[1] ?? /^([a-z][\w-]*)/i.exec(last)?.[1];
+  };
+  /** A replacement ring for `subject`: a :focus/:focus-visible rule on it, or a
+   *  :focus-within rule on any compound that the bare selector descends from. */
+  const hasRingFor = (part) => {
+    const subject = subjectOf(part);
+    if (!subject) return false;
+    const re = new RegExp(`(?:\\.|^|[\\s>+~])${subject.replace(/[-]/g, '\\-')}(?![\\w-])[^\\s,]*:focus(?:-visible)?\\b`);
+    const ancestors = part.trim().split(/[\s>+~]+/).slice(0, -1).map((a) => a.replace(/:{1,2}[\w-]+(\([^)]*\))?/g, ''));
+    return sets.some((r) => r.sel.split(',').some((rp) =>
+      (re.test(rp.trim()) && sets2(r, RING)) ||
+      (/:focus-within/.test(rp) && sets2(r, RING) && (ancestors.length === 0 || ancestors.some((a) => a && rp.includes(a))) ),
+    ));
+  };
   // hover-only-reveal: the hidden control is keyed by the LAST class of each
   // selector part (`.row:hover .x-close` → `x-close`).
   const lastClass = (sel) => /\.([\w-]+)(?:[^.\s>+~]*)$/.exec(sel.trim())?.[1];
@@ -429,12 +462,22 @@ for (const f of files) {
       }
     }
   }
+  // local-pill-class: the shared Badge is the one place a pill is drawn.
+  if (f.path.endsWith('.svelte') && f.rel !== 'src/lib/components/Badge.svelte') {
+    for (const s of sets) {
+      if (!s.decls.some((d) => /^(?:background(?:-color)?|border-radius|padding(?:-[a-z-]+)?)$/.test(d.prop))) continue;
+      const local = s.sel.replace(/:global\((?:[^()]|\([^()]*\))*\)/g, ' ');
+      const cls = [...local.matchAll(/\.([\w-]+)/g)].map((m) => m[1]).find(isPillClass);
+      if (cls) hit('local-pill-class', f, s.decls[0].at, `"${s.sel}" draws a local .${cls}`);
+    }
+  }
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
     const ol = s.decls.find((d) => d.prop === 'outline' && /^(none|0)\b/.test(d.value));
-    if (ol && !/:focus/.test(s.sel) && !sets2(s, ['border-color', 'box-shadow']) && !fileHasFocusRing) {
-      hit('outline-removed', f, ol.at, `"${s.sel}" — outline: ${ol.value} with no focus replacement`);
+    if (ol && !/:focus/.test(s.sel) && !sets2(s, ['border-color', 'box-shadow'])) {
+      const bare = s.sel.split(',').filter((part) => !hasRingFor(part));
+      if (bare.length) hit('outline-removed', f, ol.at, `"${bare.map((b) => b.trim()).join(', ')}" — outline: ${ol.value} with no focus replacement for that control`);
     }
   }
 }

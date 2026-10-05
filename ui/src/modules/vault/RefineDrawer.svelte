@@ -240,7 +240,7 @@
       }}
     />
     <button class="send" disabled={sending || !prompt.trim()} onclick={() => void send()}>
-      {#if sending}<span class="spinner-xs"></span> Refining…{:else}Send{/if}
+      {#if sending}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Refining…{:else}Send{/if}
     </button>
     {#if sessionId || sending}
       <button
@@ -261,7 +261,7 @@
       <AgentByline provider={result.provider} at={result.at} label="Refined this note" />
       <span class="delta">+{result.added} / −{result.removed} lines{result.summary ? ` · ${result.summary}` : ''}</span>
       <button class="btn small" disabled={undoing} onclick={() => void undoRefine()}>
-        {#if undoing}<span class="spinner-xs"></span> Undoing…{:else}Undo refine{/if}
+        {#if undoing}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Undoing…{:else}Undo refine{/if}
       </button>
     </div>
   {/if}
@@ -378,19 +378,5 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     line-height: 1.5;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
 </style>

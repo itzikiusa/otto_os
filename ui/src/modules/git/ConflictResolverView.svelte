@@ -10,6 +10,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import ConflictFilePane from './ConflictFilePane.svelte';
   import { canCompleteOperation } from './operationState';
 
@@ -210,7 +211,7 @@
     <Icon name="merge" size={14} />
     <span class="head-title">Resolve {opName ?? 'file'} conflicts</span>
     {#if sourceLabel}
-      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono chip">{sourceLabel}</span></span>
+      <span class="head-source">{opName === 'merge' ? 'merging' : 'from'} <span class="mono"><Badge tone="accent" label={sourceLabel} /></span></span>
     {:else if op === null}
       <span class="head-source">from a stash pop or squash — resolutions are staged as you go</span>
     {/if}
@@ -342,14 +343,6 @@
   .head-source {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
   }
   .head-count {
     font-size: var(--fs-xs);

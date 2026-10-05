@@ -144,7 +144,7 @@
   <div class="search">
     <label class="box">
       <Icon name="search" size={14} />
-      <input type="search" bind:value={q} placeholder="Search the team library" aria-label="Search references" data-testid="design-ref-search" />
+      <input type="search" bind:value={q} placeholder="Search the team library…" aria-label="Search references" data-testid="design-ref-search" />
     </label>
     <div class="filters">
       <select class="input" bind:value={studio} aria-label="Studio">

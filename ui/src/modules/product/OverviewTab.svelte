@@ -1,6 +1,7 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
+  import Badge from '../../lib/components/Badge.svelte';
   // Overview tab — shows the selected story's detail: title, source link, stage
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
@@ -93,6 +94,8 @@
   // body column, mirroring Jira's own inline-edit affordances).
   let editingTitle = $state(false);
   let titleDraft = $state('');
+  /** Inline validation for the title editor — Save stays disabled while empty. */
+  const titleEmpty = $derived(!titleDraft.trim());
   let titleSaving = $state(false);
   let editingDesc = $state(false);
   let descDraft = $state('');
@@ -210,7 +213,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Couldn’t save tag', product.errMsg(e));
+      toastError('Couldn’t save tag', e);
     } finally {
       tagSaving = false;
     }
@@ -222,7 +225,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Couldn’t remove tag', product.errMsg(e));
+      toastError('Couldn’t remove tag', e);
     }
   }
 
@@ -348,7 +351,7 @@
   async function runDiscovery(): Promise<void> {
     if (runningDiscovery) return;
     const targetSwarm = swarm.swarms.find((s) => s.id === discoverySwarmId);
-    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const teamName = targetSwarm ? `“${targetSwarm.name}”` : 'a swarm';
     const attCount = 0; // attachments listed in the panel; count not tracked here
     const ok = await confirmer.ask(
       `Run Discovery in ${teamName}? This will START the swarm and send the story info${attCount > 0 ? ` + ${attCount} attachments` : ''} as discovery context.`,
@@ -785,10 +788,7 @@
   async function saveTitle(): Promise<void> {
     if (!story) return;
     const next = titleDraft.trim();
-    if (!next) {
-      toasts.error('Title cannot be empty');
-      return;
-    }
+    if (!next) return; // the empty field says so inline (titleEmpty)
     if (next === story.title) {
       cancelEditTitle();
       return;
@@ -890,7 +890,7 @@
       await product.loadVersions();
       versionsLoaded = true;
     } catch (e) {
-      toasts.error('Couldn’t load versions', product.errMsg(e));
+      toastError('Couldn’t load versions', e);
     }
   }
 
@@ -904,7 +904,7 @@
     try {
       viewingVersion = await product.getVersion(vid);
     } catch (err) {
-      toasts.error('Couldn’t load version', product.errMsg(err));
+      toastError('Couldn’t load version', err);
     } finally {
       versionLoading = false;
     }
@@ -925,7 +925,7 @@
         await loadDevStatus();
       }
     } catch (e) {
-      toasts.error('Couldn’t refresh', product.errMsg(e));
+      toastError('Couldn’t refresh the story', e);
     } finally {
       refreshing = false;
     }
@@ -937,7 +937,7 @@
       await product.updateDraft({ title: draftTitle, body_md: draftBody });
       toasts.success('Draft saved');
     } catch (e) {
-      toasts.error('Couldn’t save', product.errMsg(e));
+      toastError('Couldn’t save the draft', e);
     } finally {
       draftSaving = false;
     }
@@ -967,10 +967,7 @@
           draftBody =
             draftBody.slice(0, caretPos) + token + draftBody.slice(caretPos);
         } catch (ex) {
-          toasts.error(
-            'Screenshot upload failed',
-            ex instanceof Error ? ex.message : String(ex),
-          );
+          toastError('Couldn’t upload the screenshot', ex);
         }
         return; // only handle the first image item
       }
@@ -989,7 +986,7 @@
       newTranscriptBody = '';
       toasts.success('Transcript added');
     } catch (e) {
-      toasts.error('Couldn’t add transcript', product.errMsg(e));
+      toastError('Couldn’t add transcript', e);
     } finally {
       addingTranscript = false;
     }
@@ -997,7 +994,7 @@
 
   async function doDeleteTranscript(t: ProductTranscript): Promise<void> {
     const ok = await confirmer.ask(
-      `Remove transcript "${t.title || 'untitled'}"?`,
+      `Remove transcript “${t.title || 'untitled'}”?`,
       { title: 'Remove transcript', confirmLabel: 'Remove', danger: true },
     );
     if (!ok) return;
@@ -1005,7 +1002,7 @@
       await product.deleteTranscript(t.id);
       toasts.info('Transcript removed');
     } catch (e) {
-      toasts.error('Couldn’t remove', product.errMsg(e));
+      toastError('Couldn’t remove the transcript', e);
     }
   }
 
@@ -1048,7 +1045,7 @@
     try {
       await product.updateStory({ watch_enabled: !story.watch_enabled });
     } catch (e) {
-      toasts.error('Couldn’t update watch', product.errMsg(e));
+      toastError('Couldn’t update watch', e);
     } finally {
       watchWorking = false;
     }
@@ -1100,7 +1097,7 @@
     try {
       await product.updateStory({ stage });
     } catch (e) {
-      toasts.error('Couldn’t update stage', product.errMsg(e));
+      toastError('Couldn’t update stage', e);
     }
   }
 
@@ -1225,7 +1222,7 @@
           <Icon name="chevronDown" size={10} />
         </button>
         {#if story.issue_type}
-          <span class="chip">{story.issue_type}</span>
+          <Badge label={story.issue_type} />
         {/if}
         {#if story.url}
           <a class="source-link mono" href={story.url} target="_blank" rel="noopener noreferrer" title="Open in source">
@@ -1243,15 +1240,18 @@
             bind:value={titleDraft}
             spellcheck="false"
             aria-label="Story title"
+            aria-invalid={titleEmpty}
+            aria-describedby={titleEmpty ? 'ov-title-err' : undefined}
             onkeydown={(e) => {
               if (e.key === 'Enter') { e.preventDefault(); void saveTitle(); }
               else if (e.key === 'Escape') { e.preventDefault(); cancelEditTitle(); }
             }}
           />
-          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving} title="Writes to the live Jira issue — everyone with access sees it">
+          <button class="btn small primary" onclick={saveTitle} disabled={titleSaving || titleEmpty} title={titleEmpty ? 'Give the story a title first' : 'Writes to the live Jira issue — everyone with access sees it'}>
             {titleSaving ? 'Saving…' : `Save to ${story.source_key}`}
           </button>
           <button class="btn small" onclick={cancelEditTitle} disabled={titleSaving}>Cancel</button>
+          {#if titleEmpty}<p class="title-err" id="ov-title-err">The title can’t be empty.</p>{/if}
         </div>
       {:else if !isDraft}
         <!-- The page header already names the story; this row is the Jira
@@ -1272,8 +1272,8 @@
       <!-- counts row -->
       <div class="counts-row">
         <span class="count-chip" title="Versions"><Icon name="archive" size={11} />{plural(detail.counts.versions, 'version')}</span>
-        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{detail.counts.analyses} analys{detail.counts.analyses !== 1 ? 'es' : 'is'}</span>
-        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{detail.counts.open_questions} open question{detail.counts.open_questions !== 1 ? 's' : ''}</span>
+        <span class="count-chip" title="Analyses"><Icon name="gauge" size={11} />{plural(detail.counts.analyses, 'analysis', 'analyses')}</span>
+        <span class="count-chip" title="Open questions"><Icon name="comment" size={11} />{plural(detail.counts.open_questions, 'open question')}</span>
         <span class="count-chip" title="Notes"><Icon name="note" size={11} />{plural(detail.counts.notes, 'note')}</span>
         <span class="count-chip" title="Test cases"><Icon name="check" size={11} />{plural(detail.counts.testcases, 'test')}</span>
       </div>
@@ -1397,7 +1397,7 @@
               <label class="label" for="draft-title">Title</label>
               <input
                 id="draft-title"
-                class="input"
+                class="input wide-input"
                 bind:value={draftTitle}
                 placeholder="e.g. Players can set a weekly deposit limit"
                 spellcheck="false"
@@ -1483,7 +1483,7 @@
             <!-- Add transcript form -->
             <div class="add-transcript-form">
               <input
-                class="input"
+                class="input wide-input"
                 bind:value={newTranscriptTitle}
                 placeholder="e.g. Kickoff call, 12 Oct" aria-label="Transcript title (optional)"
                 spellcheck="false"
@@ -1605,7 +1605,8 @@
                       class="textarea comment-textarea"
                       bind:value={newCommentBody}
                       rows={3}
-                      placeholder="Add a comment…"
+                      aria-label="Comment"
+                      placeholder="e.g. Should the limit also cover bonus funds?"
                       spellcheck="true"
                       disabled={postingComment}
                     ></textarea>
@@ -2397,17 +2398,16 @@
     font-size: var(--fs-xl);
     font-weight: 600;
   }
+  .title-err {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--danger);
+  }
   .title-input:focus {
     outline: none;
     border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
   }
   .source-link {
     display: inline-flex;
@@ -3204,20 +3204,10 @@
     text-transform: uppercase;
     letter-spacing: .06em;
   }
-  .input {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    color: var(--text);
-    font-size: var(--fs-m);
-    padding: 6px 10px;
-    outline: none;
+  /* Shared .input (app.css); these two span their form's width. */
+  .wide-input {
     width: 100%;
     box-sizing: border-box;
-  }
-  .input:focus {
-    border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .textarea {
     background: var(--surface);

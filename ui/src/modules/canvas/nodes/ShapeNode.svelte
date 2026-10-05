@@ -4,6 +4,7 @@
   // Double-click the label to edit it; the edit commits the patched node back to
   // the store via `setScene` (the editor reloads on the resulting `rev` bump).
   import { Handle, Position } from '@xyflow/svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import type { CanvasNode, ShapeVariant } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
@@ -119,10 +120,9 @@
 
   <div class="label">
     {#if editing}
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         onblur={commit}
         onkeydown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {

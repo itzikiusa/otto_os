@@ -23,6 +23,7 @@
   import DiffViewer from './DiffViewer.svelte';
   import { repoDiffFileLoader } from './diff-load';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
   import Terminal from '../../lib/components/Terminal.svelte';
@@ -656,7 +657,7 @@
       <span class="mono wp-fname">{file.name}</span>
       {#if partial.has(file.change.path)}
         <!-- Same path in both trees: some hunks staged, some not. -->
-        <span class="chip partial" title="Partially staged">partial</span>
+        <Badge tone="accent" variant="outline" label="Partial" title="Partially staged" testid="wip-partial" />
       {/if}
     </button>
     <button
@@ -821,7 +822,7 @@
           <p class="wp-untracked-cap" role="note">
             <Icon name="info" size={12} />
             <span
-              >{hiddenUntracked.toLocaleString()} more untracked file{hiddenUntracked === 1 ? '' : 's'} not shown. If they’re
+              >{hiddenUntracked.toLocaleString()} more untracked {hiddenUntracked === 1 ? 'file' : 'files'} not shown. If they’re
               build output or dependencies, add them to <code>.gitignore</code>.</span
             >
           </p>
@@ -939,7 +940,7 @@
           : 'Stage a file first — drafting can’t see untracked files'}
       >
         {#if drafting}
-          <span class="spinner-xs"></span>Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
+          <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
           <Icon name="zap" size={11} /> Draft
         {/if}
@@ -1350,17 +1351,6 @@
     top: 4px;
     inset-inline-end: 6px;
   }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 4px;
-  }
   
   .sign-err {
     display: inline-flex;
@@ -1395,16 +1385,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
-  }
-  /* "partial" = the path sits in BOTH trees (some hunks staged). Quiet — it
-     annotates a row that is already busy with a kind badge and a name. */
-  .chip.partial {
-    height: 15px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
-    flex-shrink: 0;
   }
   .wp-target > button {
     height: 18px;

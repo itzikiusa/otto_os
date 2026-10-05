@@ -196,7 +196,7 @@
         })),
       ...repos.map((r) => ({
         id: `repo.${r.id}`,
-        title: `Open repo: ${r.name}`,
+        title: `Open repository ${r.name}`,
         group: 'Git',
         keywords: `repository ${r.path}`,
         run: go(`git/${r.id}`),
@@ -363,7 +363,7 @@
     const sp = barStore.state.spaces[idx];
     if (!run) {
       barStore.updateTurn(idx, turn.id, {
-        a: 'Cancelled — nothing ran.',
+        a: 'Canceled — nothing ran.',
         tone: 'info',
         detail: undefined,
         plan: undefined,
@@ -870,8 +870,7 @@
                     <li class="sec" role="presentation">{searching ? 'Searching…' : 'In this workspace'}</li>
                   {/if}
                   <!-- Options are driven from the combobox input (aria-activedescendant);
-                       mousedown keeps focus there. -->
-                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                       a press picks the row and mousedown keeps focus in the input. -->
                   <li
                     id="fb-opt-{i}"
                     class="opt"
@@ -881,9 +880,8 @@
                     role="option"
                     aria-selected={i === selected}
                     aria-disabled={row.kind === 'cmd' && row.cmd.disabled ? 'true' : undefined}
-                    onmousedown={(e) => e.preventDefault()}
+                    onmousedown={(e) => { e.preventDefault(); runRow(row); }}
                     onmousemove={() => (selected = i)}
-                    onclick={() => runRow(row)}
                   >
                     <span class="opt-ic"><Icon name={rowIcon(row)} size={13} /></span>
                     {#if row.kind === 'ask'}
@@ -918,7 +916,7 @@
         </div>
       {/if}
 
-      <div class="pill" bind:this={pillEl}>
+      <div class="bar-row" bind:this={pillEl}>
         <button
           class="spark"
           tabindex="-1"
@@ -1085,8 +1083,8 @@
     }
   }
 
-  /* ── pill ─────────────────────────────────────────────────────────────── */
-  .pill {
+  /* ── input row ─────────────────────────────────────────────────────────────── */
+  .bar-row {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -1095,15 +1093,15 @@
     padding-inline: 8px;
     min-width: 0;
   }
-  .compact .pill {
+  .compact .bar-row {
     height: 36px;
     padding-inline: 6px 8px;
   }
-  .win .pill {
+  .win .bar-row {
     height: 56px;
     padding-inline: 12px 12px;
   }
-  .expanded .pill {
+  .expanded .bar-row {
     border-block-start: 1px solid var(--border);
   }
   .spark {
@@ -1139,7 +1137,7 @@
     height: 100%;
     border: none;
     background: transparent;
-    outline: none;
+    outline: none; /* ui-guards: allow — the bar shows focus as a ring on .surface.focused (set from script) */
     font: inherit;
     font-size: var(--fs-l);
     color: var(--text);

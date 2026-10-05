@@ -122,10 +122,13 @@
         {@const h = healthLabel(r.health)}
         {@const total = restartTotal(r)}
         {@const rbac = rbacMessage(r.status?.metrics_server)}
-        <div class="card cluster" class:off={!r.enabled} role="button" tabindex="0" onclick={() => open(r)} onkeydown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); open(r); } }} data-testid="k8s-monitor-card" data-health={r.health}>
+        <!-- One real button (the name) opens the cluster; its ::after stretches
+             over the card so the whole card stays clickable, while Enable /
+             Copy sit above it as sibling buttons — no nested interactives. -->
+        <div class="card cluster" class:off={!r.enabled} data-testid="k8s-monitor-card" data-health={r.health}>
           <div class="row1">
             <span class="dot" style="background: {r.cluster.color ?? 'var(--accent)'}"></span>
-            <span class="name">{r.cluster.name}</span>
+            <button type="button" class="name card-open" onclick={() => open(r)} data-testid="k8s-monitor-card-open">{r.cluster.name}</button>
             <EnvBadge env={r.cluster.environment} />
             <span class="health {h.cls}" data-testid="k8s-monitor-health">{h.label}</span>
           </div>
@@ -133,7 +136,7 @@
           {#if !r.enabled}
             <div class="off-body">
               <span class="dim">Nothing is collected for this cluster.</span>
-              <button class="btn small primary" onclick={(e) => { e.stopPropagation(); open(r, 'settings'); }}>Enable monitoring</button>
+              <button class="btn small primary" onclick={() => open(r, 'settings')}>Enable monitoring</button>
             </div>
           {:else}
             <div class="stats">
@@ -151,7 +154,7 @@
               <div class="stat">
                 <span class="k">Restarts <span class="dim">({r.window})</span></span>
                 <span class="v mono">{total}<span class="dim">{' '}unplanned</span></span>
-                <span class="note">{r.churn} planned replacement{r.churn === 1 ? '' : 's'}</span>
+                <span class="note">{plural(r.churn, 'planned replacement')}</span>
               </div>
               <div class="stat">
                 <span class="k">Memory</span>
@@ -195,7 +198,7 @@
               <div class="rbac">
                 <span>metrics-server blocked by RBAC — ask your cluster admin to grant it:</span>
                 <code>{rbac}</code>
-                <button class="btn small" onclick={(e) => { e.stopPropagation(); void copy(rbac); }}>Copy</button>
+                <button class="btn small" onclick={() => void copy(rbac)}>Copy</button>
               </div>
             {:else if r.status?.metrics_server === 'ok'}
               <div class="dim tiny">metrics-server: CPU + memory per container available</div>
@@ -224,6 +227,7 @@
     gap: 12px;
   }
   .cluster {
+    position: relative;
     padding: 14px 16px;
     display: flex;
     flex-direction: column;
@@ -232,7 +236,7 @@
     transition: border-color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .cluster:hover,
-  .cluster:focus-visible {
+  .cluster:has(.card-open:focus-visible) {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
     background: color-mix(in srgb, var(--accent) 4%, var(--surface));
   }
@@ -259,6 +263,31 @@
     white-space: nowrap;
     flex: 1;
     min-width: 0;
+  }
+  .card-open {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    text-align: start;
+    cursor: pointer;
+  }
+  /* Stretched hit area: the whole card opens the cluster. */
+  .card-open::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  /* Controls and tooltipped lines sit above the stretched area. */
+  .cluster :global(.btn),
+  .cluster .drift,
+  .cluster .status,
+  .cluster code {
+    position: relative;
+    z-index: 1;
   }
   .health {
     flex-shrink: 0;

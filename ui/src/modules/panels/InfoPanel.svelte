@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../lib/labels';
   // Info tab: shows active session metadata + attached Jira issue.
   import { ws } from '../../lib/stores/workspace.svelte';
   import { toastError } from '../../lib/toastError';
@@ -121,7 +122,7 @@
 </script>
 
 {#if !session && !workspace}
-  <EmptyState icon="info" title="No workspace" body="Select a workspace to see its details here." />
+  <EmptyState icon="info" title={NO_WORKSPACE} body="Its details show here." />
 {:else}
   <div class="info">
     {#if workspace}

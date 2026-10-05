@@ -149,7 +149,6 @@
       <option value="false">false</option>
     </select>
   {:else if kind !== 'null'}
-    <!-- svelte-ignore a11y_autofocus -->
     <input
       class="ve-input mono"
       class:bad={err !== null}

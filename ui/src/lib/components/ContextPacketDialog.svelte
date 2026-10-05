@@ -19,6 +19,9 @@
   import { ws } from '../stores/workspace.svelte';
   import { toasts } from '../toast.svelte';
   import Modal from './Modal.svelte';
+  import Badge from './Badge.svelte';
+  import LoadState from './LoadState.svelte';
+  import { loadErrorText } from '../loadError';
   import type {
     ContextPacketKind,
     ContextPacketPreviewResp,
@@ -63,7 +66,7 @@
       );
       preview = resp;
     } catch (e) {
-      previewErr = e instanceof Error ? e.message : String(e);
+      previewErr = loadErrorText(e);
       preview = null;
     }
   }
@@ -142,12 +145,12 @@
       {#if preview === 'loading'}
         <div class="preview-loading">Previewing redactions…</div>
       {:else if previewErr}
-        <div class="preview-err">Preview failed: {previewErr}</div>
+        <LoadState variant="compact" what="the preview" error={previewErr} empty onretry={() => pickedSessionId && void loadPreview(pickedSessionId)} />
       {:else if preview}
         <!-- Redaction badge -->
         {@const total = (preview as ContextPacketPreviewResp).redactions.reduce((s, h) => s + h.count, 0)}
-        <div class="badge {total > 0 ? 'badge-warn' : 'badge-ok'}">
-          {redactionSummary((preview as ContextPacketPreviewResp).redactions)}
+        <div class="redactions">
+          <Badge tone={total > 0 ? 'warn' : 'ok'} label={redactionSummary((preview as ContextPacketPreviewResp).redactions)} />
         </div>
         <!-- Redacted payload preview (read-only) -->
         <div class="preview-wrap">
@@ -201,17 +204,9 @@
     color: var(--text-dim);
     margin-bottom: 8px;
   }
-  .preview-err { color: var(--danger); }
-  .badge {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 999px;
+  .redactions {
     margin-bottom: 8px;
   }
-  .badge-ok  { background: var(--success-soft); color: var(--success); }
-  .badge-warn { background: var(--warning-soft); color: var(--warning); }
   .preview-wrap {
     max-height: 260px;
     overflow-y: auto;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   // Review-SQL modal (shared by cell edits, row duplication, deletes and the
   // doc editor). The textarea is the source of truth for what runs — it is
@@ -57,7 +58,7 @@
             <thead>
               <tr>
                 {#if multiRow}<th class="rd-row">row</th>{/if}
-                <th class="rd-op"><span class="rd-badge">{plural(lines.length, 'change')}</span></th>
+                <th class="rd-op"><Badge tone="accent" label={plural(lines.length, 'change')} /></th>
                 <th>path</th>
                 <th>before</th>
                 <th class="rd-arrow" aria-hidden="true"></th>
@@ -83,14 +84,13 @@
         </div>
       {/if}
       <p class="review-hint">Review and edit the statement before running. This will run against the connection.</p>
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
         class="review-sql mono"
         value={sql}
         oninput={(e) => onsql(e.currentTarget.value)}
         disabled={running}
         spellcheck="false"
-        autofocus
+        data-autofocus
         rows="5"
       ></textarea>
     </div>
@@ -153,14 +153,6 @@
   }
   .review-diff tbody tr:last-child td {
     border-bottom: none;
-  }
-  .rd-badge {
-    display: inline-block;
-    padding: 0 6px;
-    border-radius: var(--radius-m);
-    font-size: var(--fs-xs);
-    color: var(--accent-contrast);
-    background: var(--accent-solid);
   }
   .rd-row,
   .rd-op {

@@ -370,7 +370,7 @@
     const r = res.links;
     if (r.broken.length || r.cycles.length) {
       const parts: string[] = [];
-      if (r.broken.length) parts.push(`${r.broken.length} broken otto://design reference${r.broken.length === 1 ? '' : 's'}`);
+      if (r.broken.length) parts.push(plural(r.broken.length, 'broken otto://design reference'));
       if (r.cycles.length) parts.push(`${plural(r.cycles.length, 'embed')} skipped (would loop)`);
       toasts.warn('Saved with link problems', parts.join(' · '));
     }
@@ -513,8 +513,8 @@
       const follow = split.usedIn.filter((r) => r.link.policy === 'follow_approved').map((r) => r.label);
       const pinned = split.usedIn.filter((r) => r.link.policy === 'pinned').map((r) => r.label);
       const parts = [
-        follow.length ? `${follow.join(', ')} follow${follow.length === 1 ? 's' : ''} Approved → now shows v${head.seq}` : '',
-        pinned.length ? `${pinned.join(', ')} pin${pinned.length === 1 ? 's' : ''} an older version (update available)` : '',
+        follow.length ? `${follow.join(', ')} ${follow.length === 1 ? 'follows' : 'follow'} Approved → now shows v${head.seq}` : '',
+        pinned.length ? `${pinned.join(', ')} ${pinned.length === 1 ? 'pins' : 'pin'} an older version (update available)` : '',
       ].filter(Boolean);
       toasts.success(`Approved v${head.seq}`, parts.join(' · ') || undefined);
     } catch (e) {

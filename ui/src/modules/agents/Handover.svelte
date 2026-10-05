@@ -4,6 +4,7 @@
   // the source agent's recent work (+ git state), summarizes it, and types a
   // handover brief into the target. Optionally review/edit the brief first.
   import Modal from '../../lib/components/Modal.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
@@ -170,7 +171,7 @@
   {#if phase === 'compose'}
     <p class="lead">
       Pass <strong>{source?.title ?? 'this agent'}</strong>’s context to another agent. Otto
-      summarizes what <span class="chip">{source?.provider ?? 'the agent'}</span> has been doing
+      summarizes what <Badge tone="accent" label={source?.provider ?? 'the agent'} /> has been doing
       (plus the repo’s git state) and hands the brief over.
     </p>
 
@@ -205,8 +206,8 @@
             >
               <span class="provider-name">
                 {p}
-                {#if p === source?.provider}<span class="badge muted">same</span>{/if}
-                {#if !avail}<span class="badge muted">not found</span>{/if}
+                {#if p === source?.provider}<Badge label="Same" />{/if}
+                {#if !avail}<Badge label="Not found" />{/if}
               </span>
               <span class="provider-desc">{providerDesc(p)}</span>
             </button>
@@ -225,7 +226,7 @@
               >
                 <StatusDot state={sessionState(a, ws.statusMap[a.id], ws.needsYou[a.id] === true, { stale: events.state !== 'connected' })} />
                 <span class="agent-title">{a.title}</span>
-                <span class="chip">{a.provider}</span>
+                <Badge tone="accent" label={a.provider} />
               </button>
             </li>
           {/each}
@@ -240,7 +241,7 @@
         class="input"
         bind:value={focus}
         rows="3"
-        placeholder="e.g. The auth refactor is done — focus on wiring the new endpoint into the UI; don't touch the DB layer."
+        placeholder="e.g. The auth refactor is done — focus on wiring the new endpoint into the UI; don’t touch the DB layer."
       ></textarea>
     </div>
 
@@ -333,17 +334,6 @@
     border-radius: var(--radius-s);
     padding: 6px 8px;
   }
-  .chip {
-    display: inline-block;
-    padding: 0 4px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    vertical-align: middle;
-  }
 
   /* Segmented control: new vs existing target */
   .seg {
@@ -418,19 +408,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 6px;
-    border-radius: 999px;
-  }
-  .badge.muted {
-    background: color-mix(in srgb, var(--text-dim) 20%, transparent);
-    color: var(--text-dim);
-  }
-
   /* Existing-agent list */
   .agent-list {
     list-style: none;

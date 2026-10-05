@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_WORKSPACE } from '../../../lib/labels';
   // Insights tab: the latest report of the workspace's "Kubernetes watchdog"
   // personal agent (found by the template marker in its persona), rendered
   // from Markdown through the shared allowlist sanitizer, plus run history
@@ -141,7 +142,7 @@
   {:else if error}
     <LoadState what="the watchdog" variant="compact" {error} empty={true} onretry={() => void load()} />
   {:else if !ws.currentId}
-    <EmptyState icon="shield" title="Pick a workspace" body="Personal agents belong to a workspace; select one to see the watchdog's reports." />
+    <EmptyState icon="shield" title={NO_WORKSPACE} body="Personal agents belong to a workspace — its watchdog reports show here." />
   {:else if !agent}
     <EmptyState
       icon="shield"

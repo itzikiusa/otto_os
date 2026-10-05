@@ -10,6 +10,7 @@
   import RelTime from '../../lib/components/RelTime.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import { plural } from '../../lib/plural';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import type { OttoRun } from '../../lib/api/types';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -207,7 +208,7 @@
       <p class="gate-who"><AgentByline provider={run.provider} model={run.model} at={run.updated_at} label="Run output" /></p>
       <p class="gate-what">
         <span class="mono">{run.branch || 'the run branch'}</span>
-        · {run.findings_total} {run.findings_total === 1 ? 'finding' : 'findings'}{run.findings_blocking > 0 ? ` (${run.findings_blocking} blocking)` : ''}
+        · {plural(run.findings_total, 'finding')}{run.findings_blocking > 0 ? ` (${run.findings_blocking} blocking)` : ''}
         · {run.proof_status ? `proof ${run.proof_status}` : 'no proof pack yet'}{run.result_summary ? ` · ${run.result_summary}` : ''}
       </p>
       <p class="gate-note">
@@ -219,6 +220,7 @@
         disabled={busy}
         denyTarget="this run"
         denyTitle="Deny run"
+        denyHint="Denying ends the run and removes its worktree — commits that weren’t pushed are lost. Your reason is recorded with the decision."
         onapprove={() => approve('approve')}
         ondeny={(reason) => approve('reject', reason)}
       />

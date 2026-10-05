@@ -6,6 +6,7 @@
   import { toastError } from '../../lib/toastError';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Switch from '../../lib/components/Switch.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { api, baseUrl } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -149,7 +150,7 @@
       adding = false;
       toasts.success(editingId ? 'Trigger updated' : 'Trigger added');
     } catch (e) {
-      toasts.error(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e instanceof Error ? e.message : String(e));
+      toastError(editingId ? 'Couldn’t update the trigger' : 'Couldn’t add the trigger', e);
     } finally {
       saving = false;
     }
@@ -357,14 +358,13 @@
         <span class="trig-kind">{KIND_LABEL[t.kind] ?? t.kind}</span>
         <span class="trig-spec" title={describeSpec(t)}>{describeSpec(t)}</span>
       </div>
-      <button
-        class="toggle"
-        aria-pressed={t.enabled}
+      <Switch
+        checked={t.enabled}
+        onchange={() => toggle(t)}
+        tone="success"
+        label={`Enable ${KIND_LABEL[t.kind] ?? t.kind} trigger`}
         title={t.enabled ? 'On — click to pause this trigger' : 'Off — click to enable this trigger'}
-        onclick={() => toggle(t)}
-      >
-        {t.enabled ? 'On' : 'Off'}
-      </button>
+      />
       {#if t.kind === 'webhook' && webhookUrl(t)}
         <button class="icon-btn" title="Copy the webhook URL (POST a JSON body to start a run)" aria-label="Copy webhook URL" onclick={() => copyWebhook(t)}><Icon name="copy" size={12} /></button>
       {/if}
@@ -552,25 +552,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .toggle {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-dim);
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    padding: 2px 6px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .toggle[aria-pressed='true'] {
-    color: var(--success);
-    background: var(--success-soft);
-    border-color: transparent;
-  }
-  .toggle:hover {
-    background: var(--hover);
   }
   .row-del {
     background: none;

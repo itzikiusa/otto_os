@@ -48,7 +48,7 @@
   });
   const summary = $derived.by(() => {
     const parts: string[] = [];
-    if (today.needs.length) parts.push(`${today.needs.length} need${today.needs.length === 1 ? 's' : ''} you`);
+    if (today.needs.length) parts.push(`${today.needs.length} ${today.needs.length === 1 ? 'needs' : 'need'} you`);
     if (today.running.length) parts.push(`${today.running.length} working`);
     return parts.length ? parts.join(' · ') : 'All quiet';
   });

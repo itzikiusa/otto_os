@@ -195,6 +195,9 @@
     return [...starts, ...within].slice(0, 12);
   });
   const cmdOpen = $derived(suggestions.length > 0);
+  // The slash popup is a listbox driven from the textarea (aria-activedescendant):
+  // focus never leaves the composer, ↑/↓ move the active option.
+  const popId = $props.id();
   $effect(() => {
     // Load once per session, the first time a `/` is typed at the start.
     if (cmdPrefix == null || cmdsFor === sessionId) return;
@@ -357,17 +360,18 @@
   {:else}
     <div class="box-wrap" bind:this={wrapEl}>
       {#if cmdOpen}
-        <div class="cmd-pop" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
+        <div class="cmd-pop" id="{popId}-list" bind:this={listEl} style="--pop-max:{popMax}px" role="listbox" aria-label="Slash commands" data-slash-pop>
           {#each suggestions as c, i (c.name)}
-            <!-- svelte-ignore a11y_click_events_have_key_events a11y_interactive_supports_focus -->
+            <!-- Picked on press: mousedown keeps focus (and the caret) in the
+                 textarea; the keyboard path is ↑/↓ + Tab/⏎ there. -->
             <div
+              id="{popId}-opt-{i}"
               class="cmd-row"
               class:active={i === cmdIdx}
               role="option"
               tabindex="-1"
               aria-selected={i === cmdIdx}
-              onmousedown={(e) => e.preventDefault()}
-              onclick={() => acceptCmd(c)}
+              onmousedown={(e) => { e.preventDefault(); acceptCmd(c); }}
               onmouseenter={() => (cmdIdx = i)}
             >
               <span class="cmd-name mono">/{c.name}</span>
@@ -394,6 +398,8 @@
           onkeydown={onKeydown}
           onpaste={onPaste}
           aria-autocomplete="list"
+          aria-controls={cmdOpen ? `${popId}-list` : undefined}
+          aria-activedescendant={cmdOpen ? `${popId}-opt-${cmdIdx}` : undefined}
         ></textarea>
         <div class="tools">
           <input bind:this={fileEl} type="file" accept="image/*" multiple hidden onchange={pickImages} />

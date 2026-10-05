@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusOnMount } from '../../lib/focusOnMount';
   // SQL / Redis / Mongo editor. Wraps the shared CodeEditor with a server-backed
   // completion source (debounced /db/completion). Cmd/Ctrl+Enter runs; toolbar
   // has Run / Save / Explain-with-agent. Results render in the ResultsGrid below.
@@ -324,7 +325,7 @@
     const n = unappliedEdits(closing);
     if (n === 0) return true;
     return confirmer.ask(
-      `${n} un-applied change${n === 1 ? '' : 's'} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
+      `${plural(n, 'un-applied change')} in the results ${n === 1 ? 'is' : 'are'} not saved to the database and will be lost.`,
       { title: `Discard ${plural(n, 'change')}?`, confirmLabel: 'Discard', danger: true },
     );
   }
@@ -1024,7 +1025,7 @@
 </script>
 
 <div class="query-editor" bind:this={rootEl}>
-  <div class="qe-tabs" role="tablist" aria-label="Query tabs">
+  <div class="qe-tabs scroll-thin" role="tablist" aria-label="Query tabs">
     {#each database.tabs as t, i (t.id)}
       <div
         class="qe-tab"
@@ -1067,11 +1068,10 @@
           </span>
         {/if}
         {#if renaming === i}
-          <!-- svelte-ignore a11y_autofocus -->
           <input
             class="qe-tab-rename mono"
             bind:value={renameText}
-            autofocus
+            use:focusOnMount
             onclick={(e) => e.stopPropagation()}
             onblur={() => commitRename(t)}
             onkeydown={(e) => {
@@ -1108,8 +1108,8 @@
   <div class="qe-toolbar">
     <div class="qe-actions">
     {#if tab.running}
-      <button class="btn small stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
-        <Icon name="x" size={12} />
+      <button class="btn small danger qe-stop" onclick={() => database.abortQuery(undefined, { report: true })} title="Stop the running query">
+        <Icon name="stop" size={12} />
         Stop
       </button>
     {:else}
@@ -1236,7 +1236,7 @@
     </div>
     <div class="qe-settings">
     {#if database.capabilities?.sql && database.databaseNames.length > 0}
-      <label class="qe-db" title="Active database — queries run scoped to it, so you don't need a db. prefix">
+      <label class="qe-db" title="Active database — queries run scoped to it, so you don’t need a db. prefix">
         <Icon name="db" size={12} />
         <select
           class="input"
@@ -1307,7 +1307,7 @@
         }}
       />
       <Icon name="lock" size={12} />
-      {#if tab.mask}<span class="qe-masked-badge">Masked</span>{:else}<span>Mask</span>{/if}
+      {#if tab.mask}<strong>Masked</strong>{:else}<span>Mask</span>{/if}
     </label>
     <label
       class="qe-mask qe-wrap"
@@ -1418,12 +1418,11 @@
 
   {#if saving}
     <div class="save-bar">
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}
-        autofocus
+        use:focusOnMount
         onkeydown={(e) => {
           if (e.key === 'Enter') confirmSave();
           else if (e.key === 'Escape') saving = false;
@@ -1572,7 +1571,6 @@
     gap: 2px;
     margin-bottom: 8px;
     overflow-x: auto;
-    scrollbar-width: thin;
     padding-bottom: 1px;
     border-bottom: 1px solid var(--border);
   }
@@ -1892,14 +1890,9 @@
     padding: 1px 6px;
     white-space: nowrap;
   }
-  .btn.stop {
-    border-color: color-mix(in srgb, var(--status-exited) 55%, transparent);
-    background: color-mix(in srgb, var(--status-exited) 16%, transparent);
-    color: var(--danger);
+  /* The one control that matters mid-run: the shared danger button, weighted. */
+  .qe-stop {
     font-weight: 600;
-  }
-  .btn.stop:hover {
-    background: color-mix(in srgb, var(--status-exited) 26%, transparent);
   }
   .kbd {
     font-size: var(--fs-xs);
@@ -1967,10 +1960,6 @@
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
-  }
-  .qe-masked-badge {
-    font-weight: 600;
-    letter-spacing: .06em;
   }
   .sr-only {
     position: absolute;

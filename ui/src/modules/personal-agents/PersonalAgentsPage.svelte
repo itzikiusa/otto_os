@@ -13,6 +13,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import { router } from '../../lib/router.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -68,6 +69,19 @@
   );
   const primaryAgent = $derived(agents.find((a) => autonomyById[a.id]?.primary) ?? null);
   const loadError = $derived(loadErrorOf(personalAgents, 'agentsError'));
+
+  // ⌘K verbs while the module is open: create, the rooms tab, and one
+  // Open / Chat pair per agent.
+  $effect(() =>
+    registry.register('personal-agents', [
+      { id: 'personal-agents.new', title: 'New personal agent…', group: 'Personal Agents', keywords: 'create agent assistant schedule', run: () => { if (sub) router.go('personal-agents'); creating = true; } },
+      { id: 'personal-agents.rooms', title: 'Open agent rooms', group: 'Personal Agents', keywords: 'rooms channel agents talk', run: () => router.go('personal-agents/rooms') },
+      ...agents.flatMap((a) => [
+        { id: `personal-agents.open.${a.id}`, title: `Open ${a.name}`, group: 'Personal Agents', detail: 'Personal agent', keywords: 'agent page settings runs', run: () => router.go(`personal-agents/${a.id}`) },
+        { id: `personal-agents.chat.${a.id}`, title: `Chat with ${a.name}`, group: 'Personal Agents', keywords: 'agent message talk', run: () => router.go(`personal-agents/${a.id}/chat`) },
+      ]),
+    ]),
+  );
 
   async function toggle(a: PersonalAgent): Promise<void> {
     busyId = a.id;

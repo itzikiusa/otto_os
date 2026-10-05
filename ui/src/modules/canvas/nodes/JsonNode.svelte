@@ -4,6 +4,7 @@
   // highlighted via hljs. Invalid JSON falls back to the raw view with an error
   // chip. Double-click (in Raw mode) to edit the source.
   import { Handle, Position } from '@xyflow/svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
@@ -83,10 +84,9 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="body" ondblclick={startEdit}>
     {#if editing}
-      <!-- svelte-ignore a11y_autofocus -->
       <textarea
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         spellcheck="false"
         onblur={commit}
         onkeydown={(e) => {

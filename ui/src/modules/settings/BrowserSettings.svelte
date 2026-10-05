@@ -86,7 +86,7 @@
             />
             <span>
               <span class="choice-title">This Mac's web view</span>
-              <span class="row-desc">Fastest. Only in the desktop app; agents can't drive it.</span>
+              <span class="row-desc">Fastest. Only in the desktop app; agents can’t drive it.</span>
             </span>
           </label>
           <label class="choice">
@@ -107,7 +107,7 @@
 
     {#if browserLive.supported === false}
       <section class="card bs-card">
-        <p class="row-desc">This Otto daemon doesn't include the live browser engine. Update Otto to use it.</p>
+        <p class="row-desc">This Otto daemon doesn’t include the live browser engine. Update Otto to use it.</p>
       </section>
     {:else if browserLive.loadError && !st}
       <section class="card bs-card err-card" role="alert">
@@ -149,7 +149,7 @@
                   <!-- The size is on the Download button when there is one; saying it twice read as clutter. -->
                   <span class="row-desc">{b.blurb}{#if !(isAdmin && info && !info.installed && info.sha256_pinned)}{' '}About {formatBytes(browserLive.downloadBytes(b.build))}.{/if}</span>
                   {#if info && !info.sha256_pinned}
-                    <span class="row-desc">This Otto build has no checksum for it, so it can't be downloaded.</span>
+                    <span class="row-desc">This Otto build has no checksum for it, so it can’t be downloaded.</span>
                   {/if}
                 </label>
                 {#if isAdmin && info && !info.installed && info.sha256_pinned}

@@ -68,7 +68,7 @@
       <input id="nw-path" class="input mono" bind:value={rootPath} spellcheck="false" onkeydown={onKeydown} placeholder="~/code/my-project" />
       <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
     </div>
-    <span class="hint">Created if it doesn't exist. Sessions and repos run inside it. <code>~</code> expands to your home.</span>
+    <span class="hint">Created if it doesn’t exist. Sessions and repos run inside it. <code>~</code> expands to your home.</span>
   </div>
 
   {#snippet footer()}

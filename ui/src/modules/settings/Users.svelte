@@ -501,7 +501,7 @@
       {#if savedIn === 'roles'}<span class="saved" role="status"><Icon name="check" size={12} /> Saved</span>{/if}
     </div>
     <p class="sub">
-      A user only reaches the workspaces they're a member of. Switch to <b>By user</b> to grant one
+      A user only reaches the workspaces they’re a member of. Switch to <b>By user</b> to grant one
       account several workspaces at once.
     </p>
     <div class="urow controls">

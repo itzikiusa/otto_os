@@ -251,8 +251,15 @@ Rules:
 - The title names the task ("New scheduled task"), and the primary button
   names the action ("Create task").
 - **Drawers:** use `shell/Drawer.svelte` (off-canvas slide-over: focus trap via
-  `dialogFocus`, Esc, backdrop, `ui.pushModal()`, a 24 px ✕). Don't hand-roll
-  one. A bottom sheet (`BottomNav`'s "More") follows the same contract.
+  `dialogFocus`, Esc, backdrop, `ui.pushModal()`, a 24 px ✕; `title` adds a
+  header row, `head` a richer one, `onclose` reports a self-dismiss). Don't
+  hand-roll one — the phone `BottomNav` "More" overflow is a titled Drawer too.
+- **Docked detail columns** (a resource's details beside its table — AWS
+  EC2/RDS, Kubernetes) use `lib/components/DockedDrawer.svelte`: an inline
+  column with one header (title or `head` snippet + ✕, Esc closes) on desktop,
+  and the shell Drawer as a full-width sheet on phone (or when `modal`). The
+  caller renders only the body (tabs first); no local `pushModal` /
+  `dialogFocus`.
 
 ## 8. Confirm, prompt and choose: `confirmer`
 

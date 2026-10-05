@@ -187,11 +187,6 @@
     border-block-end: 1px solid var(--border);
     flex-wrap: wrap;
   }
-  button.chip {
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-  }
   /* Kind chips: neutral by default; a tone only where the kind means one. */
   .kind-chip {
     gap: 4px;

@@ -11,6 +11,7 @@
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { parseRoomInvite } from './room-state';
   import { recallRoom } from './room-access';
   import { openHostedRoom } from './room-window';
@@ -22,10 +23,21 @@
   async function openRoom(id: string) {
     opening = id; lastOpened = id; openError = '';
     try { await openHostedRoom(id); }
-    catch (e) { openError = e instanceof Error ? e.message : String(e); }
+    catch (e) { openError = loadErrorText(e); }
     finally { opening = ''; }
   }
   onMount(() => { void load(); });
+  // ⌘K verbs while the lobby is open.
+  $effect(() =>
+    registry.register('rooms', [
+      { id: 'rooms.join', title: 'Join room…', group: 'Rooms', keywords: 'invite link connect session room', run: () => (joinOpen = true) },
+      { id: 'rooms.recaps', title: 'Open recap archives', group: 'Rooms', keywords: 'room recap summary history', run: () => router.go('rooms/recaps') },
+      ...(auth.isRoot ? [{ id: 'rooms.settings', title: 'Room connection settings…', group: 'Rooms', keywords: 'relay host server', run: () => (settingsOpen = true) }] : []),
+      ...rooms.filter((r) => recallRoom(r.room_id)).map((r) => ({
+        id: `rooms.open.${r.room_id}`, title: `Open room ${r.session_title ?? 'Session room'}`, group: 'Rooms', keywords: 'room session', run: () => void openRoom(r.room_id),
+      })),
+    ]),
+  );
   async function load() {
     loading = true; error = '';
     try { rooms = await api.get<RoomSnapshot[]>('/rooms'); }

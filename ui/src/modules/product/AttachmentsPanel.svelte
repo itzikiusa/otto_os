@@ -234,7 +234,7 @@
 
   /** Delete an attachment with confirm. */
   async function deleteAtt(att: ProductAttachment): Promise<void> {
-    const ok = await confirmer.ask(`Delete "${att.filename}"?`, {
+    const ok = await confirmer.ask(`Delete “${att.filename}”?`, {
       title: 'Delete attachment',
       confirmLabel: 'Delete',
       danger: true,

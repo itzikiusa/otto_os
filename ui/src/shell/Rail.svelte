@@ -98,9 +98,7 @@
     ctxMenu.showAt(e.currentTarget as HTMLElement, [
       { label: sub && sub !== name ? `${name} (${sub})` : name, icon: 'user', disabled: true },
       { separator: true },
-      { label: 'Help', icon: 'info', action: () => router.go('walkthroughs') },
-      { label: 'Settings', icon: 'gear', action: () => router.go('settings/appearance') },
-      { separator: true },
+      // Help and Settings are the rail buttons right above this one.
       { label: 'Sign out', icon: 'logout', action: () => auth.logout() },
     ]);
   }

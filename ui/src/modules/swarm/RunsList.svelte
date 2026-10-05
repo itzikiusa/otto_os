@@ -188,11 +188,6 @@
     gap: 4px;
     flex-wrap: wrap;
   }
-  .chip {
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: transparent;
-  }
   .table {
     display: flex;
     flex-direction: column;

@@ -136,7 +136,7 @@
         <div class="field">
           <label for="ob-pass2">Confirm password</label>
           <input id="ob-pass2" aria-describedby="ob-mismatch" aria-invalid={password2.length > 0 && password !== password2} class="input" type="password" bind:value={password2} autocomplete="new-password" />
-          <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don't match" : ''}</span>
+          <span id="ob-mismatch" class="hint err" role="status">{password2.length > 0 && password !== password2 ? "Passwords don’t match" : ''}</span>
         </div>
 
         <div class="ob-actions">

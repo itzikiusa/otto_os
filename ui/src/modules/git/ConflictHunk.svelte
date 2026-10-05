@@ -294,7 +294,7 @@
     {/if}
     {#if hiddenLines > 0}
       <button class="more-lines" onclick={() => (shown += LINE_PAGE * 10)}>
-        Show {Math.min(hiddenLines, LINE_PAGE * 10)} more line{hiddenLines === 1 ? '' : 's'} ({hiddenLines} hidden) — or take a whole side / Edit
+        Show {plural(Math.min(hiddenLines, LINE_PAGE * 10), 'more line')} ({hiddenLines} hidden) — or take a whole side / Edit
       </button>
     {/if}
   {/if}

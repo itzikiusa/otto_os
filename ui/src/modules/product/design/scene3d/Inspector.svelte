@@ -389,7 +389,7 @@
             {:else}
               <div class="s3d-hint">Empty group. Right-click a node in the hierarchy → <em>Move to {group.name}</em>.</div>
             {/if}
-            <div class="s3d-hint">Groups organise the hierarchy; they carry no transform of their own.</div>
+            <div class="s3d-hint">Groups organize the hierarchy; they carry no transform of their own.</div>
           </div>
         {/if}
       </section>
@@ -701,18 +701,18 @@
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, white 85%, var(--ball)) 0%, var(--ball) 45%, color-mix(in srgb, black 55%, var(--ball)) 100%);
-    box-shadow: 0 1px 2px color-mix(in srgb, black 25%, transparent);
+    background: radial-gradient(circle at 35% 30%, color-mix(in srgb, white 85%, var(--ball)) 0%, var(--ball) 45%, color-mix(in srgb, black 55%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
+    box-shadow: var(--shadow-xs);
   }
   .s3d-preset.brushed-metal .s3d-ball {
-    background: radial-gradient(circle at 35% 30%, white 0%, var(--ball) 40%, color-mix(in srgb, black 50%, var(--ball)) 100%);
+    background: radial-gradient(circle at 35% 30%, white 0%, var(--ball) 40%, color-mix(in srgb, black 50%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
   }
   .s3d-preset.frosted-glass .s3d-ball {
-    background: radial-gradient(circle at 35% 30%, white 0%, color-mix(in srgb, var(--ball) 70%, transparent) 55%, color-mix(in srgb, var(--ball) 40%, transparent) 100%);
+    background: radial-gradient(circle at 35% 30%, white 0%, color-mix(in srgb, var(--ball) 70%, transparent) 55%, color-mix(in srgb, var(--ball) 40%, transparent) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
     border: 1px solid var(--border);
   }
   .s3d-preset.matte-paper .s3d-ball {
-    background: radial-gradient(circle at 40% 35%, color-mix(in srgb, white 40%, var(--ball)) 0%, var(--ball) 70%, color-mix(in srgb, black 25%, var(--ball)) 100%);
+    background: radial-gradient(circle at 40% 35%, color-mix(in srgb, white 40%, var(--ball)) 0%, var(--ball) 70%, color-mix(in srgb, black 25%, var(--ball)) 100%); /* ui-guards: allow — material preview shading (light/shadow), not UI color */
   }
   .s3d-plabel {
     font-size: var(--fs-xs);

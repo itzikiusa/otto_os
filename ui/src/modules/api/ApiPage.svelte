@@ -37,6 +37,7 @@
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { keyContext } from '../../lib/keys';
+  import { router } from '../../lib/router.svelte';
   import type { Id } from '../../lib/api/types';
 
   type Side = 'collections' | 'automations' | 'history';
@@ -147,6 +148,8 @@
   $effect(() => {
     const wid = ws.currentId;
     const reqs = apiClient.requests;
+    // A `#/api/<id>` link wins over the "most recent" landing.
+    if (routePending) return;
     if (!wid || autoOpenedFor === wid || apiClient.loading || reqs.length === 0) return;
     if (reqs[0].workspace_id !== wid) return;
     untrack(() => {
@@ -157,6 +160,50 @@
       if (persisted || !only || only.requestId || apiClient.isDirty(only)) return;
       const latest = reqs.reduce((a, b) => ((b.updated_at ?? '') > (a.updated_at ?? '') ? b : a));
       void apiClient.openRequest(latest.id);
+    });
+  });
+
+  // ── URL ↔ open request ─────────────────────────────────────────────────────
+  // The URL carries the saved request in the editor (`#/api/<requestId>`) so a
+  // reload / share / link lands on it. Route → page: once the list knows the
+  // id, open it in the request editor; page → route: switching tabs or opening
+  // a request rewrites the URL in place (an unsaved draft or another view is
+  // plain `#/api`). Until a routed id is resolved the page leaves the URL alone,
+  // so restoring the last tabs can't overwrite the link being opened.
+  let routePending = $state<string | null>(untrack(() => (router.parts[0] === 'api' ? (router.parts[1] ?? null) : null)));
+  $effect(() => {
+    const [mod, id] = router.parts;
+    if (mod !== 'api') return;
+    if (!id) {
+      routePending = null;
+      return;
+    }
+    const reqs = apiClient.requests;
+    const loaded = !apiClient.loading && (reqs.length === 0 || reqs[0].workspace_id === ws.currentId);
+    if (!reqs.some((r) => r.id === id)) {
+      // Unknown once loaded (deleted / another workspace): let the page own the URL.
+      if (loaded) routePending = null;
+      return;
+    }
+    untrack(() => {
+      if (view.kind === 'request' && apiClient.draft.requestId === id) {
+        routePending = null;
+        return;
+      }
+      void changeView({ kind: 'request' })
+        .then((ok) => (ok ? apiClient.openRequest(id) : false))
+        .finally(() => (routePending = null));
+    });
+  });
+  let routedReq: string | null = null;
+  $effect(() => {
+    const id = view.kind === 'request' ? (apiClient.draft.requestId ?? null) : null;
+    if (routePending) return;
+    const was = routedReq;
+    routedReq = id;
+    if (!id && !was) return;
+    untrack(() => {
+      if (router.module === 'api' && (router.parts[1] ?? null) !== id) router.replace(id ? `api/${id}` : 'api');
     });
   });
 
@@ -326,7 +373,7 @@
         {#if showMain}
           <div class="api-main">
             <div class="req-tabs">
-              <div class="req-tablist">
+              <div class="req-tablist scroll-thin">
                 {#each apiClient.tabs as t, i (t.tabId ?? i)}
                   {@const active = view.kind === 'request' && apiClient.activeTab === i}
                   {@const st = apiClient.tabStatus(t.tabId)}
@@ -336,7 +383,7 @@
                       <MethodTag method={t.kind === 'http' || t.kind === 'sse' ? t.method : t.kind === 'grpc' ? 'gRPC' : 'WS'} />
                       <span class="req-tab-label">{apiClient.tabLabel(t)}</span>
                       {#if apiClient.isDirty(t)}<span class="req-tab-dirty" aria-label="Unsaved changes"></span>{/if}
-                      {#if st === 'sending'}<span class="req-tab-status sending" role="status" aria-label="Sending" title="Sending…"></span>
+                      {#if st === 'sending'}<span class="spinner" style="--spinner-size: 9px" role="status" aria-label="Sending" title="Sending…"></span>
                       {:else if st}<span class="req-tab-status {st}" aria-label={st === 'ok' ? 'Last send succeeded' : 'Last send failed'} title={st === 'ok' ? 'Last send succeeded' : 'Last send failed'}></span>{/if}
                     </button>
                     <button class="req-tab-close icon-btn" title="Close tab" aria-label="Close tab" onclick={() => void closeRequestTab(i)}><Icon name="x" size={12} /></button>
@@ -515,7 +562,6 @@
     display: flex;
     gap: 2px;
     overflow-x: auto;
-    scrollbar-width: thin;
     min-width: 0;
   }
   .req-tab {
@@ -577,18 +623,6 @@
   }
   .req-tab-status.fail {
     background: var(--danger);
-  }
-  .req-tab-status.sending {
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid var(--accent-soft);
-    border-block-start-color: var(--accent-solid);
-    animation: req-tab-spin 0.8s linear infinite;
-  }
-  @keyframes req-tab-spin {
-    to {
-      transform: rotate(360deg);
-    }
   }
   .req-tab-close {
     width: 20px;
@@ -660,10 +694,6 @@
   @media (prefers-reduced-motion: reduce) {
     .resizer {
       transition: none;
-    }
-    .req-tab-status.sending {
-      animation: none;
-      background: var(--accent-solid);
     }
   }
 </style>

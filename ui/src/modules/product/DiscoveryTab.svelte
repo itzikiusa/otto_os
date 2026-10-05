@@ -95,7 +95,7 @@
     if (!story || !ws.currentId) return;
 
     const targetSwarm = swarm.swarms.find((s) => s.id === targetSwarmId);
-    const teamName = targetSwarm ? `"${targetSwarm.name}"` : 'a swarm';
+    const teamName = targetSwarm ? `“${targetSwarm.name}”` : 'a swarm';
 
     const attCount = 0; // attachment count not tracked here; overview has the panel
     const ok = await confirmer.ask(

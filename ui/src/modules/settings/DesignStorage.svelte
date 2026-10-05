@@ -80,7 +80,7 @@
         <dt>Auto-tidy would free</dt>
         <dd data-testid="design-storage-reclaim">
           {formatBytes(report.reclaimable.bytes)}
-          <span class="dim">({report.reclaimable.versions.toLocaleString()} old autosave{report.reclaimable.versions === 1 ? '' : 's'})</span>
+          <span class="dim">({report.reclaimable.versions.toLocaleString()} {report.reclaimable.versions === 1 ? 'old autosave' : 'old autosaves'})</span>
         </dd>
       </div>
     </dl>

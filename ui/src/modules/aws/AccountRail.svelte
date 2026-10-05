@@ -75,7 +75,7 @@
         ? [
             { label: 'Edit account…', icon: 'edit', action: () => onedit(a) },
             { separator: true },
-            { label: 'Delete account', icon: 'trash', danger: true, action: () => ondelete(a) },
+            { label: 'Delete account…', icon: 'trash', danger: true, action: () => ondelete(a) },
           ]
         : []),
     ]);

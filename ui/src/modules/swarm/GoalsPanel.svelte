@@ -53,7 +53,7 @@
     try {
       const res = await swarm.verifyTask(task.id);
       if (res.started) toasts.success('Verification started', 'Watch goal statuses update live.');
-      else toasts.info("Verification didn't start", res.reason ?? 'Verification could not start.');
+      else toasts.info("Verification didn’t start", res.reason ?? 'Verification could not start.');
     } catch (e) {
       toastError("Couldn’t start verification", e);
     } finally {
@@ -98,7 +98,7 @@
 <Modal title="Goals — {task.title}" width={620} {onclose}>
   <div class="bar">
     {#if running}
-      <span class="running" role="status"><span class="spinner-xs" aria-hidden="true"></span> Verifying…</span>
+      <span class="running" role="status"><span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Verifying…</span>
       <button class="btn small" onclick={stop} title="Stop verifying — goals already checked keep their result"><Icon name="stop" size={12} /> Stop</button>
     {:else}
       <button class="btn small primary" onclick={runVerify} disabled={verifying || !goals.length} title={goals.length ? 'Run every goal check for this task now' : 'Add a goal first'}>
@@ -166,14 +166,6 @@
     gap: 6px;
     font-size: var(--fs-s);
     color: var(--accent-text);
-  }
-  .spinner-xs {
-    width: 11px;
-    height: 11px;
-    border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .goals {
@@ -291,8 +283,7 @@
   }
   
   @media (prefers-reduced-motion: reduce) {
-    .status.pulse,
-    .spinner-xs {
+    .status.pulse {
       animation: none;
     }
   }

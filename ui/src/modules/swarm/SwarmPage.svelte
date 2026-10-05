@@ -270,7 +270,7 @@
       const agents = running === 1 ? '1 running agent is' : `${running} running agents are`;
       const q = queued === 1 ? '1 queued run is' : `${queued} queued runs are`;
       const ok = await confirmer.ask(
-        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} cancelled. Work in progress is lost.`,
+        `Abort “${detail.name}”? ${agents} stopped and their sessions closed, and ${q} canceled. Work in progress is lost.`,
         { title: 'Abort swarm', confirmLabel: 'Abort all', danger: true },
       );
       if (!ok) return;
@@ -278,7 +278,7 @@
     try {
       await swarm.lifecycle(action, detail.id);
     } catch (e) {
-      toasts.error(LIFECYCLE_FAILED[action], e instanceof Error ? e.message : String(e));
+      toastError(LIFECYCLE_FAILED[action], e);
     }
   }
 
@@ -315,7 +315,7 @@
     const t = v.trim();
     const next = t === '' || Number(t) <= 0 ? null : Math.floor(Number(t));
     if (next !== null && !Number.isFinite(next)) {
-      toasts.warn('Run budget not changed', `“${t}” isn't a number — enter a whole number, or leave it blank for unlimited.`);
+      toasts.warn('Run budget not changed', `“${t}” isn’t a number — enter a whole number, or leave it blank for unlimited.`);
       return;
     }
     try {
@@ -383,7 +383,7 @@
     const p = detail?.projects.find((x) => x.id === projEditId);
     if (
       await confirmer.ask(
-        `Delete project "${p?.name ?? projName}"? All its tasks and feed are removed and in-flight runs are stopped. This cannot be undone.`,
+        `Delete project “${p?.name ?? projName}”? All its tasks and feed are removed and in-flight runs are stopped. This cannot be undone.`,
         { title: 'Delete project', confirmLabel: 'Delete', danger: true },
       )
     ) {
@@ -402,7 +402,7 @@
     const d = detail;
     if (
       await confirmer.ask(
-        `Delete swarm "${d.name}" and all its agents, projects and tasks? This cannot be undone.`,
+        `Delete swarm “${d.name}” and all its agents, projects and tasks? This cannot be undone.`,
         { title: 'Delete swarm', confirmLabel: 'Delete', danger: true },
       )
     ) {
@@ -499,13 +499,12 @@
     if (!detail) return;
     ctxMenu.show(e, [
       ...(detail.status !== 'aborted'
-        ? [{ label: 'Abort all…', icon: 'square', danger: true, title: 'Stop every agent and cancel queued runs', action: () => void lifecycle('abort') }]
+        ? [{ label: 'Abort all…', icon: 'stop', danger: true, title: 'Stop every agent and cancel queued runs', action: () => void lifecycle('abort') }]
         : []),
       { label: 'Delete swarm…', icon: 'trash', danger: true, action: () => void deleteSwarm() },
     ]);
   }
 
-  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 </script>
 
 <div class="swarm-page" class:phone={viewport.isPhone} class:compact={viewport.isMobile}>
@@ -690,7 +689,7 @@
             class="budget-label cap-edit"
             onclick={setRunsCap}
             title={runsCap != null
-              ? `Run budget: ${runsUsed.toLocaleString()} of ${runsCap.toLocaleString()} runs used. The swarm pauses when it's spent. Click to change.`
+              ? `Run budget: ${runsUsed.toLocaleString()} of ${runsCap.toLocaleString()} runs used. The swarm pauses when it’s spent. Click to change.`
               : `${runsUsed.toLocaleString()} runs so far, no run budget. Click to set one.`}
           >
             {#if runsCap != null}
@@ -708,7 +707,7 @@
           {/if}
           {#if detail.max_cost_usd != null}
             {@const pct = Math.min(100, (detail.counts.cost_usd / detail.max_cost_usd) * 100)}
-            <span class="budget-label" title="Estimated cost so far of the cost budget (USD). The swarm pauses when it's spent.">Cost ${detail.counts.cost_usd.toFixed(2)} / ${detail.max_cost_usd.toFixed(2)}</span>
+            <span class="budget-label" title="Estimated cost so far of the cost budget (USD). The swarm pauses when it’s spent.">Cost ${detail.counts.cost_usd.toFixed(2)} / ${detail.max_cost_usd.toFixed(2)}</span>
             <div class="budget-bar" role="img" aria-label="Cost budget {Math.round(pct)}% used" title="Cost budget {Math.round(pct)}% used">
               <div class="budget-fill" class:budget-warn={pct > 80} style="width:{pct}%"></div>
             </div>
@@ -798,7 +797,7 @@
 {#if projModal}
   <Modal title={projEditId ? 'Edit project' : 'New project'} width={480} onclose={() => (projModal = false)}>
     <div class="field"><label for="p-name">Name</label><input id="p-name" class="input" bind:value={projName} /></div>
-    <div class="field"><label for="p-repo">Repo path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
+    <div class="field"><label for="p-repo">Repository path (optional, for code projects)</label><PathField bind:value={projRepo}><input id="p-repo" class="input" bind:value={projRepo} placeholder="/path/to/repo" /></PathField></div>
     <div class="field"><label for="p-goal">Goal (optional, used by Plan from goal)</label><textarea id="p-goal" class="input" rows={3} bind:value={projGoal}></textarea></div>
     <div class="field"><SkillPicker label="Project skills (optional)" selected={projSkills} onchange={(s) => (projSkills = s)} /></div>
     {#snippet footer()}
@@ -1002,12 +1001,7 @@
     height: 100%;
     border-radius: 999px;
     background: var(--accent);
-    transition: width 0.3s;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .budget-fill {
-      transition: none;
-    }
+    /* Data-driven width: no transition (motion is for user actions). */
   }
   /* >80% of the budget: warn (amber), don't alarm — the run isn't failing. */
   .budget-fill.budget-warn {

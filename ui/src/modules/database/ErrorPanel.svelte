@@ -70,7 +70,7 @@
     if (!tab || !n.token) return;
     const next = applySuggestion(tab.statement, n.token, suggestion);
     if (next === null) {
-      toasts.info('Nothing to replace', `\`${n.token}\` isn't in the editor any more.`);
+      toasts.info('Nothing to replace', `\`${n.token}\` isn’t in the editor any more.`);
       return;
     }
     // One statement change — the editor applies it as an undoable edit (⌘Z).

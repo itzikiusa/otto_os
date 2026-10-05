@@ -15,6 +15,9 @@
   import { router } from '../../lib/router.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { agentProviders as registryAgentProviders, providerReadiness } from '../../lib/providers';
 
@@ -87,7 +90,7 @@
   let bundled: BundledSkill[] = $state([]);
   let skillsLoaded = $state(false);
   let skillsLoading = $state(false);
-  let skillsError = $state(false);
+  let skillsError = $state<string | null>(null);
   let skillBusy: Set<string> = $state(new Set());
   const recommendedSkills = $derived(
     RECOMMENDED.map((n) => bundled.find((b) => b.name === n)).filter(
@@ -103,12 +106,12 @@
   async function loadSkills(): Promise<void> {
     if (skillsLoading) return;
     skillsLoading = true;
-    skillsError = false;
+    skillsError = null;
     try {
       bundled = await contextApi.listBundled();
-    } catch {
+    } catch (e) {
       // Optional setup must stay recoverable without blocking the first agent.
-      skillsError = true;
+      skillsError = loadErrorText(e);
     } finally {
       skillsLoaded = true;
       skillsLoading = false;
@@ -204,7 +207,7 @@
     <div class="coach-head">
       <div class="coach-mark"><Icon name="zap" size={20} /></div>
       <div>
-        <h2>Let's launch your first agent</h2>
+        <h2>Let’s launch your first agent</h2>
         <p>A few quick checks, then Otto starts a coding agent in your workspace.</p>
       </div>
     </div>
@@ -219,13 +222,13 @@
         {#if hasAgentCli}
           <div class="tool-chips">
             {#each agentTools as t (t.name)}
-              <span class="chip" class:found={t.found && t.checked} title={providerReadiness(t.name).message}>
+              <Badge tone={t.found && t.checked ? 'ok' : 'neutral'} title={providerReadiness(t.name).message}>
                 <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={10} />
                 {t.name}{!t.checked ? ' · unchecked' : t.found && t.version ? ` ${t.version}` : ''}
-              </span>
+              </Badge>
             {/each}
             {#if agentTools.length === 0}
-              <span class="chip found">{agentProviders.join(', ')}</span>
+              <Badge tone="ok" label={agentProviders.join(', ')} />
             {/if}
           </div>
         {:else}
@@ -270,10 +273,10 @@
           <div class="ws-form">
             <input class="input" aria-label="Workspace name" bind:value={wsName} oninput={() => (wsNameTouched = true)} placeholder="my-project" />
             <div class="path-row">
-              <input class="input mono" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
+              <input class="input mono path-input" aria-label="Workspace folder" dir="ltr" bind:value={wsPath} spellcheck="false" placeholder="~/code/my-project" />
               <button class="btn" type="button" onclick={() => (pickerOpen = true)}>Browse…</button>
             </div>
-            <button class="btn small primary" disabled={!canCreateWs} onclick={createWorkspace}>
+            <button class="btn small primary ws-create" disabled={!canCreateWs} onclick={createWorkspace}>
               {wsBusy ? 'Creating…' : 'Create workspace'}
             </button>
           </div>
@@ -293,29 +296,23 @@
             Drop-in expertise your agents can use — code review and usage insights. Install now or
             later from <button class="link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>.
           </div>
-          {#if skillsLoading}
-            <p class="step-hint" role="status">Loading recommended skills…</p>
-          {:else if skillsError}
-            <div class="step-hint" role="status">
-              <p>Could not load recommended skills.</p>
-              <button class="btn small" onclick={loadSkills}>Retry skills</button>
-            </div>
-          {/if}
+          <LoadState variant="compact" what="recommended skills" loading={skillsLoading} error={skillsError} empty={recommendedSkills.length === 0} onretry={loadSkills}>
           <div class="skill-rows">
             {#each recommendedSkills as s (s.name)}
               {@const installed = s.state === 'up_to_date' || s.state === 'ahead'}
               <div class="skill-row">
                 <span class="mono skill-name">{s.name}</span>
                 {#if installed}
-                  <span class="chip found"><Icon name="check" size={10} /> installed</span>
+                  <Badge tone="ok"><Icon name="check" size={10} /> Installed</Badge>
                 {:else}
                   <button class="btn small" disabled={skillBusy.has(s.name)} onclick={() => installSkill(s)}>
-                    {skillBusy.has(s.name) ? '…' : s.state === 'update_available' ? 'Update' : 'Install'}
+                    {skillBusy.has(s.name) ? 'Installing…' : s.state === 'update_available' ? 'Update' : 'Install'}
                   </button>
                 {/if}
               </div>
             {/each}
           </div>
+          </LoadState>
         </div>
       </div>
     {/if}
@@ -323,7 +320,7 @@
     <!-- Step 4: launch -->
     <div class="coach-launch">
       <button
-        class="btn primary big"
+        class="btn primary launch-btn"
         disabled={!hasAgentCli || !hasWorkspace || launchBusy}
         onclick={launchFirstSession}
       >
@@ -482,25 +479,6 @@
     gap: 6px;
     margin-top: 6px;
   }
-  .chip {
-    height: auto;
-    min-height: 20px;
-    max-width: 100%;
-    white-space: normal;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .chip.found {
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-    color: var(--success);
-  }
-
   .ws-form {
     display: flex;
     flex-direction: column;
@@ -512,11 +490,11 @@
     gap: 8px;
     align-items: center;
   }
-  .path-row .input {
+  .path-input {
     flex: 1;
     min-width: 0;
   }
-  .ws-form .btn {
+  .ws-create {
     align-self: flex-start;
   }
 
@@ -543,9 +521,7 @@
     align-items: center;
     gap: 8px;
   }
-  .btn.big {
-    height: 32px;
-    padding: 0 18px;
+  .launch-btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;

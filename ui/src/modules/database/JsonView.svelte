@@ -335,7 +335,7 @@
   .jrec-more {
     font-size: var(--fs-m);
     line-height: 1;
-    padding: 0 5px;
+    padding: 0 4px;
   }
   .jrec-head {
     display: flex;

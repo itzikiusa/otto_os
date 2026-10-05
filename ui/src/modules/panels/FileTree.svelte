@@ -360,7 +360,7 @@
                   <Icon name={node.open ? 'chevronDown' : 'chevronRight'} size={10} />
                 </span>
                 {#if node.loading}
-                  <span class="spin"><Icon name="refresh" size={12} /></span>
+                  <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
                 {:else}
                   <Icon name="folder" size={12} />
                 {/if}
@@ -559,11 +559,6 @@
     align-items: center;
   }
 
-  .spin {
-    display: flex;
-    align-items: center;
-    animation: otto-spin 0.8s linear infinite;
-  }
 
   .empty-dir {
     padding: 8px 12px;

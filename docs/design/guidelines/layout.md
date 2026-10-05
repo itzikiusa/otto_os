@@ -66,7 +66,7 @@ help sentence in the one place that owns the thing, and name that place:
 | Draft a script, snippet or scratch note and run it somewhere | **Workbench** (per user, full edit history; *Save as note* moves a file into the Vault) | Vault |
 | Jot workspace notes beside a running session | the **Session panel → Notes** tab (⌘J) | Vault |
 | Annotate a design (frame, site, 3D scene, brand kit) | the artifact's notes in **Design Hall** | Vault |
-| Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — one module, two doors | a separate "whiteboard" |
+| Draw a diagram with an agent (Excalidraw, Mermaid, D2) | **Canvas** (`#/canvas`), which is Design Hall's **Whiteboard** studio — reached from Design Hall (⌘K "Go to Design Hall" matches "canvas") | a separate "whiteboard" module or ⌘K entry |
 | Invite people into a running session | **Rooms** (session rooms: up to three guests, the host moderates) | Personal agents |
 | Watch personal agents message each other | **Personal agents → Rooms** (agent rooms, always visible to you) | the Rooms module |
 | Browse, edit, review or evaluate skills | **Skills Lab** (Skills · Review · Evaluator); bundled skills install from **Settings → Skills**; the files live in each provider's skill folder (`~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`) | Settings |
@@ -107,7 +107,9 @@ anywhere else.
   | `plugins` | Plugins (runtime plugins only) |
 
   Put a new module in the group whose verb fits it. **A new group needs design
-  review.** Five sections is the budget.
+  review.** Five built-in sections (the table above, minus Plugins) is the
+  budget; Plugins appears only when a runtime plugin is installed, and
+  Favorites (below) only when the user has favorited something.
 - **Favorites** is a user-made section, always rendered **first** (star
   icon, label "Favorites"), and only while it holds at least one module the
   user can see. A module is favorited from its row's context menu ("Add to
@@ -132,13 +134,13 @@ anywhere else.
   with ⌘K. "Reset to default" clears order, hiding, folds, favorites and
   section order.
 - **Active item:**
-  - an `--accent` tint at 16%
+  - the `--accent-soft` tint (accent at 14%)
   - `--text` at weight 600
   - a 3 px `--accent` bar on the inline-start edge
-  - an `--accent` icon
+  - an `--accent-text` icon
 
-  A nested active row (a focused session under Agents) is quieter: an 11%
-  tint and no bar. Never use a solid fill or a non-accent colour for
+  A nested active row (a focused session under Agents) is quieter: the same
+  `--accent-soft` tint at weight 500, and no bar. Never use a solid fill or a non-accent colour for
   selection.
 - **The active row stays visible.** The Navigator scrolls it into view on
   every route change.

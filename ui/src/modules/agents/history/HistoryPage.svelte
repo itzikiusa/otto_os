@@ -16,6 +16,7 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../../lib/stores/workspace.svelte';
   import { activity } from '../../../lib/stores/activity.svelte';
   import { router } from '../../../lib/router.svelte';
+  import { registry } from '../../../lib/commands.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { api } from '../../../lib/api/client';
@@ -132,6 +133,18 @@
 
   // ── Actions ─────────────────────────────────────────────────────────────────
   let busy = $state(false);
+  let searchEl = $state<HTMLInputElement | null>(null);
+
+  // ⌘K verbs while History is open (resume runs the same path as the button).
+  $effect(() =>
+    registry.register('history', [
+      { id: 'history.search', title: 'Search conversation history', group: 'History', keywords: 'find past conversation transcript prompt', run: () => searchEl?.focus() },
+      { id: 'history.rescan', title: 'Rescan conversation history', group: 'History', keywords: 'refresh import disk transcripts', run: () => void rescan() },
+      { id: 'history.scope-workspace', title: 'Show this workspace’s conversations', group: 'History', keywords: 'scope filter', run: () => (scope = 'workspace') },
+      { id: 'history.scope-scratch', title: 'Show conversations with no workspace', group: 'History', keywords: 'scope scratch filter', run: () => (scope = 'scratch') },
+      ...(sel && canEdit ? [{ id: 'history.resume', title: resumeLabel(sel), detail: entryTitle(sel), group: 'History', keywords: 'continue resume conversation', run: () => void resume(sel) }] : []),
+    ]),
+  );
 
   /** Resume in Otto: import (on_disk) → restart (exited/reconnectable) → open in Chat. */
   async function resume(e: HistoryEntry): Promise<void> {
@@ -416,6 +429,7 @@
         <Icon name="search" size={12} />
         <input
           class="search"
+          bind:this={searchEl}
           placeholder="Search titles and first prompts…"
           bind:value={history.q}
           oninput={onSearchInput}
@@ -523,7 +537,7 @@
       {/if}
       {#if history.hasMore && !history.loading}
         <button class="btn small more" onclick={() => void history.loadMore()} disabled={history.loadingMore}>
-          {history.loadingMore ? 'Loading…' : 'Load older conversations'}
+          {history.loadingMore ? 'Loading older conversations…' : 'Load older conversations'}
         </button>
       {/if}
     </div>
@@ -565,7 +579,7 @@
           icon="search"
           title="No matches yet"
           body="No matches in this part of history. Load more to keep looking."
-          actionLabel={history.loadingMore ? 'Loading…' : 'Load more'}
+          actionLabel={history.loadingMore ? 'Loading more history…' : 'Load more'}
           onaction={() => void history.loadMore()}
         />
       {:else}

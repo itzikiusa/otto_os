@@ -23,7 +23,7 @@ async function showList(ctx: UiCommandCtx): Promise<string> {
   if (!wsId) throw new UiCommandError('failed', 'No workspace is selected in Otto.');
   if (router.parts[0] !== 'scheduled-tasks') router.go('scheduled-tasks');
   await scheduledTasks.loadList(wsId);
-  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   if (scheduledTasks.listError) throw new UiCommandError('failed', scheduledTasks.listError);
   return wsId;
 }

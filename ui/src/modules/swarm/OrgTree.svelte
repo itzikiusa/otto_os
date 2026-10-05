@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Recursive org tree (CEO → … → devs) by `reports_to`. Each node shows the
   // agent, a status dot, task/run counts, and its open sessions (click → open).
   // Supports drag-and-drop to reparent agents within the hierarchy.
@@ -8,7 +9,7 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -104,7 +105,7 @@
     }
   }
 
-  function menu(e: MouseEvent, a: SwarmAgent) {
+  function menu(e: MouseEvent | KeyboardEvent, a: SwarmAgent) {
     ctxMenu.show(e, [
       { label: 'Edit agent', icon: 'edit', action: () => onedit(a) },
       { label: 'Duplicate agent', icon: 'split', action: () => onduplicate?.(a) },
@@ -113,8 +114,61 @@
       { separator: true },
       { label: 'Move to top level', icon: 'user', action: () => reparent(a.id, null) },
       { separator: true },
-      { label: 'Delete agent', icon: 'trash', danger: true, action: () => deleteAgent(a) },
+      { label: 'Delete agent…', icon: 'trash', danger: true, action: () => deleteAgent(a) },
     ]);
+  }
+
+  // --- Tree keyboard (WAI-ARIA tree view, roving tabindex) -------------------
+  // Agents and their sessions are treeitems; one is in the Tab order (the last
+  // focused, else the first root). ↑/↓/Home/End move along the visible rows,
+  // → expands an agent or steps into it, ← collapses or steps out to the
+  // manager (mirrored under RTL). Enter opens: an agent's editor, a session's
+  // terminal. ContextMenu / ⇧F10 opens the agent menu (it holds every row-tool
+  // action, so the hover buttons stay pointer shortcuts).
+  let treeEl = $state<HTMLElement | null>(null);
+  let focusId = $state<string | null>(null);
+  const tabStop = $derived(
+    focusId && (agents.some((a) => a.id === focusId) || ws.sessions.some((s) => s.id === focusId)) ? focusId : (roots[0]?.id ?? null),
+  );
+
+  function items(): HTMLElement[] {
+    return treeEl ? [...treeEl.querySelectorAll<HTMLElement>('[role="treeitem"]')] : [];
+  }
+  function focusItem(id: string | null | undefined): void {
+    if (!id) return;
+    focusId = id;
+    void tick().then(() => treeEl?.querySelector<HTMLElement>(`[data-tid="${CSS.escape(id)}"]`)?.focus());
+  }
+  function onTreeKey(e: KeyboardEvent): void {
+    const el = (e.target as HTMLElement).closest<HTMLElement>('[role="treeitem"]');
+    if (!el || el !== e.target) return;
+    const id = el.dataset.tid ?? '';
+    const agent = agents.find((a) => a.id === id);
+    const list = items();
+    const i = list.indexOf(el);
+    const rtl = getComputedStyle(el).direction === 'rtl';
+    const key = rtl && e.key === 'ArrowRight' ? 'ArrowLeft' : rtl && e.key === 'ArrowLeft' ? 'ArrowRight' : e.key;
+    const expanded = el.getAttribute('aria-expanded');
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
+      e.preventDefault();
+      const next = key === 'Home' ? 0 : key === 'End' ? list.length - 1 : i + (key === 'ArrowDown' ? 1 : -1);
+      focusItem(list[Math.max(0, Math.min(list.length - 1, next))]?.dataset.tid);
+    } else if (key === 'ArrowRight') {
+      e.preventDefault();
+      if (agent && expanded === 'false') toggle(agent.id);
+      else if (agent && expanded === 'true') focusItem(list[i + 1]?.dataset.tid);
+    } else if (key === 'ArrowLeft') {
+      e.preventDefault();
+      if (agent && expanded === 'true') toggle(agent.id);
+      else focusItem(agent ? agent.reports_to : el.dataset.owner);
+    } else if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      if (agent) onedit(agent);
+      else swarm.selectedSessionId = id;
+    } else if (agent && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) {
+      e.preventDefault();
+      menu(e, agent);
+    }
   }
 
   // --- Drag-and-drop reparenting -------------------------------------------
@@ -205,7 +259,7 @@
     </div>
   {/if}
   {#if roots.length > 0}
-    <div role="tree" tabindex="-1" aria-label="Agents">
+    <div role="tree" tabindex="-1" aria-label="Agents" bind:this={treeEl} onkeydown={onTreeKey}>
       {#each roots as r (r.id)}
         {@render node(r, 0)}
       {/each}
@@ -236,11 +290,17 @@
     ondrop={(e) => onNodeDrop(e, a.id)}
     oncontextmenu={(e) => menu(e, a)}
     role="treeitem"
+    data-tid={a.id}
+    aria-label={a.title ? `${a.name}, ${a.title}` : a.name}
+    aria-level={depth + 1}
+    aria-expanded={kids.length > 0 || sessions.length > 0 ? isOpen : undefined}
     aria-selected="false"
-    tabindex="-1"
+    tabindex={tabStop === a.id ? 0 : -1}
+    onfocus={(e) => e.target === e.currentTarget && (focusId = a.id)}
   >
     {#if kids.length > 0 || sessions.length > 0}
-      <button class="twist" onclick={() => toggle(a.id)} aria-label={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} title={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} aria-expanded={isOpen}>
+      <!-- Pointer shortcut for → / ← (the row's aria-expanded states it). -->
+      <button class="twist" tabindex="-1" aria-hidden="true" aria-expanded={isOpen} onclick={() => toggle(a.id)} aria-label={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`} title={isOpen ? `Collapse ${a.name}` : `Expand ${a.name}`}>
         <Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
     {:else}
@@ -259,7 +319,7 @@
     </span>
     <!-- The name opens the agent's editor (the most common action); the rest
          are in ⋯ / right-click. -->
-    <button class="who" onclick={() => onedit(a)} title={a.title ? `${a.name} — ${a.title} · Edit agent` : `${a.name} · Edit agent`}>
+    <button class="who" tabindex="-1" onclick={() => onedit(a)} title={a.title ? `${a.name} — ${a.title} · Edit agent` : `${a.name} · Edit agent`}>
       <span class="name">{a.name}</span>
       {#if a.title}<span class="title dim">{a.title}</span>{/if}
     </button>
@@ -267,33 +327,37 @@
       <span class="badge" role="img" aria-label="Runs on a schedule" title="Runs on a schedule"><Icon name="clock" size={12} /></span>
     {/if}
     {#if running > 0}
-      <span class="chip runs-chip" title="{running} active run{running === 1 ? '' : 's'}"><StatusDot state={agentDot(running)} size={6} />{running}</span>
+      <span class="chip runs-chip" title={plural(running, 'active run')}><StatusDot state={agentDot(running)} size={6} />{running}</span>
     {/if}
     <span class="grow"></span>
     <span class="row-tools">
-      <button class="icon-btn small" onclick={() => onadd?.(a)} aria-label="Add a direct report to {a.name}" title="Add direct report">
+      <button class="icon-btn small" tabindex="-1" onclick={() => onadd?.(a)} aria-label="Add a direct report to {a.name}" title="Add a direct report to {a.name}">
         <Icon name="plus" size={12} />
       </button>
-      <button class="icon-btn small" onclick={(e) => menu(e, a)} aria-label="Actions for {a.name}" title="Agent actions">
+      <button class="icon-btn small" tabindex="-1" onclick={(e) => menu(e, a)} aria-label="Actions for {a.name}" title="Actions for {a.name}">
         <Icon name="more" size={14} />
       </button>
     </span>
   </div>
   {#if isOpen}
     {#each sessions as s (s.id)}
-      <div role="treeitem" aria-selected={swarm.selectedSessionId === s.id}>
-      <button
+      <div
         class="session-row"
         class:selected={swarm.selectedSessionId === s.id}
         style="padding-inline-start:{depth * 14 + 30}px"
+        role="treeitem"
+        data-tid={s.id}
+        data-owner={a.id}
+        aria-level={depth + 2}
+        aria-selected={swarm.selectedSessionId === s.id}
+        tabindex={tabStop === s.id ? 0 : -1}
         onclick={() => (swarm.selectedSessionId = s.id)}
+        onfocus={() => (focusId = s.id)}
         title="Open session: {s.title || s.provider}"
-        aria-current={swarm.selectedSessionId === s.id ? 'true' : undefined}
       >
         <Icon name="terminal" size={12} />
         <span class="grow mono ellipsis">{s.title || s.provider}</span>
         <StatusDot state={sessionDot(s.id, s.status)} size={8} />
-      </button>
       </div>
     {/each}
     {#each kids as k (k.id)}

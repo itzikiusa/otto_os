@@ -945,7 +945,7 @@
       if (status === 400 && msg.includes('stage the whole file')) {
         toasts.error(
           'Partial staging unavailable',
-          "This hunk can't be staged partially (renamed/binary file) — stage the whole file.",
+          "This hunk can’t be staged partially (renamed/binary file) — stage the whole file.",
         );
       } else if (status === 409 && msg.includes('changed since the diff')) {
         toasts.error(
@@ -1418,7 +1418,7 @@
     {:else if r.kind === 'more'}
       <div class="hunk-cap-cell" data-rk={r.key} use:measure={[r.key, i]}>
         <button class="btn small ghost hunk-cap-btn" onclick={() => showMore(r.file, r.hi)}>
-          Show {r.remaining.toLocaleString()} more line{r.remaining === 1 ? '' : 's'}
+          Show {r.remaining.toLocaleString()} more {r.remaining === 1 ? 'line' : 'lines'}
         </button>
       </div>
     {:else if r.kind === 'note'}

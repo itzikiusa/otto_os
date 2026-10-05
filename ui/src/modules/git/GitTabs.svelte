@@ -69,7 +69,7 @@
           action: () => onopen(r.id),
         })),
       ],
-      { filter: true, filterPlaceholder: 'Search repositories…', maxVisible: 12 },
+      { filter: true, filterPlaceholder: 'Filter repositories…', maxVisible: 12 },
     );
   }
 

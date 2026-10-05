@@ -220,7 +220,7 @@
 
       <!-- Repo path (cwd) -->
       <div class="field">
-        <label class="label" for="import-cwd">Repo path <span class="dim">(optional)</span></label>
+        <label class="label" for="import-cwd">Repository path <span class="dim">(optional)</span></label>
         <PathField bind:value={cwd}>
           <input
             id="import-cwd"

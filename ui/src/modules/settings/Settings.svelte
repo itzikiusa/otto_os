@@ -248,7 +248,7 @@
         bind:value={query}
         class="settings-filter-input"
         type="search"
-        placeholder="Filter settings"
+        placeholder="Filter settings…"
         aria-label="Filter settings"
         aria-controls="settings-nav-list"
         autocomplete="off"
@@ -287,7 +287,7 @@
         <EmptyState
           variant="page"
           icon="lock"
-          title={`You don't have access to ${section.label}`}
+          title={`You don’t have access to ${section.label}`}
           body={gateHint(section)}
           actionLabel="Open Appearance"
           onaction={() => router.go('settings/appearance')}

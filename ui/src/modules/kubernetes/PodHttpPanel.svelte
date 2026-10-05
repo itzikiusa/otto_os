@@ -12,6 +12,8 @@
   import { untrack } from 'svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { copyText } from '../../lib/clipboard';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -68,7 +70,7 @@
       saved = r.actions;
       savedError = '';
     } catch (e) {
-      savedError = e instanceof Error ? e.message : String(e);
+      savedError = loadErrorText(e);
     } finally {
       savedLoading = false;
     }
@@ -217,13 +219,8 @@
   <aside class="ph-side" aria-label="Saved actions and presets">
     {#if workload}
       <div class="ph-sec">Saved for {workload.name}</div>
-      {#if savedLoading && !saved.length}
-        <div class="dim small pad">Loading…</div>
-      {:else if savedError}
-        <div class="dim small pad">Couldn’t load saved actions. <button class="btn small" onclick={() => void loadSaved()}>Retry</button></div>
-      {:else if !saved.length}
-        <div class="dim small pad">None yet — build a request and Save it.</div>
-      {:else}
+      <LoadState what="saved actions" variant="compact" loading={savedLoading} error={savedError} empty={!saved.length} onretry={() => void loadSaved()}>
+        {#snippet emptyView()}<div class="dim small pad">None yet — build a request and Save it.</div>{/snippet}
         {#each saved as a (a.id)}
           <div class="ph-item-row">
             <button class="ph-item" class:active={loadedFrom === a.id} onclick={() => applyPreset({ ...a, body: a.body_template })} title="{a.method} :{a.port}{a.path}">
@@ -232,7 +229,7 @@
             {#if canMutate}<button class="icon-btn" onclick={() => void deleteAction(a)} aria-label="Delete {a.name}" title="Delete saved action"><Icon name="trash" size={12} /></button>{/if}
           </div>
         {/each}
-      {/if}
+      </LoadState>
     {/if}
     <div class="ph-sec">Spring Boot actuator</div>
     {#each ACTUATOR_PRESETS as p (p.id)}
@@ -292,7 +289,7 @@
       </button>
     </div>
     {#if problem && path}<div class="dim small">{problem}</div>{/if}
-    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you'll be asked to type the target name.</div>{/if}
+    {#if mutating && guarded}<div class="guard small" role="note"><Icon name="warning" size={12} /> {isProdEnv(cluster?.environment) ? 'Production' : 'Read-only'} cluster — you’ll be asked to type the target name.</div>{/if}
 
     {#if runError}
       <div class="err" role="alert">{runError}</div>

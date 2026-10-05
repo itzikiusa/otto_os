@@ -278,7 +278,7 @@
       <p class="state">Loading your work…</p>
     {:else if auth.phase === 'offline'}
       <div class="state">
-        <p>The Otto daemon isn't running yet.</p>
+        <p>The Otto daemon isn’t running yet.</p>
         <button class="btn small" onclick={() => void auth.boot()}>Retry</button>
       </div>
     {:else if auth.phase !== 'ready'}

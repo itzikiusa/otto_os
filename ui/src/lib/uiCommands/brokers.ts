@@ -59,7 +59,7 @@ const VIEWS: ClusterView[] = ['overview', 'topics', 'groups', 'schema', 'replay'
 
 async function clusterFor(key: string, ctx: UiCommandCtx): Promise<BrokerCluster> {
   if (brokers.clusters.length === 0 && ws.currentId) await brokers.load(ws.currentId);
-  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   return resolveByIdOrName(brokers.clusters, key, (c) => c.id, (c) => c.name, 'Kafka cluster');
 }
 

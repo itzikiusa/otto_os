@@ -5,7 +5,10 @@
   // or a bare `tone` + `label`. `variant="pill"` (default) is the soft-tinted
   // pill; `variant="text"` is the same dot + word without the tint, for dense
   // list rows. Tones use the text-safe semantic tokens, so the label passes AA.
-  import type { StatusInfo, Tone } from '../status';
+  // The pill IS the shared Badge (one pill system); only the text variant is
+  // drawn here.
+  import { badgeTone, type StatusInfo, type Tone } from '../status';
+  import Badge from './Badge.svelte';
 
   interface Props {
     status?: StatusInfo;
@@ -24,14 +27,18 @@
   const live = $derived(status?.live === true);
 </script>
 
-<span
-  class="sbadge tone-{t} {variant}"
-  data-status={status?.key}
-  data-testid={testid}
-  title={title ?? status?.hint}
->
-  {#if dot}<span class="sbadge-dot" class:live aria-hidden="true"></span>{/if}{text}
-</span>
+{#if variant === 'pill'}
+  <Badge tone={badgeTone(t)} label={text} {dot} live={dot && live} status={status?.key} {testid} title={title ?? status?.hint} />
+{:else}
+  <span
+    class="sbadge tone-{t}"
+    data-status={status?.key}
+    data-testid={testid}
+    title={title ?? status?.hint}
+  >
+    {#if dot}<span class="sbadge-dot" class:live aria-hidden="true"></span>{/if}{text}
+  </span>
+{/if}
 
 <style>
   .sbadge {
@@ -44,13 +51,6 @@
     line-height: 1.4;
     white-space: nowrap;
     color: var(--text-dim);
-  }
-  .sbadge.pill {
-    height: 18px;
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
   }
   .sbadge-dot {
     width: 6px;
@@ -78,21 +78,5 @@
   }
   .tone-danger {
     color: var(--danger);
-  }
-  .pill.tone-info {
-    background: var(--info-soft);
-    border-color: color-mix(in srgb, var(--info) 30%, transparent);
-  }
-  .pill.tone-success {
-    background: var(--success-soft);
-    border-color: color-mix(in srgb, var(--success) 30%, transparent);
-  }
-  .pill.tone-warning {
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 30%, transparent);
-  }
-  .pill.tone-danger {
-    background: var(--danger-soft);
-    border-color: color-mix(in srgb, var(--danger) 30%, transparent);
   }
 </style>

@@ -17,7 +17,7 @@
 
   const cur = $derived(status ? stageIndex(status) : -1);
   const failed = $derived(status === 'failed');
-  const cancelled = $derived(status === 'cancelled');
+  const cancelled = $derived(status === 'cancelled'); // ui-guards: allow — wire status value
   const rejected = $derived(status === 'rejected');
   const done = $derived(status === 'completed');
   const live = $derived(!!status && !isTerminal(status));
@@ -114,7 +114,7 @@
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 18%, var(--bg));
     color: var(--accent-text);
-    animation: rail-pulse 1.6s ease-in-out infinite;
+    animation: otto-pulse 1.6s ease-in-out infinite;
   }
   .step.now { color: var(--accent-text); font-weight: 600; }
   .step.bad .bubble {
@@ -132,10 +132,6 @@
   .rail.dead .step .bubble { opacity: 0.45; }
   .rail.dead .step { opacity: 0.7; }
 
-  @keyframes rail-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); }
-    50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
-  }
   @media (prefers-reduced-motion: reduce) {
     .step.now .bubble { animation: none; }
   }
@@ -153,13 +149,9 @@
     background: color-mix(in srgb, var(--text-dim) 22%, transparent);
   }
   .seg.done { background: var(--status-working); }
-  .seg.now { background: var(--accent); animation: rail-blink 1.4s ease-in-out infinite; }
+  .seg.now { background: var(--accent); animation: otto-pulse 1.4s ease-in-out infinite; }
   .seg.bad { background: var(--status-exited); }
   .rail.mini.dead .seg { background: color-mix(in srgb, var(--status-exited) 30%, transparent); }
-  @keyframes rail-blink {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
-  }
   @media (prefers-reduced-motion: reduce) {
     .seg.now { animation: none; }
   }

@@ -15,6 +15,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { renderMarkdown } from '../../lib/md';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import ActionCard from './ActionCard.svelte';
@@ -170,10 +171,10 @@
       <div class="empty-wrap">
         <EmptyState
           icon="zap"
-          title="Let's figure out what to build"
-          body="Tell me the rough idea or a problem you're chasing. I'll research, ask the right questions, and turn it into a story — no need to write anything first."
+          title="Let’s figure out what to build"
+          body="Tell me the rough idea or a problem you’re chasing. I’ll research, ask the right questions, and turn it into a story — no need to write anything first."
         />
-        <div class="starters" class:scroll-row={viewport.isPhone}>
+        <div class="starters" class:scroll-row={viewport.isPhone} class:scroll-thin={viewport.isPhone}>
           {#each STARTERS as s (s)}
             <button class="starter-chip" onclick={() => useStarter(s)} title="Prefill the composer">
               {s.trim()}
@@ -215,9 +216,9 @@
       <!-- Thinking indicator while a turn is in flight -->
       {#if sending}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking">
-            <span class="bubble-role">Agent</span>
-            <span class="thinking-dots">thinking…</span>
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="bubble-header"><AgentByline {provider} model={chatModel} /></div>
+            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
           </div>
         </div>
       {/if}
@@ -308,7 +309,6 @@
     overflow-x: auto;
     width: 100%;
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
   }
   .starter-chip {
     flex-shrink: 0;
@@ -419,8 +419,7 @@
 
   /* Thinking bubble */
   .thinking {
-    opacity: 0.7;
-    font-style: italic;
+    color: var(--text-dim);
   }
   .thinking-dots {
     font-size: var(--fs-s);

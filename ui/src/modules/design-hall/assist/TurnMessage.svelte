@@ -416,16 +416,4 @@
     color: var(--accent-text);
     font-style: italic;
   }
-  .as-btn {
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .as-btn:hover:not(:disabled) {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
-  .as-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
 </style>

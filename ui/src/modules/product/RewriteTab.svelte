@@ -3,6 +3,7 @@
   // before/after diff vs the current source version, and allow publishing
   // back to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
+  import { toastError } from '../../lib/toastError';
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
@@ -155,7 +156,7 @@
         sourceVersion = fullSource;
       }
     } catch (e) {
-      if (suggestedVersion) toasts.error('Couldn’t load version bodies', product.errMsg(e));
+      if (suggestedVersion) toastError('Couldn’t load version bodies', e);
       else loadError = loadErrorText(e);
     } finally {
       loadingBodies = false;
@@ -172,7 +173,7 @@
       toasts.info('Rewrite triggered', 'Waiting for suggested version to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Couldn’t rewrite', product.errMsg(e));
+      toastError('Couldn’t start the rewrite', e);
     } finally {
       generating = false;
     }
@@ -203,7 +204,7 @@
       await product.publishVersion(suggestedVersion.id);
       toasts.success('Published', 'Suggested version published back to source.');
     } catch (e) {
-      toasts.error('Couldn’t publish', product.errMsg(e));
+      toastError('Couldn’t publish the rewrite', e);
     } finally {
       publishing = false;
     }
@@ -256,7 +257,7 @@
 
         {#if pollTimer !== null}
           <button class="btn" onclick={stopWaiting} title="Stop waiting for the rewrite (the agent already started keeps running)">
-            <Icon name="stop" size={12} /> Stop
+            <Icon name="x" size={12} /> Stop waiting
           </button>
           <span class="polling-indicator">checking every 3s…</span>
         {/if}

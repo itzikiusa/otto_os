@@ -14,6 +14,7 @@
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { k8sApi } from '../../lib/api/k8s';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import type { Environment, K8sCluster, K8sDiscoveredContext } from '../../lib/api/types';
 
   interface Props {
@@ -111,11 +112,11 @@
   async function testAndToast(c: K8sCluster): Promise<void> {
     try {
       const r = await k8sApi.testCluster(c.id);
-      if (r.ok) toasts.success(`${c.name}: connected`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
-      else toasts.warn(`${c.name}: saved, but unreachable`, r.message);
+      if (r.ok) toasts.success(`Connected to ${c.name}`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
+      else toasts.warn(`Saved ${c.name}, but couldn’t reach it`, r.message);
       void k8s.loadCapabilities(c.id, true);
     } catch (e) {
-      toasts.warn(`${c.name}: saved, test failed`, e instanceof Error ? e.message : String(e));
+      toasts.warn(`Saved ${c.name}, but couldn’t test it`, loadErrorText(e));
     }
   }
 

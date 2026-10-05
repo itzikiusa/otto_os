@@ -576,9 +576,9 @@
       {/if}
       {#each clusterOpts as c (c.id)}
         <button
-          class="pill"
+          class="pill-toggle"
           class:on={clusters.includes(c.id)}
-          class:empty={c.rows === 0}
+          class:no-data={c.rows === 0}
           onclick={() => toggleCluster(c.id)}
           title={c.rows === 0 ? `${c.name}: nothing collected in this window` : `${c.name}: ${c.rows.toLocaleString()} rows in ${window}`}
           aria-pressed={clusters.includes(c.id)}
@@ -867,27 +867,8 @@
     gap: 6px;
     align-items: center;
   }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding-block: 3px; padding-inline: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text);
-    font: inherit;
-    font-size: var(--fs-s);
-    cursor: pointer;
-  }
-  .pill:hover {
-    border-color: var(--accent);
-  }
-  .pill.on {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-  }
-  .pill.empty {
+  /* Cluster filters ride the global .pill-toggle (`.on` when picked). */
+  .no-data {
     opacity: 0.6;
   }
   .dot {
@@ -1015,7 +996,7 @@
     color: var(--text);
   }
   .wl td {
-    padding: 7px 10px;
+    padding: 6px 10px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { focusOnMount } from '../../lib/focusOnMount';
   // Browser tab: a real inline browser with TABS. Each tab is its own native
   // child webview (Tauri), so switching tabs is instant and preserves the page's
   // scroll/form/login state. A `window.open()` / `target=_blank` inside a tab is
@@ -608,14 +609,13 @@
         onkeydown={popoverKeydown}
       >
         <div class="popover-desc" title={popover.desc}>{popover.desc}</div>
-        <!-- svelte-ignore a11y_autofocus -->
         <textarea
           class="input popover-textarea"
           bind:value={popoverComment}
           placeholder="Your comment…"
           rows={3}
           onkeydown={popoverKeydown}
-          autofocus
+          use:focusOnMount
         ></textarea>
         <div class="popover-actions">
           <button class="btn" onclick={closePopover}>
@@ -661,7 +661,7 @@
           arrow button in the toolbar) for anything that should leave Otto.
         {:else}
           Enter a URL above to browse it here. Sites that block embedding (Jira,
-          Google, GitHub) won't load here — open them with Open in system
+          Google, GitHub) won’t load here — open them with Open in system
           browser (the arrow button in the toolbar).
         {/if}
       </p>
@@ -838,7 +838,7 @@
     min-height: 0;
     width: 100%;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — a web page’s default canvas, not app chrome */
   }
   /* Crosshair cursor hint while take-over is on */
   .frame.takeover-cursor {

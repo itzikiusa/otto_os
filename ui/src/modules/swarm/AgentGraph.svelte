@@ -7,6 +7,8 @@
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import { events } from '../../lib/events.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import { plural } from '../../lib/plural';
+  import { ctxMenu } from '../../lib/contextmenu.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { onMount } from 'svelte';
@@ -180,8 +182,21 @@
     return liveTasks.filter((t) => t.title.toLowerCase().includes(q));
   });
 
-  // ── Click → open the agent's (most recent) session; hover → its sessions ────
-  let hoverAgentId = $state<string | null>(null);
+  // ── Click → open the agent's (most recent) session; the node's session
+  // button lists them all (ctxMenu: opens on click / Enter / Space, clamped
+  // into the viewport and scrollable, unlike the old hover-only tooltip).
+  function sessionMenu(e: MouseEvent, a: SwarmAgent): void {
+    const sess = agentSessions(a.id);
+    ctxMenu.show(
+      e,
+      sess.map((s) => ({
+        label: s.title || s.provider,
+        icon: 'terminal' as const,
+        hint: sessionDot(s.id, s.status).label,
+        action: () => (swarm.selectedSessionId = s.id),
+      })),
+    );
+  }
   function openAgent(a: SwarmAgent) {
     const sess = agentSessions(a.id);
     if (sess.length > 0) swarm.selectedSessionId = sess[0].id;
@@ -257,7 +272,7 @@
   }
   function startPan(e: PointerEvent) {
     const t = e.target as HTMLElement;
-    if (t.closest('.node') || t.closest('.tooltip')) return;
+    if (t.closest('.node')) return;
     userTouched = true;
     drag = { sx: e.clientX, sy: e.clientY, ox: tx, oy: ty };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -291,7 +306,7 @@
     </div>
 
     {#if agents.length === 0}
-      <EmptyState icon="user" title="No team yet" body="Recruit agents and they'll appear here as a live org graph." />
+      <EmptyState icon="user" title="No team yet" body="Recruit agents and they’ll appear here as a live org graph." />
     {:else}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -321,12 +336,9 @@
               {@const act = activity(a.id)}
               {@const sess = agentSessions(a.id)}
               {@const el = elapsed(a.id)}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div
                 class="node act-{act}"
                 style="left:{pos.x - NODE_W / 2}px; top:{pos.y - NODE_H / 2}px; width:{NODE_W}px; min-height:{NODE_H}px"
-                onmouseenter={() => (hoverAgentId = a.id)}
-                onmouseleave={() => (hoverAgentId === a.id ? (hoverAgentId = null) : null)}
               >
                 <button class="node-hit" onclick={() => openAgent(a)} title="Open session">
                   <span class="avatar">{a.avatar || a.name.slice(0, 1)}</span>
@@ -339,23 +351,18 @@
                     <span class="node-foot">
                       <span class="role">{a.specialization || a.title}</span>
                       {#if el}<span class="el"><Icon name="clock" size={12} /> {el}</span>{/if}
-                      {#if sess.length > 0}<span class="sess"><Icon name="terminal" size={12} /> {sess.length}</span>{/if}
                     </span>
                   </span>
                 </button>
 
-                {#if hoverAgentId === a.id && sess.length > 0}
-                  <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <div class="tooltip" onmouseenter={() => (hoverAgentId = a.id)}>
-                    <div class="tip-head dim">Sessions ({sess.length})</div>
-                    {#each sess as s (s.id)}
-                      <button class="tip-row" onclick={() => (swarm.selectedSessionId = s.id)}>
-                        <Icon name="terminal" size={12} />
-                        <span class="grow ellipsis">{s.title || s.provider}</span>
-                        <StatusDot state={sessionDot(s.id, s.status)} size={7} />
-                      </button>
-                    {/each}
-                  </div>
+                {#if sess.length > 0}
+                  <button
+                    class="sess-btn"
+                    aria-haspopup="menu"
+                    aria-label={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
+                    title={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
+                    onclick={(e) => sessionMenu(e, a)}
+                  ><Icon name="terminal" size={12} /> {sess.length} <Icon name="chevronDown" size={10} /></button>
                 {/if}
               </div>
             {/if}
@@ -386,7 +393,7 @@
       <div class="side-head"><Icon name="zap" size={12} /> Live tasks</div>
       <div class="search">
         <Icon name="search" size={12} />
-        <input class="search-input" aria-label="Search tasks" placeholder="Search tasks…" bind:value={taskQuery} />
+        <input class="search-input" aria-label="Filter live tasks" placeholder="Filter live tasks…" bind:value={taskQuery} />
       </div>
       <div class="task-list" role="list" aria-label="Live tasks">
         {#each shownTasks as t (t.id)}
@@ -543,60 +550,34 @@
     white-space: nowrap;
     max-width: 84px;
   }
-  .node-foot .el,
-  .node-foot .sess {
+  /* The session chooser sits in the node's foot corner — a sibling of the
+     node's main button, never nested in it. */
+  .sess-btn {
+    position: absolute;
+    inset-block-end: 6px;
+    inset-inline-end: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-s);
+    background: var(--surface);
+    color: var(--text-dim);
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .sess-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+  .node-foot .el {
     display: inline-flex;
     align-items: center;
     gap: 2px;
     flex: none;
   }
 
-  .tooltip {
-    position: absolute;
-    top: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 5;
-    width: 210px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
-    padding: 4px;
-  }
-  /* Invisible bridge over the 6px gap: the tooltip lives inside `.node`, so
-     without it the pointer "leaves" the node while crossing the gap and the
-     session list vanishes before it can be clicked. */
-  .tooltip::before {
-    content: '';
-    position: absolute;
-    inset-inline: 0;
-    bottom: 100%;
-    height: 8px;
-  }
-  .tip-head {
-    font-size: var(--fs-xs);
-    padding: 2px 6px 4px;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-  }
-  .tip-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    width: 100%;
-    border: none;
-    background: transparent;
-    color: var(--text);
-    border-radius: var(--radius-s);
-    padding: 4px 6px;
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    text-align: start;
-  }
-  .tip-row:hover {
-    background: var(--accent-soft);
-  }
 
   /* ── Side rail ── */
   .side {
@@ -773,7 +754,7 @@
   }
 
   /* Stack the rail under the graph on narrow viewports. */
-  @media (max-width: 720px) {
+  @media (max-width: 640px) {
     .agent-graph {
       flex-direction: column;
     }

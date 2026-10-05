@@ -264,7 +264,7 @@
     background: var(--surface-2);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    padding: 3px;
+    padding: 4px;
   }
   .canvas {
     position: absolute;

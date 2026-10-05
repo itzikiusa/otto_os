@@ -9,6 +9,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import Switch from '../../lib/components/Switch.svelte';
   import GoalEditor from './GoalEditor.svelte';
   import SkillPicker from './SkillPicker.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
@@ -271,7 +272,7 @@
             <input id="t-kw" class="input" bind:value={triggerForm.keyword} placeholder="e.g. /swarm" />
           </div>
           <div class="field">
-            <label for="t-repo">Repo path <span class="dim">(optional)</span></label>
+            <label for="t-repo">Repository path <span class="dim">(optional)</span></label>
             <PathField bind:value={triggerForm.repo_path}><input id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
           </div>
         </div>
@@ -308,9 +309,12 @@
                 {#if t.auto_start}<span class="dim">· auto-start</span>{/if}
                 {#if t.reply}<span class="dim">· reply</span>{/if}
               </div>
-              <button class="toggle" class:on={t.enabled} aria-pressed={t.enabled} onclick={() => toggleEnabled(t)} title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}>
-                {t.enabled ? 'On' : 'Off'}
-              </button>
+              <Switch
+                checked={t.enabled}
+                onchange={() => toggleEnabled(t)}
+                label={`Enable trigger “${t.keyword || 'Any message'}”`}
+                title={t.enabled ? 'Enabled — click to disable' : 'Disabled — click to enable'}
+              />
               <button class="icon-btn small" onclick={() => editTrigger(t)} aria-label="Edit trigger" title="Edit trigger"><Icon name="edit" size={13} /></button>
               <button class="icon-btn small" onclick={() => delTrigger(t)} aria-label="Delete trigger" title="Delete trigger"><Icon name="trash" size={13} /></button>
             </div>
@@ -402,21 +406,6 @@
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
     border-radius: 999px;
     padding: 0 6px;
-  }
-  .toggle {
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    border-radius: 999px;
-    padding: 1px 10px;
-    font-size: var(--fs-xs);
-    cursor: pointer;
-  }
-  .toggle.on {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-    font-weight: 600;
   }
   .form {
     display: flex;

@@ -103,7 +103,7 @@
         <div class="actions">
           <button type="button" class="btn primary" disabled={saving} onclick={save}>{saving ? 'Saving…' : 'Save'}</button>
           <button type="button" class="btn" disabled={saving} onclick={() => { draft = document?.content ?? ''; editing = false; error = ''; }}>Cancel</button>
-          {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Reload saved version</button>{/if}
+          {#if error}<button type="button" class="btn" disabled={saving} onclick={load}>Load saved version</button>{/if}
         </div>
       {:else}
         {#if document.content}<Markdown md={document.content} />{:else}<p class="hint">No {label.toLowerCase()} yet.</p>{/if}

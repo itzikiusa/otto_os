@@ -58,7 +58,7 @@
 {#if Bar}
   <Bar />
 {:else if resolved}
-  <div class="pill" role="dialog" aria-label="Otto assistant">
+  <div class="bar-fallback" role="dialog" aria-label="Otto assistant">
     <Icon name="sparkle" size={16} />
     <span class="msg">The assistant bar arrives with the next Otto update.</span>
     <button class="btn small primary" bind:this={openBtn} onclick={() => void openInOtto().catch(() => {})}>
@@ -68,7 +68,7 @@
 {/if}
 
 <style>
-  .pill {
+  .bar-fallback {
     height: 100vh;
     box-sizing: border-box;
     display: flex;
@@ -81,11 +81,11 @@
     font-size: var(--fs-m);
   }
   @media (prefers-reduced-transparency: reduce) {
-    .pill {
+    .bar-fallback {
       background: var(--bg-sidebar);
     }
   }
-  .pill :global(svg) {
+  .bar-fallback :global(svg) {
     color: var(--accent-text);
     flex-shrink: 0;
   }

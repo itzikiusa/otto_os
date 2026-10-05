@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../plural';
+  import { NO_WORKSPACE } from '../labels';
   // Dedicated broadcast composer. Relays a literal message to the selected live
   // agent sessions via POST /workspaces/{id}/broadcast — NO AI, no parsing, no
   // fallback. Separate from the ⌘K orchestrator on purpose.
@@ -59,7 +60,7 @@
       return;
     }
     if (!ws.currentId) {
-      toasts.error('No workspace selected', 'Pick a workspace first.');
+      toasts.error(NO_WORKSPACE, 'Broadcast sends to the sessions of one workspace.');
       return;
     }
     const ids = selected.map((s) => s.id);

@@ -518,12 +518,12 @@
   <div class="overlay" aria-hidden={!tb}>
     {#if hoverBox}
       <div class="outline hover" style:left={`${hoverBox.x}px`} style:top={`${hoverBox.y}px`} style:width={`${hoverBox.w}px`} style:height={`${hoverBox.h}px`}>
-        {#if !hover?.block && hoverName}<span class="tag hover-tag" style:top={hoverBox.y < 20 ? '0' : '-20px'}>{hoverName}</span>{/if}
+        {#if !hover?.block && hoverName}<span class="box-label hover-tag" style:top={hoverBox.y < 20 ? '0' : '-20px'}>{hoverName}</span>{/if}
       </div>
     {/if}
     {#if selBox}
       <div class="outline sel" style:left={`${selBox.x}px`} style:top={`${selBox.y}px`} style:width={`${selBox.w}px`} style:height={`${selBox.h}px`}>
-        <span class="tag" style:top={selBox.y < 22 ? '0' : '-22px'}>{selName}</span>
+        <span class="box-label" style:top={selBox.y < 22 ? '0' : '-22px'}>{selName}</span>
       </div>
     {/if}
     {#if blockBox}
@@ -655,7 +655,8 @@
     border: 1.5px dashed var(--accent);
     border-radius: var(--radius-s);
   }
-  .tag {
+  /* The selected/hovered block's name tab on the canvas outline. */
+  .box-label {
     position: absolute;
     inset-inline-start: -2px;
     padding: 2px 8px;

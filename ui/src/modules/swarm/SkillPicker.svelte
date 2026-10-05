@@ -4,6 +4,7 @@
   // current selection as removable chips with an autocompleting add input.
   import { swarm } from '../../lib/stores/swarm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { untrack } from 'svelte';
 
   interface Props {
@@ -47,7 +48,8 @@
   <div class="add">
     <input
       class="input grow"
-      placeholder="Add a skill…"
+      aria-label="Add a skill"
+      placeholder="e.g. golang-testing"
       bind:value={draft}
       list={listId}
       onkeydown={(e) => {
@@ -76,10 +78,10 @@
   {#if selected.length}
     <div class="chips">
       {#each selected as s (s)}
-        <span class="chip">
+        <Badge variant="outline">
           {s}
           <button class="x" onclick={() => remove(s)} aria-label="Remove {s}" title="Remove {s}"><Icon name="x" size={12} /></button>
-        </span>
+        </Badge>
       {/each}
     </div>
   {:else}
@@ -105,15 +107,6 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 2px 8px;
-    font-size: var(--fs-xs);
   }
   .x {
     border: none;

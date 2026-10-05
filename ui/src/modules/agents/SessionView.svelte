@@ -1,5 +1,6 @@
 <script lang="ts">
   import PathField from '../../lib/components/PathField.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { toastError } from '../../lib/toastError';
   // One pane: a compact, width-adaptive session header (status + title first;
   // everything secondary in the details chip or the ⋯ menu) + terminal or chat.
@@ -766,12 +767,11 @@
     {/if}
     <StatusDot state={paneState} />
     {#if renaming}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="rename-input"
         aria-label="Session name"
         bind:value={draftTitle}
-        autofocus
+        use:focusOnMount
         onblur={commitRename}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename();
@@ -1197,6 +1197,10 @@
     color: var(--text);
     padding: 1px 6px;
     outline: none;
+  }
+  .rename-input:focus {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .grow {
     flex: 1 1 0;

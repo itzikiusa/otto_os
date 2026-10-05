@@ -1,4 +1,7 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   // DB Explorer page (mirrors ApiPage): left sidebar = connection picker +
@@ -7,7 +10,7 @@
   import { tick } from 'svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import { paneResizer, loadPaneWidth } from '../../lib/paneResizer';
+  import { paneResizer, loadPaneWidth, LIST_PANE } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
@@ -42,6 +45,7 @@
   import { onTabKey } from '../../lib/tabKeys';
   import { popoutItems } from '../../lib/popoutMenu';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import type {
     BrokerCluster,
     Connection,
@@ -577,8 +581,8 @@
     editingConn = null;
     connFormOpen = true;
   }
-  async function showSchemaSidebar(e: MouseEvent): Promise<void> {
-    const page = (e.currentTarget as HTMLElement).closest('.db-page');
+  async function showSchemaSidebar(): Promise<void> {
+    const page = document.querySelector('.db-page');
     database.toggleSidebar();
     await tick();
     const selected = [...(page?.querySelectorAll<HTMLElement>('[data-node-id]') ?? [])]
@@ -604,6 +608,16 @@
     editingConn = c;
     connFormOpen = true;
   }
+
+  // ⌘K: the Connections hub's verbs.
+  $effect(() =>
+    registry.register('connections', [
+      { id: 'conn.new', title: 'New connection…', group: 'Connections', keywords: 'database ssh mysql postgres mongo redis clickhouse kafka add', disabled: !auth.isRoot, run: newConnectionFromStrip },
+      { id: 'conn.import', title: 'Import connections…', group: 'Connections', keywords: 'workbench dbeaver datagrip nosqlbooster', disabled: !auth.isRoot, run: () => (connImportOpen = true) },
+      { id: 'conn.list', title: 'Show the connection list', group: 'Connections', keywords: 'picker sidebar profiles', run: showConnections },
+      { id: 'conn.sidebar', title: database.sidebarCollapsed ? 'Show the schema sidebar' : 'Hide the schema sidebar', group: 'Connections', shortcut: '⌘B', keywords: 'toggle collapse tree', run: () => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar()) },
+    ]),
+  );
   async function onConnSaved(c: Connection): Promise<void> {
     connFormOpen = false;
     await database.loadConnections();
@@ -659,7 +673,7 @@
     }
     const wsId = ws.currentId;
     if (!wsId) {
-      toasts.error('No workspace', 'Create or select a workspace to attach the session to');
+      toasts.error(NO_WORKSPACE, 'The database session is attached to a workspace — create or pick one.');
       return;
     }
     opening[c.id] = true;
@@ -807,7 +821,11 @@
   // names ("DB MySQL - Platform Aggregates Prod") get the horizontal room they need;
   // the chosen width survives reloads. Mirrors the assist-pane idiom above. (On
   // phones the sidebar is a full-width band — the width binding is skipped there.)
-  let sideW = $state(loadPaneWidth('db.sideW', 300, 220, 640));
+  // Documented exception to LIST_PANE: the default is 300 (not 280) and the max
+  // tracks the window (up to 640), because this one pane also hosts the schema
+  // tree, Saved and History — deeper, wider content than a plain list.
+  const SIDE_DEFAULT = 300;
+  let sideW = $state(loadPaneWidth('db.sideW', SIDE_DEFAULT, LIST_PANE.min, 640));
   // Leave room for the editor/results area; cap so the sidebar can't eat the page.
   const sideMaxW = (): number => Math.min(640, Math.max(360, (typeof window !== 'undefined' ? window.innerWidth : 1280) - 420));
   // Open connections as top-level tabs (Workbench-style), resolved to their
@@ -832,7 +850,7 @@
     const k = brokers.clusters.length;
     const parts = [`${plural(dbs, 'connection')}`];
     if (prod > 0) parts.push(`${prod} prod`);
-    if (k > 0) parts.push(`${k} Kafka cluster${k === 1 ? '' : 's'}`);
+    if (k > 0) parts.push(plural(k, 'Kafka cluster'));
     return `${parts.join(' · ')}.`;
   });
   // An empty workbench (fresh start, after a restore that found nothing, or the
@@ -928,15 +946,31 @@
      to open, the empty state owns that CTA instead. Phone keeps its accordion
      head buttons, so the header stays action-free there. -->
 <PageHeader title="Connections">
+  <!-- The one list-collapse control (same as Canvas / Skills Lab): the header
+       `sidebar` icon. ⌘B does the same; nothing in the pane duplicates it. -->
+  {#snippet leading()}
+    {#if !viewport.isPhone && !hubEmpty}
+      <button
+        class="icon-btn"
+        onclick={() => (database.sidebarCollapsed ? void showSchemaSidebar() : database.toggleSidebar())}
+        aria-label={database.sidebarCollapsed ? 'Show schema sidebar' : 'Hide sidebar'}
+        title={database.sidebarCollapsed ? 'Show sidebar (⌘B)' : 'Hide sidebar (⌘B)'}
+        aria-expanded={!database.sidebarCollapsed}
+        aria-controls="db-side"
+      >
+        <Icon name="sidebar" size={16} />
+      </button>
+    {/if}
+  {/snippet}
   {#snippet actions()}
     {#if !viewport.isPhone}
       {#if !hubEmpty}
-      <button class="btn ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
+      <button class="btn small ghost" disabled={!auth.isRoot} onclick={() => (connImportOpen = true)} title={auth.isRoot ? 'Import connections from MySQL Workbench, DBeaver, DataGrip or NoSQLBooster' : 'Only the owner can import connections'}>
         <Icon name="arrowDown" size={12} /> Import
       </button>
       {/if}
       {#if database.connections.length > 0 || database.otherConnections.length > 0 || brokers.clusters.length > 0}
-        <button class="btn primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
+        <button class="btn small primary" disabled={!auth.isRoot} onclick={newConnectionFromStrip} title={auth.isRoot ? 'New connection (SSH, database or custom CLI)' : 'Only the owner can create connections'}>
           <Icon name="plus" size={12} /> New connection
         </button>
       {/if}
@@ -945,21 +979,8 @@
 </PageHeader>
 <PageBody fill padded={false}>
 <div class="db-page">
-  {#if !viewport.isPhone && database.sidebarCollapsed && !hubEmpty}
-    <!-- Collapsed rail: never zero-width — an invisible sidebar is unrecoverable. -->
-    <div class="side-rail">
-      <button
-        class="rail-btn"
-        onclick={showSchemaSidebar}
-        title="Show schema (⌘B)"
-        aria-label="Show schema sidebar"
-      >
-        <Icon name="chevronRight" size={13} />
-      </button>
-      <span class="rail-label">SCHEMA</span>
-    </div>
-  {/if}
   <aside
+    id="db-side"
     class="db-side"
     class:collapsed={!viewport.isPhone && (database.sidebarCollapsed || hubEmpty)}
     style={viewport.isPhone || database.sidebarCollapsed ? '' : `width:${sideW}px`}
@@ -1021,14 +1042,6 @@
         {#if database.sideTab === 'schema' && database.selectedConnId}
           <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
         {/if}
-        <button
-          class="icon-btn"
-          onclick={() => database.toggleSidebar()}
-          title="Hide sidebar (⌘B)"
-          aria-label="Hide sidebar"
-        >
-          <Icon name="chevronLeft" size={12} />
-        </button>
       </div>
       <div class="side-body">
         {#if database.sideTab === 'connections'}
@@ -1050,7 +1063,7 @@
   </aside>
 
   {#if !viewport.isPhone && !database.sidebarCollapsed && !hubEmpty}
-    <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" min={220} max={sideMaxW()} defaultWidth={300} />
+    <PaneDivider bind:width={sideW} storageKey="db.sideW" label="Resize connections sidebar" max={sideMaxW()} defaultWidth={SIDE_DEFAULT} />
   {/if}
 
   <div class="db-main" class:danger-rail={database.isProd} class:guard-rail={database.isGuarded && !database.isProd}>
@@ -1110,7 +1123,7 @@
               {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
             </button>
             {#if st?.phase === 'connecting'}
-              <span class="conn-tab-spin spin" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"><Icon name="refresh" size={10} /></span>
+              <span class="conn-tab-spin spinner" style="--spinner-size: 10px" title={database.isWarming(c.id) ? 'Connecting in the background… (right-click to stop)' : 'Connecting…'} data-testid="conn-tab-connecting"></span>
             {:else if st?.phase === 'error'}
               <span class="conn-tab-dot" title={st.error}></span>
             {:else if st?.phase === 'idle'}
@@ -1216,7 +1229,7 @@
             <span class="cap-chip mono" title="Engine">{database.capabilities.engine}</span>
           {/if}
           {#if database.activeConnStatus?.phase === 'connecting'}
-            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spin"><Icon name="refresh" size={12} /></span><span class="lbl">Connecting…</span></span>
+            <span class="conn-state" title="Connecting…"><span class="conn-tab-spin spinner" style="--spinner-size: 12px" aria-hidden="true"></span><span class="lbl">Connecting…</span></span>
           {:else if database.activeConnStatus?.phase === 'error'}
             <span class="conn-state err" title={database.activeConnStatus.error}>Disconnected</span>
           {:else if database.activeConnStatus?.phase === 'ready'}
@@ -1388,8 +1401,8 @@
     >
       <span class="conn-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
       <span class="conn-name">{c.name}</span>
-      <span class="kind-tag mono">{c.kind}</span>
-      {#if opening[c.id]}<span class="kind-tag" title="Opening…">…</span>{/if}
+      <Badge variant="outline" label={c.kind} />
+      {#if opening[c.id]}<span class="spinner" style="--spinner-size: 10px" role="status" aria-label="Opening…" title="Opening…"></span>{/if}
       {#if envBadge(c)}<EnvBadge env={c.environment} readOnly={c.read_only} />{/if}
     </button>
     <div class="conn-actions">
@@ -1423,7 +1436,7 @@
     >
       <span class="conn-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
       <span class="conn-name">{cl.name}</span>
-      <span class="kind-tag mono">kafka</span>
+      <Badge variant="outline" label="kafka" />
       {#if envBadge(cl)}<EnvBadge env={cl.environment} readOnly={cl.read_only} />{/if}
     </button>
     <div class="conn-actions">
@@ -1572,11 +1585,10 @@
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
           {#if renamingId === q.id}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="rename-input"
               bind:value={renameDraft}
-              autofocus
+              use:focusOnMount
               onkeydown={(e) => {
                 if (e.key === 'Enter') void commitRename();
                 else if (e.key === 'Escape') cancelRename();
@@ -1636,7 +1648,7 @@
       {/each}
       {#if database.canLoadMoreHistory}
         <button class="load-more" onclick={() => database.loadMoreHistory()} disabled={database.historyLoadingMore}>
-          {database.historyLoadingMore ? 'Loading…' : 'Load more'}
+          {database.historyLoadingMore ? 'Loading more history…' : 'Load more'}
         </button>
       {/if}
     {/if}
@@ -1648,7 +1660,7 @@
         <span class="conn-glyph {sc.kind}"><Icon name={engineGlyph(sc.kind)} size={12} /></span>
         <span class="schema-conn-name ellipsis">{sc.name}</span>
         {#if envBadge(sc)}<EnvBadge env={sc.environment} readOnly={sc.read_only} />{/if}
-        <span class="kind-tag mono">{sc.kind}</span>
+        <Badge variant="outline" label={sc.kind} />
       </div>
     {/if}
     <SchemaTree />
@@ -1779,6 +1791,10 @@
     font-size: var(--fs-s);
     outline: none;
     min-width: 0;
+  }
+  /* The bare input drops its outline; the search row shows focus instead. */
+  .tree-search:focus-within {
+    box-shadow: inset 0 -2px 0 var(--accent-text);
   }
   .tree-search-input::placeholder {
     color: var(--text-dim);
@@ -2225,15 +2241,6 @@
     font-size: var(--fs-s);
     font-weight: 600;
   }
-  .kind-tag {
-    flex-shrink: 0;
-    font-size: var(--fs-xs);
-    letter-spacing: .06em;
-    padding: 1px 4px;
-    border-radius: 999px;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-  }
   /* Type-filter chips under the tree search. */
   .type-chips {
     display: flex;
@@ -2534,12 +2541,6 @@
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
-  /* Component-scoped spinner (SchemaTree's copy doesn't leak here). */
-  .spin {
-    display: grid;
-    place-items: center;
-    animation: otto-spin 0.8s linear infinite;
-  }
   
   /* Horizontal split holding the active view + (optionally) the DB Assistant. */
   .main-split {
@@ -2589,39 +2590,6 @@
   /* Draggable divider between the connections sidebar and the main area. Sits flush
      against the sidebar's inline-end border; a hit-area wider than its visible line
      makes it easy to grab. */
-  /* Collapsed schema sidebar: a 28px rail that can always bring itself back. */
-  .side-rail {
-    flex: 0 0 28px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 0;
-    border-inline-end: 1px solid var(--border);
-    background: var(--surface);
-  }
-  .rail-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .rail-btn:hover {
-    border-color: var(--accent);
-  }
-  .rail-label {
-    writing-mode: vertical-rl;
-    font-size: var(--fs-xs);
-    letter-spacing: .06em;
-    color: var(--text-dim);
-    user-select: none;
-  }
   .db-side.collapsed {
     display: none;
   }
@@ -2748,7 +2716,7 @@
       font-size: var(--fs-s);
     }
     .saved-open {
-      font-size: 14px;
+      font-size: var(--fs-l);
       height: 36px;
     }
     .hist-row {
@@ -2808,7 +2776,7 @@
       padding: 0 10px;
     }
     .conn-name {
-      font-size: 14px;
+      font-size: var(--fs-l);
     }
     .ss {
       height: 30px;

@@ -17,7 +17,7 @@ export type AmbientScheme = 'light' | 'dark';
 export type Rgb = [number, number, number];
 
 export const AMBIENT_MODES: { id: AmbientMode; label: string; desc: string }[] = [
-  { id: 'none', label: 'None', desc: 'Plain window colours' },
+  { id: 'none', label: 'None', desc: 'Plain window colors' },
   { id: 'subtle', label: 'Subtle', desc: 'A soft wash of your accent' },
   { id: 'wallpaper', label: 'Wallpaper', desc: 'A generated wallpaper, or your own photo' },
 ];

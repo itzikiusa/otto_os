@@ -7,6 +7,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { gitBridge, type RecoveryMode } from './gitBridge.svelte';
 
   let { repoId, initialMode = 'history', initialOnto, onclose, onresolve }: {
@@ -165,8 +166,8 @@
                   <option value="pick">Pick</option><option value="edit">Edit</option><option value="squash" disabled={index === 0}>Squash</option>
                 </select>
                 <div><code>{commit.sha.slice(0, 10)}</code><p>{commit.subject}</p></div>
-                <button class="btn small" aria-label="Move {commit.subject} up" disabled={busy || index === 0} onclick={() => move(index, -1)}>↑</button>
-                <button class="btn small" aria-label="Move {commit.subject} down" disabled={busy || index === plan!.commits.length - 1} onclick={() => move(index, 1)}>↓</button>
+                <button class="btn small" aria-label="Move {commit.subject} up" title="Move {commit.subject} up" disabled={busy || index === 0} onclick={() => move(index, -1)}><Icon name="arrowUp" size={12} /></button>
+                <button class="btn small" aria-label="Move {commit.subject} down" title="Move {commit.subject} down" disabled={busy || index === plan!.commits.length - 1} onclick={() => move(index, 1)}><Icon name="arrowDown" size={12} /></button>
               </div>
             {/each}
           </div>
@@ -179,7 +180,7 @@
         <p>{bisect.finished ? 'First bad commit found' : 'Test the current candidate, then mark the result.'}</p>
         <div class="entry"><div><code>{bisect.first_bad ?? bisect.current_sha}</code><p>{bisect.current_subject}</p></div>
           <button class="btn" onclick={() => inspect(bisect!.first_bad ?? bisect!.current_sha)}>Inspect in graph</button></div>
-        {#if bisect.remaining !== null && !bisect.finished}<p>{plural(bisect.remaining, 'commit')} remain{bisect.remaining === 1 ? 's' : ''} in the range.</p>{/if}
+        {#if bisect.remaining !== null && !bisect.finished}<p>{plural(bisect.remaining, 'commit')} {bisect.remaining === 1 ? 'remains' : 'remain'} in the range.</p>{/if}
         <div class="actions">
           {#if !bisect.finished}
             <button class="btn primary" disabled={busy} onclick={() => bisectAction('good')}>Works (good)</button>

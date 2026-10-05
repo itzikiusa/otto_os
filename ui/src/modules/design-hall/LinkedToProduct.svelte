@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // "Linked to Product": the epic tree of stories that designs `implement`,
   // with per-studio artifact counts. A story row opens its designs in the Hall.
   import Icon from '../../lib/components/Icon.svelte';
@@ -48,7 +49,7 @@
           {/each}
         </span>
         <span class="meta">
-          {#if r.childCount}{r.childCount} stor{r.childCount === 1 ? 'y' : 'ies'} · {kids} with designs{:else}{countTotal(r.own)} design{countTotal(r.own) === 1 ? '' : 's'}{/if}
+          {#if r.childCount}{plural(r.childCount, 'story', 'stories')} · {kids} with designs{:else}{plural(countTotal(r.own), 'design')}{/if}
         </span>
       </div>
       {#if kids && isOpen(r.story.id, i)}

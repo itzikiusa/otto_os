@@ -84,7 +84,7 @@ export const STUDIOS: readonly StudioInfo[] = [
     blurb: 'Models, scenes and text-to-3D',
     icon: 'box',
     phase: 'ready',
-    note: '3D Studio 1.5: physical material presets, brand colours, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
+    note: '3D Studio 1.5: physical material presets, brand colors, environments, states, named views and a turntable. ✨ Generate runs an Otto agent turn (blockout, text or image → 3D, refine in Blender); export GLB, USDZ or PNG and optimize for the web.',
     roadmap: null,
     formats: ['scene3d'],
   },
@@ -101,7 +101,7 @@ export const STUDIOS: readonly StudioInfo[] = [
   {
     id: 'brand',
     name: 'Brand Kit',
-    blurb: 'Colours, type and logos every studio uses',
+    blurb: 'Colors, type and logos every studio uses',
     icon: 'palette',
     phase: 'ready',
     note: 'A brand kit is a versioned token document every studio reads by name. Edit it with live contrast and see which designs a change reaches before you save.',

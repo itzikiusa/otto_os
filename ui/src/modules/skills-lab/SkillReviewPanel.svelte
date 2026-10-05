@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Skills Lab → Review. A list of skill reviews + a detail pane that mirrors the
   // code-review UX: a deterministic static-analysis card, N visible embedded
   // agent terminals (SkillReviewAgents), and the summarizer's aggregated report.
@@ -20,7 +21,9 @@
   import { loadErrorText } from '../../lib/loadError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus } from '../../lib/status';
+  import { runStatus, type BadgeTone } from '../../lib/status';
+  import { severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { sourceLabel } from './skillGroups';
@@ -205,7 +208,7 @@
   async function cancelReview(): Promise<void> {
     if (!selected) return;
     if (
-      !(await confirmer.ask(`Stop the review of "${selected.skill_name}"? Agents still running are stopped and their partial findings are not summarized.`, {
+      !(await confirmer.ask(`Stop the review of “${selected.skill_name}”? Agents still running are stopped and their partial findings are not summarized.`, {
         title: 'Stop review',
         confirmLabel: 'Stop review',
       }))
@@ -224,7 +227,7 @@
     // fire on a single click of a bare ✕.
     if (
       !(await confirmer.ask(
-        `Delete the review of "${rev.skill_name}"? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
+        `Delete the review of “${rev.skill_name}”? Its findings, agent transcripts and summary are removed. The skill itself is not touched.`,
         { title: 'Delete review' },
       ))
     )
@@ -324,8 +327,10 @@
     if (v === 'Ready with fixes') return 'verdict-fixes';
     return 'verdict-block';
   }
-  function sevClass(sev: string): string {
-    return `sev-${sev.toLowerCase()}`;
+  // Review severity → the shared Badge tone + wording (lib/labels severityLabel).
+  const SEV_TONE: Record<string, BadgeTone> = { critical: 'bad', high: 'bad', medium: 'warn', low: 'info' };
+  function sevTone(sev: string): BadgeTone {
+    return SEV_TONE[sev.toLowerCase()] ?? 'neutral';
   }
 </script>
 
@@ -417,7 +422,7 @@
           ></textarea>
         </label>
         <div class="lr-actions">
-          <span class="dim lr-cost">{fMode === 'static' ? 'No agents — runs instantly' : `${Math.max(1, fProviders.size)} review agent${fProviders.size === 1 ? '' : 's'} + a summarizer`}</span>
+          <span class="dim lr-cost">{fMode === 'static' ? 'No agents — runs instantly' : `${plural(Math.max(1, fProviders.size), 'review agent')} + a summarizer`}</span>
           <span class="grow"></span>
           <button class="btn primary" disabled={!fSkill || starting} title={!fSkill ? 'Pick a skill to review' : undefined} onclick={start} data-testid="start-skill-review">
             {starting ? 'Starting…' : 'Start review'}
@@ -470,7 +475,7 @@
               <ul class="lr-findings">
                 {#each sr.findings as f, i (i + f.code)}
                   <li class="rp-finding">
-                    <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
+                    <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity.toLowerCase())} />
                     <span class="mono rp-loc">{f.code}</span>
                     <span class="rp-finding-body"><strong>{f.title}</strong> — {f.fix}</span>
                   </li>
@@ -508,7 +513,7 @@
               <ul class="lr-findings">
                 {#each sm.findings as f, i (i + f.code)}
                   <li class="rp-finding">
-                    <span class="severity-chip {sevClass(f.severity)}">{f.severity}</span>
+                    <Badge tone={sevTone(f.severity)} label={severityLabel(f.severity.toLowerCase())} />
                     <span class="mono rp-loc">{f.code}</span>
                     <span class="rp-finding-body"><strong>{f.title}</strong>{f.fix ? ` — ${f.fix}` : ''}</span>
                   </li>
@@ -663,11 +668,6 @@
   .rp-finding { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 6px; font-size: var(--fs-xs); line-height: 1.4; }
   .rp-finding-body { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
   .rp-loc { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
-  .severity-chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; text-transform: capitalize; }
-  .sev-critical { background: var(--danger-soft); color: var(--danger); }
-  .sev-high { background: var(--danger-soft); color: var(--danger); }
-  .sev-medium { background: var(--warning-soft); color: var(--warning); }
-  .sev-low { background: var(--info-soft); color: var(--info); }
   .mono { font-family: var(--font-mono); }
 
   /* Phone: the list stacks above the report, like the Evaluator's runs. */

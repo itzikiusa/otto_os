@@ -216,7 +216,7 @@
         <button
           class="btn primary"
           disabled={!openAllowed}
-          title={openAllowed ? `Go to ${selected.title}` : `You don't have access to ${selected.title}. Ask an admin for access.`}
+          title={openAllowed ? `Go to ${selected.title}` : `You don’t have access to ${selected.title}. Ask an admin for access.`}
           onclick={() => selected?.route && router.go(selected.route)}
           data-testid="guide-open-module"
         >
@@ -247,7 +247,7 @@
                 bind:this={searchEl}
                 bind:value={query}
                 type="search"
-                placeholder="Search guides and shortcuts"
+                placeholder="Search guides and shortcuts…"
                 aria-label="Search guides"
                 autocomplete="off"
                 spellcheck="false"
@@ -313,7 +313,7 @@
               {:else}
                 <EmptyState
                   icon="book"
-                  title="There's no guide called “{param}”"
+                  title="There’s no guide called “{param}”"
                   body="It may have been renamed. Pick one from the list, or start at the beginning."
                   actionLabel="Open Getting started"
                   onaction={() => open(DEFAULT_GUIDE_ID)}

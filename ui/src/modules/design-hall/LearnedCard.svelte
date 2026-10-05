@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Lobby rail: "What Otto learned from your team". The real pending rule
   // proposals for this workspace (Learning v1, suggest-only) with Keep
   // (approve), Dismiss (reject) and Details — each decision asks first — plus
@@ -79,7 +80,7 @@
     <h2 id="dh-learned-h">What Otto learned from your team</h2>
   </header>
   {#if loading}
-    <p class="dim small" role="status">Loading…</p>
+    <p class="dim small" role="status">Loading what Otto learned…</p>
   {:else if error}
     <div class="err">
       <Icon name="warning" size={14} />
@@ -89,7 +90,7 @@
   {:else if learned}
     <p class="counts">
       {#if pending.length}<span class="chip new">{pending.length} new</span>{/if}
-      <span class="dim">{learned.active.length} active rule{learned.active.length === 1 ? '' : 's'}</span>
+      <span class="dim">{plural(learned.active.length, 'active rule')}</span>
       {#if learned.mode === 'off'}<span class="dim">· learning off</span>{/if}
     </p>
     {#if pending.length === 0}

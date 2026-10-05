@@ -174,8 +174,8 @@
       class="input pr-search"
       type="search"
       bind:value={query}
-      placeholder="Search title, author, branch…"
-      aria-label="Search pull requests"
+      placeholder="Filter by title, author, branch…"
+      aria-label="Filter pull requests"
     />
     <span class="grow"></span>
     <!-- While the list is empty the empty state carries the one "New" CTA. -->
@@ -236,7 +236,7 @@
     {#if hasMore}
       <div class="pr-more">
         <button class="btn small" disabled={loadingMore} onclick={loadMore}>
-          {loadingMore ? 'Loading…' : moreError ? 'Retry' : 'Load more'}
+          {loadingMore ? 'Loading more pull requests…' : moreError ? 'Retry' : 'Load more'}
         </button>
         {#if moreError}<span class="pr-more-err" role="status">Couldn’t load more: {moreError}</span>{/if}
       </div>

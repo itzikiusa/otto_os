@@ -27,7 +27,7 @@
 
 <div class="picker" data-testid="site-templates">
   <header>
-    <span class="badge"><Icon name="layout" size={16} /></span>
+    <span class="studio-tile"><Icon name="layout" size={16} /></span>
     <div>
       <h2>Start your site</h2>
       <p>Pick a starting point — every template uses your brand tokens, real copy and motion that respects reduced-motion. You can swap any section later.</p>
@@ -61,7 +61,7 @@
     max-width: 760px;
     margin-block-end: 22px;
   }
-  .badge {
+  .studio-tile {
     display: grid;
     place-items: center;
     flex: none;

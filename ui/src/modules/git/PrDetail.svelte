@@ -274,7 +274,7 @@
       await load(repoId, number);
       toasts.success('Pull request updated');
     } catch (e) {
-      toastError('Couldn’t update', e);
+      toastError('Couldn’t update the PR', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -340,7 +340,7 @@
       toasts.success(resolved ? 'Thread resolved' : 'Thread reopened');
       await load(repoId, number);
     } catch (e) {
-      toasts.error(resolved ? 'Resolve failed' : 'Reopen failed', e instanceof Error ? e.message : String(e));
+      toastError(resolved ? 'Couldn’t resolve the thread' : 'Couldn’t reopen the thread', e);
     }
   }
 
@@ -390,7 +390,7 @@
       toasts.success(`PR ${kind === 'approve' ? 'approved' : kind + 'd'}`, `#${number}`);
       await load(repoId, number);
     } catch (e) {
-      toasts.error(approve ? "Couldn’t approve the PR" : "Couldn’t decline the PR", e instanceof Error ? e.message : String(e));
+      toastError(approve ? 'Couldn’t approve the PR' : 'Couldn’t decline the PR', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -421,7 +421,7 @@
       });
       // createSession → addSession → navigateToSession handles routing.
     } catch (e) {
-      toastError('Couldn’t open session', e);
+      toastError('Couldn’t open a session', e);
     } finally {
       if (!disposed) busy = '';
     }
@@ -577,8 +577,9 @@
             {busy === 'approve' ? 'Approving…' : 'Approve…'}
           </button>
           <button
-            class="btn warn"
+            class="btn"
             disabled={busy !== ''}
+            aria-expanded={showRequestChanges}
             onclick={() => (showRequestChanges = !showRequestChanges)}
           >
             <Icon name="warning" size={12} />
@@ -618,7 +619,7 @@
               <span class="hint dim">Posts to PR #{number} on {repoLabel} · visible to the author and reviewers</span>
               <button class="btn small ghost" disabled={busy === 'request-changes'} onclick={() => (showRequestChanges = false)}>Cancel</button>
               <button
-                class="btn small warn"
+                class="btn small primary"
                 disabled={busy === 'request-changes'}
                 onclick={requestChanges}
               >
@@ -912,14 +913,6 @@
     flex: 1 1 220px;
     min-width: 0;
     font-size: var(--fs-xs);
-  }
-  .btn.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-    border-color: color-mix(in srgb, var(--warning) 45%, transparent);
-  }
-  .btn.warn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--warning) 24%, transparent);
   }
   .prd-request-changes {
     padding: 12px 16px;

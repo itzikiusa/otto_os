@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // Questions tab — filters by status/category; inline edit, answer/discard,
   // delete, add question; multi-select + post to Jira/Confluence.
   import { product } from '../../lib/stores/product.svelte';
@@ -160,7 +161,7 @@
       await product.updateQuestion(editingId, req);
       editingId = null;
     } catch (e) {
-      toasts.error('Couldn’t save question', product.errMsg(e));
+      toastError('Couldn’t save question', e);
     } finally {
       savingId = null;
     }
@@ -177,7 +178,7 @@
       await product.updateQuestion(answeringId, req);
       answeringId = null;
     } catch (e) {
-      toasts.error('Couldn’t save answer', product.errMsg(e));
+      toastError('Couldn’t save answer', e);
     } finally {
       savingId = null;
     }
@@ -188,7 +189,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'discarded' });
     } catch (e) {
-      toasts.error('Couldn’t discard question', product.errMsg(e));
+      toastError('Couldn’t discard question', e);
     } finally {
       savingId = null;
     }
@@ -200,7 +201,7 @@
     try {
       await product.updateQuestion(q.id, { status: 'open' });
     } catch (e) {
-      toasts.error('Couldn’t reopen question', product.errMsg(e));
+      toastError('Couldn’t reopen question', e);
     } finally {
       savingId = null;
     }
@@ -226,7 +227,7 @@
       await product.deleteQuestion(q.id);
       selectedIds = new Set([...selectedIds].filter((id) => id !== q.id));
     } catch (e) {
-      toasts.error('Couldn’t delete question', product.errMsg(e));
+      toastError('Couldn’t delete question', e);
     } finally {
       deletingId = null;
     }
@@ -246,7 +247,7 @@
       addOpen = false;
       toasts.success('Question added');
     } catch (e) {
-      toasts.error('Couldn’t add question', product.errMsg(e));
+      toastError('Couldn’t add question', e);
     } finally {
       addWorking = false;
     }
@@ -279,7 +280,7 @@
       selectedIds = new Set();
       toasts.success(`Posted ${plural(ids.length, 'question')}`);
     } catch (e) {
-      toasts.error('Couldn’t post', product.errMsg(e));
+      toastError('Couldn’t post the questions', e);
     } finally {
       postingIds = false;
     }
@@ -400,12 +401,14 @@
                     class="edit-text"
                     bind:value={editText}
                     rows={3}
-                    placeholder="Question text"
+                    aria-label="Question"
+                    placeholder="e.g. Does the limit reset weekly or on a rolling 7 days?"
                   ></textarea>
                   <input
                     class="edit-input"
                     bind:value={editRationale}
-                    placeholder="Rationale (optional)"
+                    aria-label="Rationale (optional)"
+                    placeholder="e.g. Changes how we store the reset date"
                   />
                   <select class="edit-sel" bind:value={editCategory}>
                     <option value="scope">Scope</option>
@@ -483,7 +486,8 @@
                   class="edit-text"
                   bind:value={answerText}
                   rows={3}
-                  placeholder="Write answer or additional context…"
+                  aria-label="Answer"
+                  placeholder="e.g. Yes — limits apply per brand, confirmed with compliance"
                 ></textarea>
                 <div class="edit-actions">
                   <button
@@ -513,7 +517,7 @@
               class="form-textarea"
               bind:value={newText}
               rows={3}
-              placeholder="What needs clarification?"
+              placeholder="e.g. Does the limit reset weekly or on a rolling 7 days?"
               disabled={addWorking}
             ></textarea>
           </label>
@@ -521,7 +525,7 @@
             <input
               class="form-input"
               bind:value={newRationale}
-              placeholder="Why is this question important?"
+              placeholder="e.g. Changes how we store the reset date"
               disabled={addWorking}
             />
           </label>

@@ -6,6 +6,8 @@
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from './mdRender';
   import Icon from '../../lib/components/Icon.svelte';
+  import { plural } from '../../lib/plural';
+  import Badge from '../../lib/components/Badge.svelte';
 
   let open = $state({ backlinks: true, outgoing: true, outline: false, props: false, okf: false });
 
@@ -47,7 +49,7 @@
     <button class="hdr" aria-expanded={open.backlinks} onclick={() => (open.backlinks = !open.backlinks)}>
       <span class="tri" class:open={open.backlinks}><Icon name="chevronRight" noflip size={12} /></span>
       Backlinks
-      <span class="badge">{vault.backlinks.length}</span>
+      <span class="hdr-count"><Badge label={String(vault.backlinks.length)} /></span>
     </button>
     {#if open.backlinks}
       {#if vault.backlinks.length === 0}
@@ -70,7 +72,7 @@
     <button class="hdr" aria-expanded={open.outgoing} onclick={() => (open.outgoing = !open.outgoing)}>
       <span class="tri" class:open={open.outgoing}><Icon name="chevronRight" noflip size={12} /></span>
       Outgoing links
-      <span class="badge">{vault.note?.outgoing.length ?? 0}</span>
+      <span class="hdr-count"><Badge label={String(vault.note?.outgoing.length ?? 0)} /></span>
     </button>
     {#if open.outgoing}
       {#each (vault.note?.outgoing ?? []).slice(0, shownOutgoing) as l, i (i)}
@@ -97,7 +99,7 @@
     <button class="hdr" aria-expanded={open.outline} onclick={() => (open.outline = !open.outline)}>
       <span class="tri" class:open={open.outline}><Icon name="chevronRight" noflip size={12} /></span>
       Outline
-      <span class="badge">{vault.note?.meta.headings.length ?? 0}</span>
+      <span class="hdr-count"><Badge label={String(vault.note?.meta.headings.length ?? 0)} /></span>
     </button>
     {#if open.outline}
       {#each vault.note?.meta.headings ?? [] as h, i (i)}
@@ -117,7 +119,7 @@
     <button class="hdr" aria-expanded={open.props} onclick={() => (open.props = !open.props)}>
       <span class="tri" class:open={open.props}><Icon name="chevronRight" noflip size={12} /></span>
       Properties
-      <span class="badge">{props.length}</span>
+      <span class="hdr-count"><Badge label={String(props.length)} /></span>
     </button>
     {#if open.props}
       {#if vault.note?.meta.content_index_status === 'size_limited'}
@@ -146,8 +148,12 @@
         <span class="tri" class:open={open.okf}><Icon name="chevronRight" noflip size={12} /></span>
         OKF
         {#if vault.okfReport}
-          <span class="badge" class:err={!vault.okfReport.conformant} title={vault.okfReport.conformant ? 'Conformant' : `${vault.okfReport.errors.length} errors`}>
-            {#if vault.okfReport.conformant}<Icon name="check" size={11} />{:else}{vault.okfReport.errors.length}{/if}
+          <span class="hdr-count">
+            {#if vault.okfReport.conformant}
+              <Badge tone="ok" title="Conformant"><Icon name="check" size={11} /></Badge>
+            {:else}
+              <Badge tone="bad" label={String(vault.okfReport.errors.length)} title={plural(vault.okfReport.errors.length, 'error')} />
+            {/if}
           </span>
         {/if}
       </button>
@@ -219,17 +225,9 @@
   .tri.open {
     transform: rotate(90deg);
   }
-  .badge {
+  .hdr-count {
     margin-inline-start: auto;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: var(--hover);
-    border-radius: 999px;
-    padding: 1px 6px;
-  }
-  .badge.err {
-    background: var(--danger-soft);
-    color: var(--danger);
+    display: inline-flex;
   }
   .item {
     display: block;
@@ -311,10 +309,6 @@
     vertical-align: -1px;
     margin-inline-end: 4px;
     color: var(--text-dim);
-  }
-  .badge {
-    display: inline-flex;
-    align-items: center;
   }
   .none.ok {
     display: flex;

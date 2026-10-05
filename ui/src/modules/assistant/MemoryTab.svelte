@@ -8,6 +8,7 @@
   //  • Import from Hermes — a one-off, read-only scan of ~/.hermes/memories
   //    that only QUEUES entries for review. Hermes itself is never changed.
   import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
@@ -260,7 +261,7 @@
       {#if memories.length}
         <div class="search">
           <Icon name="search" size={14} />
-          <input class="search-in" type="search" bind:value={query} placeholder="Search memories" aria-label="Search memories" />
+          <input class="search-in" type="search" bind:value={query} placeholder="Filter memories…" aria-label="Filter memories" />
         </div>
       {/if}
       {#if !memories.length}
@@ -280,7 +281,7 @@
                     <span>·</span>
                     <button class="link" onclick={() => onopenthread(m.source.thread_id!)} title="Open the conversation it came from">from {threadTitle(m.source.thread_id)}</button>
                   {/if}
-                  {#each m.tags as t (t)}<span class="tag">{t}</span>{/each}
+                  {#each m.tags as t (t)}<Badge variant="outline" label={t} title={t} />{/each}
                 </div>
               </div>
               <button class="icon-btn forget" onclick={() => void forgetOne(m)} aria-label={`Forget “${m.text}”`} title="Forget">
@@ -449,11 +450,6 @@
     .forget {
       opacity: 1;
     }
-  }
-  .tag {
-    padding: 0 6px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
   }
   .undo-bar {
     display: flex;

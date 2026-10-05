@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../lib/plural';
+  import { focusOnMount } from '../lib/focusOnMount';
   import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
@@ -160,7 +161,7 @@
     const ids = ws.archivedSessions.filter((s) => archSel.has(s.id)).map((s) => s.id);
     if (ids.length === 0) return;
     const ok = await confirmer.ask(
-      `Delete ${ids.length} archived session${ids.length === 1 ? '' : 's'} and their entire history? This cannot be undone.`,
+      `Delete ${plural(ids.length, 'archived session')} and their entire history? This cannot be undone.`,
       { title: `Delete ${ids.length} sessions`, confirmLabel: 'Delete' },
     );
     if (!ok) return;
@@ -1297,8 +1298,9 @@
          group in every workspace and with none. Plain `sessionRow`s — they are
          already in `ws.sessions`, so open / rename / archive work as above. -->
     {#if q ? fScratch.length > 0 : agentsOpen && (ws.scratchSessions.length > 0 || ws.current === null)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- Right-click is a pointer shortcut (⌘T → “No workspace” is the keyboard path). -->
       <div
+        role="presentation"
         class="ws-group-label"
         title="Sessions not tied to any workspace"
         data-testid="scratch-group"
@@ -1433,8 +1435,9 @@
               {#if ws.canEditSession(s)}
                 <input type="checkbox" class="arch-check" checked={archSel.has(s.id)} onchange={() => toggleArchSel(s.id)} aria-label="Select {s.title}" />
               {/if}
-              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <!-- Right-click is a pointer shortcut for the Restore / Delete buttons in the row. -->
               <div
+                role="presentation"
                 class="nav-item nested-item archived"
                 title={s.title}
                 oncontextmenu={(e) => ctxMenu.show(e, [
@@ -1471,7 +1474,7 @@
               <button class="show-more" onclick={() => void loadArchivedPage(ws.archivedLoaded)}>Retry</button>
             </div>
           {:else if ws.archivedLoading}
-            <div class="arch-state" aria-live="polite">Loading…</div>
+            <div class="arch-state" aria-live="polite">Loading archived sessions…</div>
           {:else if ws.archivedLoaded && ws.archivedSessions.length === 0}
             <div class="arch-state">No archived sessions.</div>
           {:else if ws.archivedHasMore}
@@ -1508,11 +1511,10 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="nav-rename"
         bind:value={draft}
-        autofocus
+        use:focusOnMount
         onblur={commitRename}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename();

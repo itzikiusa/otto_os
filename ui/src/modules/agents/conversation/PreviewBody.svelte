@@ -272,12 +272,7 @@
   }
   @media (prefers-reduced-motion: no-preference) {
     .sk {
-      animation: pb-pulse 1.4s ease-in-out infinite;
-    }
-  }
-  @keyframes pb-pulse {
-    50% {
-      opacity: 0.55;
+      animation: otto-pulse 1.4s ease-in-out infinite;
     }
   }
   .pb-err {

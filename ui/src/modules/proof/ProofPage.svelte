@@ -683,7 +683,7 @@
       }
       const n = dry.matched;
       const ok = await confirmer.ask(
-        `Archive ${n} session proof pack${n === 1 ? '' : 's'} with no evidence, untouched for 30+ days? They're hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
+        `Archive ${plural(n, 'session proof pack')} with no evidence, untouched for 30+ days? They’re hidden from the Proof list and the sidebar chips, not deleted — a pack comes back by itself as soon as it changes or gets evidence.`,
         { title: 'Archive stale session packs', confirmLabel: 'Archive' },
       );
       if (!ok) return;

@@ -12,6 +12,7 @@
   // Mermaid. Mermaid's own renderer draws the full rich spectrum (subgraphs, classDef
   // colours, every shape). Pan/zoom the preview.
   import { PAN_LABEL, panDelta } from './panKeys';
+  import { toastAgentEdit } from './agentUndo';
   import { toastError } from '../../lib/toastError';
   import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -291,7 +292,7 @@
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'mermaid', source: src }, sceneId);
       canvas.pushConvo('assistant', res.note || 'Updated the canvas.', sceneId);
-      toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
+      toastAgentEdit(sceneId, 'Otto edited the diagram', res.note || 'Diagram updated.');
       void canvas.refreshSession();
     } catch (e) {
       canvas.pushConvo('assistant', `Failed: ${e instanceof Error ? e.message : String(e)}`, sceneId);
@@ -383,7 +384,7 @@
           <div class="empty">
             <Icon name="shapes" size={28} />
             <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It's labelled Mermaid but contains an Excalidraw scene. Create a new
+            <p class="hint">It’s labeled Mermaid but contains an Excalidraw scene. Create a new
               <strong>Excalidraw</strong> canvas to edit those shapes.</p>
           </div>
         {:else if !renderError}

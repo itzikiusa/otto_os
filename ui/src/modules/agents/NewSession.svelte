@@ -300,7 +300,7 @@
   async function create(): Promise<void> {
     if (busy || total === 0) return;
     const unavailable = chosen.find((p) => !providerReadiness(p).available);
-    if (unavailable) { toasts.error(`Cannot start ${unavailable}`, providerReadiness(unavailable).message); return; }
+    if (unavailable) { toasts.error(`Couldn’t start ${unavailable}`, providerReadiness(unavailable).message); return; }
     busy = true;
     try {
       // Fold a pending draft (typed but not yet "Add"-ed) into the list.
@@ -521,7 +521,7 @@
         placeholder="What should the agent start on? Sent once it is ready."
       ></textarea>
       <span class="hint">
-        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ creates the session{total > 1 ? 's' : ''}.
+        {total > 1 ? 'Sent to every agent in this batch. ' : ''}⌘↩ {total > 1 ? 'creates the sessions' : 'creates the session'}.
       </span>
     </div>
   {/if}

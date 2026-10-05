@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../lib/plural';
   // Explicit merge approval. Opened by dropping one local branch onto another in
   // the graph's refs panel — NOTHING merges until the user clicks Merge here.
   // Shows source → target, a strategy picker, a dry-run conflict preview, and a
@@ -171,7 +172,7 @@
     <!-- pre-merge conflict check -->
     {#if previewLoading}
       <div class="warn check">
-        <span class="spinner-xs"></span>
+        <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
         <span>Checking for conflicts…</span>
       </div>
     {:else if willConflict}
@@ -180,8 +181,7 @@
           <Icon name="merge" size={14} />
           <span>
             Merging <span class="mono">{source}</span> into <span class="mono">{target}</span>
-            will conflict in {preview?.conflicted_files.length}
-            file{preview && preview.conflicted_files.length === 1 ? '' : 's'}. Otto will start the
+            will conflict in {plural(preview?.conflicted_files.length ?? 0, 'file')}. Otto will start the
             merge and open the conflict resolver so you can fix them here — or abort and leave
             <span class="mono">{target}</span> untouched.
           </span>
@@ -202,8 +202,8 @@
       <div class="warn">
         <Icon name="info" size={14} />
         <span>
-          You have {status?.changes.length} uncommitted change{status && status.changes.length === 1 ? '' : 's'}.
-          They'll be <strong>stashed</strong>, the merge applied, then <strong>restored</strong>.
+          You have {plural(status?.changes.length ?? 0, 'uncommitted change')}.
+          They’ll be <strong>stashed</strong>, the merge applied, then <strong>restored</strong>.
         </span>
       </div>
     {/if}
@@ -383,16 +383,6 @@
     margin-inline-start: -14px;
     color: var(--text-dim);
     font-style: italic;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 11px;
-    height: 11px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    flex-shrink: 0;
   }
   
   .err {

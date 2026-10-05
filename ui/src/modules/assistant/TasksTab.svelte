@@ -8,7 +8,7 @@
   import { assistant } from '../../lib/stores/assistant.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import NeedsYouCard from './cards/NeedsYouCard.svelte';
-  import StatePill from './cards/StatePill.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { TASK_KIND, groupTasks, taskStateLabel, taskTone } from './model';
   import { whenLabel } from './format';
   import type { AssistantTask } from '../../lib/api/types';
@@ -41,7 +41,7 @@
   <li class="task">
     <div class="line1">
       <span class="title" title={t.title}>{t.title}</span>
-      <StatePill tone={taskTone(t)} label={taskStateLabel(t)} live={t.state === 'running'} />
+      <Badge tone={taskTone(t)} label={taskStateLabel(t)} live={t.state === 'running'} />
     </div>
     {#if t.detail}<div class="detail">{t.detail}</div>{/if}
     <div class="meta">

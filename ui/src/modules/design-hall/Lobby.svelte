@@ -683,14 +683,6 @@
     gap: 6px;
     font-size: var(--fs-s);
   }
-  .as-btn {
-    cursor: pointer;
-    font-family: inherit;
-  }
-  .as-btn:hover {
-    color: var(--text);
-    border-color: var(--border-strong);
-  }
   .go {
     display: inline-flex;
     align-items: center;

@@ -52,7 +52,7 @@
     if (!status) return;
     const n = status.plaintext_entries;
     const ok = await confirmer.ask(
-      `Encrypt ${n} stored secret${n === 1 ? '' : 's'} (connection passwords, Slack/Telegram tokens, accounts)? ` +
+      `Encrypt ${plural(n, 'stored secret')} (connection passwords, Slack/Telegram tokens, accounts)? ` +
         'Otto creates one encryption key in your macOS Keychain — macOS may ask you to allow access; choose “Always Allow”. ' +
         'Every secret is checked to read back from the encrypted store before the plaintext file is wiped and deleted. ' +
         'If anything fails, nothing changes. Integrations keep working; no restart needed.',

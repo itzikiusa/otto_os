@@ -360,7 +360,7 @@
 {:else}
   <div class="share-root" style={`zoom:${ui.zoom}`}>
     <header class="share-header">
-      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading…'}</span>
+      <span class="session-title" title={session?.title ?? ''}>{session?.title ?? 'Loading session…'}</span>
       <span class="header-spacer"></span>
       {#if session}
         <span class="status-badge status-{status}" title="Session status">
@@ -491,7 +491,7 @@
     text-align: center;
     font-size: var(--fs-2xl);
     font-family: var(--font-mono);
-    letter-spacing: 0.18em;
+    letter-spacing: 0.18em; /* ui-guards: allow — one-time-code digits spaced for reading back */
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: var(--radius-m);

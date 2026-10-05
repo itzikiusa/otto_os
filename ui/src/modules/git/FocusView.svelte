@@ -349,7 +349,7 @@
       {:else if prGroups.length === 0}
         <div class="fx-empty dim">
           No open pull requests{prFilter === 'mine' ? ' opened by you' : ''} across
-          {git.allRepos.length} registered repo{git.allRepos.length === 1 ? '' : 's'}.
+          {plural(git.allRepos.length, 'registered repository', 'registered repositories')}.
           {#if prErrors > 0}({plural(prErrors, 'repo')} failed to list){/if}
         </div>
       {:else}
@@ -919,7 +919,7 @@
       bottom: 0;
       width: min(92vw, 380px);
       z-index: 5;
-      box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+      box-shadow: var(--shadow-card);
     }
     .focus {
       position: relative;

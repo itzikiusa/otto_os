@@ -111,10 +111,10 @@
     busy = { ...busy, [i.instance_id]: true };
     try {
       const r = await awsApi.ec2Action(account.id, i.instance_id, action, rowRegion(i));
-      toasts.success(`${action} sent`, `${i.instance_id}: ${r.previous_state} → ${r.current_state}`);
+      toasts.success(`${verb} sent`, `${i.instance_id}: ${r.previous_state} → ${r.current_state}`);
       await load();
     } catch (e) {
-      toastError(`${action} failed`, e);
+      toastError(`Couldn’t ${action} ${label}`, e);
     } finally {
       busy = { ...busy, [i.instance_id]: false };
     }
@@ -181,9 +181,9 @@
       ...(canEdit
         ? [
             { separator: true },
-            { label: 'Start', icon: 'play', disabled: !canStart || !stopped, action: () => void act(i, 'start') },
-            { label: 'Reboot', icon: 'refresh', disabled: !canReboot || !running, action: () => void act(i, 'reboot') },
-            { label: 'Stop', icon: 'x', danger: true, disabled: !canStop || !running, action: () => void act(i, 'stop') },
+            { label: 'Start…', icon: 'play', disabled: !canStart || !stopped, action: () => void act(i, 'start') },
+            { label: 'Reboot…', icon: 'refresh', disabled: !canReboot || !running, action: () => void act(i, 'reboot') },
+            { label: 'Stop…', icon: 'stop', danger: true, disabled: !canStop || !running, action: () => void act(i, 'stop') },
           ]
         : []),
     ]);
@@ -305,7 +305,7 @@
         {:else}
           <div class="tags">
             {#each Object.entries(inst.tags).sort(([a], [b]) => a.localeCompare(b)) as [k, v] (k)}
-              <span class="tag" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
+              <span class="kv" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
             {/each}
           </div>
         {/if}
@@ -449,10 +449,12 @@
     flex-wrap: wrap;
     gap: 6px;
   }
-  .tag {
+  /* key=value metadata, not a status Badge: it must truncate a long value
+     (ARNs, paths) inside the drawer, which a Badge chip never does. */
+  .kv {
     font-size: var(--fs-s);
     padding: 2px 8px;
-    border-radius: 999px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
     max-width: 100%;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
@@ -94,6 +95,15 @@
       loading = false;
     }
   }
+
+  // The open queue vanished (deleted / a reload without it): open the next one.
+  $effect(() => {
+    if (selected || !queues?.length || viewport.isMobile) return;
+    untrack(() => {
+      selectedUrl = null;
+      autoSelect(queues!);
+    });
+  });
 
   // Load on mount and whenever the region changes (`rq` is the only dep).
   $effect(() => {
@@ -339,8 +349,8 @@
                 <td class="name" title={q.url}>
                   <Icon name="send" size={12} />
                   <span class="qn">{q.name}</span>
-                  {#if q.fifo}<span class="tag">FIFO</span>{/if}
-                  {#if a?.dlq_target_arn}<span class="tag dim" title={`DLQ: ${a.dlq_target_arn}`}>→DLQ</span>{/if}
+                  {#if q.fifo}<Badge tone="accent" label="FIFO" />{/if}
+                  {#if a?.dlq_target_arn}<Badge label="Has DLQ" title={`Dead-letter queue: ${a.dlq_target_arn}`} />{/if}
                 </td>
                 <td class="num mono">{a ? a.approx_messages : '…'}</td>
                 <td class="num mono hide-sm">{a ? a.approx_not_visible : '…'}</td>
@@ -356,14 +366,18 @@
   {#if showDetail}
     <div class="detail">
       {#if !selected}
-        <EmptyState icon="send" title="Pick a queue" body="Peek messages, send, inspect attributes or redrive." />
+        <!-- Never a "pick a queue" pane: a queue is auto-opened whenever the
+             list has one (see autoSelect + the effect below). -->
+        {#if queues && queues.length === 0}
+          <EmptyState icon="send" title="No queues here" body="Queues in this region show here — peek messages, send, inspect attributes or redrive." />
+        {/if}
       {:else}
         <div class="dhead">
           {#if viewport.isMobile}
             <button class="back" onclick={() => { keepDraft(); selectedUrl = null; }} aria-label="Back to queues" title="Back to queues"><Icon name="chevronLeft" size={14} /></button>
           {/if}
           <strong class="qname" title={selected.url}>{selected.name}</strong>
-          {#if selected.fifo}<span class="tag">FIFO</span>{/if}
+          {#if selected.fifo}<Badge tone="accent" label="FIFO" />{/if}
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
           <button class="icon-btn more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
@@ -394,10 +408,10 @@
                         <span class="mono mid">{m.message_id}</span>
                       </button>
                       <span class="dim mono">{m.attributes.SentTimestamp ? new Date(Number(m.attributes.SentTimestamp)).toLocaleString() : ''}</span>
-                      {#if m.attributes.ApproximateReceiveCount}<span class="tag dim" title="ApproximateReceiveCount">rx {m.attributes.ApproximateReceiveCount}</span>{/if}
+                      {#if m.attributes.ApproximateReceiveCount}<Badge title="Approximate receive count" label={`Received ${m.attributes.ApproximateReceiveCount}×`} />{/if}
                       <button class="icon-btn" onclick={() => void copy(m.body, 'body')} title="Copy body" aria-label="Copy body"><Icon name="copy" size={12} /></button>
                       {#if canDelete}
-                        <button class="icon-btn danger" onclick={() => void deleteMessage(m)} title="Delete message" aria-label="Delete message"><Icon name="trash" size={12} /></button>
+                        <button class="icon-btn msg-delete" onclick={() => void deleteMessage(m)} title="Delete message" aria-label="Delete message"><Icon name="trash" size={12} /></button>
                       {/if}
                     </div>
                     {#if !open}
@@ -577,19 +591,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .tag {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    letter-spacing: .06em;
-  }
-  .tag.dim {
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
   .dim {
     color: var(--text-dim);
   }
@@ -766,7 +767,7 @@
   code {
     font-family: var(--font-mono);
   }
-  .icon-btn.danger {
+  .msg-delete {
     color: var(--danger);
   }
   @media (max-width: 640px) {

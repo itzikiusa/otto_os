@@ -430,9 +430,6 @@
     font-size: var(--fs-m);
     color: var(--text);
   }
-  .btn.danger {
-    color: var(--danger);
-  }
   .cl {
     position: absolute;
     inline-size: 1px;

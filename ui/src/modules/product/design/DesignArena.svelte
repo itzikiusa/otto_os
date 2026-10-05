@@ -496,7 +496,7 @@
       // The viewport/hierarchy/inspector go through C's ops, so this is a
       // programming error rather than user input — surface it, don't save it.
       localInvalid = r.issues;
-      toasts.error('Scene edit rejected by the validator', r.issues[0]?.message ?? 'invalid document');
+      toasts.error('Couldn’t apply that scene edit', r.issues[0]?.message ?? 'The edit would make the scene invalid, so it wasn’t saved.');
       return;
     }
     applyLocalEdit(serializeScene(r.doc));
@@ -709,7 +709,7 @@
     }
   }
   async function remove(a: ProductAttachment): Promise<void> {
-    const ok = await confirmer.ask(`Delete "${a.filename}"? Its pinned annotations go with it.`, {
+    const ok = await confirmer.ask(`Delete “${a.filename}”? Its pinned annotations go with it.`, {
       title: 'Delete artifact', confirmLabel: 'Delete', danger: true,
     });
     if (!ok) return;
@@ -1075,7 +1075,7 @@
                 <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
             {:else}
-              <p class="insp-hint">Blender isn't installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
+              <p class="insp-hint">Blender isn’t installed (set <span class="mono">OTTO_BLENDER</span> or install it in /Applications). You can still download the generated script and open it in Blender by hand.</p>
               <div class="insp-actions">
                 <button class="btn small" onclick={downloadBlenderScript}>Download script</button>
               </div>
@@ -1432,6 +1432,10 @@
     outline: none;
     tab-size: 2;
   }
+  /* The editor fills its pane edge to edge: the ring is drawn inside. */
+  .code-view:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
+  }
   .render-wrap {
     position: relative;
     flex: 1;
@@ -1447,7 +1451,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — rendered page canvas (the artifact’s own white page) */
   }
   .render-box > :global(*) {
     flex: 1;

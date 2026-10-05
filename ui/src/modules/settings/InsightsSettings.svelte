@@ -153,7 +153,7 @@
     {#if skillState === 'missing'}
       <p class="skill-warn" role={anyOn ? 'alert' : undefined}>
         <Icon name="warning" size={12} />
-        <span>The <span class="mono">insights</span> skill isn't installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
+        <span>The <span class="mono">insights</span> skill isn’t installed, so {anyOn ? 'scheduled reports can’t be generated' : 'reports can’t be generated yet'}.</span>
         <button class="btn small" onclick={() => router.go('settings/skills')}>Open Skills</button>
       </p>
     {/if}

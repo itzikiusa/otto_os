@@ -59,7 +59,7 @@ Rules:
 | `--separator` | The quieter hairline between chrome and content: the `PageHeader` bottom edge, the sidebar's inline-end edge, the status bar's top edge, a Modal footer, stat dividers in Home widgets |
 | `--border-strong` | Emphasised borders: focused/selected cards, drag targets, the agent-content rule (see patterns.md) |
 | `--hover` | Hover wash on rows and ghost controls (7% of `--text`, works on any surface) |
-| `--scrim` | The dimmed backdrop behind a `Modal`, `Drawer` or the phone "More" sheet (per scheme) |
+| `--scrim` | The dimmed backdrop behind a `Modal` or `Drawer` (incl. the phone "More" drawer) (per scheme) |
 | `--scrim-soft` | A lighter backdrop for the command palette, which should keep the page legible |
 | `--scrim-media` | The veil behind a caption or control sitting on an image, video or 3D viewport (same in both schemes; text on it is white) |
 
@@ -98,6 +98,12 @@ graphics. They are what `StatusDot` renders:
 | `--status-idle` | idle |
 | `--status-exited` | exited or failed |
 | `--status-warn` / `--status-warn-soft` | attention: needs you, ahead/behind, waiting (a suspended session is a hollow idle ring, not amber) |
+
+`--status-warn` is an alias of `--warning` and `--status-idle` an alias of
+`--text-dim` in every theme and scheme, so a dot and the text beside it are
+always the same amber or grey. `--status-working` and `--status-exited` alias
+`--success` / `--danger` in the light scheme; in dark they stay brighter for
+the 3:1 graphic contrast on glass.
 
 Use a tone token for text and a status token for dots. Don't write a status
 label in `--status-working`; use `--success`.
@@ -232,7 +238,7 @@ Two families only:
 | `--fs-m` | 13 | **Body default** (`body`), buttons, inputs, list rows |
 | `--fs-l` | 15 | The page title (`PageHeader` h1), page-level empty-state title |
 | `--fs-xl` | 18 | Hero numbers in KPI tiles, rare in-content headings |
-| `--fs-2xl` | 22 | Dashboard hero figures only |
+| `--fs-2xl` | 22 | Dashboard hero figures; the top heading of long-form **content** (a walkthrough step, an article in the browser's reader view) — never chrome |
 | `--fs-hero` | 28 | The wordmark on the boot, sign-in and onboarding screens only — never body or page titles |
 
 Rules:
@@ -251,6 +257,16 @@ Rules:
   | 14 px | `--fs-m` or `--fs-l` |
 - **One title size.** Every page title is `--fs-l`/600 in `PageHeader`. Don't
   give a page a bigger h1. (Legacy `.page-header h1` is aligned to `--fs-l`.)
+- **Content exception.** Rendered long-form content — a walkthrough step
+  (`help/Walkthroughs`), an article in the reader view (`browser/ReaderView`),
+  markdown bodies — is a document, not chrome: its own top heading may use
+  `--fs-2xl`/600 (and `--fs-xl` below it). The page title above it in
+  `PageHeader` still stays `--fs-l`.
+- **Tracking.** Two letter-spacing values exist: `.06em` on uppercase
+  micro-labels, and `-0.01em` on titles at `--fs-l` and above (page titles,
+  hero figures, content headings) — large sans text reads loose at 0. Body,
+  controls and mono stay at the default (0). `npm run check` ratchets any
+  other value (`letter-spacing-literal`).
 - **Weights:** 400 (body), 500 (buttons, labels, chips), 600 (titles, active
   nav item, table headers). No 700/800 in chrome.
 - **Uppercase micro-labels** exist in one form only: `.section-title`
@@ -352,9 +368,9 @@ z-index literals outside the in-pane range (−1…10).
 
 | Layer | Token (value) | Who |
 |---|---|---|
-| In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5) |
+| In-pane stacking | literal 1–10, `--z-sticky` (10) | sticky headers, resize handles, the right-panel edge (5); in the agents grid: pane chrome ≤ 5, split/tile dividers 8, corner grip and pane close 9, the drag-drop veil 10 |
 | Floating bar | `--z-floating-bar` (40) | `FloatingBar` over the content column (below every sheet and menu) |
-| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1…+3) | `BottomNav` (sheet at drawer +2/+3), `Drawer` (90–91) |
+| Mobile chrome | `--z-mobile-nav` (60), `--z-drawer` (90, +1) | `BottomNav`, `Drawer` (90–91; also the phone "More" overflow and `DockedDrawer` sheets) |
 | Command surfaces | `--z-command` (150) | `Palette`, `ShortcutsOverlay` |
 | Sheets | `--z-modal` (200) | `Modal` (and so `ConfirmDialog`) |
 | Toasts | `--z-toast` (300) | `Toasts` |
@@ -370,6 +386,11 @@ Rules:
 - A menu opened from inside a Modal still goes through `ctxMenu`, which sits
   above sheets.
 - Nothing goes above `--z-overlay-max` (9999).
+- **Contain a component's own stack** with `isolation: isolate` (or `contain:
+  paint`, as the terminal does) when its internals use the in-pane range and
+  it hosts no fixed overlay. Don't isolate a container that renders a
+  non-portalled `Modal` or lightbox — the overlay would be trapped under its
+  later siblings and the app chrome.
 
 ---
 

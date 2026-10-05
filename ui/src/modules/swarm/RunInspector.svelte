@@ -185,7 +185,7 @@
     <!-- cwd / worktree -->
     {#if cwd}
       <section>
-        <h3>Working directory</h3>
+        <h3>Working folder</h3>
         <div class="path-row">
           <Icon name="folder" size={13} />
           <span class="path mono">{cwd}</span>

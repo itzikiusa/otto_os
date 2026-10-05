@@ -345,7 +345,7 @@
     {:else}
       <div class="test" aria-live="polite">
         {#if testing}
-          <p><span class="spinner"></span> Running <code>sts get-caller-identity</code>…</p>
+          <p><span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span> Running <code>sts get-caller-identity</code>…</p>
         {:else if testResult?.ok}
           <p class="ok"><Icon name="check" size={14} /> Connected in {testResult.latency_ms} ms</p>
           {#if testResult.identity}
@@ -609,14 +609,6 @@
   .idn dd {
     margin: 0;
     word-break: break-all;
-  }
-  .spinner {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    border: 2px solid var(--border);
-    border-top-color: var(--accent);
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .err {

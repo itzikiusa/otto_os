@@ -13,6 +13,7 @@
   // Every edit goes up as a new document through `onchange` (the studio owns
   // undo + saving); nothing here talks to an agent.
   import Icon from '../../../lib/components/Icon.svelte';
+  import Switch from '../../../lib/components/Switch.svelte';
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { confirmer } from '../../../lib/confirm.svelte';
   import type { DesignArtifact } from '../../../lib/api/types';
@@ -302,7 +303,10 @@
 {#snippet field(f: FieldDef)}
   {@const v = str(cur(), f.key)}
   {#if f.kind === 'toggle'}
-    <label class="checkbox-row toggle"><input type="checkbox" checked={flag(cur(), f.key)} disabled={readonly} onchange={(e) => setProp(f.key, e.currentTarget.checked)} /> {f.label}</label>
+    <div class="switch-row">
+      <span>{f.label}</span>
+      <Switch checked={flag(cur(), f.key)} disabled={readonly} onchange={(next) => setProp(f.key, next)} label={f.label} />
+    </div>
   {:else if f.kind === 'links'}
     <div class="field wide">
       <span class="lbl">{f.label}</span>
@@ -542,15 +546,25 @@
         </div>
       </div>
       {#if def.media || section.block === 'features/alternating'}
-        <label class="checkbox-row toggle">
-          <input type="checkbox" checked={section.responsive?.stack === 'media-first'} disabled={readonly} onchange={(e) => onchange(ops.setResponsive(doc, section!.id, 'stack', e.currentTarget.checked ? 'media-first' : undefined))} />
-          On mobile, put the media above the text
-        </label>
+        <div class="switch-row">
+          <span>On mobile, put the media above the text</span>
+          <Switch
+            checked={section.responsive?.stack === 'media-first'}
+            disabled={readonly}
+            onchange={(next) => onchange(ops.setResponsive(doc, section!.id, 'stack', next ? 'media-first' : undefined))}
+            label="Media above the text on mobile"
+          />
+        </div>
       {/if}
-      <label class="checkbox-row toggle">
-        <input type="checkbox" checked={section.responsive?.mobile_align === 'center'} disabled={readonly} onchange={(e) => onchange(ops.setResponsive(doc, section!.id, 'mobile_align', e.currentTarget.checked ? 'center' : undefined))} />
-        Center the text on mobile
-      </label>
+      <div class="switch-row">
+        <span>Center the text on mobile</span>
+        <Switch
+          checked={section.responsive?.mobile_align === 'center'}
+          disabled={readonly}
+          onchange={(next) => onchange(ops.setResponsive(doc, section!.id, 'mobile_align', next ? 'center' : undefined))}
+          label="Center the text on mobile"
+        />
+      </div>
     </div>
 
     {#if contrastNow}
@@ -763,7 +777,11 @@
     display: flex;
     gap: 6px;
   }
-  .toggle {
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     margin-block-end: 8px;
     font-size: var(--fs-s);
   }

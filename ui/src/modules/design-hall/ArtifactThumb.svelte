@@ -198,7 +198,7 @@
 
   function svgDoc(svg: string): string {
     return (
-      '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#fff}' +
+      '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;height:100%;background:#fff}' + // ui-guards: allow — rendered page canvas (the artifact’s own white page)
       'body{display:flex;align-items:center;justify-content:center}svg{max-width:92%;max-height:92%;height:auto}</style>' +
       `</head><body>${svg}</body></html>`
     );
@@ -315,7 +315,7 @@
     border: 0;
     transform-origin: 0 0;
     pointer-events: none;
-    background: white;
+    background: white; /* ui-guards: allow — rendered page canvas (the artifact’s own white page) */
   }
   :global([dir='rtl']) iframe {
     transform-origin: 100% 0;

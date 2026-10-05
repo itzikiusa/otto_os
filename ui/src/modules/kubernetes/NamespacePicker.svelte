@@ -204,7 +204,7 @@
       aria-label="Namespaces"
       style="top:{pos.top}px;left:{pos.left}px;width:{pos.width}px;max-height:{pos.maxH}px"
     >
-      {#if error}<div class="ns-err">Couldn’t list namespaces (RBAC) — showing ones you've used; type any other to use it.</div>{/if}
+      {#if error}<div class="ns-err">Couldn’t list namespaces (RBAC) — showing ones you’ve used; type any other to use it.</div>{/if}
       {#each options as o, i (o.value + ':' + o.label)}
         <div
           id="k8s-ns-opt-{i}"

@@ -96,7 +96,7 @@
 <section class="pa-panel" aria-labelledby="mem-h">
   <div class="card-head">
     <h2 id="mem-h">What it has learned</h2>
-    <button class="icon-btn" aria-label="Reload memories" title="Reload" onclick={() => void load()}><Icon name="refresh" size={14} /></button>
+    <button class="icon-btn" aria-label="Refresh memories" title="Refresh memories" onclick={() => void load()}><Icon name="refresh" size={14} /></button>
   </div>
   <p class="hint">The same memory is used by every run and chat with this agent. Each item shows where it was learned.</p>
   <LoadState what="this agent’s memories" loading={loading && !data} error={data ? null : error} empty={(data?.items.length ?? 0) === 0} rows={3} onretry={() => void load()}>

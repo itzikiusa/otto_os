@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Per-session Canvas references: the scenes attached to the focused agent
   // session (via GET/POST/DELETE /sessions/{id}/canvas-refs). Each row shows a
   // format chip + an expandable inline SVG preview (mermaid/d2 — rendered from
@@ -275,7 +276,7 @@
                   <span class="ref-text">
                     <span class="ref-title">{label(ref)}</span>
                     <span class="ref-meta">
-                      <span class="chip fmt-{formatOf(ref)}">{FORMAT_LABEL[formatOf(ref)]}</span>
+                      <Badge tone={formatOf(ref) === 'd2' ? 'accent' : 'neutral'} label={FORMAT_LABEL[formatOf(ref)]} />
                       <span class="ref-time mono" title={new Date(ref.updated_at).toLocaleString()}>{rel(ref.updated_at)}</span>
                     </span>
                   </span>
@@ -437,19 +438,6 @@
     align-items: center;
     gap: 6px;
     margin-top: 2px;
-  }
-  .chip {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-  }
-  .chip.fmt-d2 {
-    color: var(--accent-text);
   }
   .ref-time {
     font-size: var(--fs-xs);

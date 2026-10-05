@@ -131,7 +131,7 @@
   async function cancel(): Promise<void> {
     if (!selected) return;
     if (
-      !(await confirmer.ask(`Stop the matrix "${selected.name}"? Cells still running are abandoned; scored cells are kept.`, {
+      !(await confirmer.ask(`Stop the matrix “${selected.name}”? Cells still running are abandoned; scored cells are kept.`, {
         title: 'Stop matrix',
         confirmLabel: 'Stop matrix',
         danger: true,
@@ -331,11 +331,11 @@
         </p>
 
         <section class="card block">
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="mx-name">Name</label>
             <input id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
           </div>
-          <div class="fld">
+          <div class="field">
             <span class="field-label" id="mx-prov-lbl">Agents</span>
             <div class="provider-chips" role="group" aria-labelledby="mx-prov-lbl" data-testid="matrix-providers">
               {#each providerOpts as p (p)}
@@ -346,16 +346,16 @@
               {/each}
             </div>
           </div>
-          <div class="fld">
+          <div class="field">
             <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
             <input id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
           </div>
           <div class="grid2">
-            <div class="fld">
+            <div class="field">
               <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
               <input id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
             </div>
-            <div class="fld">
+            <div class="field">
               <label class="field-label" for="mx-iter">Iterations</label>
               <input id="mx-iter" class="input" type="number" min="1" max="10" bind:value={fIterations} />
             </div>
@@ -666,10 +666,9 @@
     flex-direction: column;
     gap: 12px;
   }
-  .fld {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  /* Shared .field (app.css); the block's gap spaces the rows. */
+  .field {
+    margin-bottom: 0;
     min-width: 0;
   }
   .grid2 {

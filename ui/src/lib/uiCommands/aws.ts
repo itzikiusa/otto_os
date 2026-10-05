@@ -21,14 +21,14 @@ const SERVICES: readonly AwsService[] = ['s3', 'sqs', 'ec2', 'athena', 'eks', 'r
 
 async function accountFor(key: string, ctx: UiCommandCtx): Promise<AwsAccount> {
   if (aws.accounts.length === 0) await aws.loadAccounts();
-  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Cancelled');
+  if (ctx.signal.aborted) throw new UiCommandError('cancelled_by_user', 'Canceled');
   return resolveByIdOrName(aws.accounts, key, (a) => a.id, (a) => a.name, 'AWS account');
 }
 
 /** Route to an account's service view and wait for AwsPage to show it. */
 async function showService(a: AwsAccount, svc: AwsService, ctx: UiCommandCtx, tail = ''): Promise<void> {
   if (!aws.serviceAllowed(a.id, svc)) {
-    throw new UiCommandError('forbidden', `The account “${a.name}”'s IAM doesn't allow ${svc.toUpperCase()}.`);
+    throw new UiCommandError('forbidden', `The account “${a.name}”'s IAM doesn’t allow ${svc.toUpperCase()}.`);
   }
   router.go(`aws/${encodeURIComponent(a.id)}/${svc}${tail}`);
   await waitFor(() => router.parts[0] === 'aws' && router.parts[1] === a.id && router.parts[2] === svc, ctx.signal, 5000, 'the AWS view');

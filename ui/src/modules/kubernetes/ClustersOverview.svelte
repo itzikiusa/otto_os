@@ -6,6 +6,7 @@
   // version + capability chips), "Add cluster" wizard (Admin), card context menu
   // (open / test / refresh capabilities / edit / delete).
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { k8s } from '../../lib/stores/k8s.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -27,6 +28,11 @@
   const isAdmin = $derived(auth.isRoot);
   let wizardOpen = $state(false);
   let editing: K8sCluster | null = $state(null);
+  $effect(() =>
+    registry.register('kubernetes-overview', [
+      { id: 'k8s.add', title: 'Add a Kubernetes cluster…', group: 'Kubernetes', keywords: 'k8s kubeconfig context import eks', disabled: !isAdmin, run: () => { editing = null; wizardOpen = true; } },
+    ]),
+  );
   let k9sSheet = $state(false);
   let testing: Record<string, boolean> = $state({});
 
@@ -38,8 +44,8 @@
     testing = { ...testing, [c.id]: true };
     try {
       const r = await k8sApi.testCluster(c.id);
-      if (r.ok) toasts.success(`${c.name}: reachable`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
-      else toasts.error(`${c.name}: unreachable`, r.message);
+      if (r.ok) toasts.success(`Reached ${c.name}`, `${r.server_version ?? ''} · ${r.latency_ms} ms`.trim());
+      else toasts.error(`Couldn’t reach ${c.name}`, r.message);
       void k8s.loadCapabilities(c.id, true);
     } catch (e) {
       toastError(`Couldn’t test ${c.name}`, e);
@@ -98,19 +104,19 @@
 >
   {#snippet actions()}
     {#if !k8s.status?.k9s.installed && isAdmin}
-      <button class="btn ghost" onclick={() => (k9sSheet = true)}>Install k9s</button>
+      <button class="btn small ghost" onclick={() => (k9sSheet = true)}>Install k9s</button>
     {/if}
     {#if k8s.clusters.length > 0}
-    <button class="btn" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
-      <Icon name="gauge" size={14} /> Monitor
+    <button class="btn small" onclick={() => router.go('kubernetes/monitor')} title="Monitoring dashboard: pod metrics, restarts, health" data-testid="k8s-monitor-btn">
+      <Icon name="gauge" size={12} /> Monitor
     </button>
     {/if}
     <button class="icon-btn" onclick={() => void k8s.loadClusters()} title="Refresh" aria-label="Refresh clusters">
       <Icon name="refresh" size={14} />
     </button>
     {#if isAdmin && k8s.clusters.length > 0}
-      <button class="btn primary" data-testid="k8s-add-cluster" onclick={() => { editing = null; wizardOpen = true; }}>
-        <Icon name="plus" size={14} /> Add cluster
+      <button class="btn small primary" data-testid="k8s-add-cluster" onclick={() => { editing = null; wizardOpen = true; }}>
+        <Icon name="plus" size={12} /> Add cluster
       </button>
     {/if}
   {/snippet}

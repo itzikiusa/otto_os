@@ -56,7 +56,7 @@
   <p class="dim small intro">
     Runs <span class="mono">npx ccusage</span> on this Mac and puts its numbers next to Otto's for the same days, with
     every session counted on both sides. The first run may download ccusage through npx and take up to 2 minutes.
-    Nothing is sent anywhere. ccusage also counts tools Otto doesn't track (for example Hermes), so those rows only
+    Nothing is sent anywhere. ccusage also counts tools Otto doesn’t track (for example Hermes), so those rows only
     appear on its side.
   </p>
 
@@ -68,7 +68,7 @@
     <div class="cc-error" role="alert">
       <Icon name="warning" size={14} />
       <div>
-        <div>ccusage didn't run: {check.error ?? 'no output'}</div>
+        <div>ccusage didn’t run: {check.error ?? 'no output'}</div>
         {#if check.command}<div class="dim small">Command: <span class="mono">{check.command}</span></div>{/if}
       </div>
     </div>

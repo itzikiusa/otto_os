@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { CLUSTER_VIEWS, type ClusterView } from './types';
   import { onTabKey } from '../../lib/tabKeys';
   import { toastError } from '../../lib/toastError';
@@ -9,7 +10,6 @@
   // connections) instead of navigating away. Self-contained: it owns its sub-tab
   // + warm-tunnel state and does the Test call itself; Edit/Remove are delegated
   // to the host via callbacks so each page can wire them to its own flow.
-  import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
@@ -78,15 +78,9 @@
       <span class="dot" style="background: {cluster.color || 'var(--accent)'}"></span>
       <span class="name ellipsis" title={cluster.name}>{cluster.name}</span>
       <EnvBadge env={cluster.environment} />
-      {#if cluster.read_only}<span class="ro">read-only</span>{/if}
+      {#if cluster.read_only}<Badge variant="outline" label="Read-only" />{/if}
       {#if cluster.ssh}
-        <span
-          class="tunnel-pill"
-          class:ready={tunnelReady}
-          title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'}
-        >
-          <Icon name="zap" size={10} /> {tunnelReady ? 'Tunnel' : 'Connecting…'}
-        </span>
+        <Badge tone={tunnelReady ? 'ok' : 'neutral'} dot live={!tunnelReady} title={tunnelReady ? 'SSH tunnel connected' : 'SSH tunnel warming…'} label={tunnelReady ? 'Tunnel' : 'Connecting…'} />
       {/if}
       <span class="boot mono ellipsis" title={cluster.bootstrap_servers}>{cluster.bootstrap_servers}</span>
     </div>
@@ -156,27 +150,6 @@
     height: 9px;
     border-radius: 50%;
     flex: 0 0 auto;
-  }
-  .ro {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px 6px;
-  }
-  .tunnel-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px 6px;
-  }
-  .tunnel-pill.ready {
-    color: var(--success);
-    border-color: color-mix(in srgb, var(--success) 35%, transparent);
   }
   .boot {
     font-size: var(--fs-xs);

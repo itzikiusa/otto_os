@@ -118,5 +118,5 @@ export function closedReason(reason: string): string {
 
 /** Human copy for the SSRF guard's `blocked` frame. */
 export function blockedCopy(host: string): string {
-  return `Otto blocked a request to ${host}. Pages in the live browser can't reach this Mac, your local network or cloud metadata addresses.`;
+  return `Otto blocked a request to ${host}. Pages in the live browser can’t reach this Mac, your local network or cloud metadata addresses.`;
 }

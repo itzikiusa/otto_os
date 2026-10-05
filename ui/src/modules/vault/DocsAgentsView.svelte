@@ -38,6 +38,8 @@
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
   import { toasts } from '../../lib/toast.svelte';
   import { kindLabel, runStateLabel, severityLabel } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import type { BadgeTone } from '../../lib/status';
   import { DOCS_TEMPLATES } from './docsTemplates';
   import { vault } from './vault.svelte';
   import type { Poller } from '../../lib/poll';
@@ -462,6 +464,15 @@
     if (r && isActive(r)) startPoll();
     return () => stopPoll();
   });
+
+  /** Run / agent / review state → the shared Badge tone. */
+  function stTone(state: string): BadgeTone {
+    if (state === 'running' || state === 'summarizing' || state === 'reviewing' || state === 'revising') return 'accent';
+    if (state === 'done' || state === 'clean' || state === 'revised') return 'ok';
+    if (state === 'done_with_findings' || state === 'exhausted') return 'warn';
+    if (state === 'error') return 'bad';
+    return 'neutral';
+  }
 </script>
 
 <div class="docs-agents">
@@ -651,13 +662,11 @@
     {:else}
       <!-- ── run view ──────────────────────────────────────────────────────── -->
       <div class="run-head">
-        <span
-          class="pill st-{run.state}"
-          title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
-        >
-          {#if active}<span class="spinner-xs"></span>{/if}
+        <Badge tone={stTone(run.state)}
+          title={run.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}>
+          {#if active}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
           {displayState(run.state)}
-        </span>
+        </Badge>
         <span class="kind-chip">{kindLabel(run.kind)}</span>
         <span class="run-meta" title={run.prompt}>
           {#if run.kind === 'refine'}
@@ -672,7 +681,7 @@
         <span class="grow"></span>
         {#if active && run.kind === 'docs'}
           <button class="ghost" disabled={cancelling} onclick={() => void cancel()}>
-            {cancelling ? 'Cancelling…' : 'Cancel'}
+            {cancelling ? 'Canceling…' : 'Cancel'}
           </button>
         {/if}
         {#if run.state === 'done_with_findings'}
@@ -708,7 +717,7 @@
           <div class="agent-card">
             <div class="agent-top">
               <span class="agent-name">{agent.name}</span>
-              <span class="chip">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</span>
+              <Badge variant="outline">{agent.provider}{agent.model ? ' · ' + agent.model : ''}</Badge>
               <span class="grow"></span>
               {#if agent.session_id}
                 <button class="ghost small" onclick={() => void toggleTerminal(agent.session_id)}>
@@ -730,10 +739,10 @@
                   {retrying[String(agent.index)] ? 'Retrying…' : 'Retry'}
                 </button>
               {/if}
-              <span class="pill st-{agent.state}">
-                {#if agent.state === 'running'}<span class="spinner-xs"></span>{/if}
+              <Badge tone={stTone(agent.state)}>
+                {#if agent.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                 {runStateLabel(agent.state)}
-              </span>
+              </Badge>
             </div>
             {#if agent.error}
               <p class="agent-err">{agent.error}</p>
@@ -760,9 +769,9 @@
           <div class="agent-card">
           <div class="agent-top">
             <span class="agent-name">summarizer</span>
-            <span class="chip">
+            <Badge variant="outline">
               {run.summarizer.provider}{run.summarizer.model ? ' · ' + run.summarizer.model : ''}
-            </span>
+            </Badge>
             <span class="grow"></span>
             {#if run.summarizer.session_id}
               <button
@@ -782,10 +791,10 @@
                 {retrying['sum'] ? 'Retrying…' : 'Retry'}
               </button>
             {/if}
-            <span class="pill st-{run.summarizer.state}">
-              {#if run.summarizer.state === 'running'}<span class="spinner-xs"></span>{/if}
+            <Badge tone={stTone(run.summarizer.state)}>
+              {#if run.summarizer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
               {runStateLabel(run.summarizer.state)}
-            </span>
+            </Badge>
           </div>
           {#if run.summarizer.error}
             <p class="agent-err">{run.summarizer.error}</p>
@@ -808,12 +817,12 @@
               <span class="review-eyebrow">Independent review</span>
               <strong>{reviewStateLabel(run)}</strong>
             </div>
-            <span class="pill st-{run.review.state}">
+            <Badge tone={stTone(run.review.state)}>
               {#if run.review.state === 'reviewing' || run.review.state === 'revising'}
-                <span class="spinner-xs"></span>
+                <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>
               {/if}
               {runStateLabel(run.review.state)}
-            </span>
+            </Badge>
           </div>
 
           {#if run.review.state === 'clean'}
@@ -822,8 +831,7 @@
             </div>
           {:else if run.review.state === 'exhausted'}
             <div class="review-outcome exhausted">
-              <strong>Review limit reached.</strong> Findings remain after {run.review.max_iterations}
-              iteration{run.review.max_iterations === 1 ? '' : 's'}; the run kept the latest revisions
+              <strong>Review limit reached.</strong> Findings remain after {plural(run.review.max_iterations, 'iteration')}; the run kept the latest revisions
               and evidence below.
             </div>
           {:else if run.review.outcome}
@@ -842,7 +850,7 @@
                     </span>
                   </div>
                   <span class="grow"></span>
-                  <span class="pill st-{round.state}">{runStateLabel(round.state)}</span>
+                  <Badge tone={stTone(round.state)}>{runStateLabel(round.state)}</Badge>
                 </header>
 
                 <div class="reviewer-list">
@@ -850,9 +858,9 @@
                     <div class="reviewer-card">
                       <div class="agent-top">
                         <span class="agent-name">{reviewer.skill}</span>
-                        <span class="chip">
+                        <Badge variant="outline">
                           {reviewer.provider}{reviewer.model ? ' · ' + reviewer.model : ''}
-                        </span>
+                        </Badge>
                         <span class="grow"></span>
                         {#if reviewer.session_id}
                           <button
@@ -876,10 +884,10 @@
                               : 'Retry reviewer'}
                           </button>
                         {/if}
-                        <span class="pill st-{reviewer.state}">
-                          {#if reviewer.state === 'running'}<span class="spinner-xs"></span>{/if}
+                        <Badge tone={stTone(reviewer.state)}>
+                          {#if reviewer.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                           {runStateLabel(reviewer.state)}
-                        </span>
+                        </Badge>
                       </div>
                       {#if reviewer.focus}
                         <p class="review-focus-label">Focus: {reviewer.focus}</p>
@@ -948,10 +956,10 @@
                           {retrying[`revision-${round.iteration}`] ? 'Retrying…' : 'Retry revision'}
                         </button>
                       {/if}
-                      <span class="pill st-{round.revision.state}">
-                        {#if round.revision.state === 'running'}<span class="spinner-xs"></span>{/if}
+                      <Badge tone={stTone(round.revision.state)}>
+                        {#if round.revision.state === 'running'}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                         {runStateLabel(round.revision.state)}
-                      </span>
+                      </Badge>
                     </div>
                     {#if round.revision.error}
                       <p class="agent-err">{round.revision.error}</p>
@@ -1003,13 +1011,11 @@
               onclick={() => selectRun(r)}
               title={r.prompt}
             >
-              <span
-                class="pill st-{r.state}"
-                title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}
-              >
-                {#if isActive(r)}<span class="spinner-xs"></span>{/if}
+              <Badge tone={stTone(r.state)}
+                title={r.state === 'interrupted' ? 'The app/daemon restarted mid-run' : undefined}>
+                {#if isActive(r)}<span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span>{/if}
                 {displayState(r.state)}
-              </span>
+              </Badge>
               <span class="kind-chip">{kindLabel(r.kind)}</span>
               <span class="run-row-text">
                 {r.kind === 'refine' ? `${r.note_path} — ${r.prompt}` : r.prompt}
@@ -1358,13 +1364,6 @@
     font-size: var(--fs-s);
     font-weight: 600;
   }
-  .chip {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px 8px;
-  }
   .agent-err {
     margin: 6px 0 0;
     font-size: var(--fs-xs);
@@ -1581,62 +1580,6 @@
     overflow-wrap: anywhere;
   }
 
-  /* status pills */
-  .pill {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .st-pending,
-  .st-skipped,
-  .st-cancelled,
-  .st-interrupted {
-    background: color-mix(in srgb, var(--text-dim) 12%, transparent);
-    color: var(--text-dim);
-  }
-  .st-interrupted {
-    border: 1px dashed color-mix(in srgb, var(--text-dim) 45%, transparent);
-  }
-  .st-running,
-  .st-summarizing,
-  .st-reviewing,
-  .st-revising {
-    background: var(--accent-soft);
-    color: var(--accent-text);
-  }
-  .st-done {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .st-done_with_findings,
-  .st-exhausted {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .st-clean,
-  .st-revised {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .st-error {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-  }
 
   .err {
     color: var(--danger);

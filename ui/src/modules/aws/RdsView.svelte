@@ -188,7 +188,7 @@
             {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
             <td class="hide-sm">{i.engine ?? '—'}{#if i.engine_version}<span class="dim"> {i.engine_version}</span>{/if}</td>
             <td class="mono hide-sm">{i.class ?? '—'}</td>
-            <td class="mono hide-md">{i.az ?? '—'}{#if i.multi_az}<span class="tag" title="Multi-AZ">MAZ</span>{/if}</td>
+            <td class="mono hide-md">{i.az ?? '—'}{#if i.multi_az}{' '}<Badge tone="accent" label="Multi-AZ" />{/if}</td>
             <td class="mono hide-md num">{i.storage_gb != null ? `${i.storage_gb} GB` : '—'}</td>
             <td class="mono hide-md" title={endpointOf(i)}>{endpointOf(i) || '—'}</td>
             <td class="dim hide-md" title={fmtDate(i.created)}>{fmtAgo(i.created)}</td>
@@ -224,7 +224,7 @@
         <dl class="kv">
           <dt>Engine</dt><dd>{inst.engine ?? '—'} {inst.engine_version ?? ''}</dd>
           <dt>Class</dt><dd class="mono">{inst.class ?? '—'}</dd>
-          <dt>AZ</dt><dd class="mono">{inst.az ?? '—'}{#if inst.multi_az} <span class="tag" title="Multi-AZ">Multi-AZ</span>{/if}</dd>
+          <dt>AZ</dt><dd class="mono">{inst.az ?? '—'}{#if inst.multi_az} <Badge tone="accent" label="Multi-AZ" />{/if}</dd>
           <dt>Storage</dt><dd>{inst.storage_gb != null ? `${inst.storage_gb} GB` : '—'}{#if inst.storage_type} <span class="dim">({inst.storage_type})</span>{/if}</dd>
           <dt>Endpoint</dt><dd class="mono">{endpointOf(inst) || '—'}</dd>
           <dt>DB name</dt><dd class="mono">{inst.db_name ?? '—'}</dd>
@@ -238,7 +238,7 @@
         {:else}
           <div class="tags">
             {#each Object.entries(inst.tags).sort(([a], [b]) => a.localeCompare(b)) as [k, v] (k)}
-              <span class="tag pl" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
+              <span class="kv" title={`${k}=${v}`}><strong>{k}</strong>={v}</span>
             {/each}
           </div>
         {/if}
@@ -345,25 +345,15 @@
   .err {
     color: var(--danger);
   }
-  .tag {
-    margin-inline-start: 6px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 0 4px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    letter-spacing: .06em;
-  }
-  .tag.pl {
-    margin: 0;
+  /* key=value metadata, not a status Badge: it must truncate a long value
+     inside the drawer, which a Badge chip never does. */
+  .kv {
     font-size: var(--fs-s);
-    font-weight: 400;
     padding: 2px 8px;
+    border-radius: var(--radius-s);
     border: 1px solid var(--border);
     background: var(--surface-2);
     color: var(--text);
-    letter-spacing: 0;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;

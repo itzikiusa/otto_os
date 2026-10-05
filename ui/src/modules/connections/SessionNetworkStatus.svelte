@@ -48,7 +48,7 @@
 <details class="network" bind:open data-testid="network-status">
   <summary aria-expanded={open}>
     <span class="chev" class:open aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
-    <span class="sum-text">Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Loading…'}{#if network?.restart_required}{' · '}<span class="warn">Restart required</span>{/if}</span>
+    <span class="sum-text">Network: {network?.profile_name || (selectedProfileId ? 'selected profile' : 'none')} · {network ? (STATUS_LABEL[network.status] ?? network.status) : 'Checking…'}{#if network?.restart_required}{' · '}<span class="warn">Restart required</span>{/if}</span>
   </summary>
   <div class="contents">
     {#if network?.status === 'connected'}<p>SSH forwards ready. Service health is not checked.</p>{/if}

@@ -222,8 +222,9 @@
       {#each accounts as a (a.id)}
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
         <div
+          role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
             { label: 'Test connection', icon: 'refresh', action: () => testAccount(a) },

@@ -641,7 +641,7 @@
   }
   .read :global(blockquote.callout) {
     border-inline-start: 3px solid var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-soft);
     border-radius: var(--radius-s);
     padding: 8px 12px;
     margin: 8px 0;

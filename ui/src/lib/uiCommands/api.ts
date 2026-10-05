@@ -253,7 +253,7 @@ registerUiCommands('api', {
         // Read the initiating tab's slot — the user may have switched tabs.
         const failed = tabId ? apiClient.responses.get(tabId)?.error : apiClient.lastError;
         if (failed) throw new UiCommandError('failed', failed);
-        throw new UiCommandError('cancelled_by_user', 'The send was cancelled (a new-host secret confirm was declined, or it was stopped).');
+        throw new UiCommandError('cancelled_by_user', 'The send was canceled (a new-host secret confirm was declined, or it was stopped).');
       }
       return responseResult(resp);
     } catch (e) {

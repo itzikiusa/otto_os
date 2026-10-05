@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
   import { untrack } from 'svelte';
@@ -570,7 +571,7 @@
     if (typed === null) return;
     if (typed !== topic) {
       // A mistyped name must not look like a silent no-op.
-      toasts.warn('Topic not deleted', `The name you typed didn't match "${topic}".`);
+      toasts.warn('Topic not deleted', `The name you typed didn’t match "${topic}".`);
       return;
     }
     try {
@@ -775,7 +776,7 @@
           <p class="muted pad small">Showing first {result.messages.length} — increase the limit for more.</p>
         {/if}
         {#if result?.masked}
-          <p class="masked-badge pad small">PII masked — sensitive values were redacted server-side.</p>
+          <p class="masked-note pad small">PII masked — sensitive values were redacted server-side.</p>
         {/if}
         {#if autoPoll && (tailOffsets.size > 0 || tailError)}
           <p class="muted pad small tail-note" role="status">
@@ -795,17 +796,15 @@
             <span class="mono">P{selected.partition} · offset {selected.offset}</span>
             <span class="muted">{fmtTs(selected.timestamp_ms)}</span>
             {#if selected.value?.format}
-              <span class="badge">{selected.value.format}{selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}</span>
+              <Badge tone="accent" label={`${selected.value.format}${selected.value.schema_id != null ? ` #${selected.value.schema_id}` : ''}`} />
             {/if}
             {#if selected.headers.length > 0}
-              <span class="badge muted-badge">{plural(selected.headers.length, 'header')}</span>
+              <Badge label={plural(selected.headers.length, 'header')} />
             {/if}
             {#if result}
               {@const pct = offsetPct(selected, result.partitions)}
               {#if pct !== null}
-                <span class="badge pos-badge" title="Offset position within partition watermarks">
-                  {pct.toFixed(1)}%
-                </span>
+                <Badge label={`${pct.toFixed(1)}%`} title="Offset position within partition watermarks" />
               {/if}
             {/if}
             {#if selected.value?.raw_base64}
@@ -1100,7 +1099,7 @@
     color: var(--accent-text);
   }
   /* Server-side PII masking active badge — shown below the message list. */
-  .masked-badge {
+  .masked-note {
     color: var(--accent-text);
     font-weight: 600;
   }
@@ -1200,10 +1199,6 @@
     min-width: 2px;
   }
   /* Offset-position badge in the detail pane */
-  .pos-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
-  }
   .tail-note {
     padding-top: 4px;
     padding-bottom: 6px;
@@ -1227,15 +1222,6 @@
     gap: 8px;
     flex-wrap: wrap;
     margin-bottom: 8px;
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 2px 6px;
-    border-radius: var(--radius-s);
-    background: var(--accent-soft-strong);
-    color: var(--accent-text);
   }
   h5 {
     margin: 12px 0 4px;
@@ -1344,10 +1330,6 @@
   .field .field-err {
     font-size: var(--fs-xs);
     color: var(--danger);
-  }
-  .muted-badge {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
   }
   .field {
     display: flex;

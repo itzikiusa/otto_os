@@ -66,7 +66,7 @@
       toasts.success(
         'Settings exported',
         excCount > 0
-          ? `${excCount} secret key${excCount === 1 ? '' : 's'} excluded`
+          ? `${plural(excCount, 'secret key')} excluded`
           : 'No secrets in export',
       );
     } catch (e) {
@@ -87,7 +87,7 @@
     try {
       parsed = JSON.parse(await file.text()) as SettingsExportResp;
     } catch {
-      toasts.error('Couldn’t import settings', `“${file.name}” isn't valid JSON.`);
+      toasts.error('Couldn’t import settings', `“${file.name}” isn’t valid JSON.`);
       return;
     }
 
@@ -137,7 +137,7 @@
     try {
       backup = JSON.parse(await file.text()) as StateBackupResp;
     } catch {
-      toasts.error('Couldn’t restore settings', `“${file.name}” isn't a valid settings backup.`);
+      toasts.error('Couldn’t restore settings', `“${file.name}” isn’t a valid settings backup.`);
       return;
     }
 
@@ -208,7 +208,7 @@
     {#if lastExport}
       <div class="hint-line">
         Last export: {lastExport.excluded_keys.length > 0
-          ? `${lastExport.excluded_keys.length} secret key${lastExport.excluded_keys.length === 1 ? '' : 's'} excluded`
+          ? `${plural(lastExport.excluded_keys.length, 'secret key')} excluded`
           : 'no secrets present'}
       </div>
     {/if}

@@ -342,7 +342,7 @@
       <textarea
         bind:value={pendingBody}
         aria-label="Annotation note"
-        placeholder="Add a note…"
+        placeholder="e.g. Make this button the primary action"
         rows="3"
         use:focusOnMount
       ></textarea>
@@ -461,11 +461,7 @@
   }
   .pin.pending {
     background: var(--status-warn);
-    animation: pulse 1.2s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 50%, transparent); }
-    50% { box-shadow: 0 0 0 6px transparent; }
+    animation: otto-pulse 1.4s ease-in-out infinite;
   }
 
   .editor {

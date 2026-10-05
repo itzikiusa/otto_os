@@ -27,6 +27,8 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import ResultsGrid from '../database/ResultsGrid.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import { awsErrorText, fmtBytes, logsRoute } from './util';
@@ -77,6 +79,7 @@
   let groupsLoading = $state(false);
   let groupsError = $state('');
   let selected = $state<string>(linkIsPrefix ? '' : linkGroup);
+  let groupsW = $state(loadPaneWidth('aws.logs.groupsW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let groupSeq = 0;
 
   async function loadGroups(more = false): Promise<void> {
@@ -480,7 +483,7 @@
 </ViewToolbar>
 
 <div class="logs">
-  <aside class="groups" aria-label="Log groups">
+  <aside class="groups" aria-label="Log groups" style:--groups-w="{groupsW}px">
     {#if groupsLoading && !groups}
       <div class="pad" role="status"><p class="load-note">Loading log groups…</p><Skeleton rows={8} /></div>
     {:else if groupsError && !groups}
@@ -524,11 +527,14 @@
       {/if}
     {/if}
   </aside>
+  <PaneDivider bind:width={groupsW} storageKey="aws.logs.groupsW" label="Resize log groups list" />
 
   <section class="main">
     {#if tab === 'events'}
       {#if !selected}
-        <EmptyState icon="file" title="Pick a log group" body="Choose a log group on the left to read its events." />
+        <!-- A group opens automatically when the list has one; this is only
+             the nothing-to-read case. -->
+        <EmptyState icon="file" title="No log group open" body="Log groups in this region list on the left; their events show here." />
       {:else}
         <div class="bar">
           <span class="gtitle mono" title={selected}>{selected}</span>
@@ -740,11 +746,11 @@
   .logs {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 260px minmax(0, 1fr);
+    display: flex;
     overflow: hidden;
   }
   .groups {
+    flex: 0 0 var(--groups-w);
     border-inline-end: 1px solid var(--border);
     overflow-y: auto;
     min-height: 0;
@@ -798,6 +804,7 @@
     margin: 6px 8px 10px;
   }
   .main {
+    flex: 1;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -999,14 +1006,19 @@
   }
   @media (max-width: 640px) {
     .logs {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: minmax(120px, 30%) minmax(0, 1fr);
+      flex-direction: column;
     }
     .groups {
+      flex: 0 0 30%;
+      min-block-size: 120px;
       border-inline-end: 0;
       border-bottom: 1px solid var(--border);
     }
     .hide-sm {
+      display: none;
+    }
+    /* Stacked on phone: nothing to resize sideways. */
+    .logs > :global(.pane-divider) {
       display: none;
     }
   }

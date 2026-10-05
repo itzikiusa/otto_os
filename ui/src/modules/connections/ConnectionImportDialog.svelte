@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   // Import connections from another DB tool. No file picker, no path config: the
   // daemon reads each tool's config from its own standard location. Three steps —
@@ -186,7 +187,7 @@
       if (failed > 0) {
         // Surface the individual failures so they aren't silently lost.
         const detail = res.failed.map((f) => `${f.name}: ${f.error}`).join('\n');
-        toasts.error(`${failed} could not be imported`, detail);
+        toasts.error(`Couldn’t import ${plural(failed, 'connection')}`, detail);
       }
       if (made === 0 && failed === 0) {
         toasts.info('Nothing imported');
@@ -217,7 +218,7 @@
 
       {#if loadingSources}
         <div class="imp-loading" role="status" aria-live="polite">
-          <div class="imp-bar"><div class="imp-bar-fill"></div></div>
+          <div class="indeterminate" role="progressbar" aria-label="Looking for installed tools"></div>
           <span class="imp-loading-text">Looking for installed tools…</span>
         </div>
       {:else if sourcesError}
@@ -276,7 +277,7 @@
 
       {#if scanning}
         <div class="imp-loading" role="status" aria-live="polite">
-          <div class="imp-bar"><div class="imp-bar-fill"></div></div>
+          <div class="indeterminate" role="progressbar" aria-label="Scanning {activeLabel}"></div>
           <span class="imp-loading-text">Scanning {activeLabel}…</span>
         </div>
       {:else}
@@ -345,16 +346,12 @@
                       {#each existing.filter(e => e.kind === c.kind) as target (target.id)}<option value={target.id}>{target.name}</option>{/each}
                     </select>
                   {/if}
-                  {#if c.kind}<span class="kind-badge">{c.kind}</span>{/if}
+                  {#if c.kind}<Badge variant="outline" label={c.kind} />{/if}
                   {#if c.needs_password}
-                    <span class="pill warn" title="No password was imported — set it before connecting">
-                      Needs password
-                    </span>
+                    <Badge tone="warn" label="Needs password" title="No password was imported — set it before connecting" />
                   {/if}
                 {:else}
-                  <span class="pill skip" title={c.note ?? 'Not supported'}>
-                    {c.note ?? 'Not supported'}
-                  </span>
+                  <Badge label={c.note ?? 'Not supported'} title={c.note ?? 'Not supported'} />
                 {/if}
               </div>
             {/each}
@@ -491,27 +488,6 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
   }
-  .imp-bar {
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    overflow: hidden;
-  }
-  .imp-bar-fill {
-    height: 100%;
-    width: 40%;
-    border-radius: 999px;
-    background: var(--accent);
-    animation: imp-indet 1.1s ease-in-out infinite;
-  }
-  @keyframes imp-indet {
-    0% {
-      margin-inline-start: -40%;
-    }
-    100% {
-      margin-inline-start: 100%;
-    }
-  }
 
   /* Step 2 — preview header. */
   .prev-head {
@@ -638,32 +614,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .kind-badge {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    padding: 1px 4px;
-    border-radius: var(--radius-s);
-    background: var(--surface-2);
-    color: var(--text-dim);
-    flex-shrink: 0;
-  }
-  .pill {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: 999px;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--warning) 14%, transparent);
-  }
-  .pill.skip {
-    color: var(--text-dim);
-    background: var(--surface-2);
   }
   .imp-note {
     margin: 0;

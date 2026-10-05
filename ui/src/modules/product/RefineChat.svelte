@@ -9,6 +9,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import { renderMarkdown } from '../../lib/md';
   import AgentByline from '../../lib/components/AgentByline.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import type { RefinementMessage } from './types';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
@@ -154,9 +155,9 @@
       <!-- Thinking indicator while a turn is in flight -->
       {#if sending}
         <div class="bubble-row row-agent">
-          <div class="bubble bubble-agent thinking">
-            <span class="bubble-role">Agent</span>
-            <span class="thinking-dots">thinking…</span>
+          <div class="bubble bubble-agent thinking" role="status">
+            <div class="bubble-header"><AgentByline {provider} model={threadModel} /></div>
+            <span class="thinking-dots"><LiveWorkingDot label="Thinking…" /></span>
           </div>
         </div>
       {/if}
@@ -305,8 +306,7 @@
 
   /* Thinking bubble */
   .thinking {
-    opacity: 0.7;
-    font-style: italic;
+    color: var(--text-dim);
   }
   .thinking-dots {
     font-size: var(--fs-s);

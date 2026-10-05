@@ -133,8 +133,8 @@
       {#if updatedAt}{' '}· updated {fmtUpdated(updatedAt)}{/if}
       · auto-refresh 60 s
     </span>
-    <button class="icon-btn" class:spin={loading} onclick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh metrics">
-      <Icon name="refresh" size={13} />
+    <button class="icon-btn" onclick={() => void load()} disabled={loading} title="Refresh metrics" aria-label="Refresh metrics">
+      {#if loading}<span class="spinner" style="--spinner-size: 13px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={13} />{/if}
     </button>
   </div>
 
@@ -244,9 +244,6 @@
   }
   .dim {
     color: var(--text-dim);
-  }
-  .icon-btn.spin :global(svg) {
-    animation: otto-spin 0.8s linear infinite;
   }
   .pad {
     padding: 4px 0;

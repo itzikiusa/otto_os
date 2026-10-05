@@ -19,6 +19,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { runStateLabel } from '../../lib/labels';
   import { loadErrorText } from '../../lib/loadError';
+  import { toastError } from '../../lib/toastError';
   import type { ProductAnalysis, ProductAnalysisDetail, ProductAnalysisAgent } from './types';
   import type { ProductLens } from '../../lib/api/types';
 
@@ -228,7 +229,7 @@
       });
       startPolling(analysis.id);
     } catch (e) {
-      toasts.error('Analysis failed to start', product.errMsg(e));
+      toastError('Couldn’t start the analysis', e);
     } finally {
       running = false;
     }
@@ -264,7 +265,7 @@
       activeDetail = await product.getAnalysis(a.id);
       if (!isTerminal(activeDetail.analysis.status)) startPolling(a.id);
     } catch (e) {
-      toasts.error('Couldn’t load analysis', product.errMsg(e));
+      toastError('Couldn’t load analysis', e);
     }
   }
 
@@ -295,7 +296,7 @@
       // Resume polling so results refresh automatically.
       if (analysisId) startPolling(analysisId);
     } catch (e) {
-      toasts.error('Couldn’t retry', product.errMsg(e));
+      toastError('Couldn’t retry the analysis', e);
     } finally {
       const done = new Set(retryingAgents);
       done.delete(agentId);
@@ -317,7 +318,7 @@
       // Refresh so the stopped (errored) state shows immediately.
       void pollOnce();
     } catch (e) {
-      toasts.error('Couldn’t stop', product.errMsg(e));
+      toastError('Couldn’t stop the analysis', e);
     } finally {
       const done = new Set(stoppingAgents);
       done.delete(agentId);
@@ -395,7 +396,8 @@
               {#each availableProviders as p (p)}
                 <button
                   class="chip"
-                  class:chip-on={(lensProviders[lens.skill] ?? []).includes(p)}
+                  class:accent={(lensProviders[lens.skill] ?? []).includes(p)}
+                  aria-pressed={(lensProviders[lens.skill] ?? []).includes(p)}
                   disabled={running || !lensEnabled[lens.skill]}
                   onclick={() => toggleLensProvider(lens.skill, p)}
                   title="{p}"
@@ -877,28 +879,6 @@
   .chips-muted {
     pointer-events: none;
   }
-  .chip {
-    height: 22px;
-    padding: 0 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
-    white-space: nowrap;
-  }
-  .chip:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--text);
-  }
-  .chip-on {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
   .chip:disabled {
     cursor: not-allowed;
   }
@@ -1095,7 +1075,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     overflow: hidden;
-    background: #1b1b1b;
+    background: var(--term-bg);
   }
 
   /* ── Status pills — the shared StatusBadge (same as PR review);

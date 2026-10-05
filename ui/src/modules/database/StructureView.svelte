@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Object structure: a columns table (name/type/nullable/default/key), primary
   // key, indexes, foreign keys, and a collapsible DDL block. For Redis keys /
   // Mongo collections (no columns) it renders the `extra` JSON.
@@ -751,7 +752,7 @@
                 <tr>
                   <td class="cn">
                     {f.path}
-                    {#if f.nested}<span class="nested-tag" title="Embedded field path">nested</span>{/if}
+                    {#if f.nested}{' '}<Badge label="Nested" title="Embedded field path" />{/if}
                   </td>
                   <td class="ty">{f.type}</td>
                   <td>
@@ -810,8 +811,8 @@
                   >
                     <Icon name="key" size={12} />
                     <span class="idx-name mono" title={idx.name}>{idx.name}</span>
-                    {#if idx.unique}<span class="tag unique">unique</span>{/if}
-                    {#if idx.method}<span class="tag">{idx.method}</span>{/if}
+                    {#if idx.unique}<Badge tone="accent" label="Unique" />{/if}
+                    {#if idx.method}<Badge variant="outline" label={idx.method} />{/if}
                     <span class="idx-cols mono">({idx.columns.join(', ')})</span>
                     {#if defText != null}
                       <span class="grow"></span>
@@ -826,7 +827,7 @@
                         aria-label="Edit index {idx.name}"
                         disabled={locked || !canSchema}
                         title={locked
-                          ? "MongoDB's _id_ index can't be changed"
+                          ? "MongoDB’s _id_ index can’t be changed"
                           : 'Edit — prepares a drop + recreate for you to review and run'}
                         onclick={() => editIndex(idx)}
                       >
@@ -837,7 +838,7 @@
                         aria-label="Drop index {idx.name}"
                         disabled={locked || !canSchema}
                         title={locked
-                          ? "MongoDB's _id_ index can't be dropped"
+                          ? "MongoDB’s _id_ index can’t be dropped"
                           : 'Drop — prepares the statement for you to review and run'}
                         onclick={() => dropIndex(idx)}
                       >
@@ -993,8 +994,8 @@
                 {/if}
                 {#if idxCondExtraMongo}
                   <div class="ib-warn">
-                    This index has filter terms this builder can't edit
-                    (<span class="mono">{Object.keys(idxCondExtraMongo).join(', ')}</span>) — they're
+                    This index has filter terms this builder can’t edit
+                    (<span class="mono">{Object.keys(idxCondExtraMongo).join(', ')}</span>) — they’re
                     preserved as-is.
                   </div>
                 {/if}
@@ -1117,7 +1118,7 @@
       <div class="block">
         <div class="block-title">Definition</div>
         <div class="ddl-missing">
-          The routine body isn't available — the connected account likely lacks
+          The routine body isn’t available — the connected account likely lacks
           privilege to view routine definitions (needs <code>SHOW_ROUTINE</code>, or
           <code>SELECT</code> on the routine).
         </div>
@@ -1387,14 +1388,6 @@
     background: var(--border);
   }
   /* Mongo fields table */
-  .nested-tag {
-    margin-inline-start: 6px;
-    padding: 0 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    border-radius: var(--radius-s);
-  }
   .fld-act {
     text-align: end;
     white-space: nowrap;
@@ -1744,18 +1737,6 @@
     gap: 4px;
     min-width: 0;
     overflow: hidden;
-  }
-  .tag {
-    font-size: var(--fs-xs);
-    text-transform: uppercase;
-    color: var(--text-dim);
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    padding: 0 4px;
-    border-radius: 999px;
-  }
-  .tag.unique {
-    color: var(--accent-text);
-    background: var(--accent-soft);
   }
   .ddl {
     margin: 0;

@@ -3,6 +3,7 @@
   // and the hero actions — Ask Otto (accent), Present, Export JSON, Zoom-fit. The
   // left vertical tool rail is a sibling (ToolRail); this is only the top strip.
   import Icon from '../../lib/components/Icon.svelte';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { canvas } from '../../lib/stores/canvas.svelte';
 
   interface Props {
@@ -55,11 +56,10 @@
 <div class="toolbar">
   <div class="left">
     {#if editingTitle}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="title-input"
         bind:value={titleDraft}
-        autofocus
+        use:focusOnMount
         onblur={commitTitle}
         onkeydown={(e) => {
           if (e.key === 'Enter') commitTitle();

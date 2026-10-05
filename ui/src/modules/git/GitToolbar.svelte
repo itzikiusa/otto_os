@@ -55,7 +55,7 @@
       toasts.success(
         'Fetched',
         s.behind > 0
-          ? `${s.behind} new commit${s.behind === 1 ? '' : 's'} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
+          ? `${plural(s.behind, 'new commit')} on ${s.upstream ?? 'the upstream'} — pull to bring them in`
           : s.upstream
             ? `${s.branch} is up to date with ${s.upstream}`
             : 'Remote branches and tags refreshed',

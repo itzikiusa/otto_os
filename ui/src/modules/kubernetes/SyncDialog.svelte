@@ -37,7 +37,7 @@
       <input type="checkbox" bind:checked={prune} />
       Prune resources that are no longer in git
     </label>
-    {#if prune}<span class="hint danger">Prune deletes live resources. You'll be asked to type the application name to confirm.</span>{/if}
+    {#if prune}<span class="hint danger">Prune deletes live resources. You’ll be asked to type the application name to confirm.</span>{/if}
   </div>
   {#snippet footer()}
     <button class="btn" onclick={onclose}>Cancel</button>

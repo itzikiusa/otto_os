@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pluralNoun } from '../../lib/plural';
   // Create / edit one policy-as-code rule. `match` is the matcher object
   // (all fields optional, AND-combined): server_id, server_name, tool, tool_glob,
   // risk_label, min_injection_risk, mutating, direction, caller_kind,
@@ -73,7 +74,7 @@
       (key) => !matchKeys.includes(key as (typeof matchKeys)[number]),
     );
     if (unknownKeys.length) {
-      matchError = `Unknown match key${unknownKeys.length === 1 ? '' : 's'}: ${unknownKeys.join(', ')}. Allowed keys: ${matchKeysText}.`;
+      matchError = `Unknown ${pluralNoun(unknownKeys.length, 'match key')}: ${unknownKeys.join(', ')}. Allowed keys: ${matchKeysText}.`;
       return;
     }
     saving = true;

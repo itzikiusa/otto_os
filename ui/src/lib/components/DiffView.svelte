@@ -9,6 +9,7 @@
   // mode: 'line' (unified, line granularity) | 'word' (unified, intra-line word
   // highlights on replaced lines) | 'split' (two columns). ignoreWhitespace
   // affects equality only (rendering always shows the original text).
+  import { plural } from '../plural';
 
   interface Props {
     before: string;
@@ -243,7 +244,7 @@
   {#if mode === 'split'}
     {#each splitRows as row, ri (ri)}
       {#if row.gap !== undefined}
-        <div class="dv-gap">⋯ {row.gap} unchanged line{row.gap === 1 ? '' : 's'}</div>
+        <div class="dv-gap">⋯ {plural(row.gap, 'unchanged line')}</div>
       {:else}
         <div class="dv-srow">
           <div class="dv-col" class:del={!!row.left?.segs} class:empty={!row.left}>
@@ -264,7 +265,7 @@
   {:else}
     {#each rows as row, ri (ri)}
       {#if row.kind === 'gap'}
-        <div class="dv-gap">⋯ {row.count} unchanged line{row.count === 1 ? '' : 's'}</div>
+        <div class="dv-gap">⋯ {plural(row.count, 'unchanged line')}</div>
       {:else if row.kind === 'eq'}
         <div class="dv-row eq"><span class="dv-no">{row.aNo}</span><span class="dv-sign"> </span><span class="dv-txt">{row.text}</span></div>
       {:else if row.kind === 'del'}

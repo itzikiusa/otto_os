@@ -10,7 +10,7 @@
   // FindingStatus::can_transition in crates/otto-core/src/finding.rs); on click it
   // calls the client method and reports the updated finding back to the board (the
   // finding_updated WS event also drives a refetch).
-  import { ApiError } from '../../lib/api/client';
+  import { toastError } from '../../lib/toastError';
   import {
     acceptFinding,
     waiveFinding,
@@ -85,8 +85,7 @@
       onupdated(f);
       toasts.success(ok);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error(`Couldn’t ${label}`, msg);
+      toastError(`Couldn’t ${label}`, e);
     } finally {
       busy = '';
     }
@@ -105,8 +104,7 @@
       onupdated(resp.finding);
       toasts.success(ok, resp.session_id ? 'Agent session started — watch it in Agents.' : undefined);
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error(`Couldn’t ${label}`, msg);
+      toastError(`Couldn’t ${label}`, e);
     } finally {
       busy = '';
     }
@@ -130,8 +128,7 @@
         }
       })
       .catch((e: unknown) => {
-        const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        toasts.error('Couldn’t verify', msg);
+        toastError('Couldn’t verify the finding', e);
       })
       .finally(() => {
         busy = '';
@@ -162,8 +159,7 @@
         toasts.success('Added to repo rules', 'It will be injected into future agent sessions.');
       })
       .catch((e: unknown) => {
-        const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-        toasts.error('Couldn’t add to repo rule', msg);
+        toastError('Couldn’t add it to the repository rules', e);
       })
       .finally(() => {
         busy = '';
@@ -203,8 +199,7 @@
       jiraKey = '';
     } catch (e) {
       // 400 {code:'invalid'} when no Jira account is configured — show its message.
-      const msg = e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e);
-      toasts.error('Couldn’t convert to Jira', msg);
+      toastError('Couldn’t convert it to a Jira issue', e);
     } finally {
       busy = '';
     }

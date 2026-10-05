@@ -376,7 +376,7 @@
       onclick={startReview}
     >
       {#if starting}
-        <span class="spinner-xs"></span>Starting…
+        <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Starting…
       {:else}
         <Icon name="zap" size={12} />
         {review?.status === 'done' ? 'Review again' : 'Review changes'}
@@ -404,7 +404,7 @@
     {/if}
   {:else if review.status === 'running'}
     <div class="lrp-running-header">
-      <div class="spinner"></div>
+      <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
       <span class="lrp-running-title">Reviewing…</span>
     </div>
     {#if review.agents && review.agents.length > 0}
@@ -631,26 +631,6 @@
   .lrp-running-title {
     font-size: var(--fs-m);
     font-weight: 600;
-  }
-  .spinner {
-    width: 18px;
-    height: 18px;
-    border: 2.5px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    flex-shrink: 0;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: otto-spin 0.8s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 2px;
   }
 
   /* Agent cards */

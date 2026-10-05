@@ -589,7 +589,7 @@
       // network, 5xx — never retried, a 5xx may have created it): the comment
       // is approved in Otto but `posted` stays false. Never report that as sent.
       if (!updated.posted) {
-        if (!quiet) toasts.error("Couldn’t post the comment", `${prWhere} refused it — it's approved in Otto but not on the PR. Check the repository's git account.`);
+        if (!quiet) toasts.error("Couldn’t post the comment", `${prWhere} refused it — it’s approved in Otto but not on the PR. Check the repository’s git account.`);
         return false;
       }
       if (!confirmed) toasts.success('Comment posted', prWhere);
@@ -1101,7 +1101,7 @@
     </div>
   {:else if review.status === 'running'}
     <div class="rp-running-header">
-      <div class="spinner"></div>
+      <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
       <span class="rp-running-title">Reviewing…</span>
       <span class="grow"></span>
       <button
@@ -1123,7 +1123,7 @@
   {:else if review.status === 'cancelled'}
     <div class="rp-error card" data-testid="review-cancelled">
       <Icon name="x" size={14} />
-      <span class="rp-error-msg">Review cancelled.</span>
+      <span class="rp-error-msg">Review canceled.</span>
       <button class="btn small" disabled={starting} onclick={startReview}>
         {starting ? 'Starting…' : 'Run again'}
       </button>
@@ -1243,7 +1243,7 @@
             <!-- Unresolved findings -->
             {@const unresolved = mergeReadiness.unresolved_total}
             {#if unresolved > 0}
-              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{unresolved} open finding{unresolved === 1 ? '' : 's'}</span>
+              <span class="chip rp-readiness-chip" style="background:var(--danger-soft);color:var(--danger)">{plural(unresolved, 'open finding')}</span>
             {:else}
               <span class="chip ok rp-readiness-chip">No open findings</span>
             {/if}
@@ -1747,29 +1747,6 @@
     font-size: var(--fs-m);
     font-weight: 600;
   }
-  .spinner {
-    width: 18px;
-    height: 18px;
-    border: 2.5px solid var(--border);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    flex-shrink: 0;
-  }
-  .spinner-xs {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    border: 1.5px solid currentColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.7s linear infinite;
-    vertical-align: middle;
-    margin-inline-end: 2px;
-  }
-  @keyframes spin {
-    to { transform: rotate(360deg); }
-  }
 
   /* Live agent cards */
   .rp-agents {
@@ -2173,7 +2150,7 @@
     gap: 4px;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    border-radius: 20px;
+    border-radius: 999px;
     padding-block: 2px; padding-inline: 10px 8px;
     font-size: var(--fs-xs);
   }

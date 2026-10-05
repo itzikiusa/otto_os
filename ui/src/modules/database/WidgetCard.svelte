@@ -128,7 +128,7 @@
       ...(canEdit
         ? [
             { separator: true },
-            { label: 'Delete widget', icon: 'trash', danger: true as const, action: () => void confirmDelete() },
+            { label: 'Delete widget…', icon: 'trash', danger: true as const, action: () => void confirmDelete() },
           ]
         : []),
     ]);
@@ -141,7 +141,7 @@
     <span class="wc-title ellipsis" title={widget.title}>{widget.title}</span>
     <span class="wc-conn ellipsis" title="Connection: {connName}"><Icon name="db" size={9} />{connName}</span>
     <button class="icon-btn" onclick={() => void run(true)} title="Refresh" aria-label="Refresh widget">
-      <span class:spin={loading}><Icon name="refresh" size={12} /></span>
+      {#if loading}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={12} />{/if}
     </button>
     {#if canEdit}
       {#if onedit}
@@ -240,11 +240,6 @@
     place-items: center;
     height: 100%;
     color: var(--text-dim);
-  }
-  .spin {
-    display: inline-grid;
-    place-items: center;
-    animation: otto-spin 0.8s linear infinite;
   }
   
   .ellipsis {

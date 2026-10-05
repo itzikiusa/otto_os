@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
   // Lag alert configuration UI. Lists configured alerts for a cluster,
   // showing breach status when the last metrics sweep detected a threshold
   // crossing. Allows creating and deleting alerts.
@@ -115,13 +116,11 @@
               <td>{a.threshold.toLocaleString()}</td>
               <td>
                 {#if a.breach_lag !== undefined}
-                  <span class="badge breach">
-                    Breached ({a.breach_lag.toLocaleString()})
-                  </span>
+                  <Badge tone="bad" label={`Breached (${a.breach_lag.toLocaleString()})`} />
                 {:else if a.enabled}
-                  <span class="badge ok">Active</span>
+                  <Badge tone="ok" label="Active" />
                 {:else}
-                  <span class="badge dim">Disabled</span>
+                  <Badge label="Disabled" />
                 {/if}
               </td>
               <td>
@@ -195,24 +194,6 @@
   .mono {
     font-family: var(--font-mono);
     font-size: var(--fs-s);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: var(--radius-s);
-  }
-  .badge.breach {
-    background: var(--danger-soft);
-    color: var(--danger);
-    font-weight: 600;
-  }
-  .badge.ok {
-    background: var(--success-soft);
-    color: var(--success);
-  }
-  .badge.dim {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
-    color: var(--text-dim);
   }
   .create-row {
     display: flex;

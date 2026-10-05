@@ -4,6 +4,7 @@
   // source doesn't thrash. Parse/render errors show inline. Double-click opens an
   // inline source editor (Esc cancels, ⌘↵ commits). Connectable.
   import { Handle, Position } from '@xyflow/svelte';
+  import { focusOnMount } from '../../../lib/focusOnMount';
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import { renderMermaid } from '../mermaid';
@@ -84,10 +85,9 @@
     <div class="err" title={error}>Diagram error: {error}</div>
   {/if}
   {#if editing}
-    <!-- svelte-ignore a11y_autofocus -->
     <textarea
       bind:value={draft}
-      autofocus
+      use:focusOnMount
       spellcheck="false"
       onblur={commit}
       onkeydown={(e) => {

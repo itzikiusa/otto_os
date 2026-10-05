@@ -13,6 +13,10 @@ export function sentenceCase(v: string | null | undefined): string {
   return s ? s[0].toUpperCase() + s.slice(1) : '';
 }
 
+/** The one "needs a workspace" message: toast titles, disabled-control
+ *  titles and empty-state headings all say it the same way. */
+export const NO_WORKSPACE = 'Select a workspace first';
+
 function labeler(map: Record<string, string>): (v: string | null | undefined) => string {
   return (v) => (v != null && map[v]) || sentenceCase(v);
 }

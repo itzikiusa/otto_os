@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Badge from '../../lib/components/Badge.svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { plural } from '../../lib/plural';
   // MCP Control Plane — three focused sections: Otto's built-in server,
   // governed external servers, and approval/audit activity.
@@ -8,6 +10,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { liveQuery } from '../../lib/live';
@@ -117,6 +120,16 @@
     { id: 'servers', label: 'External servers' },
     { id: 'activity', label: 'Activity' },
   ];
+
+  // ⌘K: the page's verbs.
+  $effect(() =>
+    registry.register('mcp', [
+      { id: 'mcp.otto', title: 'Show the Otto MCP server', group: 'MCP', keywords: 'built-in gateway tools expose attach sessions token', run: () => go('otto') },
+      { id: 'mcp.servers', title: 'Show external MCP servers', group: 'MCP', keywords: 'governed servers tools discover allowlist policy', run: () => go('servers') },
+      { id: 'mcp.activity', title: 'Show MCP approvals and audit', group: 'MCP', keywords: 'activity pending approve deny audit log', run: () => go('activity') },
+      { id: 'mcp.refresh', title: 'Refresh MCP servers', group: 'MCP', keywords: 'reload list', disabled: !wsId, run: () => void loadServers() },
+    ]),
+  );
 </script>
 
 <div class="mcp-page">
@@ -138,7 +151,7 @@
           >
             {s.label}
             {#if s.id === 'servers' && wsId && !loading && !loadError}<span class="count">{servers.length}</span>{/if}
-            {#if s.id === 'activity' && pending > 0}<span class="badge" data-testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you">{pending}</span>{/if}
+            {#if s.id === 'activity' && pending > 0}<Badge tone="warn" testid="mcp-pending-badge" title="{plural(pending, 'approval')} waiting for you" label={String(pending)} />{/if}
           </button>
         {/each}
       </div>
@@ -157,8 +170,8 @@
           <EmptyState
             variant="page"
             icon="plug"
-            title="No workspace selected"
-            body="Select a workspace to manage its governed MCP servers and tools."
+            title={NO_WORKSPACE}
+            body="Governed MCP servers and their tools belong to a workspace."
           />
         {:else}
           <ServersTab
@@ -216,18 +229,6 @@
   .count {
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
-  }
-  .badge {
-    min-width: 16px;
-    padding: 1px 4px;
-    border-radius: 999px;
-    /* A pending queue is "needs you" — the amber state, not an error (patterns §5). */
-    background: var(--warning-soft);
-    color: var(--warning);
-    font-weight: 600;
-    font-size: var(--fs-xs);
-    line-height: 14px;
-    text-align: center;
   }
   .activity {
     display: flex;

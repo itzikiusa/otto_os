@@ -6,6 +6,7 @@
   // budgetBus, ws.needsYou changes) — minimal new polling (30 s fallback).
 
   import { onMount, onDestroy } from 'svelte';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { toastError } from '../../lib/toastError';
   import { api } from '../../lib/api/client';
   import type { Poller } from '../../lib/poll';
@@ -473,7 +474,7 @@
 
   <!-- Buckets -->
   {#if !wsId}
-    <EmptyState variant="page" icon="folder" title="No workspace selected" body="Pick a workspace in the sidebar to see its sessions by what they need." />
+    <EmptyState variant="page" icon="folder" title={NO_WORKSPACE} body="Pick a workspace in the sidebar to see its sessions by what they need." />
   {:else}
   <LoadState what="the work queue" variant="page" loading={loading} error={loadError} empty={!view} onretry={() => load()}>
     <div class="buckets">
@@ -495,23 +496,15 @@
               {#each items as item (item.id)}
                 {@const sid = sessionOf(item)}
                 {@const sum = sid ? activity.summary(sid) : null}
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_no_noninteractive_tabindex -->
-                <li
-                  class="item"
-                  class:clickable={!!sid}
-                  role={sid ? 'button' : undefined}
-                  tabindex={sid ? 0 : undefined}
-                  data-session-id={sid}
-                  onclick={() => openSession(item)}
-                  onkeydown={(e) => {
-                    if (e.target !== e.currentTarget) return;
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      openSession(item);
-                    }
-                  }}
-                >
-                  <span class="item-title" title={item.title}>{item.title}</span>
+                <!-- The title is the card's one real button; its ::after stretches over
+                     the card so a click anywhere opens the session, while the
+                     Sub-task controls sit above it as their own buttons. -->
+                <li class="item" class:clickable={!!sid} data-session-id={sid}>
+                  {#if sid}
+                    <button class="item-title item-open" title={item.title} onclick={() => openSession(item)}>{item.title}</button>
+                  {:else}
+                    <span class="item-title" title={item.title}>{item.title}</span>
+                  {/if}
                   <div class="item-meta">
                     {#if item.repo}
                       <span class="meta-tag repo" title={item.repo}>{item.repo}</span>
@@ -541,15 +534,13 @@
                         <button
                           class="subtask-btn"
                           onclick={(e) => openSubtask(e, item)}
-                          onkeydown={(e) => e.stopPropagation()}
                           title="Push a sub-task to this agent"
                           data-testid="subtask-btn"
                         ><Icon name="plus" size={10} /> Sub-task</button>
                       {/if}
                     </div>
                     {#if subtaskFor === item.id}
-                      <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-                      <div class="subtask-form" data-subtask-for={item.id} onclick={(e) => e.stopPropagation()}>
+                      <div class="subtask-form" data-subtask-for={item.id}>
                         <input
                           class="input subtask-input"
                           placeholder="Sub-task for the agent…"
@@ -779,6 +770,7 @@
   }
 
   .item {
+    position: relative;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     transition: background var(--dur-fast);
@@ -792,9 +784,34 @@
   .item.clickable:hover {
     background: var(--hover);
   }
-  .item.clickable:focus-visible {
+  /* The open button covers the whole card (stretched hit area); its focus
+     ring is drawn on the card. */
+  .item-open {
+    max-width: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .item-open::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+  .item-open:focus-visible {
+    outline: none;
+  }
+  .item.clickable:has(.item-open:focus-visible) {
     outline: 2px solid var(--accent-text);
     outline-offset: -2px;
+  }
+  /* Controls inside the card stay above the stretched hit area. */
+  .task-strip button,
+  .subtask-form {
+    position: relative;
+    z-index: 1;
   }
 
   .item-title {

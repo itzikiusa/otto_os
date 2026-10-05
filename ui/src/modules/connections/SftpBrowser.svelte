@@ -121,7 +121,7 @@
     running: 'Running', finalizing: 'Finalizing', completed: 'Completed', cancelled: 'Canceled',
     failed: 'Failed', timed_out: 'Timed out', outcome_unknown: 'Outcome unknown',
   };
-  const WRITE_DENIED = "You don't have write access to this connection's files";
+  const WRITE_DENIED = "You don’t have write access to this connection’s files";
 
   function humanSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;

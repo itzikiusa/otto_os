@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { NO_WORKSPACE } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
   import { toastError } from '../../lib/toastError';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -353,7 +354,7 @@
     <EmptyState
       variant="page"
       icon="folder"
-      title="No workspace selected"
+      title={NO_WORKSPACE}
       body="Self-improvement is per workspace. Pick one from the workspace menu at the top of the sidebar to configure it."
     />
   {:else if !cfg}

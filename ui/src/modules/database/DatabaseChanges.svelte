@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { badgeTone, runStatus } from '../../lib/status';
+  import Badge from '../../lib/components/Badge.svelte';
   import { onMount, untrack } from 'svelte';
   import { sentenceCase, runStateLabel } from '../../lib/labels';
   import { pollWhileVisible } from '../../lib/poll';
@@ -181,7 +183,7 @@
           <button class="btn" onclick={()=>editing=false} disabled={busy}>Close editor</button>
         </div>
       {:else if selected && detail}
-        <div class="title"><h3>{selected.title}</h3><span class="badge">{sentenceCase(selected.status)}</span></div>
+        <div class="title"><h3>{selected.title}</h3><Badge tone={badgeTone(runStatus(selected.status).tone)} label={sentenceCase(selected.status)} /></div>
         <p>{selected.description}</p>
         <p class="hint">Revision {selected.revision} · Author {selected.author_id}</p>
         <div class="targets">
@@ -235,7 +237,7 @@
           <h4>Target attempts</h4>
           {#each detail.attempts as attempt}
             <article>
-              <strong>{attempt.node?.replace(/^db:/,'')}</strong><span class="badge">{runStateLabel(attempt.state)}</span>
+              <strong>{attempt.node?.replace(/^db:/,'')}</strong><Badge tone={badgeTone(runStatus(attempt.state).tone)} label={runStateLabel(attempt.state)} />
               <p>{attempt.summary}</p>
               {#if attempt.state==='outcome_unknown' && selected.status==='outcome_unknown' && can('change_execute')}
                 <p class="hint">Inspect the target database before recording an outcome. This does not replay SQL.</p>
@@ -378,13 +380,6 @@
   }
   .actions {
     margin: 12px 0;
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    padding: 2px 6px;
-    background: var(--hover);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-l);
   }
   .targets {
     display: flex;

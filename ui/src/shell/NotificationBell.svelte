@@ -276,7 +276,7 @@
     close();
     const n = notifications.notices.length;
     const ok = await confirmer.ask(
-      `Delete all ${plural(n, 'notification')}? This can't be undone.`,
+      `Delete all ${plural(n, 'notification')}? This can’t be undone.`,
       { title: 'Clear all notifications', confirmLabel: 'Clear all' },
     );
     if (ok) await notifications.clear();
@@ -325,14 +325,13 @@
   >
     <Icon name="bell" size={15} />
     {#if unreadCount > 0}
-      <span class="badge sev-{notifications.unreadSeverity ?? 'info'}" aria-hidden="true">{badge}</span>
+      <span class="count-bubble sev-{notifications.unreadSeverity ?? 'info'}" aria-hidden="true">{badge}</span>
     {/if}
   </button>
 
   {#if open}
     <div class="bell-layer" use:portal>
       <!-- Backdrop closes the panel on any outside interaction. -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="bell-backdrop"
         onclick={() => close()}
@@ -393,7 +392,7 @@
             {:else if notifications.rows.length === 0}
               <div class="panel-empty">
                 <Icon name="bell" size={22} />
-                <p>You're all caught up</p>
+                <p>You’re all caught up</p>
               </div>
             {:else}
               {#each sections as sec (sec.bucket)}
@@ -501,7 +500,7 @@
   }
   /* Coloured by the most severe UNREAD notice: accent for info, then warning /
      danger. The semantic colours are text-safe on --bg, so --bg on them is too. */
-  .badge {
+  .count-bubble {
     position: absolute;
     top: -2px;
     inset-inline-end: -3px;
@@ -517,11 +516,11 @@
     text-align: center;
     box-shadow: 0 0 0 1.5px var(--bg);
   }
-  .badge.sev-warn {
+  .count-bubble.sev-warn {
     background: var(--warning);
     color: var(--bg);
   }
-  .badge.sev-error {
+  .count-bubble.sev-error {
     background: var(--danger);
     color: var(--bg);
   }
@@ -561,20 +560,20 @@
     transform: rotate(45deg);
   }
   .nb-caret.at-left {
-    left: -6px;
+    left: -6px; /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     top: calc(var(--caret) - 7px);
     border-width: 0 0 1px 1px;
     clip-path: polygon(0 0, 0 100%, 100% 100%);
   }
   .nb-caret.at-right {
-    right: -6px;
+    right: -6px; /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     top: calc(var(--caret) - 7px);
     border-width: 1px 1px 0 0;
     clip-path: polygon(0 0, 100% 0, 100% 100%);
   }
   .nb-caret.at-top {
     top: -6px;
-    left: calc(var(--caret) - 7px);
+    left: calc(var(--caret) - 7px); /* ui-guards: allow — physical: --caret and the side come from measured screen geometry */
     border-width: 1px 0 0 1px;
     clip-path: polygon(0 0, 100% 0, 0 100%);
   }

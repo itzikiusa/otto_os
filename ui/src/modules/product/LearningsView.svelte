@@ -1,5 +1,6 @@
 <script lang="ts">
   import { plural } from '../../lib/plural';
+  import { toastError } from '../../lib/toastError';
   // LearningsView — workspace-scoped knowledge base.
   // Patterns to follow (kind='pattern') vs Cases to avoid (kind='avoid').
   // Inactive (AI-suggested) learnings surface with an Accept button.
@@ -145,7 +146,7 @@
       addRefs = '';
       addKind = 'pattern';
     } catch (e) {
-      toasts.error('Couldn’t add learning', product.errMsg(e));
+      toastError('Couldn’t add learning', e);
     } finally {
       adding = false;
     }
@@ -189,7 +190,7 @@
       toasts.success('Learning updated');
       editingId = null;
     } catch (e) {
-      toasts.error('Couldn’t save learning', product.errMsg(e));
+      toastError('Couldn’t save learning', e);
     } finally {
       editSaving = false;
     }
@@ -201,7 +202,7 @@
     try {
       await product.updateLearning(l.id, { active: !l.active });
     } catch (e) {
-      toasts.error('Couldn’t toggle active', product.errMsg(e));
+      toastError('Couldn’t toggle active', e);
     } finally {
       togglingId = null;
     }
@@ -214,7 +215,7 @@
       await product.acceptLearning(id);
       toasts.success('Learning accepted — now active');
     } catch (e) {
-      toasts.error('Couldn’t accept learning', product.errMsg(e));
+      toastError('Couldn’t accept learning', e);
     } finally {
       acceptingId = null;
     }
@@ -226,7 +227,7 @@
     if (deletingId) return;
     const l = product.learnings.find((x) => x.id === id);
     const ok = await confirmer.ask(
-      `Delete the learning “${l?.title ?? 'untitled'}”? Future analyses stop using it. This can't be undone.`,
+      `Delete the learning “${l?.title ?? 'untitled'}”? Future analyses stop using it. This can’t be undone.`,
       { title: 'Delete learning', confirmLabel: 'Delete', danger: true },
     );
     if (!ok) return;
@@ -235,7 +236,7 @@
       await product.deleteLearning(deletingId);
       toasts.info('Learning deleted');
     } catch (e) {
-      toasts.error('Couldn’t delete learning', product.errMsg(e));
+      toastError('Couldn’t delete learning', e);
     } finally {
       deletingId = null;
     }

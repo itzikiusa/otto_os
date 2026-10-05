@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { plural } from '../../../lib/plural';
   // Evidence for one learned rule / proposal: a vertical timeline of the design
   // signals it was drawn from (newest first) — when, what kind, which design,
   // a one-line summary and a way back to the design. Evidence ids that aren't
@@ -66,7 +67,7 @@
     </ol>
   {/if}
   {#if missing > 0 && items.length > 0}
-    <p class="dim">{missing} more signal{missing === 1 ? '' : 's'} beyond the loaded log.</p>
+    <p class="dim">{plural(missing, 'more signal')} beyond the loaded log.</p>
   {/if}
 </aside>
 

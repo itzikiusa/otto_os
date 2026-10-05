@@ -204,7 +204,7 @@
     if (revokingAll || shares.length === 0) return;
     const n = shares.length;
     const ok = await confirmer.ask(
-      `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and the link${n === 1 ? '' : 's'} can't be used again.`,
+      `Revoke ${n === 1 ? 'the share link' : `all ${n} share links`} for this session? Guests attached through ${n === 1 ? 'it' : 'them'} are disconnected, and ${n === 1 ? 'the link' : 'the links'} can’t be used again.`,
       { title: 'Revoke share links', confirmLabel: n === 1 ? 'Revoke link' : `Revoke ${n} links` },
     );
     if (!ok) return;
@@ -280,9 +280,8 @@
         <div class="sm-sender-warn">
           <Icon name="warning" size={12} />
           No verified email sender.
-          <!-- svelte-ignore a11y_invalid_attribute -->
           <a
-            href="#"
+            href="#/settings/sharing"
             onclick={(e) => { e.preventDefault(); onclose(); router.go('settings/sharing'); }}
           >
             Set one up in Settings → Sharing

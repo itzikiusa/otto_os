@@ -54,7 +54,7 @@
     if (!row) return;
     if (row.secret && row.storedKey !== null && !(row.touched && row.value !== '')) {
       const ok = await confirmer.ask(
-        `“${row.key || row.storedKey}” is stored in the Keychain and can't be shown. Making it a plain variable deletes the stored value when you save — type the value again to keep it.`,
+        `“${row.key || row.storedKey}” is stored in the Keychain and can’t be shown. Making it a plain variable deletes the stored value when you save — type the value again to keep it.`,
         { title: 'Make variable plain?', confirmLabel: 'Make plain' },
       );
       if (!ok) return;

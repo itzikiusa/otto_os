@@ -42,7 +42,7 @@
     const n = name.trim();
     if (!n) return touched ? 'Give the skill a name.' : null;
     if (!NAME_RE.test(n)) return 'Use lowercase letters, digits and dashes (kebab-case), up to 64 characters.';
-    if (taken.has(n)) return `A skill named "${n}" already exists in the library.`;
+    if (taken.has(n)) return `A skill named “${n}” already exists in the library.`;
     return null;
   });
   // Tooltip for the disabled Create button (the inline name error only shows

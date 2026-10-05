@@ -387,7 +387,7 @@
     <EmptyState
       icon="terminal"
       title="No active sessions"
-      body="Start an agent or a shell (⌘T). In tiled view you'll see every session at once."
+      body="Start an agent or a shell (⌘T). In tiled view you’ll see every session at once."
       variant="page"
       actionIcon="plus"
       actionLabel="New session…"
@@ -599,8 +599,11 @@
      6px into both neighbouring tiles like a window frame. */
   .tgut {
     position: relative;
-    /* Above the panes' own stacking contexts (header chrome, drop veils). */
-    z-index: 20;
+    /* In-pane range, above the panes' own chrome (≤ 5; the terminal is its own
+       stacking context via `contain`). The tiles are NOT `isolation: isolate`:
+       they host non-portalled Modals / the image Lightbox, which must still
+       rise above the app chrome. */
+    z-index: 8;
     min-width: 0;
     min-height: 0;
   }
@@ -650,7 +653,7 @@
     bottom: 0;
     width: 18px;
     height: 18px;
-    z-index: 21;
+    z-index: 9; /* over the divider it meets */
     cursor: nwse-resize;
     touch-action: none;
   }

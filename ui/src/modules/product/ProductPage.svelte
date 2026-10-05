@@ -5,6 +5,7 @@
   // group tabs inline-start, the active group's sub-views as pills inline-end —
   // with the selected sub-view's content below.
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import { toastError } from '../../lib/toastError';
   import { tabKeys } from '../../lib/tabKeys';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -19,7 +20,6 @@
   import { product, buildTree, type TreeNode } from '../../lib/stores/product.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
-  import { toasts } from '../../lib/toast.svelte';
   import ImportDialog from './ImportDialog.svelte';
   import OverviewTab from './OverviewTab.svelte';
   import AnalysisTab from './AnalysisTab.svelte';
@@ -81,7 +81,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Couldn’t create the epic', product.errMsg(e));
+      toastError('Couldn’t create the epic', e);
     } finally {
       draftCreating = false;
     }
@@ -104,7 +104,7 @@
   }
   async function addChild(epic: ProductStory, kind: TreeKind): Promise<void> {
     if (!(await product.mayLeaveDraft())) return;
-    const title = await confirmer.promptText(`Title of the new ${kind} under "${epic.title}":`, {
+    const title = await confirmer.promptText(`Title of the new ${kind} under “${epic.title}”:`, {
       title: kind === 'doc' ? 'Add doc' : 'Add story', confirmLabel: 'Create', placeholder: 'e.g. Tier ladder screens',
     });
     if (!title) return;
@@ -119,7 +119,7 @@
       product.tab = 'overview';
       mobileSection = 'content';
     } catch (e) {
-      toasts.error('Couldn’t add the child', product.errMsg(e));
+      toastError('Couldn’t add the child', e);
     }
   }
 
@@ -155,7 +155,7 @@
       );
     }
     items.push({ separator: true });
-    items.push({ label: 'Delete', icon: 'trash', danger: true, action: () => void deleteStory(s) });
+    items.push({ label: 'Delete…', icon: 'trash', danger: true, action: () => void deleteStory(s) });
     ctxMenu.show(e, items);
   }
   /** Picker: every top-level row can become the parent (epics first). The menu is
@@ -181,7 +181,7 @@
       await product.moveStory(s.id, epic.id, s.folder || '');
       collapsedEpics = { ...collapsedEpics, [epic.id]: false };
     } catch (e) {
-      toasts.error('Couldn’t move', product.errMsg(e));
+      toastError('Couldn’t move the story', e);
     }
   }
   async function setFolder(s: ProductStory): Promise<void> {
@@ -194,21 +194,21 @@
     try {
       await product.patchStory(s.id, { folder: folder ?? '' });
     } catch (e) {
-      toasts.error('Couldn’t set the folder', product.errMsg(e));
+      toastError('Couldn’t set the folder', e);
     }
   }
   async function detach(s: ProductStory): Promise<void> {
     try {
       await product.moveStory(s.id, null, '');
     } catch (e) {
-      toasts.error('Couldn’t detach', product.errMsg(e));
+      toastError('Couldn’t detach', e);
     }
   }
   async function mark(s: ProductStory, kind: TreeKind): Promise<void> {
     try {
       await product.setTreeKind(s.id, kind);
     } catch (e) {
-      toasts.error('Couldn’t change the tree role', product.errMsg(e));
+      toastError('Couldn’t change the tree role', e);
     }
   }
   function toggleEpic(id: string): void {
@@ -237,7 +237,7 @@
       // On mobile, reveal the new draft's content panel right away.
       mobileSection = 'content';
     } catch (e) {
-      toasts.error("Couldn’t create the draft", product.errMsg(e));
+      toastError('Couldn’t create the draft', e);
     } finally {
       draftCreating = false;
     }
@@ -493,7 +493,7 @@
     // deleted with it; children are re-parented to the top level, not deleted.
     const kids = product.childrenOf(s.id).length;
     const ok = await confirmer.ask(
-      `Delete "${s.title}"? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
+      `Delete “${s.title}”? This removes it from Otto (the Jira/Confluence item is untouched).\n\n` +
         'Its versions, questions, notes, analyses, test cases, transcripts and attachments are deleted too.' +
         (kids > 0 ? ` Its ${kids} child stor${kids === 1 ? 'y moves' : 'ies move'} to the top level.` : ''),
       { title: 'Delete story', confirmLabel: 'Delete', danger: true },
@@ -512,7 +512,7 @@
     try {
       await product.deleteStory(s.id);
     } catch (e) {
-      toasts.error(`Couldn’t delete "${s.title}"`, product.errMsg(e));
+      toastError(`Couldn’t delete “${s.title}”`, e);
       return;
     }
     if (wasOpen && next && product.stories.some((x) => x.id === next.id)) {
@@ -661,18 +661,18 @@
   {#snippet actions()}
     {#if product.view === 'stories'}
       {#if selectedStory && selectedIsEpic}
-        <button class="btn add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
+        <button class="btn small add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
           <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
         </button>
       {/if}
       <!-- The ONE import affordance — secondary, before the one primary (the empty state owns it while the list is empty). -->
       {#if !noStories}
-        <button class="btn" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
+        <button class="btn small" onclick={() => (importOpen = true)} title="Import an existing Jira issue / Confluence page">
           <Icon name="download" size={12} /> Import
         </button>
       {/if}
       <button
-        class="btn primary"
+        class="btn small primary"
         onclick={newMenu}
         title="New: a blank draft (Discovery) or an epic that groups stories/docs in folders"
         disabled={draftCreating}
@@ -726,7 +726,7 @@
         {#if (product.loadingStories || storiesError) && product.stories.length === 0}
           <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} empty onretry={() => void loadStories()} />
         {:else if product.stories.length === 0}
-          <div class="list-empty">No stories yet.</div>
+          <EmptyState icon="file" title="No stories yet" body="Import one or start a blank draft from New." />
         {:else if storiesError}
           <!-- A refresh failed: keep the last good list, say so, offer Retry. -->
           <LoadState what="stories" variant="compact" loading={product.loadingStories} error={storiesError} onretry={() => void loadStories()} />
@@ -734,10 +734,13 @@
         {#if product.stories.length === 0}
           <!-- the loading / error / empty states above own it -->
         {:else if filteredStories.length === 0}
-          <div class="list-empty">
-            No stories tagged “{activeTagFilter}”.
-            <button class="btn small ghost" onclick={() => (activeTagFilter = null)}>Clear filter</button>
-          </div>
+          <EmptyState
+            icon="filter"
+            title={`No stories tagged “${activeTagFilter}”`}
+            actionLabel="Clear filter"
+            actionKind="secondary"
+            onaction={() => (activeTagFilter = null)}
+          />
         {:else}
           {#each tree as node (node.story.id)}
             {@render storyRow(node.story, node)}
@@ -971,12 +974,6 @@
     flex-direction: column;
     gap: 2px;
     min-height: 0;
-  }
-  .list-empty {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
-    padding: 8px 4px;
-    line-height: 1.5;
   }
   /* Wrapper handles hover background + reveals the row's ⋯ button */
   .story-row-wrap {
@@ -1251,7 +1248,7 @@
   .tab-strip .st.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-xs);
   }
   /* Secondary sub-nav: smaller, dimmer pills, no shared background — a
      sub-level reading subordinate to the segmented group strip beside it.
@@ -1457,9 +1454,6 @@
     }
 
     /* ── Bigger, more legible text on phones ───────────────────────────── */
-    .list-empty {
-      font-size: var(--fs-m);
-    }
     .story-title {
       font-size: var(--fs-l);
     }

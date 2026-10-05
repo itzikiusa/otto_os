@@ -11,7 +11,8 @@
   import { api } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import Icon from '../../lib/components/Icon.svelte';
   import ConflictHunk from './ConflictHunk.svelte';
 
@@ -32,6 +33,8 @@
   let loading = $state(true);
   let loadError = $state<string | null>(null);
   let saving = $state(false);
+  /** Bumped by Retry to re-run the load effect for the same file. */
+  let reloadKey = $state(0);
 
   // Per-conflict chosen lines. Indexed by the conflict's ordinal position
   // among `conflict` segments (0-based). null = undecided.
@@ -48,6 +51,7 @@
     // Re-load whenever the selected file changes.
     const id = repoId;
     const p = path;
+    void reloadKey;
     loading = true;
     loadError = null;
     file = null;
@@ -61,7 +65,7 @@
         current = 0;
       })
       .catch((e) => {
-        loadError = e instanceof Error ? e.message : String(e);
+        loadError = loadErrorText(e);
       })
       .finally(() => {
         loading = false;
@@ -218,14 +222,9 @@
   </div>
 
   <div class="pane-body">
-    {#if loading}
-      <div style="padding: 12px"><Skeleton rows={8} height={20} /></div>
-    {:else if loadError}
-      <div class="load-error">
-        <Icon name="info" size={14} />
-        <span>Failed to load conflict: {loadError}</span>
-      </div>
-    {:else if file}
+    {#if !file}
+      <LoadState what="this conflict" {loading} error={loadError} empty rows={8} onretry={() => reloadKey++} />
+    {:else}
       <div class="whole-actions">
         <button class="btn small" disabled={saving} onclick={() => takeSide('ours')}>{file.ours_present ? `Take ${oursLabel}` : `Take ${oursLabel} (delete)`}</button>
         <button class="btn small" disabled={saving} onclick={() => takeSide('theirs')}>{file.theirs_present ? `Take ${theirsLabel}` : `Take ${theirsLabel} (delete)`}</button>
@@ -396,14 +395,6 @@
   .binary {
     padding: 16px;
     font-size: var(--fs-s);
-  }
-  .load-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 16px;
-    font-size: var(--fs-s);
-    color: var(--danger);
   }
   .dim {
     color: var(--text-dim);

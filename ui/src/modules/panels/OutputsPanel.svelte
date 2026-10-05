@@ -559,7 +559,7 @@
     min-height: 200px;
     width: 100%;
     border: none;
-    background: #fff;
+    background: #fff; /* ui-guards: allow — a web page’s default canvas, not app chrome */
   }
   .ext-link {
     display: inline-flex;

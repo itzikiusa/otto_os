@@ -1,5 +1,6 @@
 <script lang="ts">
   import { toastError } from '../../lib/toastError';
+  import { focusOnMount } from '../../lib/focusOnMount';
   import { liveQuery } from '../../lib/live';
   import PathField from '../../lib/components/PathField.svelte';
   // Workflows: build automations by *describing* them (agent mode) or by hand
@@ -10,6 +11,7 @@
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
   import Icon, { asIcon } from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import { runStatus } from '../../lib/status';
   import Modal from '../../lib/components/Modal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -733,7 +735,7 @@
   // an empty "Pick a workflow" pane.
   async function del(wf: Workflow): Promise<void> {
     const ok = await confirmer.ask(
-      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can't be undone.`,
+      `Delete “${wf.name}”? Its run history and triggers are deleted with it. This can’t be undone.`,
       { title: 'Delete workflow', confirmLabel: 'Delete workflow' },
     );
     if (!ok) return;
@@ -1020,7 +1022,7 @@
       }
       return parsed;
     } catch (e) {
-      runInputError = `Run input isn't valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
+      runInputError = `Run input isn’t valid JSON (${e instanceof Error ? e.message : 'parse error'}). Fix it, or clear the field to run with no input.`;
       runInputOpen = true;
       return null; // signal: invalid
     }
@@ -1709,7 +1711,7 @@
           title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
           onclick={generate}
         >
-          {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+          {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
         </button>
       </div>
       {#if templates.length > 0}
@@ -1737,7 +1739,7 @@
         title={prompt.trim() === '' ? 'Describe the flow first' : 'Generate the workflow (⌘↵)'}
         onclick={generate}
       >
-        {#if generating}<span class="spin"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
+        {#if generating}<span class="spinner" style="--spinner-size: 11px" aria-hidden="true"></span> Building…{:else}<Icon name="zap" size={13} /> Generate workflow{/if}
       </button>
       <button class="btn ghost full" onclick={createBlank}>
         <Icon name="plus" size={13} /> Start blank
@@ -1817,11 +1819,10 @@
   {/snippet}
   {#snippet titleContent()}
     {#if current && renamingId === current.id && renameInBar}
-      <!-- svelte-ignore a11y_autofocus -->
       <input
         class="wf-title-edit"
         bind:value={renameValue}
-        autofocus
+        use:focusOnMount
         aria-label="Workflow name"
         onkeydown={(e) => {
           if (e.key === 'Enter') commitRename(current!);
@@ -1839,7 +1840,7 @@
         <Icon name="edit" size={13} />
       </button>
     {/if}
-    {#if current && dirty}<span class="badge" title="The canvas has changes that aren't saved yet">Unsaved</span>{/if}
+    {#if current && dirty}<Badge tone="accent" label="Unsaved" title="The canvas has changes that aren’t saved yet" />{/if}
   {/snippet}
   {#snippet actions()}
     {#if current}
@@ -1935,12 +1936,11 @@
       {#each workflows as wf (wf.id)}
         <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
-            <!-- svelte-ignore a11y_autofocus -->
             <input
               class="row-rename"
               data-testid="wf-rename-input"
               bind:value={renameValue}
-              autofocus
+              use:focusOnMount
               aria-label="Workflow name"
               onkeydown={(e) => {
                 if (e.key === 'Enter') commitRename(wf);
@@ -2149,7 +2149,7 @@
         <div class="instructions-wrap">
           <div class="instructions-h">
             <span>Instructions</span>
-            {#if instructionsDirty}<span class="badge">unsaved</span>{/if}
+            {#if instructionsDirty}<Badge tone="accent" label="Unsaved" />{/if}
             <span class="grow"></span>
             <button class="btn small" disabled={!instructionsDirty || savingInstructions} title={instructionsDirty ? 'Save the instructions' : 'No unsaved changes'} onclick={saveInstructions}>
               {savingInstructions ? 'Saving…' : 'Save instructions'}
@@ -2717,7 +2717,7 @@
                 value={paramStr('expr')}
                 oninput={(e) => onParam('expr', e.currentTarget.value)}
               />
-              <p class="node-hint">Truthy → downstream nodes run; falsy → they're skipped.</p>
+              <p class="node-hint">Truthy → downstream nodes run; falsy → they’re skipped.</p>
             {:else if selectedNode.kind === 'loop'}
               <label for="np-maxiter">Max iterations (1–10)</label>
               <input
@@ -3912,14 +3912,8 @@
   }
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-  .badge {
-    font-size: var(--fs-xs);
-    color: var(--accent-text);
-    background: var(--accent-soft);
-    padding: 1px 6px;
-    border-radius: 999px;
   }
   .grow {
     flex: 1;
@@ -4474,10 +4468,6 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
   }
-  .btn.danger {
-    color: var(--danger);
-    border-color: color-mix(in srgb, var(--status-exited) 45%, var(--border));
-  }
   .dot {
     width: 8px;
     height: 8px;
@@ -4509,15 +4499,6 @@
     .dot.running {
       animation: none;
     }
-  }
-  .spin {
-    width: 11px;
-    height: 11px;
-    border: 2px solid currentColor;
-    border-inline-end-color: transparent;
-    border-radius: 50%;
-    display: inline-block;
-    animation: otto-spin 0.8s linear infinite;
   }
   
   /* Triggers panel: collapsible section below the canvas */

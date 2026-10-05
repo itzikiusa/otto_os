@@ -407,7 +407,7 @@
     border-radius: var(--radius-s);
     padding: 10px;
     box-sizing: border-box;
-    color: #222;
+    color: #222; /* ui-guards: allow — sticky-note ink on its fixed paper color */
     box-shadow: var(--shadow);
     overflow: auto;
     white-space: pre-wrap;

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { transcript as transcriptStore } from '../lib/stores/transcript.svelte';
+  import { NO_WORKSPACE } from '../lib/labels';
   import { toastError } from '../lib/toastError';
   $effect(() => {
     const onVis = (): void => transcriptStore.setVisible(!document.hidden);
@@ -25,6 +26,7 @@
   import NavButtons from './NavButtons.svelte';
   import MobileActionBar from './MobileActionBar.svelte';
   import Icon from '../lib/components/Icon.svelte';
+  import LoadState from '../lib/components/LoadState.svelte';
   import StatusBar from './StatusBar.svelte';
   import Palette from './Palette.svelte';
   import FloatingBar from '../lib/components/FloatingBar.svelte';
@@ -548,7 +550,7 @@
   // ---- update CLIs helper (shared by palette + any future callers) ----
   async function updateAllCLIs(): Promise<void> {
     const wsId = ws.currentId;
-    if (!wsId) { toasts.error('No workspace selected'); return; }
+    if (!wsId) { toasts.error(NO_WORKSPACE); return; }
     // One chord (⌘U) used to launch a global install with no way back — ask.
     const ok = await confirmer.ask(
       'Otto opens an "Update CLIs" session that installs the latest Claude Code, Codex and other agent CLIs on this Mac. Running sessions keep their current version until they restart.',
@@ -570,7 +572,7 @@
       { id: 'core.new-session', title: 'New session…', group: 'Session', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
       { id: 'core.new-session-scratch', title: 'New session (no workspace)…', group: 'Session', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
       { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Session', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
-      { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Session', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
+      { id: 'core.broadcast', title: 'Broadcast message to sessions…', group: 'Session', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
       { id: 'core.close-tab', title: 'Close tab', group: 'Session', shortcut: '⌘W', run: () => ws.closeActiveTab() },
       { id: 'core.reopen-tab', title: 'Reopen closed tab', group: 'Session', shortcut: '⌘⇧T', keywords: 'restore undo close tab session', run: () => ws.reopenClosedTab() },
       { id: 'core.next-session', title: 'Next session', group: 'Session', shortcut: '⌘]', keywords: 'switch tab forward cycle', run: () => ws.cycleTab(1) },
@@ -586,12 +588,12 @@
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
       { id: 'core.toggle-right', title: `Toggle ${SESSION_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toastError('Couldn’t open window', e)) }] : []),
-      { id: 'core.scheme-auto', title: 'Scheme: Auto (follow system)', group: 'View', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
-      { id: 'core.scheme-light', title: 'Scheme: Light', group: 'View', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
-      { id: 'core.scheme-dark', title: 'Scheme: Dark', group: 'View', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
-      { id: 'core.theme-native', title: 'Theme: Native', group: 'View', run: () => ui.setTheme('native') },
-      { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'View', run: () => ui.setTheme('pro-dark') },
-      { id: 'core.theme-warm', title: 'Theme: Warm', group: 'View', run: () => ui.setTheme('warm') },
+      { id: 'core.scheme-auto', title: 'Use automatic color scheme (follow system)', group: 'View', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
+      { id: 'core.scheme-light', title: 'Use light color scheme', group: 'View', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
+      { id: 'core.scheme-dark', title: 'Use dark color scheme', group: 'View', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
+      { id: 'core.theme-native', title: 'Use Native theme', group: 'View', run: () => ui.setTheme('native') },
+      { id: 'core.theme-pro-dark', title: 'Use Pro Dark theme', group: 'View', run: () => ui.setTheme('pro-dark') },
+      { id: 'core.theme-warm', title: 'Use Warm theme', group: 'View', run: () => ui.setTheme('warm') },
       // One "Open <tab> panel" per Session-panel tab (lib/rightTabs.ts).
       ...RIGHT_TABS.map((t) => ({
         id: t.id === 'git' ? 'core.git-panel' : t.id === 'notes' ? 'core.notes' : `core.panel-${t.id}`,
@@ -602,7 +604,7 @@
         run: () => ui.openRight(t.id),
       })),
       { id: 'core.shortcuts', title: 'Show keyboard shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
-      { id: 'core.logout', title: 'Sign out', group: 'Tools', run: () => auth.logout() },
+      { id: 'core.logout', title: 'Sign out', group: 'Account', keywords: 'log out logout account', run: () => auth.logout() },
     ]);
     return unreg;
   });
@@ -650,7 +652,7 @@
         title: fav ? `Remove ${m.label} from Favorites` : `Add ${m.label} to Favorites`,
         group: 'View',
         detail: 'Sidebar',
-        keywords: 'favorite favourite star pin sidebar current page unfavorite',
+        keywords: 'favorite favourite star pin sidebar current page unfavorite', // UK search synonym; ui-guards: allow
         run: () => ui.toggleSidebarFavorite(m.id),
       },
     ]);
@@ -689,7 +691,7 @@
         'guides',
         GUIDES.map((g) => ({
           id: `help.guide.${g.id}`,
-          title: `Guide: ${g.title}`,
+          title: `Open the ${g.title} guide`,
           group: 'Help',
           detail: g.group,
           keywords: `help guide readme docs ${g.id.replace(/-/g, ' ')} ${g.summary} ${g.shortcuts.join(' ')}`,
@@ -735,7 +737,7 @@
       'workspaces',
       ws.workspaces.map((w) => ({
         id: `ws.${w.id}`,
-        title: `Switch workspace: ${w.name}`,
+        title: `Switch to workspace ${w.name}`,
         group: 'Session',
         keywords: w.root_path,
         run: () => void ws.select(w.id),
@@ -785,7 +787,7 @@
       'repos',
       git.repos.map((r) => ({
         id: `repo.${r.id}`,
-        title: `Open repo: ${r.name}`,
+        title: `Open repository ${r.name}`,
         group: 'Git',
         keywords: `repository ${r.path}`,
         run: () => router.go(`git/${r.id}`),
@@ -800,12 +802,12 @@
     const wsId = ws.currentId;
     // The side pane's palette is the window's (its commands are mirrored).
     if (!wsId || isEmbedded || !registry.wanted) return;
-    let cancelled = false;
+    let canceled = false;
     let unreg: (() => void) | null = null;
     void api
       .get<Connection[]>(`/workspaces/${wsId}/connections`)
       .then((conns) => {
-        if (cancelled) return;
+        if (canceled) return;
         unreg = registry.register(
           'connections',
           conns.map((c) => ({
@@ -823,7 +825,7 @@
       })
       .catch(() => {});
     return () => {
-      cancelled = true;
+      canceled = true;
       unreg?.();
     };
   });
@@ -1104,12 +1106,15 @@
     {#if Page}
       <Page />
     {:else if pageFailed}
-      <div class="page-load-error" role="alert">
-        <Icon name="warning" size={16} />
-        <span>This page couldn’t load. Otto may have been updated in the background.</span>
-        <button class="btn small" onclick={() => void loadPage(pageKey).catch(() => {})}>Retry</button>
-        <button class="btn small" onclick={() => location.reload()}>Reload Otto</button>
-      </div>
+      <LoadState
+        variant="page"
+        what="this page"
+        error="Otto may have been updated in the background. Retry, or reload Otto to pick up the new version."
+        empty
+        onretry={() => void loadPage(pageKey).catch(() => {})}
+      >
+        {#snippet errorActions()}<button class="btn" onclick={() => location.reload()}>Reload Otto</button>{/snippet}
+      </LoadState>
     {/if}
   </div>
 {/snippet}
@@ -1186,8 +1191,8 @@
   {#if isPopout && isTauri && !isEmbedded}
     <!-- Pop-out title strip: the overlaid traffic lights sit in it and it
          drags the window (double-click zooms), like a unified title bar. -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="popout-titlebar sidebar-material" data-tauri-drag-region onmousedown={startWindowDrag}>
+    <!-- Window chrome: a pointer-only drag strip (presentation). -->
+    <div class="popout-titlebar sidebar-material" role="presentation" data-tauri-drag-region onmousedown={startWindowDrag}>
       <span class="popout-title">{popoutTitle()}</span>
     </div>
   {/if}
@@ -1199,8 +1204,7 @@
            hidden by `titleBarStyle: Overlay`). The empty 26px inset has no
            interactive content, so this never steals clicks. -->
       {#if isTauri && !compactShell}
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="titlebar-drag" data-tauri-drag-region onmousedown={startWindowDrag}></div>
+        <div class="titlebar-drag" role="presentation" data-tauri-drag-region onmousedown={startWindowDrag}></div>
       {/if}
       {#if compactShell || ui.railExpanded}
         <Navigator />
@@ -1582,16 +1586,5 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-  }
-  .page-load-error {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: 10px;
-    height: 100%;
-    padding: 24px;
-    font-size: var(--fs-m);
-    color: var(--danger);
   }
 </style>

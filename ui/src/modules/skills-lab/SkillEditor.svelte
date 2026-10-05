@@ -13,6 +13,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import Badge from '../../lib/components/Badge.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { sourceLabel } from './skillGroups';
@@ -225,7 +226,7 @@
     <section class="pane">
       <div class="pane-head">
         <span class="mono path" dir="ltr" title={currentFile}>{currentFile}</span>
-        {#if dirty}<span class="chip tone-warning">Unsaved</span>{/if}
+        {#if dirty}<Badge tone="warn" label="Unsaved" />{/if}
         <span class="grow"></span>
         {#if editable && !loading && !binary && !loadError}
           {#if dirty}
@@ -377,11 +378,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .chip.tone-warning {
-    color: var(--warning);
-    background: var(--warning-soft);
-    border-color: color-mix(in srgb, var(--warning) 35%, transparent);
   }
   .code {
     flex: 1;

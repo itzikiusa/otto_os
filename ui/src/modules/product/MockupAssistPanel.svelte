@@ -10,6 +10,8 @@
   // The format chips cover every DesignFormat (§2.2); they lock once the
   // artifact exists (a refine resumes the existing session and format).
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { toastError } from '../../lib/toastError';
   import Terminal from '../../lib/components/Terminal.svelte';
   import MockupLivePreview from './MockupLivePreview.svelte';
@@ -54,7 +56,7 @@
     excalidraw: [
       'Wireframe two mobile screens as frames: onboarding and home',
       'A user-journey board with sticky notes grouped by stage',
-      'A system context diagram with boxes and labelled arrows',
+      'A system context diagram with boxes and labeled arrows',
     ],
     scene3d: [
       'A greybox level: ground, three platforms, cover crates and a goal marker',
@@ -113,7 +115,7 @@
         {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    {#if mockupAssist.busy}<span class="ma-working">working…</span>{/if}
+    {#if mockupAssist.busy}<span class="ma-working"><LiveWorkingDot label="Working…" /></span>{/if}
     <button class="ma-close" onclick={onclose} aria-label="Close design agent" title="Close design agent">
       <Icon name="x" size={15} />
     </button>
@@ -136,16 +138,17 @@
           {/key}
         {:else}
           <div class="ma-empty">
-            <p class="lead">
-              {embedded ? 'Ask for a change and the agent edits this artifact in place.' : 'Describe the mockup and the agent builds it here.'}
-            </p>
-            <p class="hint">It writes {HINT[mockupAssist.format]} and the preview updates live. Keep chatting
-              to refine it. The agent's shell appears here once it starts.</p>
-            <div class="ma-starters">
-              {#each STARTERS[mockupAssist.format] as s (s)}
-                <button class="ma-starter" onclick={() => useStarter(s)}>{s}</button>
-              {/each}
-            </div>
+            <EmptyState
+              icon="zap"
+              title={embedded ? 'Ask for a change and the agent edits this artifact in place' : 'Describe the mockup and the agent builds it here'}
+              body={`It writes ${HINT[mockupAssist.format]} and the preview updates live. Keep chatting to refine it. The agent’s shell appears here once it starts.`}
+            >
+              <div class="ma-starters">
+                {#each STARTERS[mockupAssist.format] as s (s)}
+                  <button class="ma-starter" onclick={() => useStarter(s)}>{s}</button>
+                {/each}
+              </div>
+            </EmptyState>
           </div>
         {/if}
       </div>
@@ -255,9 +258,8 @@
     opacity: 0.55;
   }
   .ma-working {
+    display: inline-flex;
     font-size: var(--fs-xs);
-    color: var(--accent-text);
-    font-weight: 600;
   }
   .ma-close {
     margin-inline-start: auto;
@@ -318,30 +320,7 @@
   }
   .ma-empty {
     margin: auto;
-    text-align: center;
-    color: var(--text-dim);
-    padding: 20px;
-  }
-  .embedded .ma-empty {
-    padding: 12px;
-  }
-  .ma-empty .lead {
-    margin: 0 0 6px;
-    font-size: var(--fs-m);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .embedded .ma-empty .lead {
-    font-size: var(--fs-s);
-  }
-  .ma-empty .hint {
-    margin: 0 0 14px;
-    font-size: var(--fs-s);
-    line-height: 1.5;
-    max-width: 320px;
-  }
-  .embedded .ma-empty .hint {
-    font-size: var(--fs-xs);
+    max-width: 360px;
   }
   .ma-starters {
     display: flex;

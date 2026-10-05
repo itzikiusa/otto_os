@@ -791,7 +791,7 @@
     if (!dialect) return;
     const r = parseSelect(text, dialect);
     if (!r.ok) {
-      importError = `This statement can't be edited in the builder: ${r.error}.`;
+      importError = `This statement can’t be edited in the builder: ${r.error}.`;
       return;
     }
     importing = true;
@@ -935,7 +935,11 @@
           onpointerup={onCanvasUp}
           onpointercancel={onCanvasUp}
         >
-          <div class="content" style="width:{contentSize.w}px; height:{contentSize.h}px">
+          <!-- The join canvas is a coordinate space, not reading-order layout:
+               cards, edges (SVG x) and the left/right column handles are all
+               placed in physical px, so it stays LTR under an RTL locale.
+               Its text is SQL identifiers, which read LTR anyway. -->
+          <div class="content" dir="ltr" style="width:{contentSize.w}px; height:{contentSize.h}px">
             <svg class="edges" width={contentSize.w} height={contentSize.h} aria-hidden="true">
               <defs>
                 <marker id="qb-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -1638,7 +1642,7 @@
     width: 96px;
     min-width: 0;
     height: 22px;
-    padding: 0 5px;
+    padding: 0 4px;
     border: 1px solid transparent;
     border-radius: var(--radius-s);
     background: transparent;
@@ -1667,7 +1671,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     color: var(--text-dim);
-    padding: 0 5px;
+    padding: 0 4px;
     border-radius: 999px;
     border: 1px solid var(--border);
   }
@@ -1721,7 +1725,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     line-height: 14px;
-    padding: 0 3px;
+    padding: 0 4px;
     border-radius: var(--radius-s);
   }
   .col-badge.pk {
@@ -1737,13 +1741,14 @@
     top: 50%;
     width: 10px;
     height: 10px;
-    margin-top: -5px;
+    margin-top: -5px; /* ui-guards: allow — centres the 10 px handle */
     border-radius: 50%;
     background: var(--surface);
     border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
     cursor: crosshair;
     z-index: 3;
   }
+  /* Physical on purpose: the canvas is dir="ltr" (see the markup). */
   .handle.l {
     left: -5px;
   }
@@ -1818,7 +1823,7 @@
     align-items: center;
     gap: 4px;
     height: 22px;
-    padding: 0 9px;
+    padding: 0 8px;
     border-radius: 999px;
     border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
     background: transparent;
@@ -1933,7 +1938,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-top: 5px;
+    margin-top: 4px;
     min-width: 0;
   }
   .row .input {
@@ -1996,12 +2001,6 @@
     flex-wrap: wrap;
     gap: 6px;
     margin-top: 4px;
-  }
-  .chips .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding-inline-end: 2px;
   }
   .chip-x {
     display: inline-grid;
