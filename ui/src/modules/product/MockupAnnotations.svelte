@@ -368,7 +368,7 @@
         aria-pressed={mode === 'annotate'}
         onclick={() => (mode = 'annotate')}
       >
-        <Icon name="pin" size={11} /> Annotate
+        <Icon name="pin" size={12} /> Annotate
       </button>
       <button
         class="mt"
@@ -376,7 +376,7 @@
         aria-pressed={mode === 'interact'}
         onclick={() => { mode = 'interact'; cancelPending(); }}
       >
-        <Icon name="eye" size={11} /> Interact
+        <Icon name="eye" size={12} /> Interact
       </button>
     </div>
     {#if mode === 'annotate'}
@@ -386,7 +386,7 @@
         onclick={startAtCentre}
         title="Drop a pin in the middle of the visible mockup, then move it with the arrow keys (⇧ for bigger steps)"
       >
-        <Icon name="plus" size={11} /> Add annotation
+        <Icon name="plus" size={12} /> Add annotation
       </button>
     {/if}
   </div>

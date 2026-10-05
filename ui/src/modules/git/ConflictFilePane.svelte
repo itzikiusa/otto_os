@@ -314,7 +314,7 @@
               {/if}
             {:else}
               <button class="out-unresolved" onclick={() => goTo(seg.ord)} title="Jump to conflict {seg.ord + 1}">
-                <Icon name="merge" size={11} />
+                <Icon name="merge" size={12} />
                 conflict {seg.ord + 1} — unresolved
               </button>
             {/if}

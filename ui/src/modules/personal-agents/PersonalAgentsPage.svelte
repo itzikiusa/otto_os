@@ -225,8 +225,8 @@
                   <span class="chip ok">Enabled</span>
                 {/if}
                 {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
-                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={11} /> Your agent</span>{/if}
-                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
+                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={12} /> Your agent</span>{/if}
+                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
                 <!-- A paused agent's schedules never fire — don't promise a next run. -->
                 {#if a.enabled}
                   <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>

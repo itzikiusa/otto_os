@@ -222,7 +222,7 @@
             <div class="favorite-row">
               <button title={path} disabled={loading} class:current={path === view?.path} onclick={() => load(path)}>{folderName(path)}</button>
               <button class="remove-favorite" aria-label={`Remove ${folderName(path)} from favorites`} title="Remove favorite"
-                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}><Icon name="x" size={10} /></button>
+                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}><Icon name="x" size={12} /></button>
             </div>
           {:else}<p class="dim">Save a folder with Add favorite.</p>{/each}
         </div>

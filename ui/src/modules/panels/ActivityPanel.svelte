@@ -344,7 +344,7 @@
                     <span class="row-src">{sourceLabel(e.source)}</span>
                     <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
-                      <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
+                      <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </span>
                 </span>

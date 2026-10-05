@@ -1460,7 +1460,7 @@
       aria-label="Filter connections"
     />
     {#if connFilter}
-      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={10} /></button>
+      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
     {/if}
     {#if !viewport.isPhone}
       <!-- New section / connection live here on tablet/desktop (the phone keeps

@@ -233,7 +233,7 @@
         </div>
       {:else}
         <div class="eks">
-          <Icon name="cloud" size={22} />
+          <Icon name="cloud" size={24} />
           <p>EKS clusters are imported from the AWS module: pick an account → EKS → “Open in Kubernetes”. Otto runs <span class="mono">aws eks update-kubeconfig</span> into its own kubeconfig and links the cluster to that account.</p>
           <button class="btn" onclick={() => { onclose(); router.go('aws'); }}><Icon name="external" size={13} /> Go to AWS</button>
         </div>

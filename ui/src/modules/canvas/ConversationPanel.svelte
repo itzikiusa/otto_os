@@ -120,7 +120,7 @@
 
 <aside class="assistant">
   <header class="head">
-    <span class="title"><Icon name="terminal" size={15} /> Assistant</span>
+    <span class="title"><Icon name="terminal" size={14} /> Assistant</span>
     {#if providers.length > 1}
       <select
         class="provider"
@@ -142,10 +142,10 @@
       aria-label="Restore previous version"
       title="Restore previous version…"
     >
-      <Icon name="undo" size={15} />
+      <Icon name="undo" size={14} />
     </button>
     <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 

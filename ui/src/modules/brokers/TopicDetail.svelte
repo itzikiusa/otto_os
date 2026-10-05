@@ -642,7 +642,7 @@
 <div class="td">
   <header>
     <div class="title">
-      <Icon name="box" size={15} />
+      <Icon name="box" size={14} />
       <span class="name" title={topic}>{topic}</span>
       {#if detail}<span class="muted">· {detail.partitions.length}p · {detail.message_count.toLocaleString()} msgs</span>{/if}
     </div>

@@ -99,7 +99,7 @@
 
 <section class="mockup-assist" class:embedded>
   <header class="ma-head">
-    <span class="ma-title"><Icon name="zap" size={15} /> {embedded ? 'Assistant' : 'Design agent'}</span>
+    <span class="ma-title"><Icon name="zap" size={14} /> {embedded ? 'Assistant' : 'Design agent'}</span>
     <div class="ma-format" role="group" aria-label="Design format">
       {#each DESIGN_FORMATS as f (f)}
         <button
@@ -117,7 +117,7 @@
     </label>
     {#if mockupAssist.busy}<span class="ma-working"><LiveWorkingDot label="Working…" /></span>{/if}
     <button class="ma-close" onclick={onclose} aria-label="Close design agent" title="Close design agent">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 

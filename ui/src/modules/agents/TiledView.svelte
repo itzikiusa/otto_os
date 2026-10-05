@@ -514,7 +514,7 @@
               <span class="chip ph-chip">{s.provider ?? '?'}</span>
             </span>
             <div class="ph-body">
-              <Icon name="terminal" size={20} />
+              <Icon name="terminal" size={24} />
               <span class="ph-cta">Click to attach</span>
               {#if atCapacity}
                 <span class="ph-hint">Live tiles capped at {MAX_LIVE_TILES} to save memory</span>

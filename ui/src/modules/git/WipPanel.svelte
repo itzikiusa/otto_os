@@ -942,7 +942,7 @@
         {#if drafting}
           <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
-          <Icon name="zap" size={11} /> Draft
+          <Icon name="zap" size={12} /> Draft
         {/if}
       </button>
       {#if liveDraftId}
@@ -951,7 +951,7 @@
           onclick={() => (showDraftTerm = !showDraftTerm)}
           title={showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent live'}
         >
-          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
           {showDraftTerm ? 'Hide agent' : 'Watch agent'}
         </button>
       {/if}

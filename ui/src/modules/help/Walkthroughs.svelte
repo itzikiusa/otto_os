@@ -304,7 +304,7 @@
                     {#if selected.summary}<p class="summary">{selected.summary}</p>{/if}
                     {#if chapterFor}
                       <button class="btn small" onclick={() => chapterFor && watchPart(chapterFor.start)} data-testid="guide-watch-part">
-                        <Icon name="play" size={11} /> Watch this part · {timeLabel(chapterFor.start)}
+                        <Icon name="play" size={12} /> Watch this part · {timeLabel(chapterFor.start)}
                       </button>
                     {/if}
                   </header>

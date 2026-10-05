@@ -50,7 +50,7 @@
 <div class="row" style:padding-inline-start={`${depth > 0 ? 12 : 0}px`}>
   {#if isObject}
     <button class="caret" onclick={() => (open = !open)} aria-expanded={open}>
-      <span class="tw" class:open aria-hidden="true"><Icon name="chevronRight" size={10} /></span>
+      <span class="tw" class:open aria-hidden="true"><Icon name="chevronRight" size={12} /></span>
       {#if name !== null}<span class="key">{name}:</span>{/if}
       {#if !open}<span class="sum">{summary}</span>{/if}
     </button>

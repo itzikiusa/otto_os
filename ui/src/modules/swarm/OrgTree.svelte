@@ -312,7 +312,7 @@
     <span class="avatar-wrap">
       <span class="avatar" aria-hidden="true">{a.avatar || a.name.slice(0, 1)}</span>
       {#if a.status === 'paused'}
-        <span class="presence paused" role="img" aria-label="Paused" title="Paused — picks up no new work"><Icon name="pause" size={8} /></span>
+        <span class="presence paused" role="img" aria-label="Paused" title="Paused — picks up no new work"><Icon name="pause" size={12} /></span>
       {:else}
         <span class="presence"><StatusDot state={agentDot(running)} size={8} /></span>
       {/if}

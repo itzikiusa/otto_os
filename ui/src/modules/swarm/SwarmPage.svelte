@@ -573,7 +573,7 @@
           <span class="rail-current ellipsis">· {detail.name}</span>
         {/if}
       </button>
-      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={15} /></button>
+      <button class="icon-btn" onclick={() => (showNew = true)} aria-label="New swarm" title="New swarm"><Icon name="plus" size={14} /></button>
     </div>
     <div class="rail-list">
       <LoadState

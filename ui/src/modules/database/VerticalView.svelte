@@ -440,7 +440,7 @@
       <button class="vv-tool" onclick={expandAll} title="Open every nested field of the drawn records">Expand all</button>
       <button class="vv-tool" onclick={() => setMode('none')} title="Close every nested field">Collapse all</button>
       <button class="vv-tool" onclick={() => setMode('budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
-      {#if canEdit}<span class="vv-hint dim"><Icon name="edit" size={10} />double-click or Enter to edit · right-click, ⋯ or ⇧F10 for more</span>{/if}
+      {#if canEdit}<span class="vv-hint dim"><Icon name="edit" size={12} />double-click or Enter to edit · right-click, ⋯ or ⇧F10 for more</span>{/if}
     </div>
   {/if}
   {#if viewTruncated}<div class="alt-note dim" data-find-skip>Showing first {viewCap} of {totalRows} rows.</div>{/if}
@@ -452,7 +452,7 @@
         {#if comparePick === idx}<span class="vrec-tag">comparing</span>{/if}
         <span class="grow"></span>
         {#if canEdit}
-          <button class="jrec-copy" title="Edit this record (opens a review before running)" aria-label="Edit record" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={10} /></button>
+          <button class="jrec-copy" title="Edit this record (opens a review before running)" aria-label="Edit record" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={12} /></button>
         {/if}
         {#if !mini}
           <button class="jrec-copy vrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>

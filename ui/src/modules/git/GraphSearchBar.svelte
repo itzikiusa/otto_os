@@ -164,7 +164,7 @@
       </button>
       {#if q}
         <button class="gsb-x" onclick={clear} aria-label="Clear search" title="Clear search">
-          <Icon name="x" size={11} />
+          <Icon name="x" size={12} />
         </button>
       {/if}
     </div>

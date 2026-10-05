@@ -236,9 +236,9 @@
         {#if comparePick === idx}<span class="jrec-tag">comparing</span>{/if}
         <span class="grow"></span>
         {#if canEdit}
-          <button class="jrec-copy" title="Edit this document (opens a review before running)" aria-label="Edit document" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={10} /></button>
+          <button class="jrec-copy" title="Edit this document (opens a review before running)" aria-label="Edit document" onclick={() => flow.openDocEditor(idx)}><Icon name="edit" size={12} /></button>
         {/if}
-        <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={10} /></button>
+        <button class="jrec-copy" title="Copy this row as JSON" aria-label="Copy row JSON" onclick={() => copyText(prettyJson(obj))}><Icon name="file" size={12} /></button>
         {#if !mini}
           <button class="jrec-copy jrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>
         {/if}

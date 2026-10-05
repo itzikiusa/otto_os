@@ -91,7 +91,7 @@
           onclick={() => l.dst_path && void vault.open(l.dst_path)}
         >
           <div class="t">
-            {#if l.kind === 'embed'}<span class="embed-ic" title="Embedded"><Icon name="image" size={11} /></span>{/if}{l.alias ?? l.raw_target}
+            {#if l.kind === 'embed'}<span class="embed-ic" title="Embedded"><Icon name="image" size={12} /></span>{/if}{l.alias ?? l.raw_target}
             {#if !l.dst_path}<span class="ghost">unresolved</span>{/if}
           </div>
         </button>
@@ -157,7 +157,7 @@
         {#if vault.okfReport}
           <span class="hdr-count">
             {#if vault.okfReport.conformant}
-              <Badge tone="ok" title="Conformant"><Icon name="check" size={11} /></Badge>
+              <Badge tone="ok" title="Conformant"><Icon name="check" size={12} /></Badge>
             {:else}
               <Badge tone="bad" label={String(vault.okfReport.errors.length)} title={plural(vault.okfReport.errors.length, 'error')} />
             {/if}
@@ -175,7 +175,7 @@
         </div>
         {#if vault.okfReport}
           {#if vault.okfReport.conformant}
-            <div class="none ok"><Icon name="check" size={11} /> OKF conformant ({vault.okfReport.checked_notes} notes)</div>
+            <div class="none ok"><Icon name="check" size={12} /> OKF conformant ({vault.okfReport.checked_notes} notes)</div>
           {/if}
           {#each vault.okfReport.errors as f, i (i)}
             <button class="item finding err" onclick={() => f.path.endsWith('.md') && void vault.open(f.path)}>

@@ -1189,9 +1189,9 @@
       title={sub.path}
     >
       <span class="nav-dir-chevron">
-        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={10} />
+        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={12} />
       </span>
-      <Icon name="folder" size={11} />
+      <Icon name="folder" size={12} />
       <span class="nav-dir-label">{sub.label}</span>
     </button>
   {/snippet}
@@ -1314,7 +1314,7 @@
         <div class="dfile-headrow">
           <button class="dfile-head" aria-expanded={!r.collapsed} onclick={() => toggleCollapsed(r.file)}>
             <span class="dfile-chevron">
-              <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={11} />
+              <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
             </span>
             <span class="dfile-path mono" dir="ltr">
               {#if r.file.old_path}{r.file.old_path}<span class="rename-arrow"> → </span>{/if}{r.file.path}

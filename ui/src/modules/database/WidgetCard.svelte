@@ -138,7 +138,7 @@
 <div class="widget-card" role="group" aria-label={widget.title} oncontextmenu={menu}>
   <div class="wc-head">
     <span class="wc-title ellipsis" title={widget.title}>{widget.title}</span>
-    <span class="wc-conn ellipsis" title="Connection: {connName}"><Icon name="db" size={9} />{connName}</span>
+    <span class="wc-conn ellipsis" title="Connection: {connName}"><Icon name="db" size={12} />{connName}</span>
     <button class="icon-btn" onclick={() => void run(true)} title="Refresh" aria-label="Refresh widget">
       {#if loading}<span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>{:else}<Icon name="refresh" size={12} />{/if}
     </button>
@@ -161,7 +161,7 @@
     {:else}
       {#if error}
         <div class="wc-stale" title={error}>
-          <Icon name="zap" size={10} />refresh failed — showing last data
+          <Icon name="zap" size={12} />refresh failed — showing last data
         </div>
       {/if}
       <Chart {result} viz={widget.viz} mapping={widget.mapping} />

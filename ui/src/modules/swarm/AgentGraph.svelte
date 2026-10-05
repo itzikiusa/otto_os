@@ -361,7 +361,7 @@
                     aria-label={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
                     title={`${a.name}: ${plural(sess.length, 'session')} — choose one to open`}
                     onclick={(e) => sessionMenu(e, a)}
-                  ><Icon name="terminal" size={12} /> {sess.length} <Icon name="chevronDown" size={10} /></button>
+                  ><Icon name="terminal" size={12} /> {sess.length} <Icon name="chevronDown" size={12} /></button>
                 {/if}
               </div>
             {/if}

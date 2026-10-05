@@ -1059,12 +1059,12 @@
         }}
       >
         {#if t.pinned}
-          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={12} /></span>
         {/if}
         {#if t.agent}
           <!-- Opened by an agent session over UI control: always attributed. -->
           <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
-            <Icon name="sparkle" size={10} />
+            <Icon name="sparkle" size={12} />
           </span>
         {/if}
         {#if renaming === i}
@@ -1094,7 +1094,7 @@
                 void closeTabAt(i);
               }}
             >
-              <Icon name="x" size={10} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         {/if}
@@ -1410,7 +1410,7 @@
           onclick={() => void probeMongosh()}
           title="Probe the daemon for the mongosh CLI again"
         >
-          <Icon name="refresh" size={10} /> Retry
+          <Icon name="refresh" size={12} /> Retry
         </button>
       {/if}
     </div>

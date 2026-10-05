@@ -285,7 +285,7 @@
     <!-- Section header: root path + Change folder + optional close -->
     <div class="ft-header">
       <span class="ft-root-path dim" title={effectiveRoot}>
-        <Icon name="folder" size={11} />
+        <Icon name="folder" size={12} />
         <span class="ft-root-text">{basename(effectiveRoot)}</span>
       </span>
       {#if effectiveRoot}
@@ -357,7 +357,7 @@
             >
               {#if node.entry.is_dir}
                 <span class="chevron">
-                  <Icon name={node.open ? 'chevronDown' : 'chevronRight'} size={10} />
+                  <Icon name={node.open ? 'chevronDown' : 'chevronRight'} size={12} />
                 </span>
                 {#if node.loading}
                   <span class="spinner" style="--spinner-size: 12px" aria-hidden="true"></span>
@@ -370,7 +370,7 @@
               {/if}
               <span class="row-name">{node.entry.name}</span>
               {#if node.entry.is_git_repo}
-                <span class="git-badge dim"><Icon name="branch" size={10} /></span>
+                <span class="git-badge dim"><Icon name="branch" size={12} /></span>
               {/if}
             </button>
           {/each}
@@ -386,7 +386,7 @@
         <div class="viewer-pane">
           <div class="viewer-header">
             <span class="viewer-name" title={viewerFile?.path ?? viewerName}>
-              <Icon name="file" size={11} />
+              <Icon name="file" size={12} />
               <!-- ellipsis only applies to a block box, not a bare text node in a flex row -->
               <span class="viewer-name-text">{viewerName}</span>
             </span>

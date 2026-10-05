@@ -763,7 +763,7 @@
       {#if detail}
         <!-- The four ways to attach evidence share one menu: four sibling
              "Add …" buttons made this the busiest header in the app. -->
-        <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={11} /></button>
+        <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={12} /></button>
         <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble…</button>
       {/if}
       <!-- Everything occasional (waive, CI refresh, housekeeping, delete) lives
@@ -881,7 +881,7 @@
 
         <!-- Pack-level tools: report export (R9) + repo requirements (R3). -->
         <div class="tools-row">
-          <button class="btn small ghost" onclick={openExportMenu} aria-haspopup="menu"><Icon name="download" size={12} /> Export report <Icon name="chevronDown" size={11} /></button>
+          <button class="btn small ghost" onclick={openExportMenu} aria-haspopup="menu"><Icon name="download" size={12} /> Export report <Icon name="chevronDown" size={12} /></button>
           {#if detail.pack.repo_id}
             <button class="btn small ghost" onclick={openConfig}><Icon name="gear" size={12} /> Requirements</button>
           {/if}

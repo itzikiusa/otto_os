@@ -60,14 +60,14 @@
       {#each folders as f (f.name)}
         <div class="cb-col">
           <div class="cb-col-head">
-            <Icon name="folder" size={11} /> {f.name || 'Unfiled'} <span class="cb-count">{f.list.length}</span>
+            <Icon name="folder" size={12} /> {f.name || 'Unfiled'} <span class="cb-count">{f.list.length}</span>
           </div>
           {#each f.list as c (c.id)}
             <button class="cb-card" onclick={() => void product.select(c.id)} title={c.source_key}>
               <span class="cb-card-title">{c.title}</span>
               <span class="cb-card-meta">
                 {#if c.tree_kind === 'doc'}
-                  <span class="chip"><Icon name="note" size={10} /> Doc</span>
+                  <span class="chip"><Icon name="note" size={12} /> Doc</span>
                 {:else}
                   <StatusBadge status={storyStage(c.stage)} variant="text" />
                 {/if}

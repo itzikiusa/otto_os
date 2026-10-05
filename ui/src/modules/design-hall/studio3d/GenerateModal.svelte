@@ -159,7 +159,7 @@
             </span>
             <span class="prov-note">{p.privacy}</span>
             {#if p.cost}<span class="prov-note">Cost: {p.cost}</span>{/if}
-            {#if why && p.where === 'cloud'}<span class="prov-why"><Icon name="lock" size={11} /> {why}</span>{/if}
+            {#if why && p.where === 'cloud'}<span class="prov-why"><Icon name="lock" size={12} /> {why}</span>{/if}
           </span>
         </label>
       {/each}

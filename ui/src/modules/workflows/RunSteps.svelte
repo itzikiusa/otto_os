@@ -300,7 +300,7 @@
         title="Open the proof pack assembled for this run"
         onclick={() => { if (run.proof_pack_id) viewProof(run.proof_pack_id); }}
       >
-        <Icon name="check" size={11} /> View proof pack
+        <Icon name="check" size={12} /> View proof pack
       </button>
     {/if}
   </div>
@@ -394,7 +394,7 @@
                 disabled={retryingId === ns.node_id}
                 onclick={() => void retryStep(ns)}
               >
-                <Icon name="refresh" size={11} /> {retryingId === ns.node_id ? 'Retrying…' : 'Retry step'}
+                <Icon name="refresh" size={12} /> {retryingId === ns.node_id ? 'Retrying…' : 'Retry step'}
               </button>
             {/if}
             {#if canRerunFrom(ns)}
@@ -404,12 +404,12 @@
                 disabled={retryingId === ns.node_id}
                 onclick={() => void retryStep(ns, true)}
               >
-                <Icon name="play" size={11} /> Re-run from here
+                <Icon name="play" size={12} /> Re-run from here
               </button>
             {/if}
             {#each ns.sessions ?? [] as sid (sid)}
               <button class="link-btn" title={`Open session ${sid}`} onclick={() => openSession(sid)}>
-                <Icon name="terminal" size={11} /> Open session
+                <Icon name="terminal" size={12} /> Open session
               </button>
             {/each}
             {#if reviewIdOf(ns.output)}
@@ -418,7 +418,7 @@
                 title={`Open review ${reviewIdOf(ns.output)}`}
                 onclick={() => openReview(ns.output)}
               >
-                <Icon name="eye" size={11} /> Open review
+                <Icon name="eye" size={12} /> Open review
               </button>
             {/if}
           </div>
@@ -434,7 +434,7 @@
               <span>Work product</span>
               <span class="ph-grow"></span>
               <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(ns.output), 'output')}>
-                <Icon name="copy" size={11} /> Copy
+                <Icon name="copy" size={12} /> Copy
               </button>
             </div>
             {#if txt}
@@ -468,7 +468,7 @@
           <span>Work product</span>
           <span class="ph-grow"></span>
           <button class="copy-btn" title="Copy to clipboard" onclick={() => copy(asText(z.output), 'output')}>
-            <Icon name="copy" size={11} /> Copy
+            <Icon name="copy" size={12} /> Copy
           </button>
         </div>
         {#if zt}

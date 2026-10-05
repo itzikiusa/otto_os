@@ -149,12 +149,12 @@
       Conflict {index}
     </span>
     {#if resolved !== null}
-      <span class="resolved-badge"><Icon name="check" size={11} /> resolved</span>
+      <span class="resolved-badge"><Icon name="check" size={12} /> resolved</span>
     {/if}
     <span class="grow"></span>
     {#if editing}
       <button class="edit-done" onclick={stopEdit} title="Back to side-by-side picking">
-        <Icon name="check" size={11} /> Done editing
+        <Icon name="check" size={12} /> Done editing
       </button>
     {:else}
       <button class="edit-btn" onclick={startEdit} title="Edit the resolution by hand">
@@ -187,7 +187,7 @@
           onclick={() => (showBase = !showBase)}
           title="What both sides diverged from (merge base)"
         >
-          <Icon name={showBase ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={showBase ? 'chevronDown' : 'chevronRight'} size={12} />
           <span class="base-label">BASE</span>
           <span class="base-hint dim">original — {plural(base.length, 'line')}</span>
         </button>
@@ -234,7 +234,7 @@
           {:else}
             {#each ours.slice(0, shown) as line, i (i)}
               <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
-                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
             {/each}
@@ -257,7 +257,7 @@
           {:else}
             {#each theirs.slice(0, shown) as line, i (i)}
               <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
-                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
             {/each}
@@ -272,7 +272,7 @@
           {:else}
             {#each ours.slice(0, shown) as line, i (i)}
               <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
-                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
             {/each}
@@ -284,7 +284,7 @@
           {:else}
             {#each theirs.slice(0, shown) as line, i (i)}
               <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
-                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={10} />{/if}</span>
+                <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
             {/each}

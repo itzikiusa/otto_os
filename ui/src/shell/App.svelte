@@ -1144,7 +1144,7 @@
         title="Open navigator"
         aria-label="Open navigator"
       >
-        <Icon name="sidebar" size={18} />
+        <Icon name="sidebar" size={20} />
       </button>
     {/if}
     <!-- Back/Forward: visible whenever there is history to walk. Placed left of
@@ -1166,7 +1166,7 @@
         aria-label={SESSION_PANEL}
         aria-expanded={ui.rightOpen}
       >
-        <Icon name="panel" size={18} />
+        <Icon name="panel" size={20} />
       </button>
     {/if}
   </header>

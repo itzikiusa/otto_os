@@ -25,7 +25,7 @@
 
 <div class="install" data-testid="aws-install-panel">
   <div class="card">
-    <div class="ico"><Icon name="cloud" size={28} /></div>
+    <div class="ico"><Icon name="cloud" size={26} /></div>
     <h1>Otto needs the AWS CLI</h1>
     <p class="body">
       The AWS console shells out to <code>aws</code> (CLI v2) for every call — nothing else is

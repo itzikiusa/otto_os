@@ -40,7 +40,7 @@
   />
   {#if active}
     <button class="kf-clear" title="Clear filter" aria-label="Clear filter" onclick={clear}>
-      <Icon name="x" size={10} />
+      <Icon name="x" size={12} />
     </button>
   {/if}
 </div>

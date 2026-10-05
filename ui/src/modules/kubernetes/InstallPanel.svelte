@@ -73,7 +73,7 @@
 
 <div class="install" class:compact data-testid="k8s-install-panel">
   <div class="install-head">
-    <div class="install-icon"><Icon name={tool === 'kubectl' ? 'helm' : 'terminal'} size={compact ? 18 : 26} /></div>
+    <div class="install-icon"><Icon name={tool === 'kubectl' ? 'helm' : 'terminal'} size={compact ? 16 : 26} /></div>
     <div>
       <h2>{installed ? `${label} is installed` : `Otto needs ${label}`}</h2>
       {#if !installed}<p class="sub">{blurb}</p>{/if}

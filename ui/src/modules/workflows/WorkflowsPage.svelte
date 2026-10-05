@@ -1934,7 +1934,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Stop takes the primary's place (same
              verb as the confirm dialog's "Stop run"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={11} /> Stop run…</button>
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={12} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -2353,7 +2353,7 @@
                   onclick={stop}
                   title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="stop" size={11} /> Stop run…
+                  <Icon name="stop" size={12} /> Stop run…
                 </button>
               {/if}
               <button
@@ -2422,7 +2422,7 @@
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
-              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={11} /> From here</button>
+              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={12} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
             <!-- Shared Provider + Model editor for every agent-running node —
@@ -2816,7 +2816,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Steps — run in order each iteration</span>
                 <button class="btn small ghost" type="button" onclick={addLoopStep}>
-                  <Icon name="plus" size={11} /> Add step
+                  <Icon name="plus" size={12} /> Add step
                 </button>
               </div>
               {#if loopSteps().length === 0}
@@ -2841,7 +2841,7 @@
                       oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
                     />
                     <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   {#if LOOP_AGENT_KINDS.includes(step.kind)}
@@ -2955,7 +2955,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
                 <button class="btn small ghost" type="button" onclick={addReviewer}>
-                  <Icon name="plus" size={11} /> Add
+                  <Icon name="plus" size={12} /> Add
                 </button>
               </div>
               {#if reviewers().length === 0}
@@ -2976,7 +2976,7 @@
                       oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
                     />
                     <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   <div class="rv-provs">
@@ -3345,7 +3345,7 @@
             <!-- Docked (or bottom) with nothing selected: a centered, intentional
                  empty state — not a stray line floating at the top. -->
             <div class="insp-blank">
-              <Icon name="split" size={30} />
+              <Icon name="split" size={26} />
               <p>Select a node or connection<br />to configure it.</p>
             </div>
           {/if}

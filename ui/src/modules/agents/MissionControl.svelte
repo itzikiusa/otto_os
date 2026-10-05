@@ -440,7 +440,7 @@
           aria-busy={deletingViews[sv.id] ? 'true' : undefined}
           title={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
           aria-label={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
-        ><Icon name="x" size={10} /></button>
+        ><Icon name="x" size={12} /></button>
       </span>
     {/each}
     <button class="btn small ghost" onclick={() => (showNewViewForm = !showNewViewForm)} aria-expanded={showNewViewForm}>
@@ -536,7 +536,7 @@
                           onclick={(e) => openSubtask(e, item)}
                           title="Push a sub-task to this agent"
                           data-testid="subtask-btn"
-                        ><Icon name="plus" size={10} /> Sub-task</button>
+                        ><Icon name="plus" size={12} /> Sub-task</button>
                       {/if}
                     </div>
                     {#if subtaskFor === item.id}

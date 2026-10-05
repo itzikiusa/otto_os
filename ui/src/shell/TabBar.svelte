@@ -363,12 +363,12 @@
             oncontextmenu={(e) => ctxMenu.show(e, tabMenu(id, tabIdx))}
           >
             {#if id === DB_PANE_ID}
-              <Icon name="db" size={11} />
+              <Icon name="db" size={12} />
             {:else}
               {@const st = tabState(id)}
               {#if st.resumable}
                 <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-                  <Icon name="refresh" size={9} />
+                  <Icon name="refresh" size={12} />
                 </span>
               {:else}
                 <StatusDot state={st} size={6} />
@@ -377,7 +377,7 @@
             <span class="tab-title" title={tabTooltip(id)}>{title(id)}</span>
             {#if needsYou(id)}
               <span class="tab-needs-you" title="Waiting on you" role="img" aria-label="Needs you">
-                <Icon name="bell" size={9} />
+                <Icon name="bell" size={12} />
               </span>
             {:else if ws.unread[id] === true}
               <span class="tab-unread" title="New activity since you last looked" role="img" aria-label="Unread activity"></span>
@@ -391,7 +391,7 @@
           aria-label="Close {title(id)}"
           title={ws.closeTabTitle(id)}
         >
-          <Icon name="x" size={9} />
+          <Icon name="x" size={12} />
         </button>
       </div>
     {/each}

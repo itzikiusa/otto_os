@@ -281,7 +281,7 @@
     onclick={pullMenu}
     title={inHeader ? 'Fetch, or pull with a different mode' : 'Pull with a different mode'}
     aria-label={inHeader ? 'Fetch and pull options' : 'Pull options'}
-  ><Icon name="chevronDown" size={11} /></button>
+  ><Icon name="chevronDown" size={12} /></button>
 </span>
 
 <!-- Push -->
@@ -319,7 +319,7 @@
     aria-label="Branch and stash"
     title="New branch, stash, pop stash"
     onclick={branchMenu}
-  ><Icon name="stash" size={12} /> <Icon name="chevronDown" size={11} /></button>
+  ><Icon name="stash" size={12} /> <Icon name="chevronDown" size={12} /></button>
 {:else}
 <span class="divider"></span>
 

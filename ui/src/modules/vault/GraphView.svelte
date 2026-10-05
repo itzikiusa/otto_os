@@ -1371,7 +1371,7 @@
                 onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
               >
                 <span class="ftoken-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
-                <Icon name="x" size={10} />
+                <Icon name="x" size={12} />
               </button>
             {/each}
           </div>
@@ -1495,7 +1495,7 @@
           {#if expandedGroups.length}
             <div class="chips">
               {#each expandedGroups as g (g)}
-                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={10} /></button>
+                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={12} /></button>
               {/each}
             </div>
           {/if}

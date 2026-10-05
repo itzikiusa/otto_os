@@ -48,7 +48,7 @@
     <img src={dataUrl} alt={node.label || 'image'} />
   {:else}
     <button class="placeholder" onclick={pick}>
-      <Icon name="file" size={22} />
+      <Icon name="file" size={24} />
       <span>Click to add an image</span>
     </button>
   {/if}

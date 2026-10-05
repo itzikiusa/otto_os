@@ -1319,7 +1319,7 @@
                 </button>
               {:else if c.state === 'approved' && c.posted}
                 <span class="chip ok rp-badge">
-                  <Icon name="check" size={10} /> posted
+                  <Icon name="check" size={12} /> posted
                 </span>
               {:else if c.state === 'approved'}
                 <span class="chip rp-badge dim" title="Approved in Otto, but the provider refused the post">not posted</span>
@@ -1407,7 +1407,7 @@
                           {/if}
                           <span class="grow"></span>
                           {#if c.state === 'approved' && c.posted}
-                            <span class="chip ok rp-badge"><Icon name="check" size={10} /> posted</span>
+                            <span class="chip ok rp-badge"><Icon name="check" size={12} /> posted</span>
                           {:else if c.state === 'approved'}
                             <span class="chip rp-badge dim">not posted</span>
                           {:else if c.state === 'declined'}

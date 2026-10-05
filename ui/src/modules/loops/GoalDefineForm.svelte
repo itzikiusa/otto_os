@@ -198,7 +198,7 @@
 <PageHeader title="New goal loop">
   {#snippet leading()}
     <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={cancel}>
-      <Icon name="chevronLeft" size={15} />
+      <Icon name="chevronLeft" size={14} />
     </button>
   {/snippet}
 </PageHeader>

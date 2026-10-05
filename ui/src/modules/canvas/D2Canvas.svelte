@@ -387,14 +387,14 @@
           </div>
         {:else if notD2}
           <div class="empty">
-            <Icon name="shapes" size={28} />
+            <Icon name="shapes" size={26} />
             <p class="lead">This canvas holds Excalidraw content</p>
             <p class="hint">It’s labeled D2 but contains an Excalidraw scene. Create a new
               <strong>Excalidraw</strong> canvas to edit those shapes.</p>
           </div>
         {:else if !renderError}
           <div class="empty">
-            <Icon name="layers" size={28} />
+            <Icon name="layers" size={26} />
             <p class="lead">D2 diagram</p>
             <p class="hint">Describe it in <strong>Ask Otto</strong>, or open <strong>Code</strong> to
               edit the D2 yourself — both write the same diagram and render here live.</p>
@@ -440,13 +440,13 @@
           <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
           <button onclick={downloadSvg} title="Download SVG" aria-label="Download SVG">
-            <Icon name="file" size={15} />
+            <Icon name="file" size={14} />
           </button>
           <button onclick={downloadPng} title="Download PNG" aria-label="Download PNG">
-            <Icon name="image" size={15} />
+            <Icon name="image" size={14} />
           </button>
           <button onclick={() => void copySource()} title="Copy source" aria-label="Copy source">
-            <Icon name="copy" size={15} />
+            <Icon name="copy" size={14} />
           </button>
         </div>
       {/if}

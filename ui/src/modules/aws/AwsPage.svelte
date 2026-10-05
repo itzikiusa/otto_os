@@ -176,7 +176,7 @@
   {#snippet leading()}
     {#if viewport.isMobile && routeAccountId}
       <button class="icon-btn" onclick={() => router.go('aws')} aria-label="Back to accounts" title="Back to accounts">
-        <Icon name="chevronLeft" size={15} />
+        <Icon name="chevronLeft" size={14} />
       </button>
     {/if}
   {/snippet}

@@ -177,7 +177,7 @@
 <PageHeader title={loop?.name ?? 'Goal loop'}>
   {#snippet leading()}
     <button class="icon-btn" title="Back to Goal Loops" aria-label="Back to Goal Loops" onclick={onback}>
-      <Icon name="chevronLeft" size={15} />
+      <Icon name="chevronLeft" size={14} />
     </button>
   {/snippet}
   {#snippet badge()}
@@ -243,7 +243,7 @@
         {#each PHASES as p, i (p)}
           {@const cur = loop.status === 'running' ? phaseIndex(loop) : -1}
           <li class="step" class:active={cur === i} class:past={cur > i} aria-current={cur === i ? 'step' : undefined}>
-            <span class="step-dot">{#if cur > i}<Icon name="check" size={10} />{/if}</span>{PHASE_LABEL[p]}
+            <span class="step-dot">{#if cur > i}<Icon name="check" size={12} />{/if}</span>{PHASE_LABEL[p]}
           </li>
         {/each}
         {#if loop.status === 'running' && loop.phase === 'waiting'}<li class="step waiting">Waiting on an agent</li>{/if}

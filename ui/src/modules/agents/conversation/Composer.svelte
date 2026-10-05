@@ -407,7 +407,7 @@
           <span class="keys" aria-hidden="true">{busy ? 'Busy — ⏎ queues' : '⏎ send'} · ⇧⏎ new line</span>
           <span class="grow"></span>
           {#if busy}
-            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={11} /> Stop</button>
+            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={12} /> Stop</button>
           {/if}
           {#if uploading > 0}<span class="uploading" role="status">Uploading…</span>{/if}
           <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>

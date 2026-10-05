@@ -550,7 +550,7 @@
               {#if saving}<span class="saving">Saving…</span>{:else if savedTick}<span class="saved-tick">Saved</span>{/if}
               {#if swarmLink}
                 <span class="chip pl-swarm-chip" title="Linked to swarm project “{swarmLink.project_name}”">
-                  <Icon name="zap" size={10} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
+                  <Icon name="zap" size={12} /> <span class="pl-swarm-name">{swarmLink.project_name}</span>
                 </span>
               {/if}
               <button class="btn small" onclick={refresh} disabled={generating}>Refresh</button>

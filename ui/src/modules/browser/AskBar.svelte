@@ -117,7 +117,7 @@
   {#if url}
   <label class="marks-chip" class:off={!includeMarks || marks.length === 0} title={marks.length === 0 ? 'No marks on this page yet — use Mark passage to add one' : "Include this page's marks in the question so the agent knows which elements you mean"}>
     <input type="checkbox" bind:checked={includeMarks} disabled={marks.length === 0} />
-    <Icon name="target" size={11} />
+    <Icon name="target" size={12} />
     <span>{plural(marks.length, 'mark')}</span>
   </label>
   {/if}

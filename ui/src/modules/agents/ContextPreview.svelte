@@ -154,7 +154,7 @@
               <span class="file-name mono" title={f.path}>{leaf(f.path)}</span>
               <Badge tone={f.enforcement === 'enforced' ? 'accent' : 'neutral'} label={sentenceCase(f.enforcement)} />
               <span class="file-size dim">{fmtBytes(f.size)}</span>
-              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" noflip size={10} /></span>
+              <span class="chevron" class:open={openFile === f.path}><Icon name="chevronRight" noflip size={12} /></span>
             </button>
             {#if openFile === f.path}
               <pre class="file-body mono">{f.first_lines}{f.truncated ? '\n…' : ''}</pre>

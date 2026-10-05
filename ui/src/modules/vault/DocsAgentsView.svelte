@@ -477,7 +477,7 @@
 
 <div class="docs-agents">
   <div class="inner">
-    <h2><Icon name="zap" size={15} /> Docs agent</h2>
+    <h2><Icon name="zap" size={14} /> Docs agent</h2>
 
     {#if !run}
       <!-- ── form ─────────────────────────────────────────────────────────── -->
@@ -646,7 +646,7 @@
           <div class="skill-chips">
             {#each runSkills as s (s)}
               <button class="skill-chip" title="Open {s}" onclick={() => void viewSkill(s)}>
-                <Icon name="function" size={11} />
+                <Icon name="function" size={12} />
                 {s}
               </button>
             {/each}
@@ -896,7 +896,7 @@
                         <p class="agent-err">{reviewer.error}</p>
                       {/if}
                       {#if reviewer.findings.length === 0 && reviewer.state === 'done'}
-                        <p class="clean-verdict"><Icon name="check" size={11} /> No findings</p>
+                        <p class="clean-verdict"><Icon name="check" size={12} /> No findings</p>
                       {:else if reviewer.findings.length > 0}
                         <div class="finding-list">
                           {#each reviewer.findings as finding, findingIndex (`${reviewer.index}-${findingIndex}`)}
@@ -933,7 +933,7 @@
                 {#if round.revision.state !== 'skipped'}
                   <div class="revision-card">
                     <div class="agent-top">
-                      <span class="revision-mark"><Icon name="edit" size={11} /></span>
+                      <span class="revision-mark"><Icon name="edit" size={12} /></span>
                       <span class="agent-name">Final author revision</span>
                       <span class="grow"></span>
                       {#if round.revision.session_id}

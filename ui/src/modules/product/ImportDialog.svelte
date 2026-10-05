@@ -202,7 +202,7 @@
           aria-expanded={showManual}
           onclick={() => (showManual = !showManual)}
         >
-          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={12} />
           Enter {sourceKind === 'jira' ? 'issue key' : 'page ID'} manually
         </button>
       </div>

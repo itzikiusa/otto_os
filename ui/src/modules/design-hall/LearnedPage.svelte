@@ -514,7 +514,7 @@
                   <button class="row-btn" onclick={() => select(r.key)}>
                     <span class="rule-sm">{r.rule}</span>
                     <span class="meta">
-                      <span class="chip"><Icon name="file" size={11} /> skill: {learned.skill}</span>
+                      <span class="chip"><Icon name="file" size={12} /> skill: {learned.skill}</span>
                       {#if r.applied_at}<span class="dim small">accepted {rel(r.applied_at)}</span>{/if}
                       <span class="dim small">{plural(r.evidence.length, 'signal')}</span>
                     </span>
