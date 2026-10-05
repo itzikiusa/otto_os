@@ -3012,20 +3012,9 @@ fn u64_lenient(v: &Value) -> Option<u64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
-/// Percent-encode a path segment so an id with `/` or spaces can't break out of
-/// the intended route (defense-in-depth; ids are normally opaque tokens).
-fn seg(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+// Path segments are encoded by the ONE shared `seg` (otto-mcp): an id with
+// `/`, spaces or a whole-segment `..` can't break out of the intended route.
+use otto_server::mcp_outward::seg;
 
 /// Run one tool by name. Returns the capped+redacted result `Value` and the
 /// audited row count, or an error string surfaced to the agent.

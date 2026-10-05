@@ -1849,3 +1849,22 @@ fn initialize_negotiates_to_a_supported_protocol_version() {
     assert_eq!(n(Some("2099-01-01")), "2025-03-26");
     assert_eq!(n(None), "2025-03-26");
 }
+
+#[test]
+fn a_dot_segment_cannot_traverse_to_another_route() {
+    for dots in [".", ".."] {
+        let url = reqwest::Url::parse(&format!(
+            "http://127.0.0.1:7700/api/v1/sessions/{}/message",
+            seg(dots)
+        ))
+        .unwrap();
+        assert!(
+            url.path().starts_with("/api/v1/sessions/"),
+            "{dots}: {}",
+            url.path()
+        );
+    }
+    // Dots inside an id are untouched; other bytes are encoded.
+    assert_eq!(seg("v1.2"), "v1.2");
+    assert_eq!(seg("a/b"), "a%2Fb");
+}

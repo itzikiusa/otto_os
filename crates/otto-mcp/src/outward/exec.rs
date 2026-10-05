@@ -146,8 +146,18 @@ pub fn arg_str(args: &Value, key: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Invalid(format!("missing required string argument '{key}'")))
 }
 
+/// One URL path segment from an untrusted value: every byte outside the
+/// unreserved set percent-encoded. A segment of only dots (`.` / `..`) would
+/// still be normalized by the URL parser as a dot segment — and so would its
+/// `%2E` form — moving the call to ANOTHER route (`send_message
+/// {session_id:".."}` → `POST /api/v1/message`); those dots are encoded as
+/// `%252E`, which the route decodes to a literal, unmatched `%2E` id.
+/// Shared with the stdio bridge (`ottod mcp-tools`). Pure — unit-tested.
 pub fn seg(s: &str) -> String {
-    let mut out = String::new();
+    if !s.is_empty() && s.bytes().all(|b| b == b'.') {
+        return "%252E".repeat(s.len());
+    }
+    let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
