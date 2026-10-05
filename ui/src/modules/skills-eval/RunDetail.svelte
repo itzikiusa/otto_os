@@ -161,8 +161,8 @@
     pollCount++;
     // A poll never supersedes a load; a load (or unmount) supersedes the poll.
     const gen = seq.gen;
-    const stale = () => seq.gen !== gen || disposed || id !== evalId;
     const id = evalId;
+    const stale = () => seq.gen !== gen || disposed || id !== evalId;
     try {
       const r = await skillsEvalApi.get(id);
       if (stale()) return;
