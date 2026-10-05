@@ -438,8 +438,18 @@ async fn get_session<S: SessionsCtx>(
 }
 
 /// `session.meta` keys a PATCH may never change (an unchanged round-trip is
-/// accepted and dropped): the agent-UI-control grant and the device stamp.
-pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id"];
+/// accepted and dropped): the agent-UI-control grant and the device stamp,
+/// and the nested-agent capture (`nested_*`) — on resume Otto TYPES
+/// `cd <nested_cwd> && <provider> --resume <sid>` into the shell's PTY, so a
+/// token that could rewrite those values would type commands into a sibling
+/// (unsandboxed) shell.
+pub const SERVER_OWNED_META: &[&str] = &[
+    "ui_control",
+    "client_id",
+    "nested_provider",
+    "nested_cwd",
+    "nested_pid",
+];
 
 /// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
@@ -471,7 +481,8 @@ async fn patch_session<S: SessionsCtx>(
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
-                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control"
+                "ui_control / client_id / nested_* are server-owned (ui_control: use POST \
+                 /sessions/{id}/ui-control)"
                     .into(),
             )));
         }
