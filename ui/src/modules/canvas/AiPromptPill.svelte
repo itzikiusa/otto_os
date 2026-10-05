@@ -156,7 +156,7 @@
     white-space: nowrap;
   }
   .run:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .close {

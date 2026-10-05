@@ -141,7 +141,7 @@
     cursor: pointer;
   }
   .pick.disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   code {

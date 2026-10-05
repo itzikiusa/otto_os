@@ -679,7 +679,7 @@
   }
   .wq-view-del:disabled {
     cursor: progress;
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
 
   /* New-view form */

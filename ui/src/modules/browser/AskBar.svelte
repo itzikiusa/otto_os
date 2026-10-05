@@ -154,7 +154,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   textarea:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .marks-chip {
     display: inline-flex;
@@ -199,7 +199,7 @@
     cursor: pointer;
   }
   .send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

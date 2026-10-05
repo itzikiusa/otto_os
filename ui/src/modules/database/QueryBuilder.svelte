@@ -1866,7 +1866,7 @@
     padding: 8px 14px 16px;
   }
   .clauses.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     pointer-events: none;
   }
   .notice {

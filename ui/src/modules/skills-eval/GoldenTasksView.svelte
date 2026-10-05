@@ -458,7 +458,7 @@
     background: var(--surface);
   }
   .gt-card.disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .gt-card-top {
     display: flex;

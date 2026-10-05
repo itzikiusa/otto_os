@@ -211,7 +211,7 @@
     border-color: var(--accent-line-strong);
   }
   .review-sql:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .review-kbd {
     font-size: var(--fs-xs);

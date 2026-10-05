@@ -819,7 +819,7 @@
     color: var(--text);
   }
   .sb-btn:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .sb-toggle {

@@ -536,7 +536,7 @@
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
   }
   .link-btn:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .step {

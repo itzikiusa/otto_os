@@ -637,7 +637,7 @@
     border-bottom-color: var(--accent);
   }
   .tabs button:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .tab-body {

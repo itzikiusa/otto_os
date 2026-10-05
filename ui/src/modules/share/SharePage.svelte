@@ -527,7 +527,7 @@
     text-decoration: underline;
   }
   .otp-link:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

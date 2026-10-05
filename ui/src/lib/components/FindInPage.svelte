@@ -525,7 +525,7 @@
     color: var(--text);
   }
   .find-nav-btn:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

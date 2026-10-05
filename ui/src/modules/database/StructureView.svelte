@@ -1682,7 +1682,7 @@
     color: var(--danger);
   }
   .idx-act:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .idx-item {

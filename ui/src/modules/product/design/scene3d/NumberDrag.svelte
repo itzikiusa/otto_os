@@ -140,7 +140,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .nd.disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
   .nd-label {
     flex: 0 0 auto;

@@ -1093,7 +1093,7 @@
     white-space: nowrap;
   }
   .tpl-use:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .tpl-hint {
@@ -1300,7 +1300,7 @@
     cursor: pointer;
   }
   .primary:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 
@@ -1340,7 +1340,7 @@
     border-color: var(--accent);
   }
   .ghost:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .rows {
@@ -1674,7 +1674,7 @@
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .run-del:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .run-row {

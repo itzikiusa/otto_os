@@ -593,7 +593,7 @@
     color: var(--accent-text);
   }
   .sm-link-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .sm-link-btn.danger {
@@ -688,7 +688,7 @@
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .sm-revoke-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

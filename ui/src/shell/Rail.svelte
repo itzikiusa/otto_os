@@ -273,7 +273,7 @@
     color: var(--text);
   }
   .rail-btn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   /* Same selection language as the Navigator: accent tint + accent glyph + a

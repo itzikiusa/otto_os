@@ -512,7 +512,7 @@
   }
   .tile:disabled {
     cursor: default;
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .thumb {
     position: relative;

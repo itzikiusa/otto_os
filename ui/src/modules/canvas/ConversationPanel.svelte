@@ -251,7 +251,7 @@
     background: var(--hover);
   }
   .hist-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .shell {
@@ -322,7 +322,7 @@
     cursor: pointer;
   }
   .send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

@@ -179,7 +179,7 @@
 
   .key-btn:disabled,
   .key-btn.disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

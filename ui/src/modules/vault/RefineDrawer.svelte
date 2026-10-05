@@ -312,7 +312,7 @@
     flex: 0 0 auto;
   }
   .bar select:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .bar input {
     flex: 1;
@@ -325,7 +325,7 @@
     padding: 6px 10px;
   }
   .bar input:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .send {
     display: inline-flex;
@@ -341,7 +341,7 @@
     white-space: nowrap;
   }
   .send:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .notice {

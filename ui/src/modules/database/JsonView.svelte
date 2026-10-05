@@ -322,7 +322,7 @@
     border-color: var(--accent-line);
   }
   .vv-tool:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .jrec.compare-pick {

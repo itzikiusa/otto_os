@@ -1852,7 +1852,7 @@
     max-width: 640px;
   }
   .checkbox-row.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .window-row {
     display: flex;

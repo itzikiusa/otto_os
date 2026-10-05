@@ -234,7 +234,7 @@
   }
   .ma-format button:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   /* Locked chips: only the active one matters — hide the rest in the narrow dock. */
   .embedded .ma-format button:disabled:not(.on) {
@@ -255,7 +255,7 @@
   }
   .ma-provider select:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .ma-working {
     display: inline-flex;
@@ -383,7 +383,7 @@
     cursor: pointer;
   }
   .ma-send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

@@ -56,7 +56,7 @@
     color: var(--text);
   }
   .nav-btn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

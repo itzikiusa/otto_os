@@ -685,7 +685,7 @@
 
   /* Provider multi-select: global .pill-toggle + the provider mark. */
   .pl-provider-group { display: flex; flex-wrap: wrap; gap: 4px; }
-  .pl-provider-group .pill-toggle:disabled { cursor: not-allowed; opacity: 0.5; }
+  .pl-provider-group .pill-toggle:disabled { cursor: not-allowed; opacity: var(--disabled-opacity); }
 
   /* Autonomy toggle */
   .autonomy-toggle {
@@ -808,7 +808,7 @@
     padding: 0;
     transition: background var(--dur-fast), border-color var(--dur-fast);
   }
-  .checkbox:disabled { cursor: not-allowed; opacity: 0.6; }
+  .checkbox:disabled { cursor: not-allowed; opacity: var(--disabled-opacity); }
   .checkbox.status-done { background: var(--success); border-color: var(--success); }
   .checkbox.status-in_progress { background: var(--warning); border-color: var(--warning); font-weight: 600; }
   .checkbox.status-todo:hover:not(:disabled) { border-color: var(--accent); }

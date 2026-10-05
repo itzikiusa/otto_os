@@ -1657,7 +1657,7 @@
     flex-shrink: 0;
   }
   .nav-head :global(.icon-btn:disabled) {
-    opacity: 0.3;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nav-title {
@@ -1855,7 +1855,7 @@
     }
   }
   .group-head-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .sec-grip {
@@ -1963,7 +1963,7 @@
   .edit-row:focus-within .row-action.mv:disabled,
   .group-head-row:hover .row-action.mv:disabled,
   .group-head-row:focus-within .row-action.mv:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
   }
   @media (hover: none) {
     .edit-row .row-action.mv,
@@ -1973,7 +1973,7 @@
     }
     .edit-row .row-action.mv:disabled,
     .group-head-row .row-action.mv:disabled {
-      opacity: 0.25;
+      opacity: var(--disabled-opacity);
     }
   }
   .edit-row:hover {
@@ -2031,7 +2031,7 @@
     opacity: 1;
   }
   .edit-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nested {
@@ -2200,7 +2200,7 @@
     padding: 0 6px; flex-shrink: 0; opacity: 1;
     border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
-  .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
+  .arch-tools .row-action:disabled { opacity: var(--disabled-opacity); cursor: default; }
   .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
   .nav-item.subtle {
     color: var(--text-dim);

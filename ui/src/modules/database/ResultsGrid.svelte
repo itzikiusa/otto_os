@@ -1952,7 +1952,7 @@
     color: var(--accent-text);
   }
   .pg-btn:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .pg-range {

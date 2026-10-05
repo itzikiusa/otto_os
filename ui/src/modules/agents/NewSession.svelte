@@ -780,7 +780,7 @@
     border-color: var(--accent);
   }
   .cbtn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   /* Touch: the ± targets have to be tappable on a phone, where the card is the

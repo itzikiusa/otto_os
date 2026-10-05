@@ -835,7 +835,7 @@
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
   .icon-act.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
-  .icon-act:disabled { opacity: 0.4; cursor: not-allowed; }
+  .icon-act:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 
   /* Card body (markdown) */
   .card-body {

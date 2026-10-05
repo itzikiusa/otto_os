@@ -781,7 +781,7 @@
   }
   .user-row.disabled .avatar,
   .user-row.disabled .u-name .u-text {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .avatar {
     flex-shrink: 0;

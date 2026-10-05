@@ -2026,7 +2026,7 @@
     background: var(--accent-soft);
   }
   .hunk-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .hunk-btn.danger {

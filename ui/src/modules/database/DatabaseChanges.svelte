@@ -323,7 +323,7 @@
     font-size: var(--fs-m);
   }
   nav .item:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   nav span {

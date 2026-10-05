@@ -2705,7 +2705,7 @@
     color: var(--text);
   }
   .change-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 
@@ -3184,7 +3184,7 @@
     border-color: var(--accent);
   }
   .att-load-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .att-dl-link {
