@@ -1466,6 +1466,15 @@ pre{{background:#1c1c1e;color:#e5e5ea;padding:10px;border-radius:6px;overflow:au
     )
 }
 
+/// One captured command run (`sh -c <cmd>`): combined output, exit code, wall
+/// time. Produced by the proof runner and goal-loop verification commands.
+pub struct CmdRun {
+    pub success: bool,
+    pub exit_code: i32,
+    pub output: String,
+    pub duration_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2281,13 +2290,4 @@ mod tests {
         assert!(!h2.contains("<script>alert(1)</script>"));
         assert!(h2.contains("&lt;script&gt;"));
     }
-}
-
-/// One captured command run (`sh -c <cmd>`): combined output, exit code, wall
-/// time. Produced by the proof runner and goal-loop verification commands.
-pub struct CmdRun {
-    pub success: bool,
-    pub exit_code: i32,
-    pub output: String,
-    pub duration_ms: u64,
 }

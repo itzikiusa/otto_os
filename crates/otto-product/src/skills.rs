@@ -184,6 +184,7 @@ fn seed_dir(src_dir: &Dir<'_>, dest_dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // synchronous fs is fine in tests
 mod tests {
     use super::*;
 
