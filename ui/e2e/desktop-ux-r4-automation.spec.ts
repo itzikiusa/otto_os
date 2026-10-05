@@ -124,7 +124,7 @@ test('workflow canvas: keyboard selects a step and saved input survives reload',
   } })).json();
   await page.goto('/#/workflows');
   await page.getByTestId(`wf-row-${workflow.id}`).locator('.row-main').click();
-  const node = page.locator('.node', { hasText: 'Release input' });
+  const node = page.locator('.node-main', { hasText: 'Release input' });
   await node.focus(); await page.keyboard.press('Enter');
   const input = page.getByLabel('Message / prompt', { exact: true });
   await expect(input).toBeVisible();
@@ -132,7 +132,7 @@ test('workflow canvas: keyboard selects a step and saved input survives reload',
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
   await page.reload();
-  await page.locator('.node', { hasText: 'Release input' }).focus(); await page.keyboard.press('Space');
+  await page.locator('.node-main', { hasText: 'Release input' }).focus(); await page.keyboard.press('Space');
   await expect(input).toHaveValue('Review long acceptance checklist before release');
   await ctx.dispose();
 });

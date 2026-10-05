@@ -363,7 +363,7 @@ test('remote browsing refreshes after reopening and ignores older queries', asyn
   await page.waitForTimeout(150);
   await expect(page.locator('.remote-list')).not.toContainText('old-repository');
   await page.getByRole('dialog', { name: 'Add repository' }).getByRole('button', { name: 'Cancel', exact: true }).click();
-  await page.getByRole('button', { name: 'Open a repository', exact: true }).click(); await page.getByRole('menuitem', { name: 'Add a local repository…' }).click();
+  await page.getByRole('button', { name: 'Open a repository', exact: true }).click(); await page.getByRole('menuitem', { name: 'Browse remote to clone…' }).click();
   await expect(page.locator('.remote-list')).toContainText('new-repository');
 });
 

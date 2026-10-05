@@ -314,6 +314,14 @@
     ['chat', 'Chat', 'comment'],
   ];
   const viewLabel = (m: SessionViewMode): string => (m === 'chat' ? 'Chat' : 'Terminal');
+  /** The shared tablist keys, then focus re-lands on the selected tab: the
+   *  terminal view grabs focus when it mounts, which would strand the user. */
+  function onViewTabKey(e: KeyboardEvent): void {
+    onTabKey(e);
+    if (!e.defaultPrevented) return;
+    const list = e.currentTarget as HTMLElement;
+    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${view}"]`)?.focus());
+  }
   $effect(() => {
     if (!isAgent) return;
     const onKey = (e: KeyboardEvent): void => {
@@ -856,7 +864,7 @@
     </button>
     <span class="grow"></span>
     {#if isAgent}
-      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onTabKey}>
+      <div class="segmented view-seg" role="tablist" tabindex="-1" aria-label="Session view" onmousedown={(e) => e.stopPropagation()} onkeydown={onViewTabKey}>
         {#each VIEW_META as [m, label, icon] (m)}
           <button
             role="tab"
