@@ -9738,6 +9738,9 @@ export type K8sMonitorHealth = 'healthy' | 'degraded' | 'incident' | 'off' | 'un
 
 export interface K8sMonitorOverviewRow {
   cluster: { id: Id; name: string; environment: Environment; color?: string | null };
+  /** The caller can discover this cluster but lacks cluster-wide `metrics`:
+   *  figures are zeroed (namespace-scoped users never see other namespaces). */
+  restricted?: boolean;
   enabled: boolean;
   interval_secs: number;
   status: K8sMonitorStatus | null;

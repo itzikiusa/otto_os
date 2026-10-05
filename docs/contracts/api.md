@@ -5285,7 +5285,19 @@ WS `k8s_monitor_cycle`. Guide: `docs/features/kubernetes-monitoring.md`.
 
 Auth: `/k8s/monitor/overview` is `kubernetes:View`; `/k8s/clusters/{id}/monitor*`
 is View on GET, Edit on PUT/POST. Enabling requires the usage engine
-(ClickHouse) to be available ⇒ `409 conflict` otherwise.
+(ClickHouse) to be available ⇒ `409 conflict` otherwise. On top of the feature
+tier every per-cluster route checks the cluster's resource grant itself (an
+Enforced cluster lowers the feature gate to View on that assumption):
+`GET …/monitor` needs `discover`; `PUT …/monitor`, `POST …/monitor/test` and
+`POST …/monitor/run` need `configure` (+ the legacy Admin tier); `workloads`,
+`series`, `events` need `metrics` for the namespace asked for (`?ns=`; without
+it, cluster-wide `metrics`); `health` needs cluster-wide `metrics`. No grant ⇒
+404, a narrower grant ⇒ 403, a malformed `ns`/`pod` ⇒ 400. The overview and
+the fleet routes are scoped to the caller's grants: clusters the caller cannot
+`discover` are omitted, a cluster without cluster-wide `metrics` appears as
+`{ …, restricted: true }` with zeroed figures, and fleet queries only see
+(cluster, namespace) pairs the caller holds `metrics` on (the fleet cache key
+includes that scope).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -5295,9 +5307,9 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
-| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
-| GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&ns=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
+| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&ns=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View + cluster-wide `metrics` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
 `window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
 and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
