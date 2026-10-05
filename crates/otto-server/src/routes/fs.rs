@@ -780,6 +780,12 @@ mod tests {
                     .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                     .await
                     .unwrap();
+                // A non-root caller is refused the secret-named `.env` itself
+                // (non_root_fs_denied) but may still list its directory.
+                if !root && uri == &read_uri {
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                    continue;
+                }
                 assert_eq!(
                     response.status(),
                     StatusCode::OK,
