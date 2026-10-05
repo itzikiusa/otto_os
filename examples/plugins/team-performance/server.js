@@ -1167,14 +1167,25 @@ function guardrails(scope) {
   const out = [];
   const delivered = (w) => records.filter((r) => !r.subtask && !r.feature && String(r.type).toLowerCase() !== 'epic' && A.isDone(r) && (r.eff_done_at ?? r.done_at) >= w.since && (r.eff_done_at ?? r.done_at) < w.until && r.excluded_override !== true);
   const est = (r) => (estimates[r.key] && estimates[r.key].days) || 0;
-  const daysOff = config.days_off || {};
+  // Working days a person was available in [since, until): business days minus
+  // their entered time off (per-person vacations from the People editor).
+  const avail = (id, w) => {
+    const p = scope.people[id] || {};
+    let off = 0;
+    for (const t of p.time_off || []) {
+      const a = Math.max(w.since, Date.parse(t.from));
+      const b = Math.min(w.until, Date.parse(t.to) + A.DAY);
+      if (b > a) off += A.businessDays(a, b, wk);
+    }
+    return Math.max(1, A.businessDays(w.since, w.until, wk) - off);
+  };
   for (const w of [prev, cur]) {
     const D = delivered(w);
     const people = new Map();
     for (const r of D) if (r.assignee_id) people.set(scope.canonical(r.assignee_id), (people.get(scope.canonical(r.assignee_id)) || 0) + est(r));
-    const wd = A.businessDays(w.since, w.until, wk);
-    const team = [...people.values()].reduce((a, b) => a + b, 0) / Math.max(1, people.size * (wd - (daysOff[w.label] || 0)));
-    const hot = [...people.entries()].filter(([id, e]) => e / Math.max(1, wd - (daysOff[w.label] || 0)) > 1).map(([id]) => (scope.flat_people[id] || {}).name || id);
+    const teamAvail = [...people.keys()].reduce((a, id) => a + avail(id, w), 0);
+    const team = [...people.values()].reduce((a, b) => a + b, 0) / Math.max(1, teamAvail);
+    const hot = [...people.entries()].filter(([id, e]) => e / avail(id, w) > 1).map(([id]) => (scope.flat_people[id] || {}).name || id);
     out.push({ id: `cap:${w.label}`, level: team > 1 ? 'bad' : team > 0.8 || hot.length ? 'warn' : 'ok', msg: `${w.label}: ${team.toFixed(2)} estimated days delivered per working day${hot.length ? ` — above 1.0 for ${hot.join(', ')}` : ''}. Above 1.0 is not credible → estimates inflated.` });
     const noEv = D.filter((r) => !(r.git_change && r.git_change.commits)).length;
     const share = D.length ? noEv / D.length : 0;
@@ -1918,6 +1929,14 @@ const server = http.createServer(async (req, res) => {
           role: typeof p.role === 'string' ? p.role.trim() : prev.role,
           included: p.included !== undefined ? Boolean(p.included) : prev.included,
           aliases: Array.isArray(p.aliases) ? p.aliases.map(String).map((a) => a.trim()).filter(Boolean).slice(0, 20) : prev.aliases,
+          // Vacations / days off, entered by the lead: [{from, to}] ISO dates
+          // (inclusive). Capacity metrics subtract them per person.
+          time_off: Array.isArray(p.time_off)
+            ? p.time_off
+                .filter((x) => x && /^\d{4}-\d{2}-\d{2}$/.test(x.from) && /^\d{4}-\d{2}-\d{2}$/.test(x.to || x.from))
+                .map((x) => ({ from: x.from, to: x.to && x.to >= x.from ? x.to : x.from }))
+                .slice(0, 200)
+            : prev.time_off || [],
           // Merge duplicate Jira accounts of the same human: this account's
           // history folds into `merged_into` everywhere (no self-merge).
           merged_into:

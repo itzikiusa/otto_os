@@ -1456,6 +1456,7 @@
                 <span>${esc(p.name)} <span class="dim" style="font-size:10px">${esc(id.slice(0, 10))}…</span></span>
                 <select class="pp-role">${roleOpts(p.role || '')}</select>
                 <input type="text" class="pp-alias" placeholder="git aliases (comma: name or email)" value="${esc((p.aliases || []).join(', '))}">
+                <input type="text" class="pp-off" placeholder="time off: 2026-08-02..2026-08-06, 2026-09-21" title="Vacations / days off (inclusive ranges or single days) — subtracted from this person's working days" value="${esc((p.time_off || []).map((t) => (t.from === t.to ? t.from : `${t.from}..${t.to}`)).join(', '))}">
                 <select class="pp-merge" title="same human, different Jira account — fold this account's history into another person">${mergeOpts(id, p.merged_into || '')}</select>
               </div>`).join('');
           const unmatched = (peopleResp.unmatched_authors || []).slice(0, 15)
@@ -1589,6 +1590,7 @@
                 role: row.querySelector('.pp-role').value,
                 aliases: row.querySelector('.pp-alias').value.split(',').map((x) => x.trim()).filter(Boolean),
                 merged_into: row.querySelector('.pp-merge').value || null,
+                time_off: row.querySelector('.pp-off').value.split(',').map((x) => x.trim()).filter(Boolean).map((x) => { const [f, t] = x.split('..').map((y) => y.trim()); return { from: f, to: t || f }; }),
               };
             });
             const status_map = { ...state.config.status_map };
