@@ -73,20 +73,21 @@ pub const SHARE_OTP_TTL_SECS: i64 = 600;
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
 
-/// Process-wide revocation pulse (S8-03): bumped by every token revocation so
-/// long-lived sockets (`/ws/events`) re-authenticate NOW instead of waiting for
-/// their periodic re-check. The value is a meaningless generation counter.
-static REVOCATIONS: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
-    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+/// Process-wide revocation generation (S8-03): bumped by every token
+/// revocation so long-lived sockets (`/ws/events`) notice within a beat and
+/// re-authenticate, instead of waiting for their periodic re-check. A plain
+/// atomic (no runtime dependency): readers poll it on a short tick — one
+/// relaxed load — and only hit the authenticator when it moved.
+static REVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Subscribe to the revocation pulse (see [`REVOCATIONS`]).
-pub fn revocation_signal() -> tokio::sync::watch::Receiver<u64> {
-    REVOCATIONS.subscribe()
+/// The current revocation generation (see [`REVOCATIONS`]).
+pub fn revocation_generation() -> u64 {
+    REVOCATIONS.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Announce that some credential was revoked.
 pub fn signal_revocation() {
-    REVOCATIONS.send_modify(|g| *g = g.wrapping_add(1));
+    REVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Release);
 }
 
 /// SHA-256 hex of a raw token string.

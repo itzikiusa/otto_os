@@ -409,7 +409,7 @@ Ping/pong handled by the transport layer (axum auto-responds to pings; server
 sends a ping every 30s).
 
 **Credential re-validation.** The socket's token is re-checked every 60 s and
-immediately after any token revocation (logout, "revoke all", API/MCP/session
+within ~1 s of any token revocation (logout, "revoke all", API/MCP/session
 token revoke). If it no longer verifies as the same user (revoked, expired —
 e.g. an impersonation past its TTL — or the user disabled), the server sends a
 Close frame with code **4401** (`credential revoked`) and drops the socket.

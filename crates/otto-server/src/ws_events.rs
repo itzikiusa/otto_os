@@ -125,9 +125,13 @@ fn scope_denied(auth: &AuthContext) -> bool {
 }
 
 /// How often an open `/ws/events` socket re-validates its credential (S8-03).
-/// A revocation (`otto_rbac::tokens::revocation_signal`) re-checks at once;
+/// A revocation (`otto_rbac::tokens::signal_revocation`) re-checks within a
+/// [`REVOCATION_POLL`] beat;
 /// this cadence catches the rest — user disable, an impersonation token's TTL.
 const EVENTS_REAUTH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often an events socket looks at the revocation generation.
+const REVOCATION_POLL: Duration = Duration::from_secs(1);
 
 /// WebSocket close code sent when the socket's credential stopped verifying
 /// (docs/contracts/ws.md): the client must not silently reconnect with it.
@@ -180,21 +184,24 @@ async fn handle_events(
     // Credential re-validation (S8-03): the token was checked once at upgrade;
     // logout, "revoke all", a revoked API token or an expired impersonation
     // must not leave this socket streaming (or a `ui_command` target) forever.
-    let mut reauth = tokio::time::interval(EVENTS_REAUTH_INTERVAL);
-    reauth.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    reauth.tick().await; // the upgrade just authenticated
-    let mut revocations = otto_rbac::tokens::revocation_signal();
-    revocations.mark_unchanged();
+    // A short beat polls the revocation generation (one atomic load); the
+    // authenticator is asked only when it moved or the full interval passed.
+    let mut beat = tokio::time::interval(REVOCATION_POLL);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    beat.tick().await; // the upgrade just authenticated
+    let mut seen_generation = otto_rbac::tokens::revocation_generation();
+    let mut last_check = std::time::Instant::now();
 
     loop {
         tokio::select! {
-            recheck = async {
-                tokio::select! {
-                    _ = reauth.tick() => true,
-                    changed = revocations.changed() => changed.is_ok(),
+            _ = beat.tick() => {
+                let generation = otto_rbac::tokens::revocation_generation();
+                if generation == seen_generation && last_check.elapsed() < EVENTS_REAUTH_INTERVAL {
+                    continue;
                 }
-            } => {
-                if recheck && !still_authorized(&ctx, &token, &user).await {
+                seen_generation = generation;
+                last_check = std::time::Instant::now();
+                if !still_authorized(&ctx, &token, &user).await {
                     let _ = sink
                         .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                             code: CLOSE_AUTH_REVOKED,
