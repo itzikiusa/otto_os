@@ -89,9 +89,9 @@ pub async fn events_ws(
             // otherwise the browser would reject an unsolicited subprotocol.
             if used_subprotocol {
                 ws.protocols([BEARER_SUBPROTOCOL])
-                    .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
+                    .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
             } else {
-                ws.on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable))
+                ws.on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
             }
         }
         Err(_) => ApiError(Error::Unauthorized).into_response(),
@@ -124,7 +124,33 @@ fn scope_denied(auth: &AuthContext) -> bool {
     auth.is_scoped()
 }
 
-async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable: bool) {
+/// How often an open `/ws/events` socket re-validates its credential (S8-03).
+/// A revocation (`otto_rbac::tokens::revocation_signal`) re-checks at once;
+/// this cadence catches the rest — user disable, an impersonation token's TTL.
+const EVENTS_REAUTH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// WebSocket close code sent when the socket's credential stopped verifying
+/// (docs/contracts/ws.md): the client must not silently reconnect with it.
+pub(crate) const CLOSE_AUTH_REVOKED: u16 = 4401;
+
+/// Whether the token that opened this socket still verifies AS THE SAME user.
+/// A transient store error keeps the socket (retry next tick): only a definite
+/// verdict — revoked, expired, disabled, or now another identity — closes it.
+async fn still_authorized(ctx: &ServerCtx, token: &str, user: &User) -> bool {
+    match ctx.authenticator.authenticate(token).await {
+        Ok(auth) => auth.effective_user.id == user.id && !scope_denied(&auth),
+        Err(Error::Internal(_)) => true,
+        Err(_) => false,
+    }
+}
+
+async fn handle_events(
+    socket: WebSocket,
+    ctx: ServerCtx,
+    user: User,
+    ui_capable: bool,
+    token: String,
+) {
     // Shared serialize-once fan-out (ws_fanout.rs): a recv is an Arc clone and
     // the JSON text is built at most once per event across every socket.
     let mut events = crate::ws_fanout::subscribe(&ctx.events);
@@ -151,9 +177,33 @@ async fn handle_events(socket: WebSocket, ctx: ServerCtx, user: User, ui_capable
     let mut caches = AuthCaches::new(std::time::Instant::now());
     // Hands the worker back while a burst of big frames drains.
     let mut pacer = crate::ws_fanout::Pacer::new();
+    // Credential re-validation (S8-03): the token was checked once at upgrade;
+    // logout, "revoke all", a revoked API token or an expired impersonation
+    // must not leave this socket streaming (or a `ui_command` target) forever.
+    let mut reauth = tokio::time::interval(EVENTS_REAUTH_INTERVAL);
+    reauth.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    reauth.tick().await; // the upgrade just authenticated
+    let mut revocations = otto_rbac::tokens::revocation_signal();
+    revocations.mark_unchanged();
 
     loop {
         tokio::select! {
+            recheck = async {
+                tokio::select! {
+                    _ = reauth.tick() => true,
+                    changed = revocations.changed() => changed.is_ok(),
+                }
+            } => {
+                if recheck && !still_authorized(&ctx, &token, &user).await {
+                    let _ = sink
+                        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                            code: CLOSE_AUTH_REVOKED,
+                            reason: "credential revoked".into(),
+                        })))
+                        .await;
+                    break;
+                }
+            }
             event = events.recv() => match event {
                 Ok(crate::ws_fanout::FanItem::Event(frame)) => {
                     let event = &frame.event;

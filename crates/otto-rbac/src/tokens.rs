@@ -73,6 +73,22 @@ pub const SHARE_OTP_TTL_SECS: i64 = 600;
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
 
+/// Process-wide revocation pulse (S8-03): bumped by every token revocation so
+/// long-lived sockets (`/ws/events`) re-authenticate NOW instead of waiting for
+/// their periodic re-check. The value is a meaningless generation counter.
+static REVOCATIONS: std::sync::LazyLock<tokio::sync::watch::Sender<u64>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
+
+/// Subscribe to the revocation pulse (see [`REVOCATIONS`]).
+pub fn revocation_signal() -> tokio::sync::watch::Receiver<u64> {
+    REVOCATIONS.subscribe()
+}
+
+/// Announce that some credential was revoked.
+pub fn signal_revocation() {
+    REVOCATIONS.send_modify(|g| *g = g.wrapping_add(1));
+}
+
 /// SHA-256 hex of a raw token string.
 pub fn token_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -471,6 +487,7 @@ impl AuthRepo {
         if let Some(cache) = &self.cache {
             cache.evict(&hash);
         }
+        signal_revocation();
         Ok(())
     }
 
@@ -493,6 +510,7 @@ impl AuthRepo {
         if let Some(cache) = &self.cache {
             cache.evict_user(user_id);
         }
+        signal_revocation();
         Ok(res.rows_affected())
     }
 
@@ -630,6 +648,7 @@ impl AuthRepo {
                 cache.evict(hash);
             }
         }
+        signal_revocation();
         Ok(hashes.len() as u64)
     }
 
@@ -957,6 +976,7 @@ impl AuthRepo {
         if let (Some(cache), Some(uid)) = (&self.cache, owner) {
             cache.evict_user(&uid);
         }
+        signal_revocation();
         Ok(res.rows_affected() > 0)
     }
 
@@ -1174,6 +1194,7 @@ impl AuthRepo {
             if let (Some(cache), Some(h)) = (&self.cache, cached_hash) {
                 cache.evict(&h);
             }
+            signal_revocation();
         }
         Ok(res.rows_affected() > 0)
     }
