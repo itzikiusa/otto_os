@@ -22,11 +22,20 @@ function rec(over) {
   };
 }
 
-test('contentHash: stable on same content, changes when the text changes', () => {
+test('contentHash: stable — title change re-estimates, description/points edits do not', () => {
   const a = E.contentHash(rec({}));
   assert.equal(a, E.contentHash(rec({})));
   assert.notEqual(a, E.contentHash(rec({ summary: 'Implement the OTHER thing' })));
-  assert.notEqual(a, E.contentHash(rec({ points: 5 })));
+  assert.equal(a, E.contentHash(rec({ points: 5 })), 'points ignored');
+  assert.equal(a, E.contentHash(rec({ description_snippet: 'a much longer rewritten spec' })), 'description edits ignored');
+});
+
+test('ruler change re-estimates everything; first estimate is kept', () => {
+  const r = rec({ key: 'RU-1' });
+  const ruler = E.rulerId(['x'], '');
+  const cache = { 'RU-1': { hash: E.contentHash(r), days: 3, v: 6, ruler } };
+  assert.equal(E.selectTargets([r], cache, 6, NOW, 0, ruler).length, 0);
+  assert.equal(E.selectTargets([r], cache, 6, NOW, 0, E.rulerId(['y'], '')).length, 1);
 });
 
 test('selectTargets: window filter, cache hits skipped, hash mismatch re-selected', () => {
@@ -36,8 +45,8 @@ test('selectTargets: window filter, cache hits skipped, hash mismatch re-selecte
   const cached = rec({ key: 'R-4' });
   const changed = rec({ key: 'R-5' });
   const cache = {
-    'R-4': { hash: E.contentHash(cached), days: 2, routine: false, v: 5 },
-    'R-5': { hash: 'stale-hash', days: 2, routine: false, v: 5 },
+    'R-4': { hash: E.contentHash(cached), days: 2, routine: false, v: 6 },
+    'R-5': { hash: 'stale-hash', days: 2, routine: false, v: 6 },
   };
   const keys = E.selectTargets([recent, old, open, cached, changed], cache, 6, NOW).map((r) => r.key);
   assert.ok(keys.includes('R-1'), 'recent done selected');
@@ -156,7 +165,7 @@ test('changeFingerprint invalidates the cache as the diff grows; prompt embeds e
   const grown = rec({ key: 'C-1', git_change: { commits: 6, files: 18, insertions: 900, deletions: 1300 } });
   const cache = {};
   // First estimate caches at the small fingerprint.
-  cache['C-1'] = { hash: E.contentHash(base), days: 1, routine: false, v: 5 };
+  cache['C-1'] = { hash: E.contentHash(base), days: 1, routine: false, v: 6 };
   assert.equal(E.selectTargets([base], cache, 6, NOW).length, 0, 'unchanged small diff stays cached');
   assert.equal(E.selectTargets([grown], cache, 6, NOW).length, 1, 'a much larger diff re-estimates');
 

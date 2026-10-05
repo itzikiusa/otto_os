@@ -70,6 +70,7 @@ const RE_IMPL = /progress|develop|implement|coding|code review|review|test|qa|ve
 // QA-class statuses (a subset of implementation): their time is capped in the
 // actual (QA queues idle for weeks) unless commits landed during the QA window.
 const RE_QA = /\bqa\b|quality|test|verif/;
+const RE_BACKLOG = /to-?\s?do|next sprint|backlog|ready|open|candidate/;
 const RE_WAIT = /to do|todo|open|backlog|blocked|waiting|hold|ready|triage|new/;
 const RE_DONE = /done|closed|resolved|cancel|reject|complete|released|deploy/;
 
@@ -250,6 +251,33 @@ function deriveGit(record, gitEntry, opts) {
   const { qa: qaRaw, windows: qaWindows } = qaTime(record, workweek);
   const qaHasCommits = qaWindows.some(([from, to]) => commitTs.some((t) => t >= from && t < to));
   const qaCappedDays = qaRaw > qaCapDays && !qaHasCommits ? qaCapDays : qaRaw;
+  // DEV time: hands-on development only — implementation-phase statuses that
+  // are NOT QA and NOT backlog-like (To-Do / Next Sprint / Ready…). Stops at QA.
+  const clipDev = record.done_at ?? doneGit ?? null;
+  let devDays = 0;
+  for (const iv of record.intervals || []) {
+    const phase = iv.phase ?? classifyStatus(iv.status, {});
+    const st = String(iv.status || '').toLowerCase();
+    if (phase !== 'implementation' || RE_QA.test(st) || RE_BACKLOG.test(st)) continue;
+    const to = clipDev !== null ? Math.min(iv.to, clipDev) : iv.to;
+    if (to > iv.from) devDays += businessDays(iv.from, to, workweek);
+  }
+  // GIT dev time: statuses are often not moved on time, so commits are the
+  // second witness. Commit timestamps are grouped into working stretches
+  // (gaps ≤ 3 business days bridged); each stretch counts span + 1 day.
+  let gitDev = 0;
+  const cts = (Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts || []).slice().sort((a, b) => a - b);
+  if (cts.length) {
+    let s0 = cts[0];
+    let prev = cts[0];
+    for (let i = 1; i <= cts.length; i++) {
+      const t = cts[i];
+      if (t !== undefined && businessDays(prev, t, workweek) <= 3) { prev = t; continue; }
+      gitDev += businessDays(s0, prev, workweek) + 1;
+      if (t !== undefined) { s0 = t; prev = t; }
+    }
+  }
+  devDays = Math.max(devDays, gitDev);
   const activeDays = record.impl_days !== null && record.impl_days !== undefined
     ? round2(Math.max(0, record.impl_days - qaRaw + qaCappedDays))
     : null;
@@ -273,7 +301,7 @@ function deriveGit(record, gitEntry, opts) {
   // The guard runs on the SAME base the actual uses (active-status time when
   // present, wall span otherwise) so a 500-day span with sane status history
   // isn't wrongly excluded, and a 500-day "In Progress" IS.
-  const actualBase = activeDays !== null && activeDays > 0 ? activeDays : effCycle;
+  const actualBase = devDays > 0 ? devDays : implGit !== null && implGit > 0 ? implGit : activeDays !== null && activeDays > 0 ? activeDays : effCycle;
   if (done && actualBase !== null && actualBase > 250) {
     if (!flags.includes('stale_timing')) flags.push('stale_timing');
   }
@@ -300,6 +328,8 @@ function deriveGit(record, gitEntry, opts) {
     qa_days: round2(qaRaw),
     qa_days_counted: round2(qaCappedDays),
     active_days: activeDays,
+    dev_days: round2(devDays),
+    git_dev_days: round2(gitDev),
     fix_days: fixDays,
     deploy_wait_days: deployWait,
     eff_done_at: effDone,
@@ -322,18 +352,19 @@ const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 // fixing effort does.
 const rCycle = (r) => {
   if (r.manual_days != null) return r.manual_days;
-  // Status-based active time (in progress + code review + capped QA) wins when
-  // the issue has real status history — the wall-clock span counts idle time.
-  // Tasks with no active-status signal (bulk-moved, git-only features, pre-v3
-  // records) fall back to the effective (git-primary) span.
+  // DEV actual (v0.7): In Progress / Code Review time only — stops at QA, no
+  // backlog time, no post-merge fix time. Sub-task dev time rolls up into the
+  // story (max of own vs children — they overlap). Falls back to first commit
+  // → merge when the ticket never sat in a dev status; legacy records without
+  // dev_days fall back to the old active/elapsed basis.
+  const own = r.dev_days ?? null;
+  const kids = r.child_dev_days ?? 0;
+  const dev = own !== null ? Math.max(own, kids) : null;
+  if (dev !== null && dev > 0) return round2(Math.max(0, dev + (r.rework_in ?? 0) - (r.rework_out ?? 0)) + (r.fix_days_override ?? 0));
+  if (r.impl_days_git != null && r.impl_days_git > 0) return r.impl_days_git;
+  if (own !== null) return kids > 0 ? kids : null;
   const active = r.active_days ?? null;
-  const base = active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
-  if (base == null) return base;
-  // A lead-entered partial fix contribution wins over the full auto fix time —
-  // fold in e.g. 10 of the 14 fix-days rather than all-or-nothing.
-  if (r.fix_days_override != null) return round2(base + r.fix_days_override);
-  if (r.include_fixes && r.fix_days) return round2(base + r.fix_days);
-  return base;
+  return active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
 };
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;
 const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || []).includes('zero_time');
@@ -343,7 +374,7 @@ const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || [
 // story (counting both would double the same work). A manual time override
 // cures stale/outlier — the story re-enters at the entered value.
 const isExcluded = (r) =>
-  r.excluded_override === true || r.rollup === true || (r.manual_days == null && (r.outlier === true || isStale(r)));
+  String(r.type || '').toLowerCase() === 'epic' || r.excluded_override === true || r.rollup === true || (r.manual_days == null && (r.outlier === true || isStale(r)));
 // Timing-sample guard: "done" records with ~zero measured time are bulk-closed
 // Jira junk, not measurements — they poison medians and pace ratios toward 0.
 // A manual override is always a deliberate sample.
@@ -374,6 +405,8 @@ function enrichHierarchy(records) {
   const parents = new Map();
   for (const r of records) if (!r.subtask) parents.set(r.key, r);
   const designByParent = new Map();
+  const devByParent = new Map();
+  const authorsByParent = new Map();
   const out = records.map((r) => {
     if (!r.subtask || !r.parent_key || !parents.has(r.parent_key)) return r;
     // A sub-task that CONTAINS the word "design" (type or anywhere in the
@@ -386,8 +419,25 @@ function enrichHierarchy(records) {
     // EVERY sub-task (dev, QA, design, …) rolls up into its parent story —
     // the story is the unit of work; counting its breakdown too would double
     // it and a pile of tiny QA/dev sub-tasks would drown the real stories.
+    const t = r.dev_days ?? 0;
+    if (t > 0) devByParent.set(r.parent_key, (devByParent.get(r.parent_key) || 0) + t);
+    if ((r.git_authors || []).length) authorsByParent.set(r.parent_key, [...(authorsByParent.get(r.parent_key) || []), ...r.git_authors]);
     return { ...r, rollup: true };
   });
+  // Sub-task dev time + commit authors roll UP into the story: the story is
+  // the rated unit and its credit splits across everyone who did the work.
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i];
+    if (!devByParent.has(r.key) && !authorsByParent.has(r.key)) continue;
+    const merged = new Map();
+    for (const a of [...(r.git_authors || []), ...(authorsByParent.get(r.key) || [])]) {
+      const k = `${a.name}|${a.email}`;
+      const m = merged.get(k) || { ...a, commits: 0 };
+      m.commits += a.commits || 0;
+      merged.set(k, m);
+    }
+    out[i] = { ...r, child_dev_days: round2(devByParent.get(r.key) || 0), git_authors: [...merged.values()] };
+  }
   if (!designByParent.size) return out;
   return out.map((r) =>
     designByParent.has(r.key)

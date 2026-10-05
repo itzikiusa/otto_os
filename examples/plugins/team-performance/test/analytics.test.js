@@ -747,35 +747,23 @@ test('resurrected ancients: multi-year effective cycles are excluded even with g
 
 // ---- v0.4.1: fix-inclusion into the actual ----------------------------------
 
-test('include_fixes folds fix time into the actual; manual override still wins', () => {
-  const base = rec({ key: 'IF-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 4, fix_count: 12 });
-  assert.equal(A.median([5]), 5);
-  // default record (no include_fixes) → base only
-  const b = A.baselines([{ ...base, include_fixes: false }, rec({ key: 'X1', eff_cycle_days: 5, cycle_days: 5 }), rec({ key: 'X2', eff_cycle_days: 5, cycle_days: 5 })]);
-  assert.equal(b.lookup('Story', 3).bucket.total.p50, 5, 'fixes not folded when include_fixes false');
-  // include_fixes true → base + fix_days (5+4=9)
-  const withFix = { ...base, include_fixes: true };
-  const stats = A.assigneeStats([withFix], A.baselines([withFix]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(stats[0].median_cycle, 9, 'actual = cycle + fix_days when included');
-  // manual override beats fix inclusion
-  const manual = { ...base, include_fixes: true, manual_days: 6 };
-  const s2 = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s2[0].median_cycle, 6, 'manual actual wins');
-});
-
-test('fix_days_override folds in a partial fix amount (wins over include mode)', () => {
-  const r = { ...rec({ key: 'FP-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 14, fix_count: 27 }), include_fixes: true };
-  // full include: 5 + 14 = 19
+test('v0.7: post-merge fix time is NOT folded into the actual (stops at QA); lead partial override and manual still apply', () => {
+  const r = { ...rec({ key: 'FP-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 14, fix_count: 27, dev_days: 5 }), include_fixes: true };
   let s = A.assigneeStats([r], A.baselines([r]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s[0].median_cycle, 19);
-  // partial: only 10 of the 14 fix-days → 5 + 10 = 15
+  assert.equal(s[0].median_cycle, 5, 'fix days ignored');
   const partial = { ...r, fix_days_override: 10 };
   s = A.assigneeStats([partial], A.baselines([partial]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s[0].median_cycle, 15, 'partial fix contribution');
-  // manual actual still wins over everything
+  assert.equal(s[0].median_cycle, 15, 'explicit lead fix contribution still added');
   const manual = { ...partial, manual_days: 8 };
   s = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
   assert.equal(s[0].median_cycle, 8);
+});
+
+test('v0.7: rework charge-back moves time between tickets', () => {
+  const r = rec({ key: 'RW-1', dev_days: 10, rework_out: 4 });
+  const a = rec({ key: 'RW-0', dev_days: 2, rework_in: 4 });
+  assert.equal(A.actualDays(r), 6);
+  assert.equal(A.actualDays(a), 6);
 });
 
 // ---- v0.6: active-status actual, QA cap, estimate-inflation index ------------
@@ -783,7 +771,7 @@ test('fix_days_override folds in a partial fix amount (wins over include mode)',
 // Interval helper: [status, fromIso, toIso] with default phase classification.
 const iv = (status, from, to) => ({ status, from: T(from), to: T(to), phase: A.classifyStatus(status, {}) });
 
-test('active_days: sums working statuses, ignores idle span; actual prefers it', () => {
+test('dev_days: In Progress + Code Review only; git stretches fill status gaps', () => {
   // Mon..Fri: 2d In Progress + 1d Code Review + 1d QA = 4 active days, but the
   // record's wall span (eff cycle) is 20 days of mostly backlog idle.
   const base = rec({
@@ -800,7 +788,11 @@ test('active_days: sums working statuses, ignores idle span; actual prefers it',
   });
   const r = A.deriveGit(base, undefined, { hasRepos: true });
   assert.equal(r.active_days, 4);
-  assert.equal(A.actualDays(r), 4, 'actual = active status time, not the 20-day span');
+  assert.equal(r.dev_days, 3, 'dev = In Progress + Code Review; To Do and QA excluded');
+  assert.equal(A.actualDays(r), 3, 'actual = dev time (stops at QA), not the 20-day span');
+  // commits widen dev time when statuses lag: a 5-day commit stretch beats 3 status days
+  const g = A.deriveGit(base, { commit_ts: [T('2026-06-15T10:00:00Z'), T('2026-06-17T10:00:00Z'), T('2026-06-19T10:00:00Z')] }, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.ok(g.dev_days >= 5, 'git working stretch counts when statuses were not moved');
 });
 
 test('QA cap: long idle QA is capped; commits during QA lift the cap', () => {

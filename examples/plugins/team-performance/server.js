@@ -122,6 +122,20 @@ function buildIndexAsync(repos, config) {
   });
 }
 
+/** Git rework worker (lib/rework.js): blame of rewritten lines → pairs. */
+function reworkAsync(repoPaths, since) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'lib', 'rework.js')], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(null); }, 60 * 60 * 1000);
+    let out = '';
+    child.stdout.on('data', (c) => (out += c));
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => { clearTimeout(timer); try { resolve(JSON.parse(out)); } catch { resolve(null); } });
+    child.stdin.end(JSON.stringify({ repos: repoPaths, since }));
+  });
+}
+const reworkPath = () => path.join(DATA_DIR, 'rework.json');
+
 // ---- config -----------------------------------------------------------------
 
 const DEFAULT_ROLES = ['Developer', 'Senior Developer', 'Team Lead', 'QA/Automation', 'Product Manager', 'VP RND'];
@@ -609,9 +623,9 @@ function gatherCorrections(account) {
     const ov = store.readJson(store.overridesPath(DATA_DIR, account, p), null);
     const corpus = ov ? store.readJson(store.corpusPath(DATA_DIR, account, p), null) : null;
     for (const [k, o] of Object.entries((ov && ov.issues) || {})) {
-      if (typeof o.est_days !== 'number' || !o.est_reason) continue;
+      if (typeof o.est_days !== 'number') continue; // every lead correction calibrates the ruler
       const rec = corpus && corpus.issues ? corpus.issues[k] : null;
-      out.push({ key: k, corrected: o.est_days, summary: rec ? rec.summary : '', reason: o.est_reason, at: o.updated_at || 0 });
+      out.push({ key: k, corrected: o.est_days, summary: rec ? rec.summary : '', reason: o.est_reason || '', at: o.updated_at || 0 });
     }
   }
   return out.sort((a, b) => b.at - a.at).slice(0, 20);
@@ -668,6 +682,28 @@ async function estimateScope(account, projects, config, job) {
     store.writeJsonAtomic(cacheFile, cache);
     job.estimate_remaining = (job.estimate_remaining || 0) + res.remaining;
     job.errors = (job.errors || 0) + res.failed_batches;
+  }
+  // Feature pass: one estimate per epic for the whole feature.
+  {
+    const all = {};
+    for (const project of projects) {
+      const corpus = store.readJson(store.corpusPath(DATA_DIR, account, project), null);
+      if (corpus && corpus.issues) Object.assign(all, corpus.issues);
+    }
+    const kidsOf = new Map();
+    for (const r of Object.values(all)) {
+      if (r.subtask || !r.parent_key || !all[r.parent_key]) continue;
+      if (String(all[r.parent_key].type).toLowerCase() !== 'epic') continue;
+      if (!kidsOf.has(r.parent_key)) kidsOf.set(r.parent_key, []);
+      kidsOf.get(r.parent_key).push(r);
+    }
+    const epics = [...kidsOf.entries()].filter(([, k]) => k.length >= 2).map(([ek, kids]) => ({ epic: all[ek], kids }));
+    const cacheFile = store.estimatesPath(DATA_DIR, account, '__epics__');
+    const cache = store.readJson(cacheFile, {}) || {};
+    delete cache.schema;
+    job.step = 'estimate features (epic level)';
+    await E.runFeatureEstimation({ epics, cache, agentRun, workers, rubric: config.estimate_rubric, instructions: config.estimate_instructions });
+    store.writeJsonAtomic(cacheFile, cache);
   }
   // Git-only features share the same machinery under a synthetic project.
   const featFile = store.featuresPath(DATA_DIR);
@@ -734,6 +770,11 @@ async function runScan(account, projects, full, assignees) {
     }
 
     if (config.estimate_enabled) await estimateScope(account, projects, config, job);
+
+    // Rework: who rewrote whose recent code (blame) — charged back in views.
+    job.step = 'git rework';
+    const rw = await reworkAsync((repos || []).map((r) => r.path).filter(Boolean), gitCfg.evidence_since);
+    if (rw) store.writeJsonAtomic(reworkPath(), rw);
 
     appendGoalSnapshots(account, config);
 
@@ -826,9 +867,55 @@ function loadScope(account, projectsParam) {
       }
     }
   }
+  // Feature-level ruler: children of an estimated epic are scaled so their
+  // sum equals the ONE feature estimate (lead-corrected children keep their
+  // value; the rest share the remainder). Slicing can't inflate a feature.
+  {
+    const ep = loadEstimates(account, '__epics__');
+    const keyset = new Map(records.map((r) => [r.key, r]));
+    for (const [ek, fe] of Object.entries(ep)) {
+      if (!fe || !(fe.days > 0) || !keyset.has(ek)) continue;
+      const kids = (fe.kids || []).filter((k) => estimates[k] && estimates[k].days > 0);
+      if (kids.length < 2) continue;
+      const fixed = kids.filter((k) => estimates[k].overridden);
+      const free = kids.filter((k) => !estimates[k].overridden);
+      const rest = fe.days - fixed.reduce((a, k) => a + estimates[k].days, 0);
+      const sumFree = free.reduce((a, k) => a + estimates[k].days, 0);
+      if (!(sumFree > 0)) continue;
+      const f = Math.max(0.1, rest / sumFree);
+      for (const k of free) estimates[k] = { ...estimates[k], story_days: estimates[k].days, days: Math.round(estimates[k].days * f * 100) / 100, feature_scaled: f };
+    }
+  }
   // Hierarchy pass: dev sub-tasks roll up into their parent story; design
   // sub-tasks paint the parent's design phase.
   records = A.enrichHierarchy(records);
+  // Rework charge-back: when ticket B rewrote ticket A's recent code, B's dev
+  // time × (rewritten lines ÷ B's changed lines) moves from B to A — A was not
+  // really done, and B was not new work.
+  {
+    const rw = store.readJson(reworkPath(), null);
+    if (rw && rw.pairs && rw.perKey) {
+      const byKey = new Map(records.map((r, i) => [r.key, i]));
+      const inn = new Map();
+      const outm = new Map();
+      for (const [pk, p] of Object.entries(rw.pairs)) {
+        const [b, a] = pk.split('>');
+        if (!byKey.has(a) || !byKey.has(b) || a === b) continue;
+        const B = rw.perKey[b];
+        const tot = B ? (B.added || 0) + (B.deleted || 0) : 0;
+        if (!(tot > 0)) continue;
+        const frac = Math.min(1, (p.lines || 0) / tot);
+        const base = A.actualDays(records[byKey.get(b)]);
+        if (!(base > 0) || frac < 0.02) continue;
+        const t = base * frac;
+        outm.set(b, (outm.get(b) || 0) + t);
+        inn.set(a, (inn.get(a) || 0) + t);
+      }
+      records = records.map((r) => (inn.has(r.key) || outm.has(r.key)
+        ? { ...r, rework_in: Math.round((inn.get(r.key) || 0) * 100) / 100, rework_out: Math.round(Math.min(outm.get(r.key) || 0, A.actualDays(r) || 0) * 100) / 100 }
+        : r));
+    }
+  }
 
   // Keyless git features (opted-in repos — automation work without tickets)
   // join the corpus as pseudo-records: their authors get weighted/pace/monthly
@@ -1061,6 +1148,61 @@ function openTaskRow(r, base, factors, config, estimates) {
   };
 }
 
+/**
+ * Guardrails — red flags that make every ratio untrustworthy. Last two full
+ * quarters. Each → {id, level:'ok'|'warn'|'bad', msg}.
+ */
+function guardrails(scope) {
+  const { records, estimates, config } = scope;
+  const wk = config.workweek;
+  const now = new Date();
+  const qStart = (y, q) => Date.UTC(y, q * 3, 1);
+  let y = now.getUTCFullYear();
+  let q = Math.floor(now.getUTCMonth() / 3) - 1;
+  if (q < 0) { q = 3; y--; }
+  const cur = { since: qStart(y, q), until: qStart(q === 3 ? y + 1 : y, (q + 1) % 4), label: `${y} Q${q + 1}` };
+  const py = q === 0 ? y - 1 : y;
+  const pq = q === 0 ? 3 : q - 1;
+  const prev = { since: qStart(py, pq), until: cur.since, label: `${py} Q${pq + 1}` };
+  const out = [];
+  const delivered = (w) => records.filter((r) => !r.subtask && !r.feature && String(r.type).toLowerCase() !== 'epic' && A.isDone(r) && (r.eff_done_at ?? r.done_at) >= w.since && (r.eff_done_at ?? r.done_at) < w.until && r.excluded_override !== true);
+  const est = (r) => (estimates[r.key] && estimates[r.key].days) || 0;
+  const daysOff = config.days_off || {};
+  for (const w of [prev, cur]) {
+    const D = delivered(w);
+    const people = new Map();
+    for (const r of D) if (r.assignee_id) people.set(scope.canonical(r.assignee_id), (people.get(scope.canonical(r.assignee_id)) || 0) + est(r));
+    const wd = A.businessDays(w.since, w.until, wk);
+    const team = [...people.values()].reduce((a, b) => a + b, 0) / Math.max(1, people.size * (wd - (daysOff[w.label] || 0)));
+    const hot = [...people.entries()].filter(([id, e]) => e / Math.max(1, wd - (daysOff[w.label] || 0)) > 1).map(([id]) => (scope.flat_people[id] || {}).name || id);
+    out.push({ id: `cap:${w.label}`, level: team > 1 ? 'bad' : team > 0.8 || hot.length ? 'warn' : 'ok', msg: `${w.label}: ${team.toFixed(2)} estimated days delivered per working day${hot.length ? ` — above 1.0 for ${hot.join(', ')}` : ''}. Above 1.0 is not credible → estimates inflated.` });
+    const noEv = D.filter((r) => !(r.git_change && r.git_change.commits)).length;
+    const share = D.length ? noEv / D.length : 0;
+    out.push({ id: `evidence:${w.label}`, level: share > 0.5 ? 'bad' : share > 0.3 ? 'warn' : 'ok', msg: `${w.label}: ${Math.round(share * 100)}% of delivered tickets estimated with no code evidence (commits without the key in the subject, or never merged).` });
+    const noDev = D.filter((r) => !(r.dev_days > 0) && r.manual_days == null).length;
+    out.push({ id: `devtime:${w.label}`, level: D.length && noDev / D.length > 0.3 ? 'warn' : 'ok', msg: `${w.label}: ${noDev} of ${D.length} tickets have no dev time at all (never In Progress and no keyed commits) — their actual is unknown.` });
+  }
+  // feature vs Σ stories
+  const ep = loadEstimates(scope.account, '__epics__');
+  const bad = [];
+  for (const [ek, fe] of Object.entries(ep)) {
+    const sum = (fe.kids || []).reduce((a, k) => a + ((estimates[k] && (estimates[k].story_days ?? estimates[k].days)) || 0), 0);
+    if (fe.days > 0 && sum / fe.days > 1.25) bad.push(`${ek} ×${(sum / fe.days).toFixed(2)}`);
+  }
+  out.push({ id: 'slicing', level: bad.length > 3 ? 'warn' : 'ok', msg: `${bad.length} features whose stories sum to > 1.25× the feature estimate (auto-scaled down): ${bad.slice(0, 6).join(', ')}` });
+  // rework
+  const rw = store.readJson(reworkPath(), null);
+  if (rw && rw.perKey) {
+    const D = delivered(cur);
+    let del = 0;
+    let other = 0;
+    for (const r of D) { const k = rw.perKey[r.key]; if (k) { del += k.deleted || 0; other += k.reworkOther || 0; } }
+    const sh = del ? other / del : 0;
+    out.push({ id: 'rework', level: sh > 0.12 ? 'warn' : 'ok', msg: `${cur.label}: ${Math.round(sh * 100)}% of changed lines rewrote another recent ticket's code (charged back to the original ticket).` });
+  }
+  return out;
+}
+
 function overview(account, projectsParam, sinceMs = 0) {
   const scope = loadScope(account, projectsParam);
   if (!scope) return null;
@@ -1182,6 +1324,7 @@ function overview(account, projectsParam, sinceMs = 0) {
       .map((r) => openTaskRow(r, base, factors, config, estimates))
       .sort((a, b) => (a.assignee_name || '').localeCompare(b.assignee_name || '') || a.key.localeCompare(b.key)),
     suspects: measurable.filter((r) => suspectOutlier(r, base)).length + completed.filter((r) => suspectOutlier(r, base) && A.isExcluded(r)).length,
+    guardrails: guardrails(scope),
   };
 }
 

@@ -539,6 +539,14 @@
         const cur = state.roleFilter;
         $('role-filter').innerHTML = '<option value="">All roles</option>' + roles.map((r) => `<option value="${esc(r)}" ${r === cur ? 'selected' : ''}>${esc(r)}</option>`).join('');
         if (state.dev) renderDev(); else renderTeam();
+        renderGuardrails(o);
+      }
+      function renderGuardrails(o) {
+        let el = document.getElementById('guardrails');
+        if (!el) { el = document.createElement('div'); el.id = 'guardrails'; $('capped-banner').after(el); }
+        const g = (o && o.guardrails) || [];
+        const bad = g.filter((x) => x.level !== 'ok');
+        el.innerHTML = g.length ? `<details ${bad.length ? 'open' : ''} style="margin:8px 0"><summary>${bad.length ? `⚠︎ ${bad.length} guardrail${bad.length > 1 ? 's' : ''} failing — ratios may not reflect reality` : '✓ Guardrails pass'}</summary><ul style="margin:6px 0">${g.map((x) => `<li style="color:${x.level === 'bad' ? 'var(--danger, #d03b3b)' : x.level === 'warn' ? 'var(--warning, #b07800)' : 'inherit'}">${x.level === 'ok' ? '✓' : x.level === 'bad' ? '✗' : '!'} ${esc(x.msg)}</li>`).join('')}</ul></details>` : '';
       }
 
       function verdictBadge(v) {

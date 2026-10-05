@@ -45,9 +45,11 @@ function git(repoPath, args, opts = {}) {
 /** First existing target branch on the repo (develop → main → master). */
 function resolveTarget(repoPath, targets) {
   for (const t of targets) {
-    if (git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${t}`]) !== null) return t;
-    // Fall back to a remote-tracking ref when the local branch doesn't exist.
+    // The REMOTE ref wins: local clones often sit on a feature branch with a
+    // stale local develop, which silently hid every newer commit (and its diff
+    // evidence) from the index. origin/<t> is what was actually merged.
     if (git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${t}`]) !== null) return `origin/${t}`;
+    if (git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${t}`]) !== null) return t;
   }
   return null;
 }
