@@ -29,6 +29,7 @@ import { SCRATCH_WORKSPACE_ID } from './sessionScope';
 import { applyStatusPatches, canDropExited, patchSessionIn, staleStatusIds, type StatusPatch } from './sessionPatch';
 import { bucketSessions, idChunks, isForeground, isShownKind, shownListQuery } from './sessionBuckets';
 import { whenIdle } from '../lazy-component.svelte';
+import { toastError } from '../toastError';
 
 /** Archived rows per "Load more" page (per scope: workspace / scratch). */
 const ARCHIVED_PAGE = 100;
@@ -1508,7 +1509,7 @@ class WorkspaceStore {
     try {
       await this.killSession(id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -1572,7 +1573,7 @@ class WorkspaceStore {
     }
     const ok = ids.length - failed;
     if (ok > 0) toasts.info(`${ok} session${ok === 1 ? '' : 's'} archived`);
-    if (failed > 0) toasts.error('Archive failed', `${failed} session${failed === 1 ? '' : 's'} could not be archived.`);
+    if (failed > 0) toasts.error('Couldn’t archive', `${failed} session${failed === 1 ? '' : 's'} could not be archived.`);
     return failed;
   }
 
@@ -1582,7 +1583,7 @@ class WorkspaceStore {
     for (const id of ids) {
       try { await this.killSession(id); } catch { failed++; }
     }
-    if (failed > 0) toasts.error('Delete failed', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
+    if (failed > 0) toasts.error('Couldn’t delete', `${failed} session${failed === 1 ? '' : 's'} could not be deleted.`);
     return failed;
   }
 
@@ -1630,7 +1631,7 @@ class WorkspaceStore {
     try {
       await this.restartSession(id);
     } catch (e) {
-      toasts.error('Restart failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t restart', e);
     }
   }
 

@@ -84,7 +84,7 @@
       tokens = [resp.info, ...tokens];
       newLabel = '';
     } catch (e) {
-      toasts.error("Couldn't create the token", loadErrorText(e));
+      toasts.error("Couldn’t create the token", loadErrorText(e));
     } finally {
       minting = false;
     }
@@ -102,7 +102,7 @@
       tokens = tokens.filter((x) => x.id !== t.id);
       toasts.success('Token revoked', t.label ?? t.token_prefix);
     } catch (e) {
-      toasts.error("Couldn't revoke the token", loadErrorText(e));
+      toasts.error("Couldn’t revoke the token", loadErrorText(e));
     } finally {
       revoking = new Set([...revoking].filter((x) => x !== t.id));
     }
@@ -114,7 +114,7 @@
       await copyTextOrThrow(freshSecret);
       toasts.success('Token copied', 'Paste it into your script or CI secret now.');
     } catch {
-      toasts.error("Couldn't copy the token", 'Select it and copy it manually.');
+      toasts.error("Couldn’t copy the token", 'Select it and copy it manually.');
     }
   }
 

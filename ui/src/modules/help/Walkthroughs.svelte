@@ -29,8 +29,12 @@
   import { DEFAULT_GUIDE_ID, FILM, GUIDES, guideById } from './sections';
   import { renderGuideHtml } from './render';
   import TourFilm from './TourFilm.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
 
   const guideIds = new Set(GUIDES.map((g) => g.id));
+  /** Guides rail width — the shared list-pane default/range, remembered. */
+  let listW = $state(loadPaneWidth('walkthroughs.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 
   // ---- selection (from the route) ----
   const param = $derived(router.module === 'walkthroughs' ? router.parts[1] : undefined);
@@ -236,7 +240,7 @@
       <div class="help-layout" class:phone={viewport.isPhone}>
         {#if showList}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-          <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey}>
+          <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey} style="--list-pane-w:{listW}px">
             <div class="rail-search">
               <Icon name="search" size={13} />
               <input
@@ -280,6 +284,9 @@
               {/if}
             </div>
           </nav>
+          {#if !viewport.isPhone}
+            <PaneDivider bind:width={listW} storageKey="walkthroughs.listW" label="Resize the guides list" />
+          {/if}
         {/if}
 
         {#if showArticle}
@@ -331,23 +338,23 @@
   .help-layout {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-columns: 272px minmax(0, 1fr);
-  }
-  .help-layout.phone {
-    grid-template-columns: minmax(0, 1fr);
+    display: flex;
   }
 
-  /* ---- rail ---- */
+  /* ---- rail ---- (width is the user's; PaneDivider draws the hairline) */
   .rail {
+    flex: none;
+    inline-size: var(--list-pane-w, 280px);
+    max-inline-size: 45%;
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-inline-end: 1px solid var(--separator);
     background: var(--bg);
   }
   .phone .rail {
-    border-inline-end: 0;
+    flex: 1;
+    inline-size: auto;
+    max-inline-size: none;
     overflow-y: auto;
   }
   .rail-search {
@@ -405,7 +412,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .rail-count {
     padding: 2px 8px 6px;
@@ -478,6 +485,7 @@
 
   /* ---- main ---- */
   .main {
+    flex: 1;
     min-height: 0;
     min-width: 0;
     overflow-y: auto;
@@ -504,7 +512,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .guide-head h2 {
@@ -599,9 +607,6 @@
   }
 
   @media (max-width: 1024px) {
-    .help-layout:not(.phone) {
-      grid-template-columns: 232px minmax(0, 1fr);
-    }
     .main {
       padding-inline: 20px;
     }

@@ -27,7 +27,7 @@
   }
 </script>
 
-<ActionCard icon="clock" kind="Reminder" summary={task.title} testid="card-reminder">
+<ActionCard icon="clock" heading="Reminder" summary={task.title} testid="card-reminder">
   {#snippet pill()}<StatePill tone={taskTone(task)} label={taskStateLabel(task)} />{/snippet}
   <p class="line">
     {#if task.run_at}

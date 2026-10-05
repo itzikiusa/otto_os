@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
+  import { toastError } from '../../lib/toastError';
+  import { CLUSTER_VIEWS, type ClusterView } from './types';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -106,9 +107,9 @@
     try {
       const r = await api.post<TestClusterResp>(`/brokers/clusters/${c.id}/test`, {});
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
-      else toasts.error('Connection failed', r.message);
+      else toasts.error('Couldn’t connect', r.message);
     } catch (e) {
-      toasts.error('Test failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the test', e);
     } finally {
       testing = false;
     }
@@ -124,7 +125,7 @@
       await brokers.remove(c.id);
       toasts.success('Cluster removed');
     } catch (e) {
-      toasts.error('Remove failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t remove', e);
     }
   }
 
@@ -217,7 +218,7 @@
     try {
       await brokers.createSection(parentId, name);
     } catch (e) {
-      toasts.error('Create section failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t create the section', e);
     }
   }
 
@@ -231,7 +232,7 @@
     try {
       await brokers.renameSection(sec.id, name);
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -246,7 +247,7 @@
     try {
       await brokers.deleteSection(sec.id);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -263,7 +264,7 @@
     try {
       await brokers.moveCluster(id, sectionId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -277,7 +278,7 @@
     try {
       await brokers.reparentSection(id, parentId);
     } catch (e) {
-      toasts.error('Move failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move', e);
     }
   }
 
@@ -324,9 +325,6 @@
       </button>
       <span class="dot" style="background: {selected.color || 'var(--accent)'}"></span>
     {/if}
-  {/snippet}
-  {#snippet titleContent()}
-    {#if selected}<span class="name">{selected.name}</span>{:else}Message Brokers{/if}
   {/snippet}
   {#snippet badge()}
     {#if selected}
@@ -456,7 +454,7 @@
       </div>
     {/if}
     {#if selected}
-      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+      <div class="tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
         {#each CLUSTER_VIEWS as v (v.id)}
           <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
         {/each}
@@ -622,7 +620,7 @@
   .aside-head .title {
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .head-btns {
@@ -657,7 +655,7 @@
     cursor: default;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     opacity: 0.8;
     margin-top: 4px;
   }
@@ -818,9 +816,6 @@
     opacity: 1;
     background: var(--hover);
   }
-  .name {
-    font-weight: 600;
-  }
   /* Read-only is a property, not a failure: neutral, matching ClusterViewer. */
   .ro {
     font-size: var(--fs-xs);
@@ -871,10 +866,15 @@
     color: var(--text);
     border-bottom-color: var(--accent);
   }
+  /* The panels size themselves to the tab body (height: 100%) and scroll
+     inside; the body itself scrolls only when a panel's guaranteed minimum (the
+     topics grid, the message panes) doesn't fit — e.g. a phone in landscape —
+     so those rows stay reachable instead of being clipped. No height query. */
   .tab-body {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   .small {
     font-size: var(--fs-xs);
@@ -907,18 +907,6 @@
     cursor: pointer;
     align-items: center;
     flex: none;
-  }
-
-  /* Short viewports (phones in landscape, ~430px tall) keep the desktop
-     two-column layout (they're >640px wide) but the cluster header + tab strips
-     leave the tab body very little room. Let the tab body scroll so panels with
-     a guaranteed min-height (e.g. the topics grid) stay fully reachable instead
-     of being clipped behind the sticky chrome. */
-  @media (max-height: 600px) {
-    .tab-body {
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-    }
   }
 
   @media (max-width: 640px) {

@@ -7,6 +7,7 @@
   // (GET /findings/{id}). Filters by status + severity; a header with counts and a
   // Proof Pack button. Subscribes to the finding WS bus and refetches on match —
   // the same pattern ReviewPanel uses for review_changed.
+  import { sentenceCase } from '../../lib/labels';
   import Icon from '../../lib/components/Icon.svelte';
   import { listFindings, getFinding } from '../../lib/api/client';
   import type {
@@ -33,7 +34,7 @@
   let loadError = $state<string | null>(null);
   /** Failed silent refetch (WS bus) — the findings stay, with a stale bar + Retry. */
   let reloadError = $state<string | null>(null);
-  /** Per-finding failed detail/timeline load → "Couldn't load the timeline · Retry". */
+  /** Per-finding failed detail/timeline load → "Couldn’t load the timeline · Retry". */
   let detailError: Record<string, boolean> = $state({});
   let expanded: Record<string, boolean> = $state({});
   let details: Record<string, FindingDetail> = $state({});
@@ -144,11 +145,10 @@
     if (f.line_end != null && f.line_end !== f.line) return `${f.path}:L${f.line}–L${f.line_end}`;
     return `${f.path}:L${f.line}`;
   }
-  function statusLabel(s: string): string {
-    return s.replace(/_/g, ' ');
-  }
+  // Wire values (`false_positive`) never go on screen — lib/labels words them.
+  const statusLabel = sentenceCase;
   function transitionLabel(from: string | null, to: string | null): string {
-    if (from && to) return ` · ${from} → ${to}`;
+    if (from && to) return ` · ${statusLabel(from)} → ${statusLabel(to)}`;
     return '';
   }
 </script>
@@ -448,7 +448,7 @@
   .fb-field-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
   }

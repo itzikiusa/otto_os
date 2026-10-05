@@ -274,7 +274,7 @@
     border-radius: 50%;
     background: var(--surface-2);
     border: 1px solid var(--border);
-    transition: background 150ms ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .ob-dot.done {
     background: var(--accent-text);
@@ -325,7 +325,7 @@
     height: 100%;
     border-radius: 2px;
     background: var(--status-exited);
-    transition: width 180ms ease-out, background 180ms ease-out;
+    transition: width var(--dur-enter) ease-out, background var(--dur-enter) ease-out;
   }
   .strength-fill.s2 {
     background: var(--status-warn);

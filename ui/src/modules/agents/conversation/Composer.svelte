@@ -589,7 +589,7 @@
     min-width: 0;
   }
   .cmd-row.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .cmd-name {
     color: var(--accent-text);
@@ -605,7 +605,7 @@
   .cmd-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .cmd-hint {
     font-size: var(--fs-xs);
@@ -641,8 +641,8 @@
     height: 18px;
     border-radius: 50%;
     border: 0;
-    background: rgba(0, 0, 0, 0.6);
-    color: #fff; /* on the fixed dark scrim over the image, in every theme */
+    background: var(--scrim-media);
+    color: var(--on-scrim);
     display: grid;
     place-items: center;
     padding: 0;

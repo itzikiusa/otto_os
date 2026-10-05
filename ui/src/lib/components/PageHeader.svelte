@@ -457,7 +457,7 @@
   .ph-titles {
     display: flex;
     align-items: baseline;
-    gap: 10px;
+    gap: 12px;
     min-width: 0;
   }
   .ph-title-line {
@@ -532,8 +532,8 @@
     scrollbar-width: none;
     /* A scroller clips on both axes: leave room for the tabs' focus rings
        (and a badge's overhang) instead of shaving them off. */
-    padding: 3px;
-    margin: -3px;
+    padding: 4px;
+    margin: -4px;
   }
   .ph-tabs-inline::-webkit-scrollbar {
     display: none;
@@ -551,8 +551,8 @@
     scrollbar-width: none;
     /* Room for focus rings on the edge buttons (2px outline + 1px offset =
        3px; keep in sync with RING in the script). */
-    padding: 3px;
-    margin: -3px;
+    padding: 4px;
+    margin: -4px;
   }
   .ph-actions-wrap::-webkit-scrollbar {
     display: none;
@@ -576,7 +576,7 @@
     font-size: var(--fs-m);
   }
   .ph-actions :global(.btn.small) {
-    padding: 0 10px;
+    padding: 0 12px;
   }
   .ph-actions > :global([data-ph-hidden]) {
     display: none !important;
@@ -590,7 +590,8 @@
     display: flex;
     align-items: center;
     /* Block padding: focus-ring room (this row scrolls, so it clips). */
-    padding: 3px 16px 3px 20px;
+    padding-block: 4px;
+    padding-inline: 20px 16px;
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
@@ -610,7 +611,8 @@
       display: none;
     }
     .ph-tabs-below {
-      padding: 3px 10px;
+      padding-block: 4px;
+      padding-inline: 12px;
     }
   }
 </style>

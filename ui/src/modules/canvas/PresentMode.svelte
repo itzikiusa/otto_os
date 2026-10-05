@@ -363,7 +363,7 @@
   .progress .bar {
     height: 100%;
     background: var(--accent);
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .stage {
     max-width: 92vw;
@@ -467,7 +467,7 @@
     border-radius: 999px;
     padding: 6px 12px;
     box-shadow: var(--shadow);
-    transition: opacity 200ms;
+    transition: opacity var(--dur-enter);
   }
   .controls.hidden {
     opacity: 0;

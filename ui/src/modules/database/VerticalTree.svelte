@@ -16,6 +16,13 @@
   // gets a thinner `dirty-in` marker; a pending `$set` on a path that doesn't
   // exist yet renders as a phantom row under its parent.
   //
+  // Keyboard (VerticalView owns the record's role="tree" and its roving
+  // tabindex / arrow navigation): every row is a `treeitem` (aria-level, and
+  // aria-expanded on containers). On a focused row Enter or F2 starts the same
+  // edit as a double-click (a container toggles instead), →/← open/close a
+  // container (mirrored in RTL), and ⇧F10 / the ContextMenu key open the same field menu as a
+  // right-click — which the row's ⋯ button (shown on hover/focus) also opens.
+  //
   // ⌘F (json-find.ts): every row carries `data-jpath` + `data-jcol`; text the
   // find model leaves out (chevrons, summaries, array-index labels, rename /
   // unset marks, "more" buttons) is `data-find-skip`. A find reveal (`reveal`, per record)
@@ -47,7 +54,8 @@
     engine: DbEngine | null;
     /** The top-level value IS a parked cell draft (rendered as its tree). */
     cellDraft?: boolean;
-    onfieldmenu: (e: MouseEvent, ctx: FieldCtx) => void;
+    /** The field menu (right-click, ⋯, ⇧F10). Omitted → no menu (mini views). */
+    onfieldmenu?: (e: MouseEvent | KeyboardEvent, ctx: FieldCtx) => void;
     /** This record's find-reveal overlay. */
     reveal?: RevealState;
     /** A pending `$set` on a path that doesn't exist yet — not in the find
@@ -168,21 +176,101 @@
     reveal?.opens.delete(path);
     setOverride(expansion, path, next);
   }
+
+  /** The row's accessible name: "field: value" (what a sighted user reads). */
+  const rowName = $derived.by(() => {
+    if (!asLeaf) return `${label}: ${summary}`;
+    if (pend === 'unset') return `${label}: ${text} (pending: unset)`;
+    if (pendTyped !== null) return `${label}: ${pendingText(pendTyped)} (pending)`;
+    if (value === null || value === undefined) return `${label}: null`;
+    if (bson !== null) return `${label}: ${bson}`;
+    if (container) return `${label}: ${summary}`;
+    return `${label}: ${strLong && !strOpen ? text.slice(0, STR_MAX) + '…' : text}`;
+  });
+
+  /** Keys on the focused row itself (never from the inline editor inside it).
+   *  Arrow ↑/↓/Home/End and ← to the parent are the tree's (VerticalView). */
+  function onRowKey(e: KeyboardEvent): void {
+    if (e.target !== e.currentTarget || e.metaKey || e.ctrlKey || e.altKey) return;
+    if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+      onfieldmenu?.(e, ctx());
+      return;
+    }
+    if (e.shiftKey) return;
+    if (e.key === 'Enter' || e.key === 'F2') {
+      if (!asLeaf) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          toggle();
+        }
+      } else if (canEdit) {
+        e.preventDefault();
+        beginEdit();
+      }
+    } else if (!asLeaf && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+      // → opens / ← closes (mirrored in RTL); otherwise the tree moves focus.
+      const rtl = getComputedStyle(e.currentTarget as HTMLElement).direction === 'rtl';
+      const opening = (e.key === 'ArrowRight') !== rtl;
+      if (opening !== open) {
+        e.preventDefault();
+        toggle();
+      }
+    }
+  }
+
+  // An inline edit that ends (saved, canceled, or the row re-rendered) hands
+  // focus back to its row when nothing else took it — the keyboard user stays
+  // in the tree instead of landing on <body>.
+  let rowEl = $state<HTMLElement | null>(null);
+  let wasEditing = false;
+  $effect(() => {
+    if (editing) {
+      wasEditing = true;
+      return;
+    }
+    if (!wasEditing) return;
+    wasEditing = false;
+    const el = rowEl;
+    queueMicrotask(() => {
+      const a = document.activeElement;
+      if (el?.isConnected && (!a || a === document.body)) el.focus();
+    });
+  });
 </script>
 
+{#snippet moreButton()}
+  {#if onfieldmenu}
+    <button
+      class="vrow-more"
+      type="button"
+      tabindex="-1"
+      aria-label="Field actions for {path}"
+      title="Field actions for {path}"
+      onclick={(e) => onfieldmenu?.(e, ctx())}
+      data-find-skip
+    >⋯</button>
+  {/if}
+{/snippet}
+
 {#if asLeaf}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="vrow"
     class:dirty
     class:editable={canEdit}
+    role="treeitem"
+    aria-level={depth + 1}
+    aria-selected="false"
+    aria-label={rowName}
+    tabindex="-1"
+    bind:this={rowEl}
     style="--depth:{depth}"
     data-jpath={path}
     data-jcol={colIdx}
     data-find-skip={phantom || undefined}
-    title={dirty ? 'Pending change — Review & apply (bar below) writes it' : canEdit ? 'Double-click to edit' : undefined}
+    title={dirty ? 'Pending change — Review & apply (bar below) writes it' : canEdit ? 'Double-click or press Enter to edit' : undefined}
     ondblclick={beginEdit}
-    oncontextmenu={(e) => onfieldmenu(e, ctx())}
+    onkeydown={onRowKey}
+    oncontextmenu={(e) => onfieldmenu?.(e, ctx())}
   >
     <span class="vk mono" title={path} data-find-skip={keySkip || undefined}>{label}{#if renamedTo !== null}<span class="vk-ren" data-find-skip> → {renamedTo}</span>{/if}</span>
     {#if editing}
@@ -202,27 +290,37 @@
     {:else}
       <span class="vv mono">{text}</span>
     {/if}
+    {@render moreButton()}
   </div>
 {:else}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="vrow ctr"
     class:dirty-in={dirtyInside}
     class:dirty
+    role="treeitem"
+    aria-level={depth + 1}
+    aria-expanded={open}
+    aria-selected="false"
+    aria-label={rowName}
+    tabindex="-1"
+    bind:this={rowEl}
     style="--depth:{depth}"
     data-jpath={path}
     data-jcol={colIdx}
-    oncontextmenu={(e) => onfieldmenu(e, ctx())}
+    onkeydown={onRowKey}
+    oncontextmenu={(e) => onfieldmenu?.(e, ctx())}
   >
     <span class="vk mono" title={path} data-find-skip={keySkip || undefined}>{label}{#if renamedTo !== null}<span class="vk-ren" data-find-skip> → {renamedTo}</span>{/if}</span>
     <span class="vv mono tree">
-      <button class="vsum" type="button" aria-expanded={open} onclick={toggle} title={open ? 'Collapse' : 'Expand'} data-find-skip>
+      <!-- Pointer target for the toggle; the keyboard uses the row (Enter, →/←). -->
+      <button class="vsum" type="button" tabindex="-1" aria-expanded={open} onclick={toggle} title={open ? 'Collapse' : 'Expand'} data-find-skip>
         <span class="chev" aria-hidden="true">{open ? '▾' : '▸'}</span><span class:dimmed={open}>{summary}</span>
       </button>
     </span>
+    {@render moreButton()}
   </div>
   {#if open}
-    <div class="vnest" style="--depth:{depth + 1}">
+    <div class="vnest" role="group" aria-label={label} style="--depth:{depth + 1}">
       {#each visible as [k, v] (k)}
         <Self value={v} path={`${path}.${k}`} depth={depth + 1} label={k} {expansion} {plan} {editable} {rowIdx} {colIdx} {flow} {engine} {onfieldmenu} {reveal} />
       {/each}
@@ -241,14 +339,51 @@
 <style>
   .vrow {
     display: grid;
-    grid-template-columns: minmax(120px, 0.3fr) 1fr;
+    grid-template-columns: minmax(120px, 0.3fr) 1fr auto;
     gap: 10px;
     padding: 3px 8px;
     font-size: var(--fs-s);
     min-width: 0;
   }
-  .vrow:hover {
+  .vrow:hover,
+  .vrow:focus-visible {
     background: var(--hover);
+  }
+  .vrow:focus-visible {
+    outline: 2px solid var(--accent-text);
+    outline-offset: -2px;
+  }
+  /* The row's field menu: revealed on hover and whenever the row (or the
+     button) has focus; always visible on touch, which has no hover. */
+  .vrow-more {
+    align-self: start;
+    inline-size: 20px;
+    block-size: 18px;
+    padding: 0;
+    border: none;
+    border-radius: var(--radius-s);
+    background: none;
+    color: var(--text-dim);
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+  }
+  .vrow:hover > .vrow-more,
+  .vrow:focus-within > .vrow-more,
+  .vrow-more:focus-visible {
+    opacity: 1;
+  }
+  .vrow-more:hover {
+    color: var(--text);
+    background: var(--hover);
+  }
+  @media (hover: none) {
+    .vrow-more {
+      opacity: 1;
+      inline-size: 32px;
+      block-size: 32px;
+    }
   }
   .vrow.editable {
     cursor: text;

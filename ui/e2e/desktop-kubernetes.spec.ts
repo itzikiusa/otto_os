@@ -151,7 +151,7 @@ test('a seeded cluster renders as a card and opens into a workspace that survive
   await expect(page.getByTestId('k8s-cluster-switcher')).toHaveValue(clusterId!);
   // The resource load fails → a visible error state (not a blank/loading-forever table).
   await expect(page.getByTestId('k8s-table-error')).toBeVisible({ timeout: 45_000 });
-  await expect(page.getByTestId('k8s-table-error')).toContainText(/Couldn't load pods/i);
+  await expect(page.getByTestId('k8s-table-error')).toContainText(/Couldn’t load pods/i);
   // Kinds rail still navigates.
   await page.getByTestId('k8s-kinds').getByRole('button', { name: /^Deployments/ }).click();
   await expect(page).toHaveURL(new RegExp(`#/kubernetes/${clusterId}/deployments`));

@@ -213,7 +213,7 @@
   }
   .tri {
     display: inline-flex;
-    transition: transform 0.12s;
+    transition: transform var(--dur-fast);
     color: var(--text-dim);
   }
   .tri.open {

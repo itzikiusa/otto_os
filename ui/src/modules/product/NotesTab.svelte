@@ -75,7 +75,7 @@
       addOpen = false;
       toasts.success('Note added');
     } catch (e) {
-      toasts.error('Could not add note', product.errMsg(e));
+      toasts.error('Couldn’t add note', product.errMsg(e));
     } finally {
       addWorking = false;
     }
@@ -89,7 +89,7 @@
       await product.updateNote(nid, { body });
       editingId = null;
     } catch (e) {
-      toasts.error('Could not save note', product.errMsg(e));
+      toasts.error('Couldn’t save note', product.errMsg(e));
     } finally {
       savingId = null;
     }
@@ -102,7 +102,7 @@
     try {
       await product.deleteNote(n.id);
     } catch (e) {
-      toasts.error('Could not delete note', product.errMsg(e));
+      toasts.error('Couldn’t delete note', product.errMsg(e));
     } finally {
       deletingId = null;
     }
@@ -279,7 +279,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    transition: border-color 100ms;
+    transition: border-color var(--dur-fast);
   }
   .n-card:hover {
     border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
@@ -303,7 +303,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 2px 7px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -358,7 +358,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .req {

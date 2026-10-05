@@ -78,7 +78,7 @@
     bind:this={input}
     class="wb-qo-input"
     type="search"
-    placeholder="Type a file name"
+    placeholder="e.g. deploy.sh"
     aria-label="File name"
     aria-controls="wb-qo-list"
     bind:value={query}

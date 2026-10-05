@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // The approval queue — dangerous tool calls and `otto.ask_human_approval`
   // requests waiting on a human. Shows the redacted args (never the full/secret
   // values; the server binds the hash of the FULL args). Approve/Deny with the
@@ -17,6 +18,8 @@
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
   import ApprovalOutcome from '../../lib/components/ApprovalOutcome.svelte';
+  import RelTime from '../../lib/components/RelTime.svelte';
+  import { runStateLabel, sentenceCase } from '../../lib/labels';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
@@ -77,7 +80,7 @@
       const list = await mcpCpExtraApi.autoApproveRules();
       allowFor = { approval: a, catalog: list.categories };
     } catch (e) {
-      toasts.error('Could not load the auto-approve catalog', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t load the auto-approve catalog', e instanceof Error ? e.message : String(e));
     } finally {
       allowLoading = null;
     }
@@ -129,7 +132,7 @@
       ondecided?.();
       await load();
     } catch (e) {
-      toasts.error('Decision failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t decision', e);
     } finally {
       const n = { ...busy };
       delete n[a.id];
@@ -137,11 +140,9 @@
     }
   }
 
-  /** `approved` → “Approved” — the raw enum never reaches the screen. */
-  const statusLabel = (status: string): string => {
-    const t = status.replace(/_/g, ' ');
-    return t.charAt(0).toUpperCase() + t.slice(1);
-  };
+  /** Who raised the request, in words (`mcp_server` → “MCP server”). */
+  const requesterKindLabel = (kind: string): string =>
+    ({ mcp_server: 'MCP server', gateway: 'Gateway', agent: 'Agent', user: 'Person' })[kind] ?? sentenceCase(kind);
 
   function prettyArgs(json: string): string {
     try {
@@ -203,7 +204,7 @@
               <span class="by">
                 requested by
                 {#if requesterMayDecide(a)}<AgentByline name={requesterLabel(a)} />{:else}{requesterLabel(a)}{/if}
-                {a.requested_by_kind ? ` (${a.requested_by_kind})` : ''}
+                {a.requested_by_kind ? ` (${requesterKindLabel(a.requested_by_kind)})` : ''}
               </span>
             {/if}
             {#if a.expires_at}<span class="by" title={new Date(a.expires_at).toLocaleString()}>expires {rel(a.expires_at)}</span>{/if}
@@ -217,7 +218,8 @@
             <div class="actions">
               <input
                 class="note"
-                placeholder="Note (optional)"
+                placeholder="Checked the arguments, looks safe"
+                aria-label="Decision note (optional)"
                 value={notes[a.id] ?? ''}
                 oninput={(e) => (notes = { ...notes, [a.id]: (e.currentTarget as HTMLInputElement).value })}
               />
@@ -245,18 +247,22 @@
                 {/snippet}
               </ApprovalActions>
             </div>
-          {:else if a.status === 'approved' || a.status === 'denied'}
+          {:else if a.status === 'approved' || a.status === 'denied' || a.status === 'consumed'}
+            <!-- `consumed` = approved and then used by the call. -->
             <div class="decided">
-              <ApprovalOutcome outcome={a.status} by={a.decided_by} at={a.decided_at} note={a.decision_note} />
+              <ApprovalOutcome outcome={a.status === 'denied' ? 'denied' : 'approved'} by={a.decided_by} at={a.decided_at} note={a.decision_note} />
             </div>
           {:else if a.status === 'expired'}
             <div class="decided">
               <ApprovalOutcome outcome="expired" at={a.expires_at ?? a.decided_at} note={a.decision_note} />
             </div>
           {:else}
-            <div class="decided">
-              {statusLabel(a.status)}{a.decided_by ? ` by ${a.decided_by}` : ''}
-              {#if a.decision_note}· “{a.decision_note}”{/if}
+            <!-- Canceled (or a state this build doesn't know): the same one-line
+                 outcome shape as ApprovalOutcome — word · by · when · note. -->
+            <div class="decided outcome-line">
+              <span>{runStateLabel(a.status)}{a.decided_by ? ` by ${a.decided_by}` : ''}</span>
+              {#if a.decided_at}<span aria-hidden="true">·</span><RelTime iso={a.decided_at} />{/if}
+              {#if a.decision_note}<span aria-hidden="true">·</span><span class="note">“{a.decision_note}”</span>{/if}
             </div>
           {/if}
         </div>
@@ -404,6 +410,15 @@
     margin-top: 8px;
     font-size: var(--fs-s);
     color: var(--text-dim);
+  }
+  .outcome-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 6px;
+  }
+  .outcome-line .note {
+    overflow-wrap: anywhere;
   }
   .empty {
     display: flex;

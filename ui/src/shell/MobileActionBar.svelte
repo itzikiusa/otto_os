@@ -39,7 +39,7 @@
   <button
     class="ab-btn"
     onclick={onpalette}
-    title="Command palette (⌘K)"
+    title="Open command palette" aria-keyshortcuts="Meta+K"
     aria-label="Open command palette"
   >
     <Icon name="command" size={18} />
@@ -49,7 +49,7 @@
   <button
     class="ab-btn"
     onclick={onnewSession}
-    title="New session (⌘T)"
+    title="New session" aria-keyshortcuts="Meta+T"
     aria-label="New session"
   >
     <Icon name="plus" size={18} />
@@ -59,7 +59,7 @@
   <button
     class="ab-btn"
     onclick={oncloseTab}
-    title="Close tab (⌘W)"
+    title="Close current tab" aria-keyshortcuts="Meta+W"
     aria-label="Close current tab"
   >
     <Icon name="x" size={18} />
@@ -69,7 +69,7 @@
   <button
     class="ab-btn"
     onclick={onfind}
-    title="Find (⌘F)"
+    title="Find in terminal or page" aria-keyshortcuts="Meta+F"
     aria-label="Find in terminal or page"
   >
     <Icon name="search" size={18} />
@@ -80,7 +80,7 @@
     <button
       class="ab-btn"
       onclick={onbroadcast}
-      title="Broadcast (⌘⇧B)"
+      title="Broadcast message to all sessions" aria-keyshortcuts="Meta+Shift+B"
       aria-label="Broadcast message to all sessions"
     >
       <Icon name="send" size={18} />

@@ -171,12 +171,20 @@
   }
 
   async function choose(kind: '3d' | 'image', e: MouseEvent, apply: (uri: string) => void): Promise<void> {
-    const anchor = anchorOf(e);
+    await chooseAt(kind, anchorOf(e), apply);
+  }
+  async function chooseAt(kind: '3d' | 'image', anchor: HTMLElement | null, apply: (uri: string) => void): Promise<void> {
     let list: DesignArtifact[] = [];
     try {
       list = await pickArtifacts(kind);
     } catch {
-      list = [];
+      // A failed lookup is not "none yet": say so, and offer the retry.
+      const what = kind === '3d' ? '3D artifacts' : 'images';
+      ctxMenu.showAt(anchor, [
+        { label: `Couldn’t load ${what}`, icon: 'warning', disabled: true },
+        { label: 'Try again', icon: 'refresh', action: () => void chooseAt(kind, anchor, apply) },
+      ]);
+      return;
     }
     const items: MenuItem[] = list.length
       ? list.map((a) => ({
@@ -220,12 +228,18 @@
     onchange(next, `site:${key}`);
   }
   async function linkKit(e: MouseEvent): Promise<void> {
-    const anchor = anchorOf(e);
+    await linkKitAt(anchorOf(e));
+  }
+  async function linkKitAt(anchor: HTMLElement | null): Promise<void> {
     let kits: DesignArtifact[] = [];
     try {
       kits = await pickArtifacts('brand');
     } catch {
-      kits = [];
+      ctxMenu.showAt(anchor, [
+        { label: 'Couldn’t load brand kits', icon: 'warning', disabled: true },
+        { label: 'Try again', icon: 'refresh', action: () => void linkKitAt(anchor) },
+      ]);
+      return;
     }
     const items: MenuItem[] = kits.map((k) => ({
       label: k.title,

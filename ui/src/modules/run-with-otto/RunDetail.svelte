@@ -279,7 +279,7 @@
   .block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
   .h {
     margin: 0; font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.04em; color: var(--text-dim);
+    letter-spacing: .06em; color: var(--text-dim);
   }
   .goal { font-size: var(--fs-m); line-height: 1.5; overflow-wrap: anywhere; }
   .src-row { display: flex; align-items: center; gap: 6px; font-size: var(--fs-s); flex-wrap: wrap; min-width: 0; }

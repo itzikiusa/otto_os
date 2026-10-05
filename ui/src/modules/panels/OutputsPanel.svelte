@@ -22,6 +22,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import type { Artifact } from '../../lib/api/types';
 
@@ -224,7 +225,7 @@
       await navigator.clipboard.writeText(v);
       toasts.info('Copied', v);
     } catch {
-      toasts.error('Could not copy', v);
+      toasts.error('Couldn’t copy', v);
     }
   }
 
@@ -282,22 +283,19 @@
       {#if list.length > 0}<span class="count">{list.length}</span>{/if}
     </div>
 
-    {#if listLoading}
-      <p class="empty-line dim" role="status">Loading outputs…</p>
-    {:else if listError}
-      <div class="pbody err" role="alert">
-        <div class="err-head"><Icon name="warning" size={13} /> Couldn't load outputs</div>
-        <div class="err-detail">{listError}</div>
-        <button class="btn small" onclick={() => sid && void activity.loadArtifacts(sid, true)}>
-          <Icon name="refresh" size={12} /> Retry
-        </button>
-      </div>
-    {/if}
-    {#if !listLoading && !listError && list.length === 0}
-      <p class="empty-line dim">
-        Nothing produced yet. Files the agent writes, PRs it opens and images it captures show up here.
-      </p>
-    {:else if list.length > 0}
+    <LoadState
+      what="outputs"
+      variant="compact"
+      loading={listLoading}
+      error={listError}
+      empty={list.length === 0}
+      onretry={() => sid && void activity.loadArtifacts(sid, true)}
+    >
+      {#snippet emptyView()}
+        <p class="empty-line dim">
+          Nothing produced yet. Files the agent writes, PRs it opens and images it captures show up here.
+        </p>
+      {/snippet}
       <ul class="alist" role="listbox" aria-label="Artifacts">
         {#each list as a, index (a.id)}
           <li>
@@ -319,7 +317,7 @@
           </li>
         {/each}
       </ul>
-    {/if}
+    </LoadState>
 
     {#if selected}
       <div class="preview" data-testid="outputs-preview">
@@ -342,15 +340,9 @@
         {#if selected.path ?? selected.url}
           <div class="pidentity mono" dir="ltr" role="region" aria-label="Output path" use:scrollableIdentity>{selected.path ?? selected.url}</div>
         {/if}
-        {#if loading}
-          <div class="pbody dim">Loading preview…</div>
-        {:else if error}
-          <div class="pbody err" role="alert">
-            <div class="err-head"><Icon name="warning" size={13} /> Couldn't load the preview</div>
-            <div class="err-detail">{error}</div>
-            <button class="btn small" onclick={() => void select(selected!)}>
-              <Icon name="refresh" size={12} /> Retry
-            </button>
+        {#if loading || error}
+          <div class="pbody" class:err={!!error}>
+            <LoadState what="the preview" variant="compact" {loading} {error} empty onretry={() => void select(selected!)} />
           </div>
         {:else if preview?.kind === 'link'}
           <div class="pbody">
@@ -406,7 +398,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .count {
@@ -555,26 +547,6 @@
     margin: 0;
     font-size: var(--fs-xs);
     white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .pbody.err {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
-  }
-  .err-head {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text);
-  }
-  .err-head :global(svg) {
-    color: var(--danger);
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
-    color: var(--text-dim);
     word-break: break-word;
   }
   .path {

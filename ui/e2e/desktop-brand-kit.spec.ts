@@ -133,9 +133,9 @@ test('a new primary previews its impact, saves as v2 and rolls out on approve', 
   // v2 is saved but not approved → approving is explicit and confirmed.
   await expect(page.getByTestId('brand-approval')).toContainText('v2 is saved but not approved');
   await page.getByTestId('brand-approve').click();
-  const confirm = page.getByRole('dialog', { name: 'Approve brand kit' });
+  const confirm = page.getByRole('dialog', { name: 'Accept brand kit' });
   await expect(confirm).toContainText('switch to v2');
-  await confirm.getByRole('button', { name: 'Approve v2' }).click();
+  await confirm.getByRole('button', { name: 'Accept v2' }).click();
   await expect(page.getByTestId('brand-approval')).toHaveCount(0);
 
   // The server agrees: v2 approved, the CSS export carries the new primary.

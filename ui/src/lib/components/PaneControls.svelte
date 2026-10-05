@@ -56,7 +56,7 @@
     class="icon-btn"
     onclick={() => postToHost({ type: 'close' })}
     aria-label="Close side pane"
-    title="Close side pane (⌘\)"
+    title="Close side pane" aria-keyshortcuts="Meta+\"
     data-testid="side-pane-close"
   >
     <Icon name="x" size={14} />

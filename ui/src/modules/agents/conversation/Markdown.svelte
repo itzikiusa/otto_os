@@ -108,7 +108,7 @@
   function copy(text: string, what: string): void {
     void navigator.clipboard?.writeText(text).then(
       () => toasts.info('Copied', what),
-      () => toasts.error('Copy failed', what),
+      () => toasts.error('Couldn’t copy', what),
     );
   }
 
@@ -205,7 +205,7 @@
     margin-bottom: 0;
   }
   .md :global(strong) {
-    font-weight: 650;
+    font-weight: 600;
   }
   .md :global(pre) {
     background: var(--code-bg, var(--surface-2));

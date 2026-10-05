@@ -761,7 +761,7 @@
       const frame = targetTransform ? targetTransform(input) : input;
       if (frame !== null) targetSocket.send(JSON.stringify(frame));
     } catch (e) {
-      toasts.error('Could not paste image', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t paste image', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -2786,7 +2786,7 @@
      On desktop this is just a transparent flex pass-through; on phone it stacks
      the key bar underneath the canvas so the bar doesn't overlap the scrollback. -->
 <div class="term-outer" class:phone={viewport.isPhone}>
-  <div class="term-wrap" class:force-dark-wrap={forceDark}>
+  <div class="term-wrap" class:otto-force-dark={forceDark}>
     {#if findOpen}
       <div class="find-bar" role="search" aria-label="Find in terminal">
         <input
@@ -2820,13 +2820,13 @@
             <Icon name="clock" size={10} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
           </span>
         {/if}
-        <button class="icon-btn" onclick={() => findNext(false)} title="Older match (↵)" aria-label="Older match">
+        <button class="icon-btn" onclick={() => findNext(false)} title="Older match" aria-keyshortcuts="Enter" aria-label="Older match">
           <Icon name="chevronUp" size={12} />
         </button>
-        <button class="icon-btn" onclick={() => findNext(true)} title="Newer match (⇧↵)" aria-label="Newer match">
+        <button class="icon-btn" onclick={() => findNext(true)} title="Newer match" aria-keyshortcuts="Shift+Enter" aria-label="Newer match">
           <Icon name="chevronDown" size={12} />
         </button>
-        <button class="icon-btn" onclick={closeFind} title="Close (Esc)" aria-label="Close find">
+        <button class="icon-btn" onclick={closeFind} title="Close find" aria-label="Close find" aria-keyshortcuts="Escape">
           <Icon name="x" size={12} />
         </button>
       </div>
@@ -2870,15 +2870,15 @@
         <button
           class="tb-btn"
           onclick={() => ui.termZoomOut()}
-          title="Zoom out (⌘−)"
+          title="Zoom out" aria-keyshortcuts="Meta+-"
           aria-label="Zoom out"
         >−</button>
         <button class="tb-btn tb-size" onclick={() => ui.termZoomReset()}
-          title="Reset terminal zoom (⌘0)" aria-label="Reset terminal zoom">{fittedFontSize}px</button>
+          title="Reset terminal zoom" aria-keyshortcuts="Meta+0" aria-label="Reset terminal zoom">{fittedFontSize}px</button>
         <button
           class="tb-btn"
           onclick={() => ui.termZoomIn()}
-          title="Zoom in (⌘+)"
+          title="Zoom in" aria-keyshortcuts="Meta+="
           aria-label="Zoom in"
         >+</button>
         <span class="tb-sep" aria-hidden="true"></span>
@@ -3041,11 +3041,10 @@
     overflow: hidden;
     contain: content;
   }
-  /* Force dark: override the host wrapper and xterm host bg so the entire
-     embedded terminal reads as one dark widget regardless of app scheme. */
-  .term-wrap.force-dark-wrap {
-    background: #131318;
-  }
+  /* Force dark: the wrapper is a `.otto-force-dark` island (tokens.css), so
+     in a light scheme it re-declares the dark token set — --term-bg, the
+     surfaces, borders and text — and the find bar, overlays, badges and
+     toolbar inside read as one dark widget with the canvas. */
   /* The xterm host gets full `strict` containment: its box is fixed by the
      insets (absolutely positioned), never by its content, so size
      containment is free — xterm's row rebuilds and canvas resizes stay
@@ -3062,7 +3061,7 @@
     contain: strict;
   }
   .term-host.force-dark {
-    background: #131318;
+    background: var(--term-bg);
   }
   /* Experimental RTL (ui.rtlBidi, DOM renderer only). xterm renders each run as
      a fixed-width `inline-block` span, which is atomic to the bidi algorithm —
@@ -3152,7 +3151,7 @@
     background: var(--hover);
   }
   .find-result-row.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
   }
   .find-result-line {
@@ -3176,7 +3175,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 2px 4px 2px 8px;
+    padding-block: 2px;
+    padding-inline: 8px 4px;
     z-index: 6;
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border: 1px solid var(--border);
@@ -3266,17 +3266,16 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: var(--radius-s, 8px);
-    border: 1px solid var(--border, #444);
-    background: color-mix(in srgb, var(--surface, #28282e) 85%, transparent);
-    color: var(--text, #e8e8e0);
+    border-radius: var(--radius-s);
+    border: 1px solid var(--border);
+    /* Opaque: no glass over the terminal (foundations §7). */
+    background: var(--surface);
+    color: var(--text);
     font-size: var(--fs-xl);
     cursor: pointer;
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
-    transition: background 0.1s;
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    transition: background var(--dur-fast);
   }
   .phone-btn:active {
     background: var(--accent-solid);
@@ -3331,13 +3330,11 @@
     align-items: center;
     gap: 2px;
     padding: 2px 4px;
-    background: color-mix(in srgb, var(--surface) 80%, transparent);
+    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
     opacity: 0.7;
-    transition: opacity 150ms ease-out;
+    transition: opacity var(--dur-enter) ease-out;
   }
   .desk-toolbar:hover {
     opacity: 1;
@@ -3355,7 +3352,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .tb-btn:hover {
     background: var(--surface-2);

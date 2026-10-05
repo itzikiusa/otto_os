@@ -68,7 +68,7 @@ function setup(ids: string[], selected: string, opts: { onClick?: boolean } = {}
       './resource-access.svelte': { resourceAccess: { subscribe: noop } },
       '../confirm.svelte': { confirmer: { ask: async () => true } },
       './workspace.svelte': { ws: { currentId: 'w1' } },
-      '../toast.svelte': { toasts: { error: noop, info: noop, warn: noop, success: noop } },
+      '../toast.svelte': { toasts: { error: noop, info: noop, warn: noop, success: noop } }, '../toastError': { toastError: () => {} },
       '../router.svelte': { router: { module: 'database' } },
       '../components/exporters': { downloadText: noop },
       '../../modules/database/mongo-format': { formatMongo: (s: string) => s },

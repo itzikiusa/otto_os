@@ -37,7 +37,7 @@
     border-radius: 50%;
     flex-shrink: 0;
     background: var(--status-idle);
-    transition: background 150ms ease-out;
+    transition: background var(--dur-enter) ease-out;
   }
   .dot.working {
     background: var(--status-working);
@@ -69,23 +69,14 @@
   .dot.working.live {
     animation: otto-pulse 1.6s ease-in-out infinite;
   }
+  /* Needs you: the same pulse, faster — urgency by tempo, not a second
+     motion vocabulary (the word beside the dot carries the meaning). */
   .dot.needs-you.live {
-    animation: needs-you-pulse 1.2s ease-in-out infinite;
+    animation: otto-pulse 1s ease-in-out infinite;
   }
   @media (prefers-reduced-motion: reduce) {
     .dot.live {
       animation: none !important;
-    }
-  }
-  @keyframes needs-you-pulse {
-    0%,
-    100% {
-      opacity: 1;
-      transform: scale(1.15);
-    }
-    50% {
-      opacity: 0.5;
-      transform: scale(0.85);
     }
   }
 </style>

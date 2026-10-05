@@ -321,7 +321,7 @@
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
-    transition: background 110ms, border-color 110ms;
+    transition: background var(--dur-fast), border-color var(--dur-fast);
   }
   .starter-chip:hover {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -374,7 +374,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .bubble-header :global(.bubble-time) {
@@ -458,11 +458,11 @@
     font-size: var(--fs-m);
     font-family: inherit;
     line-height: 1.5;
-    transition: border-color 120ms;
+    transition: border-color var(--dur-fast);
     outline: none;
   }
   .msg-input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .msg-input:disabled {
     opacity: 0.55;
@@ -480,7 +480,7 @@
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
-    transition: opacity 110ms;
+    transition: opacity var(--dur-fast);
   }
   .send-btn:hover:not(:disabled) {
     opacity: 0.88;

@@ -322,7 +322,7 @@
     text-transform: capitalize;
   }
   .viz-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent-text);
     font-weight: 500;

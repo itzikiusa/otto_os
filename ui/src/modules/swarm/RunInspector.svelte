@@ -7,12 +7,16 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
-  import { runStatus, sentenceCase } from '../../lib/status';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { runStatus, sentenceCase, type BadgeTone } from '../../lib/status';
   import { toasts } from '../../lib/toast.svelte';
   import { openExternal, isExternalUrl } from '../../lib/external';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import type { SwarmRun, SwarmMessage, TurnResult, TurnArtifact } from './types';
   import { copyTextOrThrow } from '../../lib/clipboard';
+
+  /** Finding severity → Badge tone (a warning is not a selection). */
+  const SEV_TONE: Record<string, BadgeTone> = { error: 'bad', warn: 'warn', info: 'neutral' };
 
   interface Props {
     run: SwarmRun;
@@ -103,7 +107,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${label}`);
     } catch {
-      toasts.error("Couldn't copy to the clipboard");
+      toasts.error("Couldn’t copy to the clipboard");
     }
   }
 
@@ -162,7 +166,7 @@
         <div class="findings">
           {#each (result.concerns ?? []) as c, i (i)}
             <div class="finding {c.severity}">
-              <span class="sev-chip {c.severity}">{c.severity}</span>
+              <Badge tone={SEV_TONE[c.severity] ?? 'neutral'} label={sentenceCase(c.severity)} />
               <span class="finding-text">{c.text}</span>
             </div>
           {/each}
@@ -238,7 +242,7 @@
           {#each posts as m (m.id)}
             <div class="post">
               <div class="post-h">
-                <span class="chip">{sentenceCase(m.kind)}</span>
+                <Badge variant="outline" label={sentenceCase(m.kind)} />
                 <span class="who">{author(m)}</span>
                 <span class="grow"></span>
                 <span class="dim time">{rel(m.created_at)}</span>
@@ -330,7 +334,7 @@
   .stat .k {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .stat .v {
@@ -350,7 +354,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sec-h {
@@ -466,13 +470,6 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
-  .chip {
-    border: 1px solid var(--border);
-    background: transparent;
-    font-size: var(--fs-xs);
-    padding: 1px 7px;
-    border-radius: 999px;
-  }
   .copy-btn {
     display: inline-flex;
     align-items: center;
@@ -511,28 +508,6 @@
   }
   .finding.warn {
     border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
-  }
-  .sev-chip {
-    font-size: var(--fs-xs);
-    padding: 1px 6px;
-    border-radius: 999px;
-    white-space: nowrap;
-    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
-    color: var(--text-dim);
-    flex: none;
-  }
-  /* Severity uses the semantic tones (text-safe), not the --status-* dot
-     colours or the accent — a warning is not a selection. */
-  .sev-chip.error {
-    background: var(--danger-soft);
-    color: var(--danger);
-  }
-  .sev-chip.warn {
-    background: var(--warning-soft);
-    color: var(--warning);
-  }
-  .sev-chip.info {
-    background: color-mix(in srgb, var(--text-dim) 14%, transparent);
   }
   .finding-text {
     font-size: var(--fs-s);

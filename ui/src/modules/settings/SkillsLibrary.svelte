@@ -377,7 +377,7 @@
     color: var(--text-dim);
   }
   .filter:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   .filter-input {

@@ -450,7 +450,7 @@
   .dr-kind {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .dr-name {
@@ -554,7 +554,7 @@
   .sec-title {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 4px;
   }
@@ -607,7 +607,7 @@
     text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 8px;
     border-bottom: 1px solid var(--border);

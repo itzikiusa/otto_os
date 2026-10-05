@@ -19,6 +19,7 @@
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import SceneList from './SceneList.svelte';
   import ExcalidrawCanvas from './ExcalidrawCanvas.svelte';
   import MermaidCanvas from './MermaidCanvas.svelte';
@@ -141,12 +142,27 @@
     canvas.closeScene();
   }
 
+  // ⌘K: the page's verbs (new scene per format; the assistant while a scene
+  // is open). Group = the module name.
+  $effect(() => {
+    if (!ws.currentId) return registry.register('canvas', []);
+    const open = !!canvas.currentId;
+    return registry.register('canvas', [
+      { id: 'canvas.new-excalidraw', title: 'New Excalidraw board', group: 'Canvas', keywords: 'create scene whiteboard draw', run: () => void createBlank('excalidraw') },
+      { id: 'canvas.new-mermaid', title: 'New Mermaid diagram', group: 'Canvas', keywords: 'create scene flowchart sequence', run: () => void createBlank('mermaid') },
+      { id: 'canvas.new-d2', title: 'New D2 diagram', group: 'Canvas', keywords: 'create scene architecture', run: () => void createBlank('d2') },
+      ...(open
+        ? [{ id: 'canvas.assistant', title: 'Open the canvas assistant', group: 'Canvas', keywords: 'agent ai redraw chat', run: () => (showConvo = true) }]
+        : []),
+    ]);
+  });
+
   async function createBlank(format: CanvasFormat = 'excalidraw'): Promise<void> {
     try {
       const created = await canvas.create('Untitled canvas', blankDoc(format));
       await canvas.open(created.id);
     } catch (e) {
-      toasts.error('Could not create canvas', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t create canvas', e instanceof Error ? e.message : String(e));
     }
   }
 </script>
@@ -468,8 +484,8 @@
     cursor: pointer;
     text-align: center;
     transition:
-      border-color 0.12s,
-      transform 0.12s;
+      border-color var(--dur-fast),
+      transform var(--dur-fast);
   }
   .mode:hover {
     border-color: var(--accent);

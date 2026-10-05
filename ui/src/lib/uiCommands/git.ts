@@ -28,7 +28,7 @@ const DIFF_MAX_LINES = 800;
 async function ready(): Promise<void> {
   await git.initializeOpenTabs();
   if (!git.allReposLoaded) {
-    throw new UiCommandError('failed', `Couldn't load the repositories${git.allReposError ? `: ${git.allReposError}` : ''}.`);
+    throw new UiCommandError('failed', `Couldn’t load the repositories${git.allReposError ? `: ${git.allReposError}` : ''}.`);
   }
 }
 
@@ -63,7 +63,7 @@ async function freshStatus(repo: Repo): Promise<RepoStatusResp> {
   await git.refreshStatus(repo.id);
   const err = git.statusErrorById[repo.id];
   const s = git.statusById[repo.id];
-  if (err || !s) throw new UiCommandError('failed', `Couldn't read the status of ${repo.name}${err ? `: ${err}` : ''}.`);
+  if (err || !s) throw new UiCommandError('failed', `Couldn’t read the status of ${repo.name}${err ? `: ${err}` : ''}.`);
   return s;
 }
 

@@ -309,7 +309,7 @@
     font: inherit;
     text-align: start;
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .gc-row:hover {
     background: var(--hover);

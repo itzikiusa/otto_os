@@ -193,7 +193,7 @@ async function openCluster(page: Page, tab?: string): Promise<void> {
   await page.goto('/#/brokers');
   await expect(page.locator('.brokers-page')).toBeVisible({ timeout: 30_000 });
   await page.locator('.cluster .cn', { hasText: CLUSTER }).first().click();
-  await expect(page.locator('.cluster-head .name')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.cluster-head .ph-title')).toBeVisible({ timeout: 15_000 });
   if (tab) await page.locator('.tabs button', { hasText: tab }).first().click();
 }
 

@@ -55,6 +55,8 @@
   import { commandLabel, providerName } from '../../lib/uiCommands/frames';
   import { moduleLabel } from '../../lib/sidebar';
   import { findInPage } from '../../lib/findinpage.svelte';
+  import ApprovalActions from '../../lib/components/ApprovalActions.svelte';
+  import { onTabKey } from '../../lib/tabKeys';
 
   interface Props {
     sessionId: string;
@@ -257,6 +259,16 @@
         ? `${agentWho} asked to drive Otto (you denied it earlier). Click to allow it for this session.`
         : `Allow UI control — let ${agentWho} open and drive Otto beside this session, where you can see it`,
   );
+  /** Which UI-control answer is in flight (ApprovalActions' busy label). */
+  let uiAct = $state<'approve' | 'deny' | null>(null);
+  async function runUiAct(kind: 'approve' | 'deny', run: () => Promise<unknown>): Promise<void> {
+    uiAct = kind;
+    try {
+      await run();
+    } finally {
+      uiAct = null;
+    }
+  }
   function toggleUiControl(): void {
     void uiControl.setGrant(sessionId, !uiGranted);
   }
@@ -302,19 +314,13 @@
     ['chat', 'Chat', 'comment'],
   ];
   const viewLabel = (m: SessionViewMode): string => (m === 'chat' ? 'Chat' : 'Terminal');
-  /** ←/→ (Home/End) move between the Terminal · Chat tabs, like any tablist;
-   *  focus follows the selection (roving tabindex). */
+  /** The shared tablist keys, then focus re-lands on the selected tab: the
+   *  terminal view grabs focus when it mounts, which would strand the user. */
   function onViewTabKey(e: KeyboardEvent): void {
-    let next: SessionViewMode | null = null;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') next = otherSessionView(view);
-    else if (e.key === 'Home') next = 'terminal';
-    else if (e.key === 'End') next = 'chat';
-    if (!next) return;
-    e.preventDefault();
-    setView(next);
+    onTabKey(e);
+    if (!e.defaultPrevented) return;
     const list = e.currentTarget as HTMLElement;
-    const target = next;
-    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${target}"]`)?.focus());
+    queueMicrotask(() => list.querySelector<HTMLElement>(`[data-view="${view}"]`)?.focus());
   }
   $effect(() => {
     if (!isAgent) return;
@@ -550,7 +556,7 @@
         icon: 'copy',
         action: () => {
           void copyText(cwd).then((ok) =>
-            ok ? toasts.info('Folder path copied') : toasts.error('Copy failed', 'The clipboard is not available here.'),
+            ok ? toasts.info('Folder path copied') : toasts.error('Couldn’t copy', 'The clipboard is not available here.'),
           );
         },
       });
@@ -602,7 +608,7 @@
       {
         id: 'terminal.redraw',
         title: 'Redraw terminal',
-        group: 'Sessions',
+        group: 'Session',
         keywords: 'garbled repaint refresh screen broken tui',
         run: () => termRef?.redraw(),
       },
@@ -868,7 +874,8 @@
             tabindex={view === m ? 0 : -1}
             data-view={m}
             onclick={() => setView(m)}
-            title={m === 'chat' ? 'Chat — the conversation rebuilt from the transcript (⌘⇧C)' : 'Terminal (⌘⇧C)'}
+            title={label}
+            aria-keyshortcuts="Meta+Shift+C"
           ><Icon name={icon} size={12} /><span class="head-lbl">{label}</span></button>
         {/each}
       </div>
@@ -877,7 +884,8 @@
         class="icon-btn view-flip"
         data-view-toggle
         aria-label="Switch to {viewLabel(otherSessionView(view))} view"
-        title="Switch to {viewLabel(otherSessionView(view))} view (⌘⇧C)"
+        title="Switch to {viewLabel(otherSessionView(view))} view"
+        aria-keyshortcuts="Meta+Shift+C"
         onmousedown={(e) => e.stopPropagation()}
         onclick={toggleView}
       ><Icon name={otherSessionView(view) === 'chat' ? 'comment' : 'terminal'} size={13} /></button>
@@ -901,8 +909,9 @@
       data-testid="pane-find"
       onmousedown={(e) => e.stopPropagation()}
       onclick={openSessionFind}
-      title="{findLabel} (⌘F)"
+      title={findLabel}
       aria-label={findLabel}
+      aria-keyshortcuts="Meta+F"
     ><Icon name="search" size={13} /></button>
     {#if showZoom}
       <button
@@ -947,8 +956,18 @@
         <strong>{agentWho}{session?.title ? ` · ${session.title}` : ''} wants to drive Otto</strong> — {uiAskWhat}. Everything it does shows beside this session, and writes still ask you.
       </span>
       <span class="ui-ask-actions">
-        <button class="btn small" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.deny(sessionId)} disabled={uiBusy} data-testid="ui-control-deny">Deny</button>
-        <button class="btn small primary" onmousedown={(e) => e.stopPropagation()} onclick={() => void uiControl.allow(sessionId)} disabled={uiBusy} data-testid="ui-control-allow">Allow for this session</button>
+        <!-- The shared approval shape (patterns §5). Deny is remembered on this
+             device with nowhere to record a reason, so it fires at once. -->
+        <ApprovalActions
+          approveLabel="Allow for this session"
+          approveBusyLabel="Allowing…"
+          askReason={false}
+          busy={uiAct}
+          disabled={uiBusy && uiAct === null}
+          onapprove={() => runUiAct('approve', () => uiControl.allow(sessionId))}
+          ondeny={() => runUiAct('deny', () => uiControl.deny(sessionId))}
+          testid="ui-control-actions"
+        />
       </span>
     </div>
   {/if}
@@ -1086,7 +1105,7 @@
     border-radius: var(--radius-m);
     overflow: hidden;
     background: var(--term-bg);
-    transition: border-color 140ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
     /* The header adapts to the PANE's inline size (the `@container pane` rules
        at the end). The query container is the pane, not the header: a
        container can't query itself. Inline-size containment means the pane has
@@ -1131,7 +1150,7 @@
     text-overflow: ellipsis;
     border-radius: var(--radius-s);
     padding-inline: 2px;
-    transition: color 140ms ease-out;
+    transition: color var(--dur-fast) ease-out;
   }
   .pane-title[role='button'] {
     cursor: default;
@@ -1151,7 +1170,7 @@
   }
   .pane:not(.current) .pane-head > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 0.7;
-    transition: opacity 140ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .pane:not(.current) .pane-head:is(:hover, :focus-within) > :is(.view-seg, .view-flip, .ui-ctl, .pane-find, .pane-zoom, .pane-more, .pane-close, .meta-chip) {
     opacity: 1;
@@ -1166,7 +1185,7 @@
     height: 20px;
     opacity: 0;
     cursor: grab;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .pane-head:hover > .pane-grip,
   .pane-head > .pane-grip:focus-visible {
@@ -1230,7 +1249,7 @@
   }
   .task-chip.active {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .task-chip.done {
     color: var(--success);
@@ -1307,7 +1326,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     overflow: hidden;
-    transition: border-color 130ms ease-out, color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .meta-chip:hover,
   .meta-chip:focus-visible {

@@ -209,7 +209,7 @@
               }}
             >
               <div class="row" class:active={sel && !selectedBlock} class:muted={s.hidden}>
-                {#if !readonly}<span class="grip" aria-hidden="true"><Icon name="grip" size={12} /></span>{/if}
+                {#if !readonly}<span class="grip reveal-on-hover" aria-hidden="true"><Icon name="grip" size={12} /></span>{/if}
                 <button class="row-main" onclick={() => onselect(s.id, null)} aria-pressed={sel} data-testid="site-layer">
                   <Icon name={familyIcon(s.block)} size={12} />
                   <span class="name">{sectionLabel(s)}</span>
@@ -217,7 +217,7 @@
                   {#if off}<span class="glyph warn" title={off}><Icon name="eyeOff" size={12} /></span>{/if}
                 </button>
                 {#if !readonly}
-                  <button class="icon-btn eye" onclick={() => ontogglehidden(s.id)} aria-label={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`} title={s.hidden ? 'Show section' : 'Hide section everywhere'}>
+                  <button class="icon-btn eye reveal-on-hover" onclick={() => ontogglehidden(s.id)} aria-label={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`} title={s.hidden ? `Show ${sectionLabel(s)}` : `Hide ${sectionLabel(s)}`}>
                     <Icon name={s.hidden ? 'eyeOff' : 'eye'} size={12} />
                   </button>
                 {/if}
@@ -408,11 +408,9 @@
     padding-inline-start: 4px;
     color: var(--text-dim);
     cursor: grab;
-    opacity: 0;
   }
-  .layer:hover .grip {
-    opacity: 1;
-  }
+  /* .grip / .eye use app.css `.reveal-on-hover`: shown on row hover, keyboard
+     focus in the row, their own focus, and always on touch (no hover). */
   .glyph {
     display: inline-flex;
     color: var(--text-dim);
@@ -424,12 +422,8 @@
   .glyph.warn :global(svg) {
     color: var(--warning);
   }
-  .eye {
-    opacity: 0;
-  }
-  .row:hover .eye,
-  .row.muted .eye,
-  .eye:focus-visible {
+  /* A hidden section keeps its eye-off visible: it is the state, not a verb. */
+  .muted > .eye {
     opacity: 1;
   }
   .kids {
@@ -506,7 +500,7 @@
     color: var(--text);
     text-align: start;
     cursor: grab;
-    transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
   }
   .tile:hover {
     border-color: var(--accent);

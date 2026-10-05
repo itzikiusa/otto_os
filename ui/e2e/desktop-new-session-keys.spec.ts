@@ -36,7 +36,7 @@ test.describe('new-session keyboard flow', () => {
     const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
     await page.keyboard.press('Meta+t');
     if (!(await dialog.isVisible().catch(() => false))) {
-      await page.getByTitle('New session (⌘T)').click();
+      await page.getByTitle('New session', { exact: true }).click();
     }
     await expect(dialog).toBeVisible();
 

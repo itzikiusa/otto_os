@@ -96,7 +96,7 @@
   {#if loading && !summary}
     <Skeleton rows={4} />
   {:else if error && !summary}
-    <EmptyState icon="warning" title="Couldn't load Mission Control" body={error}>
+    <EmptyState icon="warning" title="Couldn’t load Mission Control" body={error}>
       <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
     </EmptyState>
   {:else if summary}

@@ -444,7 +444,7 @@ class NotificationStore {
     } catch (e) {
       // Revert AND say so — a silent revert looks like the toggle "didn't take".
       this.settings = prev;
-      toasts.error('Could not save notification settings', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t save notification settings', e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -502,27 +502,28 @@ class NotificationStore {
       }
       const target = parseNoticeRoute(route);
       const signal = new AbortController().signal;
+      // The item's own URL (`<module>/<id>`) selects it — the same link a
+      // reload, Back or a shared address restores. The page port only opens
+      // what the URL doesn't carry (a workflow's run, a task's expanded row).
       switch (target.kind) {
         case 'workflow_run': {
           const { workflowsPagePort } = await import('../uiCommands/workflows');
-          router.go('workflows');
+          router.go(`workflows/${encodeURIComponent(target.workflowId)}`);
           const page = await workflowsPagePort.get(signal);
           if (await page.open(target.workflowId)) await page.openRun(target.workflowId, target.runId);
           break;
         }
         case 'scheduled_task': {
           const { scheduledTasksPort } = await import('../uiCommands/scheduled');
-          router.go('scheduled-tasks');
+          router.go(`scheduled-tasks/${encodeURIComponent(target.taskId)}`);
           (await scheduledTasksPort.get(signal)).expand(target.taskId);
           break;
         }
-        case 'goal_loop': {
-          const { loopsPagePort } = await import('../uiCommands/loops');
-          router.go('loops');
-          (await loopsPagePort.get(signal)).open(target.loopId);
+        case 'goal_loop':
+          router.go(`loops/${encodeURIComponent(target.loopId)}`);
           break;
-        }
         case 'route':
+          // proof/<id>, swarm/<id>, product/<id>, workflows/<id>, … as sent.
           router.go(target.route);
           break;
       }

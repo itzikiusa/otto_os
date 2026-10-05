@@ -80,7 +80,7 @@
   }
   .preset.sel {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .p-name {
     font-weight: 600;

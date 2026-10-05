@@ -78,11 +78,11 @@ test('sidebar uses summaries and selects one exact detail before restoring repla
   await expect(page.getByLabel('HTTP method', { exact: true })).toHaveValue('POST');
   const builder = page.locator('.builder');
   await builder.getByRole('tab', { name: 'Params', exact: true }).click();
-  await expect(builder.getByPlaceholder('key', { exact: true }).first()).toHaveValue('origin');
-  await expect(builder.getByPlaceholder('value', { exact: true }).first()).toHaveValue('detail-query');
+  await expect(builder.getByLabel('Parameter name', { exact: true }).first()).toHaveValue('origin');
+  await expect(builder.getByLabel('Value', { exact: true }).first()).toHaveValue('detail-query');
   await builder.getByRole('tab', { name: 'Headers', exact: true }).click();
-  await expect(builder.getByPlaceholder('key', { exact: true }).first()).toHaveValue('X-Replay');
-  await expect(builder.getByPlaceholder('value', { exact: true }).first()).toHaveValue('detail-header');
+  await expect(builder.getByLabel('Header name', { exact: true }).first()).toHaveValue('X-Replay');
+  await expect(builder.getByLabel('Value', { exact: true }).first()).toHaveValue('detail-header');
   await builder.getByRole('tab', { name: 'Body', exact: true }).click();
   await expect(builder.locator('.cm-content')).toContainText(f.snapshot.body);
   expect(f.calls.filter(path => path !== '/summaries')).toEqual([`/${f.summary.id}`]);

@@ -2,15 +2,15 @@
   // Skills Evaluator module: a left list of past runs + "New evaluation", and a
   // right pane showing either the start form or a selected run's live report.
   import { untrack } from 'svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { loadErrorText } from '../../lib/loadError';
   import { skillsEvalApi } from '../../lib/api/skillsEval';
   import type { SkillEval, SkillEvalSummary, StartSkillEvalReq } from '../../lib/api/types';
   import Icon from '../../lib/components/Icon.svelte';
@@ -182,7 +182,7 @@
         mode = 'detail';
       }
     } catch (e) {
-      loadError = e instanceof Error ? e.message : String(e);
+      loadError = loadErrorText(e);
     } finally {
       loading = false;
     }
@@ -199,7 +199,7 @@
       runs = [...runs, ...page.items.filter((r) => !have.has(r.id))];
       nextCursor = page.next_cursor;
     } catch (e) {
-      toasts.error("Couldn't load more evaluations", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t load more evaluations", e instanceof Error ? e.message : String(e));
     } finally {
       loadingMore = false;
     }
@@ -229,7 +229,7 @@
       mode = 'detail';
       toasts.success('Evaluation started', 'Watch progress in the report.');
     } catch (e) {
-      toasts.error("Couldn't start the evaluation", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t start the evaluation", e instanceof Error ? e.message : String(e));
     } finally {
       starting = false;
     }
@@ -257,21 +257,16 @@
     }
   }
 
+  const compareTitle = $derived(runs.length < 2 ? 'Compare runs (needs at least two)' : compareMode ? 'Leave compare mode' : 'Compare runs side by side');
+
   // Resizable run list (PaneDivider): the width survives reloads.
   let sideW = $state(loadPaneWidth('skillsEval.sideW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
 </script>
 
 <div class="se-wrap">
-  <div class="se-subhead">
-    <div class="segmented" role="tablist" aria-label="Evaluator view" data-testid="eval-tabs" tabindex="-1" onkeydown={onTabKey}>
-      {#each TABS as t (t.id)}
-        <button role="tab" aria-selected={tab === t.id} aria-controls="eval-panel" tabindex={tab === t.id ? 0 : -1} class:active={tab === t.id} onclick={() => setTab(t.id)} data-testid="tab-{t.id}">
-          <Icon name={t.icon} size={12} /> {t.label}
-        </button>
-      {/each}
-    </div>
-  </div>
-  <div class="se-content" id="eval-panel" role="tabpanel">
+  <!-- The view tabs (Runs / Golden tasks / Matrix) live in the Skills Lab
+       header's tab row (SkillsLabPage) — no second strip here. -->
+  <div class="se-content" id="eval-panel" role="tabpanel" aria-label={TABS.find((t) => t.id === tab)?.label}>
     {#if tab === 'golden'}
       <GoldenTasksView onopenrun={openRun} />
     {:else if tab === 'matrix'}
@@ -282,18 +277,17 @@
     <div class="se-side-head">
       <span class="se-side-title">Evaluations</span>
       <button
-        class="btn small ghost"
+        class="icon-btn"
         class:active={compareMode}
         aria-pressed={compareMode}
         onclick={toggleCompare}
-        title={runs.length < 2 ? 'Needs at least two runs to compare' : compareMode ? 'Leave compare mode' : 'Compare runs side by side'}
+        title={compareTitle}
+        aria-label={compareTitle}
         disabled={runs.length < 2}
-      >
-        <Icon name="columns" size={12} /> {compareMode ? 'Done' : 'Compare'}
-      </button>
+      ><Icon name="columns" size={14} /></button>
       <!-- Not .primary: the start form's "Start evaluation" is this view's primary. -->
-      <button class="btn small" onclick={newRun} aria-pressed={mode === 'form' && !compareMode} title="New evaluation">
-        <Icon name="plus" size={12} /> New
+      <button class="icon-btn" onclick={newRun} aria-pressed={mode === 'form' && !compareMode} title="New evaluation" aria-label="New evaluation">
+        <Icon name="plus" size={14} />
       </button>
     </div>
     {#if compareMode}
@@ -304,14 +298,8 @@
     <div class="se-list">
       {#if !ws.currentId}
         <div class="se-muted">No workspace selected.</div>
-      {:else if loading && runs.length === 0}
-        <div aria-busy="true" aria-label="Loading evaluations"><Skeleton rows={4} height={56} /></div>
-      {:else if loadError && runs.length === 0}
-        <div class="se-muted se-err" role="alert">
-          <span><Icon name="warning" size={12} /> <strong>Couldn't load evaluations.</strong></span>
-          <span class="se-err-detail">{loadError}</span>
-          <button class="btn small" onclick={() => ws.currentId && loadList(ws.currentId)} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>
-        </div>
+      {:else if (loading || loadError) && runs.length === 0}
+        <LoadState what="evaluations" variant="compact" {loading} error={loadError} empty onretry={() => ws.currentId && loadList(ws.currentId)} />
       {:else if runs.length === 0}
         <div class="se-muted">No evaluations yet. Fill in the form to run the first one.</div>
       {:else}
@@ -388,7 +376,6 @@
 </div>
 
 <style>
-  .se-subhead { display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
   .se-page.list-hidden .se-side { display: none; }
   .se-wrap {
     display: flex;
@@ -417,6 +404,11 @@
     flex-direction: column;
     min-height: 0;
   }
+  /* The pane header's toggles: pressed reads as the accent tint. */
+  .se-side-head :global(.icon-btn[aria-pressed='true']) {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
   .se-side-head {
     display: flex;
     align-items: center;
@@ -443,22 +435,6 @@
     padding: 16px 8px;
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .se-err {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
-    color: var(--text);
-    overflow-wrap: anywhere;
-  }
-  .se-err :global(svg) {
-    color: var(--danger);
-    vertical-align: -1px;
-  }
-  .se-err-detail {
-    color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .se-more {
     margin-block: 8px;

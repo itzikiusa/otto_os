@@ -1,4 +1,8 @@
 <script lang="ts">
+  import type { BadgeTone } from '../../lib/status';
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { toastError } from '../../lib/toastError';
   // RDS (read-only): DB instances table (status pill, identifier, engine,
   // class, AZ / Multi-AZ, storage, endpoint, created) with a region switcher
   // and a right-side drawer (AwsDrawer) — Overview (key fields + tags),
@@ -89,10 +93,10 @@
     return instances?.find((i) => i.identifier === d.inst.identifier) ?? d.inst;
   });
 
-  function pillClass(status: string): string {
+  function statusTone(status: string): BadgeTone {
     if (status === 'available') return 'ok';
     if (status === 'failed' || status === 'inaccessible-encryption-credentials' || status === 'storage-full') return 'bad';
-    if (status === 'stopped' || status === 'deleting') return '';
+    if (status === 'stopped' || status === 'deleting') return 'neutral';
     return 'warn';
   }
 
@@ -113,7 +117,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -158,7 +162,7 @@
   {#if loading && !instances}
     <div class="pad" role="status"><p class="load-note">Loading RDS instances…</p><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list DB instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="db" title={filter ? 'No matching instances' : allRegions ? 'No DB instances in any enabled region' : `No DB instances in ${region}`} />
   {:else}
@@ -179,7 +183,7 @@
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}
             oncontextmenu={(e) => menu(e, i)}
           >
-            <td><span class="pill {pillClass(i.status)}">{i.status}</span></td>
+            <td><Badge tone={statusTone(i.status)} label={sentenceCase(i.status)} /></td>
             <td class="strong mono" title={i.identifier}>{i.identifier}</td>
             {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
             <td class="hide-sm">{i.engine ?? '—'}{#if i.engine_version}<span class="dim"> {i.engine_version}</span>{/if}</td>
@@ -206,7 +210,7 @@
     name={inst.identifier}
     id={endpointOf(inst)}
     status={inst.status}
-    statusClass={pillClass(inst.status)}
+    statusTone={statusTone(inst.status)}
     tabs={DRAWER_TABS}
     tab={drawerTab}
     ontab={(t) => (drawerTab = t as DrawerTab)}
@@ -300,7 +304,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -330,7 +334,7 @@
     outline: none;
   }
   .trow.sel {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .strong {
     font-weight: 500;
@@ -340,28 +344,6 @@
   }
   .err {
     color: var(--danger);
-  }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: lowercase;
-  }
-  .pill.ok {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.warn {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-  }
-  .pill.bad {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
   }
   .tag {
     margin-inline-start: 6px;
@@ -411,7 +393,7 @@
     margin: 6px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .tags {

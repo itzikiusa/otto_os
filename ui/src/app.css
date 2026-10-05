@@ -112,9 +112,9 @@ a:hover {
   font-weight: 500;
   cursor: pointer;
   transition:
-    background 130ms ease-out,
-    border-color 130ms ease-out,
-    opacity 130ms ease-out;
+    background var(--dur-fast) ease-out,
+    border-color var(--dur-fast) ease-out,
+    opacity var(--dur-fast) ease-out;
   white-space: nowrap;
 }
 /* Icons never shrink: a scoped `.btn { width: 30px }` icon button used to
@@ -183,7 +183,7 @@ a:hover {
   color: var(--text-dim);
   cursor: pointer;
   font-size: var(--fs-s);
-  transition: background 130ms ease-out, color 130ms ease-out;
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   flex-shrink: 0;
 }
 .icon-btn:hover {
@@ -221,11 +221,13 @@ textarea.input {
   height: 27px;
   padding: 0 9px;
   border-radius: var(--radius-s);
-  border: 1px solid var(--border);
+  /* A control's outline must read (>= 3:1, WCAG 1.4.11): --control-border,
+     not the decorative --border. */
+  border: 1px solid var(--control-border);
   background: var(--surface-2);
   color: var(--text);
   font-size: var(--fs-m);
-  transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+  transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
 }
 textarea.input {
   height: auto;
@@ -258,10 +260,10 @@ textarea.input {
   height: 27px;
   padding: 0 9px;
   border-radius: var(--radius-s);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   background: var(--surface-2);
   color: var(--text-dim);
-  transition: border-color 130ms ease-out, box-shadow 130ms ease-out;
+  transition: border-color var(--dur-fast) ease-out, box-shadow var(--dur-fast) ease-out;
 }
 .input-group:focus-within {
   border-color: var(--accent-text);
@@ -340,6 +342,43 @@ textarea.input {
   white-space: nowrap;
 }
 
+/* Secondary row actions (close ✕, ⋯, delete, drag grip) that stay out of the
+   way until the row is pointed at. Never hover-ONLY: the control shows when
+   its parent (or a `.reveal-host` ancestor) is hovered or holds focus, when
+   it is itself focused or open, and always on a touch screen, where there is
+   no hover (ui-guards `hover-only-reveal`). Opacity, not visibility, so it
+   stays in the tab order and in the accessibility tree.
+
+     <li class="row reveal-host"> … <button class="icon-btn reveal-on-hover" …> */
+.reveal-on-hover {
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease-out;
+}
+:is(:hover, :focus-within) > .reveal-on-hover,
+.reveal-host:is(:hover, :focus-within) .reveal-on-hover,
+.reveal-on-hover:focus-visible,
+.reveal-on-hover:focus-within,
+.reveal-on-hover[aria-expanded='true'],
+.reveal-on-hover[aria-pressed='true'] {
+  opacity: 1;
+}
+@media (hover: none) {
+  .reveal-on-hover {
+    opacity: 1;
+  }
+}
+
+/* The one chat-bubble shape (your messages in Agents chat, the Assistant, and
+   their loading skeletons): --radius-l corners with a --radius-s "tail" at
+   the bottom corner on the bubble's trailing side. Keyed to the DOCUMENT
+   direction, not the bubble's own (`dir="auto"` text must not move the tail). */
+.chat-bubble-end {
+  border-radius: var(--radius-l) var(--radius-l) var(--radius-s) var(--radius-l);
+}
+[dir='rtl'] .chat-bubble-end {
+  border-radius: var(--radius-l) var(--radius-l) var(--radius-l) var(--radius-s);
+}
+
 /* Visually hidden, still read by screen readers (live regions, input labels). */
 .sr-only {
   position: absolute;
@@ -371,7 +410,7 @@ textarea.input {
   font-size: var(--fs-s);
   color: var(--text-dim);
   cursor: pointer;
-  transition: background 130ms ease-out, color 130ms ease-out;
+  transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .segmented > button:hover:not(:disabled) {
   color: var(--text);
@@ -404,7 +443,7 @@ textarea.input {
   font-size: var(--fs-s);
   font-weight: 500;
   cursor: pointer;
-  transition: background 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out;
+  transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .pill-toggle:disabled {
   opacity: 0.45;
@@ -673,6 +712,14 @@ textarea.input {
   from {
     opacity: 0;
     transform: translateY(6px);
+  }
+}
+/* Drawers and sheets sliding in from an edge. The element sets
+   `--slide-from` to the off-screen offset (-100% from the start edge, 100%
+   from the end edge — flip it under [dir='rtl']); 100% (end edge) by default. */
+@keyframes otto-slide-in {
+  from {
+    transform: translateX(var(--slide-from, 100%));
   }
 }
 .otto-fade-in {

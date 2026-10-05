@@ -183,7 +183,7 @@
     const seq = generation;
     const code = otpInput.trim();
     if (code.length !== 6 || !/^\d{6}$/.test(code)) {
-      otpError = 'Please enter the 6-digit code from your email.';
+      otpError = 'Enter the 6-digit code from your email.';
       return;
     }
     otpBusy = true;
@@ -253,7 +253,7 @@
 
   // The shared PROCESS stopped (not the access window — that is caught by
   // recheckAccess and routed to the OTP card). A new code can't bring an ended
-  // session back, so the overlay only says what happened and offers Reload.
+  // session back, so the overlay only says what happened and offers Reconnect.
   const termEnded = $derived(liveStatus === 'exited');
 
   // Effective status for the header badge.
@@ -397,7 +397,7 @@
       {/if}
 
       <!-- The shared session's process ended. Its output stays readable
-           underneath; Reload re-attaches if the owner restarts it. -->
+           underneath; Reconnect re-attaches if the owner restarts it. -->
       {#if termEnded}
         <div class="extend-overlay" role="status">
           <div class="extend-card">
@@ -405,10 +405,10 @@
             <h3>This session has ended</h3>
             <p>
               The shared terminal stopped on the host. If the person who shared it restarts it,
-              reload to pick it up again.
+              reconnect to pick it up again.
             </p>
             <button class="btn primary" onclick={() => void loadSession()}>
-              <Icon name="refresh" size={13} /> Reload
+              <Icon name="refresh" size={13} /> Reconnect
             </button>
           </div>
         </div>
@@ -497,7 +497,7 @@
     border-radius: var(--radius-m);
     background: var(--surface-2);
     color: var(--text);
-    transition: border-color 120ms;
+    transition: border-color var(--dur-fast);
   }
   .otp-input:focus {
     outline: none;

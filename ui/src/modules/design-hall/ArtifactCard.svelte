@@ -77,7 +77,7 @@
     overflow: hidden;
     color: var(--text);
     text-decoration: none;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .acard:hover {
     border-color: var(--border-strong);

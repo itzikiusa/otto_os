@@ -178,7 +178,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Work item saved');
     } catch (e) {
-      toasts.error("Couldn't save the work item", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toasts.error("Couldn’t save the work item", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
       if (ownsView(workspaceId, itemId, view)) { busy = false; loading = false; }
     }
@@ -196,7 +196,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success('Approval requested');
     } catch (e) {
-      toasts.error("Couldn't request approval", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toasts.error("Couldn’t request approval", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
       if (ownsView(workspaceId, itemId, view)) busy = false;
     }
@@ -217,7 +217,7 @@
       if (ownsView(workspaceId, itemId, view)) onChange?.();
       toasts.success(decision === 'approved' ? 'Approved' : 'Denied');
     } catch (e) {
-      toasts.error("Couldn't record the decision", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
+      toasts.error("Couldn’t record the decision", e instanceof ApiError ? e.message : 'Otto couldn’t reach the daemon.');
     } finally {
       if (ownsView(workspaceId, itemId, view)) { busy = false; deciding = null; }
     }
@@ -294,7 +294,7 @@
     <div class="d-body">
       <div class="d-err" role="alert">
         <Icon name="warning" size={14} />
-        <span>Couldn't load this work item. {err}</span>
+        <span>Couldn’t load this work item. {err}</span>
       </div>
       <div><button class="btn small" onclick={() => void load()}><Icon name="refresh" size={12} />Retry</button></div>
     </div>

@@ -274,7 +274,7 @@ test('product: manually edit Jira story title and description', async ({
 
 test('product: canceled keyboard tab change restores the selected tab focus', async ({ page }) => {
   await openStoryOverview(page);
-  const editor = page.getByPlaceholder('Write your story or paste notes here…');
+  const editor = page.getByPlaceholder('e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)');
   await editor.fill('Keep this unsaved draft');
   const tabs = page.getByRole('tablist', { name: 'Story tabs', exact: true });
   const selected = tabs.locator('[aria-selected="true"]');
@@ -300,10 +300,10 @@ test('product: saved local draft body survives the real detail endpoint and relo
     const detail = await response.json();
     expect(detail.source).toMatchObject({ kind: 'draft', body_md: body });
     await openStoryOverview(page);
-    await expect(page.getByPlaceholder('Write your story or paste notes here…')).toHaveValue(body);
+    await expect(page.getByPlaceholder('e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)')).toHaveValue(body);
     await page.reload();
     await openStoryOverview(page);
-    await expect(page.getByPlaceholder('Write your story or paste notes here…')).toHaveValue(body);
+    await expect(page.getByPlaceholder('e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)')).toHaveValue(body);
   } finally {
     await ctx.dispose();
   }

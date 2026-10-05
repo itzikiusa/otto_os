@@ -5,6 +5,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { pollWhileVisible } from '../../lib/poll';
   import TopicDetail from './TopicDetail.svelte';
@@ -43,6 +44,7 @@
   let newName = $state('');
   let newParts = $state(1);
   let newRf = $state(1);
+  let createBusy = $state(false);
 
   const guarded = $derived(cluster.read_only || cluster.environment === 'prod');
 
@@ -235,6 +237,7 @@
       replication_factor: Number(newRf),
       confirm: guarded,
     };
+    createBusy = true;
     try {
       await api.post(`/brokers/clusters/${cluster.id}/topics`, req);
       toasts.success(`Created ${req.name}`);
@@ -244,6 +247,8 @@
       selected = req.name;
     } catch (e) {
       toastError('Couldn’t create the topic', e);
+    } finally {
+      createBusy = false;
     }
   }
 </script>
@@ -300,31 +305,27 @@
 
     {#if creating}
       <div class="create">
-        <input bind:value={newName} placeholder="topic name" aria-label="Topic name" />
+        <input bind:value={newName} placeholder="orders.events" aria-label="Topic name" />
         <label title="Partitions">Parts <input type="number" min="1" bind:value={newParts} /></label>
         <label title="Replication factor">RF <input type="number" min="1" bind:value={newRf} /></label>
         <button
           class="btn primary small"
           onclick={createTopic}
-          disabled={!newName.trim()}
+          disabled={!newName.trim() || createBusy}
           title={newName.trim() ? 'Create topic' : 'Enter a topic name first'}
-        >Create</button>
-        <button class="btn small" onclick={() => (creating = false)}>Cancel</button>
+        >{createBusy ? 'Creating…' : 'Create'}</button>
+        <button class="btn small" onclick={() => (creating = false)} disabled={createBusy}>Cancel</button>
       </div>
     {/if}
 
     <div class="grid-wrap">
-      {#if loadError}
-        <!-- Inline error (nothing loaded) or a stale bar over the last good list. -->
-        <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} />
-      {/if}
-      {#if loadError && topics.length === 0}
-        <!-- rendered above -->
-      {:else if loading}
-        <p class="muted pad">Loading topics…</p>
-      {:else if topics.length === 0}
-        <p class="muted pad">No topics on this cluster yet.</p>
-      {:else if filtered.length === 0}
+      <!-- First load: skeleton; failed load: inline error (or a stale bar over
+           the last good list); a refresh keeps the rows on screen. -->
+      <LoadState what="topics" {loading} error={loadError} empty={topics.length === 0} onretry={load} rows={6}>
+        {#snippet emptyView()}
+          <EmptyState icon="layers" title="No topics on this cluster yet" actionLabel="New topic…" actionIcon="plus" actionKind="secondary" onaction={() => (creating = true)} />
+        {/snippet}
+      {#if filtered.length === 0}
         <!-- Filtered empty ≠ empty: say why and offer the way back. -->
         <p class="muted pad">
           No topics match the current filters.
@@ -372,9 +373,10 @@
           </tbody>
         </table>
       {/if}
+      </LoadState>
     </div>
 
-    {#if !loading && pageCount > 1}
+    {#if topics.length > 0 && pageCount > 1}
       <div class="pager">
         <span class="muted"
           >{pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filtered.length)} of {filtered.length}</span
@@ -516,10 +518,13 @@
   .create label input {
     width: 52px;
   }
+  /* A guaranteed height: on a short viewport (a phone in landscape) the grid
+     never collapses to a sliver — the topics column overflows into the brokers
+     tab body, which scrolls, so every row stays reachable. */
   .grid-wrap {
     flex: 1;
     overflow: auto;
-    min-height: 0;
+    min-height: 200px;
   }
   table.grid {
     width: 100%;
@@ -532,7 +537,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 8px 14px;
     position: sticky;
     top: 0;
@@ -627,24 +632,6 @@
     }
     .grid-wrap {
       min-height: 220px;
-    }
-  }
-
-  /* Short viewports (e.g. phones in landscape ~430px tall, which use the desktop
-     two-column layout because they're >640px wide): the header + tab strips +
-     toolbar eat the vertical budget, leaving the topics grid a sliver whose rows
-     end up behind the sticky toolbar / status bar and become unclickable. Let the
-     detail/topics containers grow past the viewport (the brokers tab-body scrolls
-     on short viewports) and give the grid a guaranteed height so rows stay
-     reachable. */
-  @media (max-height: 600px) {
-    .topics,
-    .detail-wrap {
-      height: auto;
-      min-height: 100%;
-    }
-    .grid-wrap {
-      min-height: 200px;
     }
   }
 </style>

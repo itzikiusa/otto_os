@@ -69,7 +69,7 @@
 
   async function runReplay() {
     if (running || blockReason) {
-      if (blockReason) toasts.error('Replay', blockReason);
+      if (blockReason) toasts.error('Can’t replay yet', blockReason);
       return;
     }
     const ok = await confirmProd({
@@ -245,7 +245,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .form {

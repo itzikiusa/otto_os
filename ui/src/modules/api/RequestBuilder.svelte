@@ -783,7 +783,7 @@
       <Icon name="send" size={13} />{sendBusy ? 'Sending…' : sendLabel}
     </button>
     {#if canStop}
-      <button class="btn stop" onclick={stopRequest} title="Cancel in-flight request"><Icon name="x" size={12} />Stop</button>
+      <button class="btn stop" onclick={stopRequest} title="Stop the in-flight request"><Icon name="stop" size={12} />Stop</button>
     {/if}
   </div>
 
@@ -906,7 +906,7 @@
           <div class="kv-head" aria-hidden="true"><span>Key</span>{#if multipartActive}<span class="kv-type-h">Type</span>{/if}<span>Value</span></div>
           {#each formRows as row, i (i)}
             <div class="kv-row">
-              <input class="input kv-key mono" placeholder="key" aria-label="Field name" value={row.key} oninput={(e) => updateFormRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
+              <input class="input kv-key mono" placeholder="email" aria-label="Field name" value={row.key} oninput={(e) => updateFormRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
               {#if multipartActive}
                 <select class="input row-type" value={row.type} onchange={(e) => setRowType(i, (e.currentTarget as HTMLSelectElement).value as FieldType)} aria-label="Field type">
                   <option value="text">Text</option>
@@ -919,7 +919,7 @@
                   <input type="file" hidden onchange={(e) => pickFile(i, e.currentTarget as HTMLInputElement)} />
                 </label>
               {:else}
-                <input class="input kv-val mono" placeholder="value" aria-label="Field value" value={row.value} oninput={(e) => updateFormRow(i, { value: (e.currentTarget as HTMLInputElement).value })} />
+                <input class="input kv-val mono" placeholder="ada@example.com" aria-label="Field value" value={row.value} oninput={(e) => updateFormRow(i, { value: (e.currentTarget as HTMLInputElement).value })} />
               {/if}
               <button class="icon-btn" title="Remove field" aria-label="Remove field" onclick={() => removeFormRow(i)}><Icon name="x" size={12} /></button>
             </div>
@@ -928,7 +928,7 @@
         </div>
       {:else if compact}
         <textarea class="input body-area mono" aria-label="Request body" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)}
-          placeholder={draft.body_mode === 'json' ? '{ "name": "value" }' : draft.body_mode === 'graphql' ? 'query { viewer { id } }' : 'Body text'} spellcheck="false"></textarea>
+          placeholder={draft.body_mode === 'json' ? '{ "name": "value" }' : draft.body_mode === 'graphql' ? 'query { viewer { id } }' : 'Hello, world'} spellcheck="false"></textarea>
       {:else if draft.body_mode === 'graphql'}
         <div class="gql-bar">
           <span class="sub-label">Query</span>
@@ -968,7 +968,7 @@
         {#if draft.auth.type === 'bearer'}
           <div class="field-row">
             <label for="auth-token">Token</label>
-            <input id="auth-token" class="input mono grow" value={secretValue(draft.auth.token)} oninput={(e) => setAuth({ token: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.token, 'Paste a token, or {{api_token}}')} />
+            <input id="auth-token" class="input mono grow" value={secretValue(draft.auth.token)} oninput={(e) => setAuth({ token: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.token, '{{api_token}}')} />
           </div>
         {:else if draft.auth.type === 'basic'}
           <div class="field-row">
@@ -986,7 +986,7 @@
           </div>
           <div class="field-row">
             <label for="auth-value">Value</label>
-            <input id="auth-value" class="input mono grow" value={secretValue(draft.auth.value)} oninput={(e) => setAuth({ value: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.value, 'The key, or {{api_key}}')} />
+            <input id="auth-value" class="input mono grow" value={secretValue(draft.auth.value)} oninput={(e) => setAuth({ value: (e.currentTarget as HTMLInputElement).value })} placeholder={secretPlaceholder(draft.auth.value, '{{api_key}}')} />
           </div>
           <div class="field-row">
             <label for="auth-in">Send as</label>
@@ -1150,10 +1150,10 @@
       <div class="kv-row" class:off={row.enabled === false}>
         <input class="kv-check" type="checkbox" checked={row.enabled !== false} aria-label="Send {row.key || 'this row'}" title={row.enabled === false ? 'Skipped: tick to send' : 'Sent: untick to skip'}
           onchange={(e) => updateRow(which, i, { enabled: (e.currentTarget as HTMLInputElement).checked })} />
-        <input class="input kv-key mono" placeholder="key" aria-label="{which === 'query' ? 'Parameter' : 'Header'} name" value={row.key}
+        <input class="input kv-key mono" placeholder={which === 'query' ? 'page' : 'Accept'} aria-label="{which === 'query' ? 'Parameter' : 'Header'} name" value={row.key}
           list={which === 'headers' ? 'hdr-keys' : undefined} autocomplete="off"
           oninput={(e) => updateRow(which, i, { key: (e.currentTarget as HTMLInputElement).value })} />
-        <input class="input kv-val mono" placeholder="value" aria-label="Value" value={row.value}
+        <input class="input kv-val mono" placeholder={which === 'query' ? '2' : 'application/json'} aria-label="Value" value={row.value}
           list={which === 'headers' && headerValues(row.key).length > 0 ? `hdr-vals-${i}` : undefined} autocomplete="off"
           oninput={(e) => updateRow(which, i, { value: (e.currentTarget as HTMLInputElement).value })} />
         {#if which === 'headers' && headerValues(row.key).length > 0}
@@ -1233,8 +1233,8 @@
         </div>
       {/each}
       <div class="kv-row">
-        <input class="input kv-key mono" placeholder="name" aria-label="New variable name" bind:value={newVarKey} onkeydown={(e) => { if (e.key === 'Enter') addVar(); }} />
-        <input class="input kv-val mono" placeholder="value" aria-label="New variable value" bind:value={newVarVal} onkeydown={(e) => { if (e.key === 'Enter') addVar(); }} />
+        <input class="input kv-key mono" placeholder="base_url" aria-label="New variable name" bind:value={newVarKey} onkeydown={(e) => { if (e.key === 'Enter') addVar(); }} />
+        <input class="input kv-val mono" placeholder="https://api.example.com" aria-label="New variable value" bind:value={newVarVal} onkeydown={(e) => { if (e.key === 'Enter') addVar(); }} />
         <button class="icon-btn" title="Add variable" aria-label="Add variable" onclick={addVar}><Icon name="plus" size={12} /></button>
       </div>
     </div>
@@ -1394,10 +1394,10 @@
     padding: 0 16px;
     flex-shrink: 0;
   }
+  /* Stop only ends the request (nothing is discarded): neutral, no confirm. */
   .stop {
     height: 32px;
     flex-shrink: 0;
-    color: var(--danger);
   }
   .vars {
     display: flex;

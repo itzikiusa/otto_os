@@ -22,7 +22,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
       localStorage.setItem('otto_firstrun_dismissed', '1');
     }, ws);
     await openPage(page, 'agents');
-    await page.getByTitle('New session (⌘T)').click();
+    await page.getByTitle('New session', { exact: true }).click();
     const dialog = page.getByRole('dialog', { name: 'New session', exact: true });
     await dialog.locator('#ns-cwd').fill(leaf);
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
@@ -70,7 +70,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
     await page.unroute('**/api/v1/fs/browse?*');
     const other = await page.context().newPage();
     await other.goto('/#/agents');
-    await other.getByTitle('New session (⌘T)').click();
+    await other.getByTitle('New session', { exact: true }).click();
     const otherDialog = other.getByRole('dialog', { name: 'New session', exact: true });
     await otherDialog.locator('#ns-cwd').fill(leaf);
     await otherDialog.getByRole('button', { name: 'Browse…' }).first().click();
@@ -89,7 +89,7 @@ test('shared folder picker navigates ancestors and history while retaining searc
     await expect(dialog.locator('#ns-cwd')).toHaveValue(parent);
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.reload();
-    await page.getByTitle('New session (⌘T)').click();
+    await page.getByTitle('New session', { exact: true }).click();
     await dialog.getByRole('button', { name: 'Browse…' }).first().click();
     const favorites = picker.getByRole('region', { name: 'Favorites', exact: true });
     await favorites.getByRole('button', { name: 'Itzik Lavon', exact: true }).click();
@@ -115,7 +115,7 @@ test('large folder listing stays bounded and fully keyboard reachable', async ({
     const entries=Array.from({length:10000},(_,i)=>({name:`Folder${String(i).padStart(5,'0')}`,path:`${root}/Folder${String(i).padStart(5,'0')}`,is_dir:true,is_git_repo:false}));
     await page.route('**/api/v1/fs/browse?*',route=>route.fulfill({json:{path:root,parent:'/',is_git_repo:false,entries}}));
     await openPage(page,'agents');
-    await page.getByTitle('New session (⌘T)').click();
+    await page.getByTitle('New session', { exact: true }).click();
     const dialog=page.getByRole('dialog',{name: 'New session',exact:true});
     await dialog.locator('#ns-cwd').fill(root);
     await dialog.getByRole('button',{name:'Browse…'}).first().click();
@@ -156,7 +156,7 @@ test('closing a slow folder picker aborts its browse request', async ({page},inf
       requested=true;await held;
       try {await route.fulfill({json:{path:'/slow-fixture',parent:'/',is_git_repo:false,entries:[]}});} catch { /* expected if canceled */ }
     });
-    await openPage(page,'agents');await page.getByTitle('New session (⌘T)').click();
+    await openPage(page,'agents');await page.getByTitle('New session', { exact: true }).click();
     const dialog=page.getByRole('dialog',{name: 'New session',exact:true});
     await dialog.locator('#ns-cwd').fill('/slow-fixture');await dialog.getByRole('button',{name:'Browse…'}).first().click();
     const picker=page.getByRole('dialog',{name:'Choose working directory',exact:true});

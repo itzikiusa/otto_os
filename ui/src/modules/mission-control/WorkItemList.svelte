@@ -85,7 +85,7 @@
     padding: 9px 12px;
     color: var(--text);
     cursor: pointer;
-    transition: border-color 0.12s, background 0.12s;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .wi-row:hover {
     border-color: var(--border-strong);

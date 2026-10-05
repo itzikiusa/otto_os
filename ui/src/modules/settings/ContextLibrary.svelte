@@ -21,6 +21,8 @@
   import { toasts } from '../../lib/toast.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import PaneDivider from '../../lib/components/PaneDivider.svelte';
+  import { LIST_PANE, loadPaneWidth } from '../../lib/paneResizer';
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -40,6 +42,8 @@
   }
 
   let tab: Tab = $state('skills');
+  /** Entry list width — the shared list-pane default/range, remembered. */
+  let listW = $state(loadPaneWidth('settings.contextLibrary.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
   let entries: Entry[] = $state([]);
   let defaultSoul: string | null = $state(null);
   let loading = $state(false);
@@ -370,7 +374,7 @@
       {/snippet}
       <div class="lib-body">
         <!-- List pane -->
-        <div class="list-pane">
+        <div class="list-pane" style="--list-pane-w:{listW}px">
           <div class="list-head">
             <h2 class="section-title">{meta.label} <span class="count">{entries.length}</span></h2>
             <button
@@ -405,6 +409,7 @@
             {/each}
           </div>
         </div>
+        <PaneDivider bind:width={listW} storageKey="settings.contextLibrary.listW" label="Resize the library list" />
 
         <!-- Editor pane -->
         <div class="editor-pane">
@@ -507,13 +512,15 @@
     color: var(--danger);
   }
   .lib-body {
-    display: grid;
-    grid-template-columns: 260px minmax(0, 1fr);
+    display: flex;
     gap: 16px;
-    align-items: start;
     max-width: 1000px;
   }
   .list-pane {
+    flex: none;
+    inline-size: var(--list-pane-w, 280px);
+    max-inline-size: 45%;
+    align-self: start;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -576,6 +583,8 @@
     white-space: nowrap;
   }
   .editor-pane {
+    flex: 1;
+    align-self: start;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -610,7 +619,12 @@
   }
   @media (max-width: 640px) {
     .lib-body {
-      grid-template-columns: 1fr;
+      flex-direction: column;
+    }
+    .list-pane {
+      inline-size: auto;
+      max-inline-size: none;
+      align-self: stretch;
     }
     .entry-list {
       max-height: 240px;

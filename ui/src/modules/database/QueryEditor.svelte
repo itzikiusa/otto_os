@@ -1594,7 +1594,7 @@
     white-space: nowrap;
     user-select: none;
     flex: 0 0 auto;
-    transition: background 0.12s, color 0.12s;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .qe-tab:hover {
     background: var(--hover);
@@ -1794,7 +1794,7 @@
   .qe-vars-label {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .qe-var {
     display: inline-flex;
@@ -1829,7 +1829,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     cursor: pointer;
   }
   /* Toggle highlight for a toolbar button (Ask AI / Ask in English) when its DB
@@ -1868,7 +1868,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin: 0;
     padding: 2px 4px 4px;
@@ -1909,7 +1909,7 @@
   .qe-lang {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 0 6px;
     height: 18px;
@@ -1957,14 +1957,14 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     user-select: none;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
   }
   .qe-mask:hover {
     color: var(--text);
     border-color: var(--accent);
   }
   .qe-mask.active {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent-text);
   }
@@ -2015,7 +2015,7 @@
     height: 3px;
     border-radius: 2px;
     background: var(--border);
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .qe-splitter:focus-visible {
     outline: none;
@@ -2120,7 +2120,7 @@
       font-size: var(--fs-m);
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: .06em;
     }
     .qe-acc-count {
       font-size: var(--fs-s);

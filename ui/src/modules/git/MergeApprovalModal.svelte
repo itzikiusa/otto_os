@@ -289,7 +289,7 @@
   .section-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     text-transform: uppercase;
   }
@@ -306,14 +306,14 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     cursor: pointer;
-    transition: border-color 110ms, background 110ms;
+    transition: border-color var(--dur-fast), background var(--dur-fast);
   }
   .strat:hover {
     background: var(--surface-2);
   }
   .strat.active {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-soft);
   }
   .strat input {
     margin-top: 2px;

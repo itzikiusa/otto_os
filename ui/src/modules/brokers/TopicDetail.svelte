@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import Skeleton from '../../lib/components/Skeleton.svelte';
   import { api } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -445,7 +446,7 @@
     } catch (e) {
       if (owner !== consumeUrl()) return;
       tailError = loadErrorText(e);
-      if (!autoPoll) toasts.error("Couldn't read messages", tailError);
+      if (!autoPoll) toasts.error("Couldn’t read messages", tailError);
     } finally {
       consuming = false;
     }
@@ -553,7 +554,7 @@
       cfgName = '';
       cfgValue = '';
     } catch (e) {
-      toasts.error("Couldn't update the config", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t update the config", e instanceof Error ? e.message : String(e));
     } finally {
       cfgSaving = false;
     }
@@ -577,7 +578,7 @@
       toasts.success(`Deleted ${topic}`);
       ondeleted();
     } catch (e) {
-      toasts.error("Couldn't delete the topic", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t delete the topic", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -595,7 +596,7 @@
         const full: ConsumeReq = { ...lastReq, preview: false };
         messages = (await api.post<ConsumeResp>(consumeUrl(), full)).messages;
       } catch (e) {
-        toasts.error("Couldn't export the messages", e instanceof Error ? e.message : String(e));
+        toasts.error("Couldn’t export the messages", e instanceof Error ? e.message : String(e));
         return;
       } finally {
         exporting = false;
@@ -630,7 +631,7 @@
       });
       toasts.success('Copied to clipboard');
     } catch {
-      toasts.error('Copy failed', 'The browser blocked the clipboard write.');
+      toasts.error('Couldn’t copy', 'The browser blocked the clipboard write.');
     }
   }
 </script>
@@ -655,7 +656,7 @@
   {#if detailErr}
     <div class="err" role="alert">
       <Icon name="warning" size={13} />
-      <span class="err-text">Couldn't load topic details. <span class="muted">{detailErr}</span></span>
+      <span class="err-text">Couldn’t load topic details. <span class="muted">{detailErr}</span></span>
       <button class="btn small" onclick={() => loadDetail(detail !== null)}>
         <Icon name="refresh" size={12} /> Retry
       </button>
@@ -850,8 +851,8 @@
     </div>
   {:else if tab === 'partitions'}
     {#if !detail && !detailErr}
-      <p class="muted pad">Loading partitions…</p>
-    {/if}
+      <div class="pad"><Skeleton rows={4} label="partitions" /></div>
+    {:else if detail}
     <table class="grid">
       <thead>
         <tr><th>Partition</th><th>Leader</th><th>Replicas</th><th>ISR</th><th>Low</th><th>High</th><th>Messages</th></tr>
@@ -870,10 +871,11 @@
         {/each}
       </tbody>
     </table>
+    {/if}
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input class="grow" bind:value={cfgName} placeholder="config name (e.g. retention.ms)" aria-label="Config name" />
-      <input class="grow" bind:value={cfgValue} placeholder="value" aria-label="Config value" />
+      <input class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
+      <input class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
       <button
         class="btn small"
         onclick={setConfig}
@@ -882,8 +884,8 @@
       >{cfgSaving ? 'Setting…' : 'Set'}</button>
     </div>
     {#if !detail && !detailErr}
-      <p class="muted pad">Loading config…</p>
-    {/if}
+      <div class="pad"><Skeleton rows={6} label="config" /></div>
+    {:else if detail}
     <table class="grid">
       <thead><tr><th>Name</th><th>Value</th><th>Source</th></tr></thead>
       <tbody>
@@ -896,6 +898,7 @@
         {/each}
       </tbody>
     </table>
+    {/if}
   {:else if tab === 'produce'}
     <div class="produce">
       <div class="produce-opts">
@@ -1103,10 +1106,13 @@
     flex: 1;
     min-width: 100px;
   }
+  /* A guaranteed height so the list/detail never shrink to a sliver on a short
+     viewport (a phone in landscape): the detail overflows into the brokers tab
+     body, which scrolls, instead of compressing behind the header. */
   .msg-layout {
     display: flex;
     flex: 1;
-    min-height: 0;
+    min-height: 180px;
   }
   .msg-list {
     flex: 1;
@@ -1130,7 +1136,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 6px 10px;
     position: sticky;
     top: 0;
@@ -1161,7 +1167,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .msg-list tbody tr.sel {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .key {
     max-width: 180px;
@@ -1223,7 +1229,7 @@
   .badge {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 2px 6px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -1233,7 +1239,7 @@
     margin: 12px 0 4px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .payload {
@@ -1437,34 +1443,6 @@
     }
     .cfg-set {
       flex-wrap: wrap;
-    }
-  }
-
-  /* Short viewports (phones in landscape): the message layout stays side-by-side
-     (wide enough), but the panes get a guaranteed height so the message list
-     doesn't shrink to a sliver whose rows fall behind the sticky chrome. The
-     detail container is allowed to grow past the viewport (the brokers tab-body
-     scrolls on short viewports) so the produce form / message rows scroll into
-     view rather than being compressed behind the header + status bar. */
-  @media (max-height: 600px) {
-    .td {
-      height: auto;
-      min-height: 100%;
-    }
-    .msg-layout {
-      flex: none;
-    }
-    .msg-list {
-      min-height: 180px;
-    }
-    .msg-list.windowed {
-      max-height: 70vh;
-    }
-    .msg-detail {
-      min-height: 180px;
-    }
-    .produce {
-      overflow: visible;
     }
   }
 </style>

@@ -13,6 +13,11 @@
   // Replace via the JSON editor). Everything writes through `flow` → the
   // pending bar → the review modal; nothing here runs a statement.
   //
+  // Keyboard: each record's fields are one role="tree" with a roving tabindex
+  // (`treeNav`): ↑/↓ move between rows, Home/End jump, → into an open
+  // container, ← to the parent; the row itself handles Enter/F2 (edit), →/←
+  // (open/close) and ⇧F10 (field menu) — see VerticalTree.
+  //
   // ⌘F searches inside closed branches and undrawn records too (json-find.ts).
   import { tick, untrack } from 'svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -285,7 +290,68 @@
     if (ok) flow.unsetPath(ctx.rowIdx, ctx.colIdx, ctx.path);
   }
 
-  function fieldMenu(e: MouseEvent, ctx: FieldCtx): void {
+  /** Roving tabindex + arrow navigation over one record's `treeitem` rows (in
+   *  DOM order = visual order). One row is the record's Tab stop: the last one
+   *  focused, else the first; a MutationObserver keeps one as rows come and go. */
+  function treeNav(node: HTMLElement) {
+    const items = (): HTMLElement[] => Array.from(node.querySelectorAll<HTMLElement>('[role="treeitem"]'));
+    const setStop = (el: HTMLElement): void => {
+      for (const i of node.querySelectorAll<HTMLElement>('[role="treeitem"][tabindex="0"]')) if (i !== el) i.tabIndex = -1;
+      el.tabIndex = 0;
+    };
+    const ensureStop = (): void => {
+      if (node.querySelector('[role="treeitem"][tabindex="0"]')) return;
+      const first = items()[0];
+      if (first) first.tabIndex = 0;
+    };
+    const level = (el: Element): number => Number(el.getAttribute('aria-level')) || 1;
+    function onFocusIn(e: FocusEvent): void {
+      const item = (e.target as Element | null)?.closest<HTMLElement>('[role="treeitem"]');
+      if (item && node.contains(item)) setStop(item);
+    }
+    function onKeyDown(e: KeyboardEvent): void {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+      const t = e.target as HTMLElement;
+      if (t.getAttribute('role') !== 'treeitem') return;
+      const all = items();
+      const i = all.indexOf(t);
+      if (i < 0) return;
+      const rtl = getComputedStyle(t).direction === 'rtl';
+      const inKey = rtl ? 'ArrowLeft' : 'ArrowRight';
+      const outKey = rtl ? 'ArrowRight' : 'ArrowLeft';
+      let j = -1;
+      if (e.key === 'ArrowDown') j = Math.min(all.length - 1, i + 1);
+      else if (e.key === 'ArrowUp') j = Math.max(0, i - 1);
+      else if (e.key === 'Home') j = 0;
+      else if (e.key === 'End') j = all.length - 1;
+      else if (e.key === inKey && t.getAttribute('aria-expanded') === 'true') {
+        // An open container: step to its first child.
+        if (all[i + 1] && level(all[i + 1]) > level(t)) j = i + 1;
+      } else if (e.key === outKey) {
+        // A leaf or a closed container: step to the parent row.
+        const lv = level(t);
+        for (let k = i - 1; k >= 0; k--) if (level(all[k]) < lv) { j = k; break; }
+      } else return;
+      e.preventDefault();
+      if (j < 0 || j === i) return;
+      setStop(all[j]);
+      all[j].focus();
+    }
+    ensureStop();
+    const mo = new MutationObserver(ensureStop);
+    mo.observe(node, { childList: true, subtree: true });
+    node.addEventListener('focusin', onFocusIn);
+    node.addEventListener('keydown', onKeyDown);
+    return {
+      destroy() {
+        mo.disconnect();
+        node.removeEventListener('focusin', onFocusIn);
+        node.removeEventListener('keydown', onKeyDown);
+      },
+    };
+  }
+
+  function fieldMenu(e: MouseEvent | KeyboardEvent, ctx: FieldCtx): void {
     if (mini) return;
     const items: MenuItem[] = [];
     const editableHere = canEdit && (ctx.colIdx === -1 || flow.isEditableCell(ctx.colIdx));
@@ -374,7 +440,7 @@
       <button class="vv-tool" onclick={expandAll} title="Open every nested field of the drawn records">Expand all</button>
       <button class="vv-tool" onclick={() => setMode('none')} title="Close every nested field">Collapse all</button>
       <button class="vv-tool" onclick={() => setMode('budget')} title="Back to the default: open what fits the node budget" disabled={!resettable}>Reset</button>
-      {#if canEdit}<span class="vv-hint dim"><Icon name="edit" size={10} />double-click a value to edit · right-click a field for more</span>{/if}
+      {#if canEdit}<span class="vv-hint dim"><Icon name="edit" size={10} />double-click or Enter to edit · right-click, ⋯ or ⇧F10 for more</span>{/if}
     </div>
   {/if}
   {#if viewTruncated}<div class="alt-note dim" data-find-skip>Showing first {viewCap} of {totalRows} rows.</div>{/if}
@@ -392,6 +458,7 @@
           <button class="jrec-copy vrec-more" title="Record actions" aria-label="Record actions" onclick={(e) => recordMenu(e, obj, idx, ri)}><Icon name="more" size={14} /></button>
         {/if}
       </div>
+      <div class="vfields" role="tree" aria-label="Record {ri + 1} fields" use:treeNav>
       {#each result.columns as c, vci (vci)}
         {@const cv = columnValue(idx, vci, obj[uniqueColNames[vci]])}
         <VerticalTree
@@ -407,13 +474,14 @@
           {flow}
           {engine}
           cellDraft={cv.draft}
-          onfieldmenu={fieldMenu}
+          onfieldmenu={mini ? undefined : fieldMenu}
           reveal={reveals.get(idx)}
         />
       {/each}
       {#each phantomFields(idx) as [k] (k)}
-        <VerticalTree value={undefined} path={k} depth={0} label={k} expansion={exp} {plan} editable={canEdit} rowIdx={idx} colIdx={-1} {flow} {engine} onfieldmenu={fieldMenu} phantom />
+        <VerticalTree value={undefined} path={k} depth={0} label={k} expansion={exp} {plan} editable={canEdit} rowIdx={idx} colIdx={-1} {flow} {engine} onfieldmenu={mini ? undefined : fieldMenu} phantom />
       {/each}
+      </div>
     </div>
   {/each}
   {#if altRemaining > 0}

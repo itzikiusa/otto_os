@@ -206,7 +206,7 @@ registerUiCommands('api', {
     await ready(ctx.signal);
     const env = resolveByIdOrName(apiClient.environments, args.environment_id, (e) => e.id, (e) => e.name, 'environment');
     await apiClient.activateEnvironment(env.id);
-    if (apiClient.activeEnv?.id !== env.id) throw new UiCommandError('failed', `Couldn't activate “${env.name}”.`);
+    if (apiClient.activeEnv?.id !== env.id) throw new UiCommandError('failed', `Couldn’t activate “${env.name}”.`);
     return { environment_id: env.id, name: env.name };
   },
 

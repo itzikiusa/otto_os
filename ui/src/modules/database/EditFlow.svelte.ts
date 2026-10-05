@@ -37,6 +37,7 @@ import {
 import { parseSimpleSelect, qid, scopeDatabase, typedCellDraft, valueLiteral, whereByPk } from './edit-sql';
 import { mongoCollectionForEdit, mongoIdFilterFor } from './edit-mongo';
 import { applyPatchAtPath, flattenPaths, valueKind } from './expansion-plan';
+import { toastError } from '../../lib/toastError';
 
 export type { TypedKind, TypedValue, RowPatch, DiffLine } from './edit-types';
 export { SET_NULL, SET_EMPTY } from './results-format';
@@ -721,7 +722,7 @@ export class EditFlow {
         keepOffset: true,
       });
     } catch (e) {
-      toasts.error('Statement failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t run the statement', e);
       // keep the modal open so the user can fix the SQL and retry
     } finally {
       this.runningReview = false;

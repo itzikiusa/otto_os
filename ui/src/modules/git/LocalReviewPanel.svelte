@@ -789,7 +789,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .sev-info {

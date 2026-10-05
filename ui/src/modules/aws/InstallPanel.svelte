@@ -112,24 +112,37 @@
     font-size: var(--fs-s);
   }
   .progress {
+    position: relative;
     height: 6px;
     border-radius: 999px;
     background: var(--surface-2);
     overflow: hidden;
   }
+  /* Indeterminate sweep along the reading direction: a logical offset, so it
+     runs right-to-left in RTL. */
   .bar {
-    width: 40%;
-    height: 100%;
+    position: absolute;
+    inset-block: 0;
+    inset-inline-start: -40%;
+    inline-size: 40%;
     background: var(--accent);
     border-radius: 999px;
-    animation: slide 1.4s ease-in-out infinite;
+    animation: aws-install-sweep 1.4s ease-in-out infinite;
   }
-  @keyframes slide {
-    0% {
-      transform: translateX(-100%);
+  @keyframes aws-install-sweep {
+    from {
+      inset-inline-start: -40%;
     }
-    100% {
-      transform: translateX(260%);
+    to {
+      inset-inline-start: 100%;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bar {
+      animation: none;
+      inset-inline-start: 0;
+      inline-size: 100%;
+      opacity: 0.5;
     }
   }
   .status {

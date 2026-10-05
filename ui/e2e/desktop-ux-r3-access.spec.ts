@@ -178,7 +178,7 @@ test('guest editor input, viewer protection, ended and invalid-link states',asyn
   await page.evaluate(()=>{location.hash='#/s/same/token-viewer';});await expect(page.getByText('You can type',{exact:true})).toBeHidden();await expect(page.locator('.xterm-rows')).toContainText('Synthetic shared output');
   await page.locator('.xterm-helper-textarea').focus();await page.keyboard.type('blocked');expect(input.join('')).toBe('hello');
   endSession();await expect(page.getByRole('heading',{name:'This session has ended'})).toBeVisible();await page.screenshot({path:info.outputPath('guest-ended.png')});
-  await page.getByRole('button',{name:'Reload',exact:true}).click();await expect(page.getByRole('heading',{name:'This session has ended'})).toBeHidden();
+  await page.getByRole('button',{name:'Reconnect',exact:true}).click();await expect(page.getByRole('heading',{name:'This session has ended'})).toBeHidden();
   await page.evaluate(()=>{location.hash='#/s/missing';});await expect(page.getByRole('alert')).toContainText('This link is invalid or has expired');
 });
 

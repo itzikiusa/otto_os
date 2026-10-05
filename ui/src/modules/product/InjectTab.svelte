@@ -45,7 +45,7 @@
     try {
       bundle = await product.loadInject();
     } catch (e) {
-      toasts.error('Could not build inject bundle', product.errMsg(e));
+      toasts.error('Couldn’t build inject bundle', product.errMsg(e));
     } finally {
       loading = false;
     }
@@ -58,7 +58,7 @@
       await copyTextOrThrow(bundle.markdown);
       toasts.success('Copied to clipboard', 'Inject bundle markdown copied.');
     } catch (e) {
-      toasts.error('Copy failed', product.errMsg(e));
+      toasts.error('Couldn’t copy', product.errMsg(e));
     } finally {
       copying = false;
     }
@@ -76,7 +76,7 @@
       // "Open in agent" means open it: land on the new session, not a toast with its id.
       ws.navigateToSession(session.id);
     } catch (e) {
-      toasts.error('Could not create agent session', product.errMsg(e));
+      toasts.error('Couldn’t create agent session', product.errMsg(e));
     } finally {
       launching = false;
     }
@@ -247,7 +247,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -275,7 +275,7 @@
   }
   .cwd-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
 
   /* Sections */
@@ -311,7 +311,7 @@
     color: var(--text);
     cursor: pointer;
     text-align: start;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .sec-trigger:hover {
     background: var(--hover);

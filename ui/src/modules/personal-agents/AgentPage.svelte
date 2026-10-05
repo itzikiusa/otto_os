@@ -2,7 +2,7 @@
   // One personal agent: Overview / Activity / Autonomy / Schedules / Runs /
   // Chat / Memory / Context tabs.
   import RelTime from '../../lib/components/RelTime.svelte';
-  import { nextTabIndex } from '../../lib/tabKeys';
+  import { tabKeys } from '../../lib/tabKeys';
   import { tick } from 'svelte';
   import { personalAgents } from '../../lib/stores/personalAgents.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -50,6 +50,8 @@
     agentId: string;
   }
   let { agentId }: Props = $props();
+  /** Prefix for the schedule form's label↔control ids. */
+  const uid = $props.id();
 
   type Tab = 'overview' | 'activity' | 'autonomy' | 'schedules' | 'runs' | 'chat' | 'memory' | 'context';
   const TABS: { id: Tab; label: string }[] = [
@@ -75,15 +77,6 @@
     if (seq !== tabTransition || !list?.isConnected || list.closest('[inert]')) return;
     // hashchange may follow this microtask; focus the accepted target only.
     list.querySelector<HTMLButtonElement>(`[role="tab"][data-tab="${accepted ? t : tab}"]`)?.focus();
-  }
-  function onTabKey(event: KeyboardEvent): void {
-    const list = event.currentTarget as HTMLElement;
-    const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]:not(:disabled)')];
-    const current = tabs.findIndex((el) => el.getAttribute('aria-selected') === 'true');
-    const next = nextTabIndex(event.key, current, tabs.length, { rtl: getComputedStyle(list).direction === 'rtl' });
-    if (current < 0 || next < 0) return;
-    event.preventDefault();
-    tabs[next].click();
   }
   let editing = $state(false);
   let busy = $state(false);
@@ -170,7 +163,7 @@
     personalAgentsApi
       .chatSession(agentId)
       .then((r) => (chatSessionId = r.session_id))
-      .catch((e) => (chatError = e instanceof Error ? e.message : 'Failed to open the chat session'));
+      .catch((e) => (chatError = loadErrorText(e)));
   });
 
   // --- Schedules form -------------------------------------------------------
@@ -382,7 +375,7 @@
     {/if}
   {/snippet}
   {#snippet tabs()}
-    <div class="tabs" role="tablist" aria-label="Agent sections" tabindex="-1" onkeydown={onTabKey}>
+    <div class="tabs" role="tablist" aria-label="Agent sections" tabindex="-1" onkeydown={tabKeys({ activate: 'click' })}>
       {#each TABS as t (t.id)}
         <button
           class="tab"
@@ -469,64 +462,64 @@
       <div class="form pa-panel">
         <h2>{schedEditId ? 'Edit schedule' : 'New schedule'}</h2>
         {#if error}<div class="err" role="alert">{error}</div>{/if}
-        <div class="fld-row">
-          <label class="fld">
-            <span>Cadence</span>
-            <select bind:value={sf.cadence}>
+        <div class="field-row">
+          <div class="field">
+            <label for="{uid}-cadence">Cadence</label>
+            <select id="{uid}-cadence" class="input" bind:value={sf.cadence}>
               <option value="interval">Interval</option>
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
               <option value="cron">Cron</option>
               <option value="once">Once</option>
             </select>
-          </label>
+          </div>
           {#if sf.cadence === 'interval'}
-            <label class="fld">
-              <span>Every (minutes, min 5)</span>
-              <input type="number" min="5" bind:value={sf.everyMin} />
-            </label>
+            <div class="field">
+              <label for="{uid}-every">Every (minutes, min 5)</label>
+              <input id="{uid}-every" class="input" type="number" min="5" bind:value={sf.everyMin} />
+            </div>
           {:else if sf.cadence === 'once'}
-            <label class="fld">
-              <span>Runs once at (in the timezone)</span>
-              <input type="datetime-local" bind:value={sf.runAt} />
-            </label>
+            <div class="field">
+              <label for="{uid}-run-at">Runs once at (in the timezone)</label>
+              <input id="{uid}-run-at" class="input" type="datetime-local" bind:value={sf.runAt} />
+            </div>
           {:else if sf.cadence === 'cron'}
-            <label class="fld">
-              <span>Cron expression (5 fields)</span>
-              <input bind:value={sf.cronExpr} placeholder="0 9 * * 1" dir="ltr" />
-            </label>
+            <div class="field">
+              <label for="{uid}-cron">Cron expression (5 fields)</label>
+              <input id="{uid}-cron" class="input" bind:value={sf.cronExpr} placeholder="0 9 * * 1" dir="ltr" />
+            </div>
           {:else}
-            <label class="fld">
-              <span>At (HH:MM)</span>
-              <input bind:value={sf.at} placeholder="09:00" dir="ltr" />
-            </label>
+            <div class="field">
+              <label for="{uid}-at">At (HH:MM)</label>
+              <input id="{uid}-at" class="input" bind:value={sf.at} placeholder="09:00" dir="ltr" />
+            </div>
             {#if sf.cadence === 'weekly'}
-              <label class="fld">
-                <span>Weekday</span>
-                <select bind:value={sf.weekday}>
+              <div class="field">
+                <label for="{uid}-weekday">Weekday</label>
+                <select id="{uid}-weekday" class="input" bind:value={sf.weekday}>
                   {#each WEEKDAYS as d, i (d)}<option value={i}>{d}</option>{/each}
                 </select>
-              </label>
+              </div>
             {/if}
           {/if}
           {#if sf.cadence !== 'interval'}
-            <label class="fld">
-              <span>Timezone</span>
-              <input bind:value={sfTimezone} placeholder="e.g. Europe/London" dir="ltr" />
-            </label>
+            <div class="field">
+              <label for="{uid}-tz">Timezone</label>
+              <input id="{uid}-tz" class="input" bind:value={sfTimezone} placeholder="e.g. Europe/London" dir="ltr" />
+            </div>
           {/if}
         </div>
-        <label class="fld">
-          <span>Directive (the run’s task prompt)</span>
-          <textarea bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
-        </label>
-        <label class="fld">
-          <span>Permissions for its runs</span>
-          <select bind:value={sfPermission}>
+        <div class="field">
+          <label for="{uid}-directive">Directive (the run’s task prompt)</label>
+          <textarea id="{uid}-directive" class="input" bind:value={sfDirective} rows="4" placeholder="Produce the daily recap…"></textarea>
+        </div>
+        <div class="field">
+          <label for="{uid}-permission">Permissions for its runs</label>
+          <select id="{uid}-permission" class="input" bind:value={sfPermission}>
             <option value="directed">Directed — your normal approvals and auto-approve rules</option>
             <option value="read_only">Read-only — can read and report, can’t change anything</option>
           </select>
-        </label>
+        </div>
         <label class="chk"><input type="checkbox" bind:checked={sfEnabled} /> Enabled</label>
         <div class="actions">
           <button class="btn" disabled={busy} onclick={() => { schedFormOpen = false; error = ''; }}>Cancel</button>
@@ -622,11 +615,7 @@
     </LoadState>
   {:else if tab === 'chat'}
     {#if chatError}
-      <div class="err-block" role="alert">
-        <Icon name="warning" size={14} />
-        <div class="err-t"><strong>Couldn’t open the chat session.</strong><span class="muted">{chatError}</span></div>
-        <button class="btn small" onclick={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }}>Retry</button>
-      </div>
+      <LoadState what="the chat session" error={chatError} empty onretry={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }} />
     {:else if chatSessionId}
       <div class="chatwrap">
         <Terminal sessionId={chatSessionId} autoFocus />
@@ -653,11 +642,7 @@
       {#if reportLoading}
         <div aria-busy="true" aria-label="Loading the report"><Skeleton rows={6} height={18} /></div>
       {:else if reportError}
-        <div class="err-block" role="alert">
-          <Icon name="warning" size={14} />
-          <div class="err-t"><strong>Couldn’t load the report.</strong><span class="muted">{reportError}</span></div>
-          <button class="btn small" onclick={() => reportRun && viewReport(reportRun)}>Retry</button>
-        </div>
+        <LoadState what="the report" error={reportError} empty onretry={() => reportRun && viewReport(reportRun)} />
       {:else}
         <pre class="report">{reportText}</pre>
       {/if}
@@ -687,12 +672,6 @@
     background: var(--danger-soft); color: var(--danger); padding: 8px 12px;
     border-radius: var(--radius-s); font-size: var(--fs-s);
   }
-  .err-block {
-    display: flex; align-items: flex-start; gap: 10px; padding: 12px;
-    border: 1px solid var(--border); border-radius: var(--radius-m); background: var(--surface);
-  }
-  .err-block > :global(svg) { color: var(--danger); margin-top: 2px; flex-shrink: 0; }
-  .err-t { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-s); }
   .muted, .hint { color: var(--text-dim); font-size: var(--fs-m); }
   .hint { margin: 0; }
   .overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
@@ -730,17 +709,10 @@
   .pa-warn { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
   .form { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
   .form h2 { margin: 0; }
-  .fld-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .fld-row .fld { flex: 1; min-width: 160px; }
-  .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-m); color: var(--text); }
-  .fld span { color: var(--text-dim); font-size: var(--fs-s); }
-  .fld input, .fld select, .fld textarea {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 6px 8px; font: inherit;
-  }
-  .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-    outline: 2px solid var(--accent-text); outline-offset: 1px;
-  }
+  /* Global .field/.input; the form's own gap spaces them, rows share a line. */
+  .form .field { margin-bottom: 0; }
+  .field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .field-row > .field { flex: 1; min-width: 160px; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .chatwrap { height: min(64vh, 620px); border: 1px solid var(--border); border-radius: var(--radius-m); overflow: hidden; }

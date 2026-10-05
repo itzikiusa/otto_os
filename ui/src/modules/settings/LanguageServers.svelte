@@ -48,7 +48,7 @@
   const wsId = $derived(ws.currentId);
 
   async function installLang(lang: string, command: string): Promise<void> {
-    if (!wsId) { toasts.error("Couldn't start the install", 'Select a workspace first.'); return; }
+    if (!wsId) { toasts.error("Couldn’t start the install", 'Select a workspace first.'); return; }
     // It installs software on this Mac: say exactly what runs first.
     const ok = await confirmer.ask(
       `Run “${command}” in a new terminal session? It installs the ${langLabel(lang)} language server on this Mac.`,
@@ -61,14 +61,14 @@
       ws.addSession(session); // navigates to the install session
       toasts.info(`Installing the ${langLabel(lang)} server`, 'Follow it in the terminal session, then Refresh here.');
     } catch (e) {
-      toasts.error("Couldn't start the install", loadErrorText(e));
+      toasts.error("Couldn’t start the install", loadErrorText(e));
     } finally {
       installing = new Set([...installing].filter((l) => l !== lang));
     }
   }
 
   async function installAll(): Promise<void> {
-    if (!wsId) { toasts.error("Couldn't start the install", 'Select a workspace first.'); return; }
+    if (!wsId) { toasts.error("Couldn’t start the install", 'Select a workspace first.'); return; }
     const cmds = missingWithInstall.map((s) => s.install_command).join('\n');
     const ok = await confirmer.ask(
       `Run these in a new terminal session to install ${missingWithInstall.length} missing language server${missingWithInstall.length === 1 ? '' : 's'} on this Mac?\n\n${cmds}`,
@@ -81,7 +81,7 @@
       ws.addSession(session); // navigates to the install session
       toasts.info('Installing the missing servers', 'Follow it in the terminal session, then Refresh here.');
     } catch (e) {
-      toasts.error("Couldn't start the install", loadErrorText(e));
+      toasts.error("Couldn’t start the install", loadErrorText(e));
     } finally {
       installingAll = false;
     }
@@ -119,7 +119,7 @@
       await copyTextOrThrow(cmd);
       toasts.success('Install command copied');
     } catch {
-      toasts.error("Couldn't copy", 'Select the command and copy it manually.');
+      toasts.error("Couldn’t copy", 'Select the command and copy it manually.');
     }
   }
 </script>

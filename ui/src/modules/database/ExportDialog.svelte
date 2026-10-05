@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // ── Large-batch streaming export to a local file ─────────────────────────────
   // Runs the statement uncapped on the daemon and STREAMS the result straight to
   // a file the user chooses on the daemon host — for result sets too big to pull
@@ -173,9 +174,9 @@
       // A user-initiated cancel isn't a failure — the partial file stays where
       // the export was writing it.
       if (e instanceof DOMException && e.name === 'AbortError') {
-        toasts.info('Export cancelled', 'The partially written file was left in place.');
+        toasts.info('Export canceled', 'The partially written file was left in place.');
       } else {
-        toasts.error('Export failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t export', e);
       }
     } finally {
       exportingPath = false;
@@ -329,7 +330,7 @@
   .exp-select:focus,
   .exp-input:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .exp-dir {
     flex: 1;

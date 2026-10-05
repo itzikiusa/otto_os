@@ -578,7 +578,7 @@
     font-size: var(--fs-xs);
     padding: 2px 6px 4px;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .tip-row {
     display: flex;
@@ -740,7 +740,7 @@
   }
   .pchip {
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 0 4px;
     border-radius: 999px;
     font-weight: 600;

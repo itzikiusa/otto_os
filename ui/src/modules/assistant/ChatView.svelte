@@ -193,7 +193,7 @@
         {/each}
         {#each pending as p (p.id)}
           <div class="pending-bubble" data-testid="pending-turn">
-            <div class="bubble-text">{p.text}</div>
+            <div class="bubble-text chat-bubble-end">{p.text}</div>
             <span class="dim">Sending…</span>
           </div>
         {/each}
@@ -360,14 +360,10 @@
   }
   .bubble-text {
     background: var(--accent-soft);
-    border-radius: 14px 14px 4px 14px;
     padding: 8px 12px;
     font-size: var(--fs-m);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-  }
-  :global([dir='rtl']) .bubble-text {
-    border-radius: 14px 14px 14px 4px;
   }
   .working {
     margin: 0;

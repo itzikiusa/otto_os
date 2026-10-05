@@ -13,6 +13,7 @@
   import { missionControlApi } from '../../lib/api/missionControl';
   import { ApiError } from '../../lib/api/client';
   import { router } from '../../lib/router.svelte';
+  import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import type {
@@ -229,6 +230,21 @@
   }
 
   const hasFilters = $derived(kindF !== '' || statusF !== '' || riskF !== '' || debouncedQ !== '');
+
+  // ⌘K: the page's verbs. (Work items are projected from sessions, PRs,
+  // reviews, workflows… — there is no "new work item" here; Refresh pulls in
+  // anything those modules recorded.)
+  $effect(() => {
+    const filtered = hasFilters;
+    const v = view;
+    return registry.register('mission-control', [
+      { id: 'mission-control.refresh', title: 'Refresh work items', group: 'Mission Control', keywords: 'backfill sync reload', run: () => void runBackfill() },
+      v === 'list'
+        ? { id: 'mission-control.graph', title: 'Show work graph', group: 'Mission Control', keywords: 'view dependencies', run: () => (view = 'graph') }
+        : { id: 'mission-control.list', title: 'Show work list', group: 'Mission Control', keywords: 'view items', run: () => (view = 'list') },
+      ...(filtered ? [{ id: 'mission-control.clear', title: 'Clear filters', group: 'Mission Control', keywords: 'reset search', run: clearFilters }] : []),
+    ]);
+  });
   function onChange(): void {
     const id = ws.currentId;
     if (id) void reload(id);
@@ -357,7 +373,7 @@
     <!-- Stale data + a failed refresh: keep the list, say so, offer Retry. -->
     <div class="banner-err" role="alert">
       <Icon name="warning" size={14} />
-      <span class="be-text">Couldn't refresh Mission Control. {err}</span>
+      <span class="be-text">Couldn’t refresh Mission Control. {err}</span>
       <button class="btn small" onclick={() => ws.currentId && void reload(ws.currentId)}>Retry</button>
     </div>
   {/if}
@@ -372,7 +388,7 @@
         <div class="card">
           <EmptyState
             icon="radar"
-            title="Couldn't load Mission Control"
+            title="Couldn’t load Mission Control"
             body={err}
             actionLabel="Retry"
             actionIcon="refresh"

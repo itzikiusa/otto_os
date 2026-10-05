@@ -227,7 +227,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     flex-shrink: 0;
@@ -320,7 +320,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     flex-shrink: 0;
     min-width: 78px;
@@ -340,7 +340,7 @@
   .chevron {
     display: inline-flex;
     color: var(--text-dim);
-    transition: transform 120ms ease-out;
+    transition: transform var(--dur-fast) ease-out;
     flex-shrink: 0;
   }
   .chevron.open {

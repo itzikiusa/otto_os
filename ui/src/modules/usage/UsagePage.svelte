@@ -442,7 +442,7 @@
     {/snippet}
   </PageHeader>
 
-  <PageBody width="full">
+  <PageBody>
     <!-- What the numbers cover: who, how far back, how fresh. In the page body,
          not the header, so the header keeps to tabs + Refresh / Export / settings. -->
     {#if usage.status?.available}
@@ -1295,7 +1295,7 @@
     font-weight: 600;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   /* One sans family for every KPI figure, tabular so digits line up. */
   .stat-value {
@@ -1444,7 +1444,7 @@
     height: 100%;
     border-radius: var(--radius-s);
     background: var(--accent-solid);
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   /* Stacked variant: width = provider share of max; segments = composition. */
   .bar-fill.stacked {

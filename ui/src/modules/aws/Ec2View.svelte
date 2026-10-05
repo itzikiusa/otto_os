@@ -1,4 +1,8 @@
 <script lang="ts">
+  import type { BadgeTone } from '../../lib/status';
+  import { sentenceCase } from '../../lib/labels';
+  import Badge from '../../lib/components/Badge.svelte';
+  import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   // EC2: instances table (state pill, name, id, type, AZ, IPs, launch) with a
   // state filter + region switcher; row actions start/stop/reboot [Edit] — stop
@@ -139,11 +143,11 @@
     if (!d) return null;
     return instances?.find((i) => i.instance_id === d.inst.instance_id) ?? d.inst;
   });
-  function pillClass(state: string): string {
+  function stateTone(state: string): BadgeTone {
     if (state === 'running') return 'ok';
     if (state === 'terminated') return 'bad';
     if (state === 'pending' || state === 'stopping' || state === 'shutting-down') return 'warn';
-    return '';
+    return 'neutral';
   }
   async function openDetail(i: Ec2Instance): Promise<void> {
     if (detail?.inst.instance_id !== i.instance_id) drawerTab = 'overview';
@@ -162,7 +166,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -219,7 +223,7 @@
   {#if loading && !instances}
     <div class="pad" role="status"><p class="load-note">Loading EC2 instances…</p><Skeleton rows={8} /></div>
   {:else if error}
-    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn't list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
+    <EmptyState actionKind={loginNeeded ? 'primary' : 'secondary'} icon="warning" title="Couldn’t list instances" body={awsErrorText(error)} actionLabel={loginNeeded ? 'Sign in' : 'Retry'} onaction={loginNeeded ? onsignin : () => void load()} />
   {:else if shown.length === 0}
     <EmptyState icon="box" title={filter || stateFilter ? 'No matching instances' : allRegions ? 'No instances in any enabled region' : `No instances in ${region}`} />
   {:else}
@@ -240,7 +244,7 @@
             onkeydown={(e) => { if (e.key === 'Enter') void openDetail(i); }}
             oncontextmenu={(e) => menu(e, i)}
           >
-            <td><span class="pill {i.state}">{i.state}</span></td>
+            <td><Badge tone={stateTone(i.state)} label={sentenceCase(i.state)} /></td>
             <td class="strong" title={i.name ?? ''}>{i.name ?? '—'}</td>
             <td class="mono">{i.instance_id}</td>
             {#if allRegions}<td class="mono">{i.region ?? '—'}</td>{/if}
@@ -267,7 +271,7 @@
     name={inst.name ?? inst.instance_id}
     id={inst.instance_id}
     status={inst.state}
-    statusClass={pillClass(inst.state)}
+    statusTone={stateTone(inst.state)}
     tabs={DRAWER_TABS}
     tab={drawerTab}
     ontab={(t) => (drawerTab = t as DrawerTab)}
@@ -347,7 +351,7 @@
     overflow: auto;
   }
   .trow.sel {
-    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    background: var(--accent-soft);
   }
   .tbl {
     width: 100%;
@@ -366,7 +370,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 10px;
     border-bottom: 1px solid var(--border);
@@ -404,30 +408,6 @@
   .err {
     color: var(--danger);
   }
-  .pill {
-    display: inline-block;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    padding: 1px 7px;
-    border-radius: 999px;
-    background: var(--surface-2);
-    color: var(--text-dim);
-    text-transform: lowercase;
-  }
-  .pill.running {
-    color: var(--success);
-    background: color-mix(in srgb, var(--status-working) 16%, transparent);
-  }
-  .pill.pending,
-  .pill.stopping,
-  .pill.shutting-down {
-    color: var(--warning);
-    background: color-mix(in srgb, var(--status-warn) 16%, transparent);
-  }
-  .pill.terminated {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--status-exited) 14%, transparent);
-  }
   .dt {
     display: flex;
     flex-direction: column;
@@ -461,7 +441,7 @@
     margin: 6px 0 0;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .tags {

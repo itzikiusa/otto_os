@@ -450,7 +450,7 @@
     font-weight: 600;
     display: grid;
     place-items: center;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-card);
     /* Pins are clickable for their tooltip even in interact mode. */
     pointer-events: auto;
     cursor: default;
@@ -480,7 +480,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+    box-shadow: var(--shadow);
     padding: 8px;
     pointer-events: auto;
   }
@@ -579,7 +579,7 @@
     color: var(--text);
   }
   .mt.active {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   .note-list {

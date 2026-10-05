@@ -6,6 +6,8 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
   import LoadState from '../../lib/components/LoadState.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
+  import { plural } from '../../lib/plural';
   import { loadErrorText } from '../../lib/loadError';
   import { mcpCpApi } from '../../lib/api/mcp';
   import { toasts } from '../../lib/toast.svelte';
@@ -68,7 +70,7 @@
     saving = true;
     try {
       await mcpCpApi.cpSetAllowlist(wsId, { entries });
-      toasts.success('Allowlist saved', `${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}`);
+      toasts.success('Allowlist saved', plural(entries.length, 'entry', 'entries'));
       await load();
     } catch (e) {
       toastError('Couldn’t save the allowlist', e);
@@ -98,11 +100,7 @@
   {:else}
     <LoadState what="the allowlist" {loading} error={loadError} empty={rows.length === 0} onretry={() => void load()}>
       {#snippet emptyView()}
-    <div class="empty">
-      <Icon name="eye" size={22} />
-      <p>No allowlist entries. Without any, each server's default tool access applies.</p>
-      <button class="btn primary" onclick={addRow}>Add an entry</button>
-    </div>
+        <EmptyState icon="eye" title="No allowlist entries yet" body="Without any, each server's default tool access applies." actionLabel="Add an entry" actionIcon="plus" actionKind="secondary" onaction={addRow} />
       {/snippet}
     <div class="grid">
       <div class="thead">
@@ -113,15 +111,15 @@
       </div>
       {#each rows as r, i (i)}
         <div class="arow">
-          <select bind:value={r.server_id}>
+          <select bind:value={r.server_id} aria-label="Server">
             {#each servers as s (s.id)}
               <option value={s.id}>{s.name}</option>
             {/each}
           </select>
-          <input bind:value={r.tool_name} placeholder="(whole server)" class="mono" />
-          <select bind:value={r.mode}>
-            <option value="allow">allow</option>
-            <option value="deny">deny</option>
+          <input bind:value={r.tool_name} placeholder="(whole server)" class="mono" aria-label="Tool (blank = whole server)" />
+          <select bind:value={r.mode} aria-label="Mode">
+            <option value="allow">Allow</option>
+            <option value="deny">Deny</option>
           </select>
           <button class="icon danger" onclick={() => removeRow(i)} title="Remove entry" aria-label="Remove entry">
             <Icon name="trash" size={14} />
@@ -169,7 +167,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .thead em {
@@ -211,13 +209,27 @@
   .pad {
     padding: 16px;
   }
-  .empty {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 36px 24px;
+  /* Phone: no header row; each entry stacks — server and tool on their own
+     lines, then mode beside the remove button (as ToolsTab does). */
+  @media (max-width: 640px) {
+    .bar {
+      flex-wrap: wrap;
+    }
+    .thead {
+      display: none;
+    }
+    .arow {
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px 8px;
+      padding-block: 10px;
+    }
+    .arow > select:first-child,
+    .arow > input {
+      grid-column: 1 / -1;
+    }
+    .icon {
+      min-inline-size: 36px;
+      min-block-size: 36px;
+    }
   }
 </style>

@@ -1118,7 +1118,7 @@
     line-height: 1;
     color: var(--text-dim);
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .th-sort:hover .th-sort-ind {
     opacity: 0.6;
@@ -1161,7 +1161,7 @@
     position: absolute;
     top: 6px;
     bottom: 6px;
-    left: 3px;
+    inset-inline-start: 3px;
     width: 1px;
     background: transparent;
   }
@@ -1202,7 +1202,7 @@
   }
   .col-filter:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .grid :global(td) {
     padding: 4px 10px;

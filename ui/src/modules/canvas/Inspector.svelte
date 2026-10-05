@@ -187,7 +187,7 @@
   .section-title {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     font-weight: 600;
   }

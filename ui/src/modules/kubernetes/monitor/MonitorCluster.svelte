@@ -468,7 +468,7 @@
     {#if eventsLoading && !events.length}
       <Skeleton rows={6} height={28} />
     {:else if eventsError}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load events" body={eventsError} actionLabel="Retry" onaction={() => void loadEvents()} />
     {:else if !events.length}
       <EmptyState icon="check" title="Nothing in this window" body={enabled ? 'No restarts or pod replacements were recorded. Widen the window or check the raw cluster events.' : 'Monitoring is off for this cluster.'} />
     {:else}
@@ -508,7 +508,7 @@
     {:else if loading && !rows.length}
       <Skeleton rows={8} height={30} />
     {:else if error}
-      <EmptyState actionKind="secondary" icon="warning" title="Couldn't load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
+      <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load workloads" body={error} actionLabel="Retry" onaction={() => void loadWorkloads()} />
     {:else if !rows.length}
       <EmptyState icon="clock" title="No data yet" body="The first cycle runs within the configured interval. Use “Run once” in Settings to collect immediately." />
     {:else}
@@ -603,7 +603,7 @@
                     {#if seriesLoading}
                       <Skeleton rows={2} height={60} />
                     {:else if seriesError}
-                      <div class="trend-error" role="alert"><strong>Couldn't load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
+                      <div class="trend-error" role="alert"><strong>Couldn’t load trends</strong><p>{seriesError}</p><button class="btn small" onclick={() => void loadTrends(r)}>Retry trends</button></div>
                     {:else}
                       <div class="charts">
                         <div class="chart">
@@ -717,7 +717,7 @@
     text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 8px 10px;
     border-bottom: 1px solid var(--border);
@@ -825,7 +825,7 @@
     text-align: start;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 4px 8px;
     border-bottom: 1px solid var(--border);

@@ -925,10 +925,10 @@
     font-size: var(--fs-s);
     color: var(--text-dim);
     cursor: pointer;
-    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .kind-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent-text);
     font-weight: 500;
@@ -947,10 +947,10 @@
     color: var(--text-dim);
     cursor: pointer;
     text-transform: capitalize;
-    transition: background 130ms ease-out, border-color 130ms ease-out, color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .env-chip.selected {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent-text);
     font-weight: 500;

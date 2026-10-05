@@ -210,6 +210,7 @@
       !(await confirmer.ask(`Stop the evaluation of ${run.source_skill}? The iteration in progress is abandoned; finished iterations and their scores are kept.`, {
         title: 'Stop evaluation',
         confirmLabel: 'Stop run',
+        danger: true,
       }))
     )
       return;
@@ -294,7 +295,7 @@
       await copyTextOrThrow(skillContent(it, source));
       toasts.success('Skill copied to clipboard');
     } catch {
-      toasts.error("Couldn't copy the skill", 'The clipboard is unavailable. Use Download instead.');
+      toasts.error("Couldn’t copy the skill", 'The clipboard is unavailable. Use Download instead.');
     }
   }
   function downloadSkill(it: EvalIteration, source: 'tested' | 'improved'): void {
@@ -419,8 +420,10 @@
         <StatusBadge status={evalStatus(run.status)} />
         <span class="grow"></span>
         {#if isActive(run)}
-          <button class="btn small" disabled={cancelling} onclick={cancelRun}>
-            <Icon name="square" size={12} /> {cancelling ? 'Stopping…' : 'Stop run'}
+          <!-- Red + "…" + confirm: stopping abandons an agent's in-flight
+               iteration (patterns.md › Stop). -->
+          <button class="btn small danger" disabled={cancelling} onclick={cancelRun}>
+            <Icon name="stop" size={12} /> {cancelling ? 'Stopping…' : 'Stop run…'}
           </button>
         {/if}
         {#if run.best_iteration != null}
@@ -984,7 +987,7 @@
     display: inline-block;
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     padding: 1px 5px;
     border-radius: var(--radius-s);
@@ -1086,7 +1089,7 @@
     border-radius: var(--radius-s);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     text-transform: uppercase;
   }
   .sev-info {

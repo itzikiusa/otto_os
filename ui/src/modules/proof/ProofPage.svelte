@@ -45,6 +45,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
+  import { router } from '../../lib/router.svelte';
   import type { ProofArtifactView } from '../../lib/api/types';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -105,13 +106,50 @@
       autoPickedFor = wsId;
       return;
     }
+    // A deep link (`#/proof/<id>`) opens on its own (below).
+    if (untrack(() => routePackId())) {
+      autoPickedFor = wsId;
+      return;
+    }
     if (proof.loading || proof.packs.length === 0) return;
     autoPickedFor = wsId;
     const id = initialSelection('proof', proof.packs, (p) => p.id);
     if (id) open(id);
   });
+
+  /** The pack the URL names (`#/proof/<id>`), or null. */
+  function routePackId(): string | null {
+    const [mod, id] = router.parts;
+    return mod === 'proof' && id ? id : null;
+  }
+  // The URL carries the open pack so a reload / share / notification lands on
+  // it; the last pick is remembered as the fallback. (Nothing open yet must
+  // not strip a deep link: only a CLOSE clears the URL.)
+  // The store keeps the last pack across visits; on arrival a link naming a
+  // DIFFERENT pack wins (the effect below opens it) instead of being replaced.
+  let routedId: string | null = null;
+  let arrived = false;
   $effect(() => {
-    if (detail?.pack.id) rememberSelection('proof', detail.pack.id);
+    const id = detail?.pack.id ?? null;
+    if (id) rememberSelection('proof', id);
+    const was = routedId;
+    routedId = id;
+    const first = !arrived;
+    arrived = true;
+    if (!id && !was) return;
+    if (first && untrack(() => routePackId()) && untrack(() => routePackId()) !== id) return;
+    untrack(() => {
+      if (router.module === 'proof' && routePackId() !== id) router.replace(id ? `proof/${id}` : 'proof');
+    });
+  });
+  // A route change while the page is up (a notification, Back/Forward, a
+  // pasted link) opens that pack.
+  $effect(() => {
+    const linked = routePackId();
+    if (!linked) return;
+    untrack(() => {
+      if (linked !== proof.detail?.pack.id && linked !== openingId) void open(linked);
+    });
   });
   // The pack list's width — drag / ←→ on the divider, remembered across visits.
   let listW = $state(loadPaneWidth('proof.listW', LIST_PANE.default, LIST_PANE.min, LIST_PANE.max));
@@ -179,7 +217,7 @@
       fullContent[id] = c.content ?? '(no content)';
       expanded[id] = true;
     } catch (e) {
-      toasts.error("Couldn't load the artifact", loadErrorText(e));
+      toasts.error("Couldn’t load the artifact", loadErrorText(e));
     }
   }
 
@@ -301,7 +339,7 @@
       addOpen = false;
       resetAdd();
     } catch (e) {
-      toasts.error("Couldn't add the artifact", loadErrorText(e));
+      toasts.error("Couldn’t add the artifact", loadErrorText(e));
     }
   }
 
@@ -313,7 +351,7 @@
       await deleteArtifact(id);
       await proof.refreshDetail();
     } catch (e) {
-      toasts.error("Couldn't delete the artifact", loadErrorText(e));
+      toasts.error("Couldn’t delete the artifact", loadErrorText(e));
     }
   }
 
@@ -346,19 +384,19 @@
 
   async function assemble(): Promise<void> {
     if (!detail) return;
-    const cwd = await confirmer.promptText('Working directory to assemble proof from:', {
+    const cwd = await confirmer.promptText('Working folder to assemble proof from:', {
       title: 'Assemble proof',
       browseFolder: true,
       confirmLabel: 'Assemble',
-      placeholder: '/path/to/repo',
+      placeholder: 'e.g. ~/code/my-repo',
     });
     if (cwd === null) return;
     try {
       await assembleProof(detail.pack.id, { cwd: cwd.trim() || undefined });
       await proof.refreshDetail();
-      toasts.success('Proof assembled', 'Re-assembled from the working directory.');
+      toasts.success('Proof assembled', 'Re-assembled from the working folder.');
     } catch (e) {
-      toasts.error("Couldn't assemble proof", loadErrorText(e));
+      toasts.error("Couldn’t assemble proof", loadErrorText(e));
     }
   }
 
@@ -375,7 +413,7 @@
       waiveReason = '';
       toasts.success('Proof gate waived', 'Recorded with you as the approver.');
     } catch (e) {
-      toasts.error("Couldn't waive the proof gate", loadErrorText(e));
+      toasts.error("Couldn’t waive the proof gate", loadErrorText(e));
     }
   }
 
@@ -410,7 +448,7 @@
       mediaOpen = false;
       resetMedia();
     } catch (e) {
-      toasts.error("Couldn't attach the media", loadErrorText(e));
+      toasts.error("Couldn’t attach the media", loadErrorText(e));
     }
   }
 
@@ -492,7 +530,7 @@
       evidenceOpen = false;
       resetEvidence();
     } catch (e) {
-      toasts.error("Couldn't add the evidence", loadErrorText(e));
+      toasts.error("Couldn’t add the evidence", loadErrorText(e));
     }
   }
 
@@ -504,7 +542,7 @@
       await proof.refreshDetail();
       toasts.success('CI refreshed', 'Live CI status pulled into a CI artifact.');
     } catch (e) {
-      toasts.error("Couldn't refresh CI", loadErrorText(e));
+      toasts.error("Couldn’t refresh CI", loadErrorText(e));
     }
   }
 
@@ -535,7 +573,7 @@
       prOpen = false;
       resetPr();
     } catch (e) {
-      toasts.error("Couldn't run the PR check", loadErrorText(e));
+      toasts.error("Couldn’t run the PR check", loadErrorText(e));
     }
   }
 
@@ -550,7 +588,7 @@
         format === 'md' ? 'text/markdown' : 'text/html',
       );
     } catch (e) {
-      toasts.error("Couldn't export the report", loadErrorText(e));
+      toasts.error("Couldn’t export the report", loadErrorText(e));
     }
   }
 
@@ -587,7 +625,7 @@
         require_review: !!c.require_review,
       };
     } catch (e) {
-      toasts.error("Couldn't load the proof requirements", loadErrorText(e));
+      toasts.error("Couldn’t load the proof requirements", loadErrorText(e));
       cfgOpen = false;
     } finally {
       cfgLoading = false;
@@ -609,7 +647,7 @@
       cfgOpen = false;
       toasts.success('Requirements saved', 'Proof requirements updated for this repo.');
     } catch (e) {
-      toasts.error("Couldn't save the requirements", loadErrorText(e));
+      toasts.error("Couldn’t save the requirements", loadErrorText(e));
     }
   }
 
@@ -628,7 +666,7 @@
       // Land on the next pack instead of an empty "pick one" pane.
       if (!viewport.isPhone && proof.packs.length > 0) void open(proof.packs[0].id);
     } catch (e) {
-      toasts.error("Couldn't delete the proof pack", loadErrorText(e));
+      toasts.error("Couldn’t delete the proof pack", loadErrorText(e));
     }
   }
 
@@ -652,7 +690,7 @@
       toasts.success('Session packs archived', `${r.archived} hidden (nothing deleted).`);
       await loadList(wsId, filter);
     } catch (e) {
-      toasts.error("Couldn't archive session packs", loadErrorText(e));
+      toasts.error("Couldn’t archive session packs", loadErrorText(e));
     }
   }
 
@@ -677,7 +715,7 @@
       await loadList(ws.currentId, filter);
       await open(created.id);
     } catch (e) {
-      toasts.error("Couldn't create the proof pack", loadErrorText(e));
+      toasts.error("Couldn’t create the proof pack", loadErrorText(e));
     }
   }
 
@@ -724,7 +762,7 @@
         <!-- The four ways to attach evidence share one menu: four sibling
              "Add …" buttons made this the busiest header in the app. -->
         <button class="btn small" data-icon="plus" data-label="Add evidence…" onclick={openAddMenu} aria-haspopup="menu"><Icon name="plus" size={12} /> Add <Icon name="chevronDown" size={11} /></button>
-        <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble</button>
+        <button class="btn small primary" onclick={assemble}><Icon name="refresh" size={12} /> Assemble…</button>
       {/if}
       <!-- Everything occasional (waive, CI refresh, housekeeping, delete) lives
            in one ⋯ so the header stays at Add + Assemble + ⋯. -->
@@ -994,7 +1032,7 @@
     </div>
     <div class="field">
       <label for="a-content">Content (optional)</label>
-      <textarea id="a-content" class="input" rows={6} bind:value={aContent} placeholder="Paste log / command output / note"></textarea>
+      <textarea id="a-content" class="input" rows={6} bind:value={aContent} placeholder="e.g. test result: 214 passed; 0 failed"></textarea>
     </div>
     {#snippet footer()}
       <button class="btn ghost" onclick={() => (addOpen = false)}>Cancel</button>
@@ -1082,50 +1120,50 @@
         </div>
         <div class="field">
           <label for="e-status">Status</label>
-          <input id="e-status" class="input" inputmode="numeric" bind:value={eStatus} placeholder="200" />
+          <input id="e-status" class="input" inputmode="numeric" bind:value={eStatus} placeholder="e.g. 200" />
         </div>
       </div>
       <div class="field">
         <label for="e-url">URL</label>
-        <input id="e-url" class="input" bind:value={eUrl} placeholder="https://api.example.com/health" />
+        <input id="e-url" class="input" bind:value={eUrl} placeholder="e.g. https://api.example.com/health" />
       </div>
       <div class="field">
         <label for="e-response">Response (optional)</label>
-        <textarea id="e-response" class="input" rows={4} bind:value={eResponse} placeholder="Response body / snippet"></textarea>
+        <textarea id="e-response" class="input" rows={4} bind:value={eResponse} placeholder={'e.g. {"status": "ok"}'}></textarea>
       </div>
     {:else if eType === 'db'}
       <div class="field-row">
         <div class="field">
           <label for="e-engine">Engine (optional)</label>
-          <input id="e-engine" class="input" bind:value={eEngine} placeholder="mysql / postgres / clickhouse" />
+          <input id="e-engine" class="input" bind:value={eEngine} placeholder="e.g. mysql" />
         </div>
         <div class="field">
           <label for="e-rows">Row count (optional)</label>
-          <input id="e-rows" class="input" inputmode="numeric" bind:value={eRowCount} placeholder="42" />
+          <input id="e-rows" class="input" inputmode="numeric" bind:value={eRowCount} placeholder="e.g. 42" />
         </div>
       </div>
       <div class="field">
         <label for="e-query">Query (optional)</label>
-        <textarea id="e-query" class="input" rows={3} bind:value={eQuery} placeholder="SELECT count(*) FROM orders"></textarea>
+        <textarea id="e-query" class="input" rows={3} bind:value={eQuery} placeholder="e.g. SELECT count(*) FROM orders"></textarea>
       </div>
       <div class="field">
         <label for="e-sample">Sample (optional)</label>
-        <textarea id="e-sample" class="input" rows={4} bind:value={eSample} placeholder="Rows / result sample"></textarea>
+        <textarea id="e-sample" class="input" rows={4} bind:value={eSample} placeholder="e.g. count(*) = 42"></textarea>
       </div>
     {:else}
       <div class="field-row">
         <div class="field">
           <label for="e-topic">Topic</label>
-          <input id="e-topic" class="input" bind:value={eTopic} placeholder="orders.events" />
+          <input id="e-topic" class="input" bind:value={eTopic} placeholder="e.g. orders.events" />
         </div>
         <div class="field">
           <label for="e-msgs">Message count (optional)</label>
-          <input id="e-msgs" class="input" inputmode="numeric" bind:value={eMsgCount} placeholder="100" />
+          <input id="e-msgs" class="input" inputmode="numeric" bind:value={eMsgCount} placeholder="e.g. 100" />
         </div>
       </div>
       <div class="field">
         <label for="e-ksample">Sample (optional)</label>
-        <textarea id="e-ksample" class="input" rows={4} bind:value={eSample} placeholder="Message payload sample"></textarea>
+        <textarea id="e-ksample" class="input" rows={4} bind:value={eSample} placeholder={'e.g. {"order_id": 42, "status": "paid"}'}></textarea>
       </div>
     {/if}
     {#snippet footer()}
@@ -1147,16 +1185,16 @@
     </div>
     <div class="field">
       <label for="pr-desc">PR description</label>
-      <textarea id="pr-desc" class="input" rows={6} bind:value={prDesc} placeholder="Paste the PR description / claims"></textarea>
+      <textarea id="pr-desc" class="input" rows={6} bind:value={prDesc} placeholder="e.g. Fixes the login redirect and adds tests for expired sessions"></textarea>
     </div>
     <div class="field-row">
       <div class="field">
         <label for="pr-base">Base (optional)</label>
-        <input id="pr-base" class="input" bind:value={prBase} placeholder="main" />
+        <input id="pr-base" class="input" bind:value={prBase} placeholder="e.g. main" />
       </div>
       <div class="field">
         <label for="pr-cwd">Working dir (optional)</label>
-        <PathField bind:value={prCwd}><input id="pr-cwd" class="input" bind:value={prCwd} placeholder="/path/to/repo" /></PathField>
+        <PathField bind:value={prCwd}><input id="pr-cwd" class="input" bind:value={prCwd} placeholder="e.g. ~/code/my-repo" /></PathField>
       </div>
     </div>
     {#snippet footer()}

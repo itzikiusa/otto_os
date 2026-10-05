@@ -26,8 +26,8 @@ Both are off by default. The daemon only listens on `127.0.0.1`, so nothing is r
 ## Everything it can do
 
 **Layouts for every screen**
-- **Phone** (up to 640 px wide): one page at a time. The sidebar is a drawer from the left, the right panel is a drawer from the right, and a bottom bar holds your modules.
-- **Tablet** (641–1024 px): a narrow sidebar column stays visible and the right panel is a drawer.
+- **Phone** (up to 640 px wide): one page at a time. The sidebar is a drawer from the left, the Session panel is a drawer from the right, and a bottom bar holds your modules.
+- **Tablet** (641–1024 px): a narrow sidebar column stays visible and the Session panel is a drawer.
 - **Desktop** (1025 px and wider, including an iPad in landscape): the full 3-pane layout.
 - Rotating the device switches layouts straight away. Pages show the same content at every size; only the surrounding chrome changes.
 

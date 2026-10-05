@@ -770,7 +770,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: var(--radius-s);
     background: var(--surface-2);

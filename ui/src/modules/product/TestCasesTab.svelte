@@ -141,7 +141,7 @@
     try {
       await product.reorderTestcases(activeRun.id, orderedIds);
     } catch (e) {
-      toasts.error('Could not save order', product.errMsg(e));
+      toasts.error('Couldn’t save order', product.errMsg(e));
     } finally {
       savingOrder = false;
     }
@@ -264,7 +264,7 @@
   const storyIsJira = $derived(story?.source_kind === 'jira');
   const publishBlocked = $derived(
     approvedCount === 0
-      ? 'Approve at least one case — only approved cases are published'
+      ? 'Accept at least one case — only accepted cases are published'
       : storyIsJira && !publishSpaceKey.trim()
         ? 'Enter a space key — a Jira story has no Confluence space to publish into'
         : '',
@@ -401,9 +401,9 @@
     try {
       await product.updateTestcase(tc.id, { status: 'approved' });
       setAction(tc.id, { mode: 'idle', busy: false });
-      toasts.success('Case approved');
+      toasts.success('Case accepted');
     } catch (e) {
-      toasts.error('Could not approve', product.errMsg(e));
+      toasts.error('Couldn’t accept the case', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -416,10 +416,10 @@
       const result = await product.bulkApproveTestcases(activeRun.id, [...selected]);
       clearSelection();
       toasts.success(
-        `${result.approved} case${result.approved !== 1 ? 's' : ''} approved`,
+        `${result.approved} case${result.approved !== 1 ? 's' : ''} accepted`,
       );
     } catch (e) {
-      toasts.error('Bulk approve failed', product.errMsg(e));
+      toasts.error('Couldn’t accept the selected cases', product.errMsg(e));
     } finally {
       bulkApproving = false;
     }
@@ -440,7 +440,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.info('Changes requested');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toasts.error('Couldn’t update', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -470,7 +470,7 @@
       setAction(tc.id, { mode: 'idle', busy: false });
       toasts.success('Test case updated');
     } catch (e) {
-      toasts.error('Could not update', product.errMsg(e));
+      toasts.error('Couldn’t update', product.errMsg(e));
       setAction(tc.id, { busy: false });
     }
   }
@@ -485,7 +485,7 @@
       toasts.info('Test generation triggered', 'Waiting for a new run to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Generate failed', product.errMsg(e));
+      toasts.error('Couldn’t generate', product.errMsg(e));
     } finally {
       generating = false;
     }
@@ -501,10 +501,10 @@
       const approvedCount = activeCases.filter((c) => c.status === 'approved').length;
       toasts.success(
         'Run approved',
-        `${approvedCount} case${approvedCount !== 1 ? 's' : ''} approved — skill learning kicked off.`,
+        `${approvedCount} case${approvedCount !== 1 ? 's' : ''} accepted — skill learning kicked off.`,
       );
     } catch (e) {
-      toasts.error('Could not approve run', product.errMsg(e));
+      toasts.error('Couldn’t approve run', product.errMsg(e));
     } finally {
       approvingRun = false;
     }
@@ -531,7 +531,7 @@
         toasts.success('Published to Confluence');
       }
     } catch (e) {
-      toasts.error('Publish failed', product.errMsg(e));
+      toasts.error('Couldn’t publish', product.errMsg(e));
     } finally {
       publishingRun = false;
     }
@@ -552,7 +552,7 @@
 
   function statusLabel(status: string): string {
     switch (status) {
-      case 'approved': return 'Approved';
+      case 'approved': return 'Accepted';
       case 'changes_requested': return 'Changes needed';
       case 'rejected': return 'Rejected';
       case 'draft': return 'Draft';
@@ -715,7 +715,7 @@
               />
             </div>
             <p class="pf-summary" data-testid="tc-publish-summary">
-              Publishes {approvedCount} approved case{approvedCount !== 1 ? 's' : ''} as the page
+              Publishes {approvedCount} accepted case{approvedCount !== 1 ? 's' : ''} as the page
               “Test Cases — {story?.title ?? ''}”{storyIsJira ? `, and comments its link on ${story?.source_key ?? 'the issue'}` : ''}.
               Everyone with access to the space can see it.
             </p>
@@ -760,9 +760,9 @@
               class="btn small primary"
               onclick={bulkApproveSelected}
               disabled={bulkApproving}
-              title="Approve all selected draft cases"
+              title="Accept all selected draft cases"
             >
-              {bulkApproving ? 'Approving…' : `Approve ${selected.size}`}
+              {bulkApproving ? 'Accepting…' : `Accept ${selected.size}`}
             </button>
             <button
               class="btn small ghost"
@@ -832,9 +832,9 @@
                           class="btn small primary"
                           onclick={() => approveCase(tc)}
                           disabled={action.busy || tc.status === 'approved'}
-                          title="Approve this test case"
+                          title="Accept this test case"
                         >
-                          {tc.status === 'approved' ? 'Approved' : 'Approve'}
+                          {tc.status === 'approved' ? 'Accepted' : 'Accept'}
                         </button>
                         <button
                           class="btn small"
@@ -1091,7 +1091,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -1159,7 +1159,7 @@
     font-weight: 600;
     text-decoration: none;
     cursor: pointer;
-    transition: background 110ms;
+    transition: background var(--dur-fast);
   }
   .confluence-link:hover {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -1311,7 +1311,7 @@
     cursor: grab;
     padding-inline-end: 2px;
     user-select: none;
-    transition: opacity 90ms;
+    transition: opacity var(--dur-fast);
   }
   .case-card:hover .drag-handle {
     opacity: 0.8;
@@ -1374,7 +1374,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
   }
@@ -1481,7 +1481,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .if-actions {

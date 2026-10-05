@@ -7,6 +7,7 @@
   import Icon from '../../../lib/components/Icon.svelte';
   import { ws as wsStore } from '../../../lib/stores/workspace.svelte';
   import type { Session } from '../../../lib/api/types';
+  import { sessionState } from '../../../lib/status';
   import { pasteTargets } from './sendTo';
 
   interface Props {
@@ -53,7 +54,7 @@
             <button class="sp-row" type="button" onclick={() => onpick(s)} title="Paste into {s.title || s.id}">
               <Icon name={s.kind === 'agent' ? 'assistant' : 'terminal'} size={14} />
               <span class="sp-title">{s.title || s.id}</span>
-              <span class="sp-meta">{s.provider} · {s.status}</span>
+              <span class="sp-meta">{s.provider} · {sessionState(s, wsStore.statusMap[s.id], wsStore.needsYou[s.id] === true).label}</span>
             </button>
           </li>
         {/each}

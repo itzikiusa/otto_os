@@ -568,11 +568,14 @@
     border-radius: var(--radius-m);
     background: var(--surface);
   }
+  /* Floated so the legend is an ordinary flex item inside the fieldset box
+     (not drawn on its border); inline-start keeps it right in RTL. */
   .detail-title {
-    float: left;
-    width: 100%;
+    float: inline-start;
+    inline-size: 100%;
     padding: 0;
-    margin: 0 0 2px;
+    margin: 0;
+    margin-block-end: 2px;
     font-size: var(--fs-m);
     font-weight: 600;
   }

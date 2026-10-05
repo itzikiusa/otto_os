@@ -102,7 +102,7 @@
       await ws.restartSession(id, { quiet: true });
       toasts.success(verb === 'added' ? 'Folder added' : 'Folder removed', 'The session restarted with the new folders.');
     } catch (e) {
-      toasts.error(verb === 'added' ? 'Could not add folder' : 'Could not remove folder', e instanceof Error ? e.message : String(e));
+      toastError(verb === 'added' ? 'Couldn’t add the folder' : 'Couldn’t remove the folder', e);
     }
   }
 
@@ -264,7 +264,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -306,7 +306,7 @@
   }
   .ws-select:focus {
     outline: none;
-    border-color: var(--accent);
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
   }
   .hint {
     margin: 4px 0 0;

@@ -3,6 +3,7 @@
   // to 0 goes through the typed-name confirm in `runAction`.
   import { untrack } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import type { K8sRow } from '../../lib/api/types';
 
   interface Props {
@@ -31,9 +32,9 @@
     <div class="field">
       <label for="k8s-scale-n">Replicas {#if Number.isFinite(current)}<span class="dim">(currently {current})</span>{/if}</label>
       <div class="stepper">
-        <button class="btn" onclick={() => (replicas = Math.max(0, replicas - 1))} aria-label="Fewer replicas">−</button>
+        <button class="btn" onclick={() => (replicas = Math.max(0, replicas - 1))} aria-label="Fewer replicas" title="Fewer replicas"><Icon name="minus" size={13} /></button>
         <input id="k8s-scale-n" class="input mono" type="number" min="0" max="1000" bind:value={replicas} onkeydown={(e) => { if (e.key === 'Enter') submit(); }} />
-        <button class="btn" onclick={() => (replicas = Math.min(1000, replicas + 1))} aria-label="More replicas">+</button>
+        <button class="btn" onclick={() => (replicas = Math.min(1000, replicas + 1))} aria-label="More replicas" title="More replicas"><Icon name="plus" size={13} /></button>
       </div>
       {#if replicas === 0}<span class="hint danger">Scaling to 0 stops every pod. You'll be asked to type the name to confirm.</span>{/if}
     </div>

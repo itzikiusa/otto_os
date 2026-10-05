@@ -183,7 +183,7 @@
       loadedFrom = a.id;
       toasts.success('Action saved', a.name);
     } catch (e) {
-      toasts.error("Couldn't save the action", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t save the action", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -195,7 +195,7 @@
       saved = saved.filter((s) => s.id !== a.id);
       if (loadedFrom === a.id) loadedFrom = null;
     } catch (e) {
-      toasts.error("Couldn't delete the action", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t delete the action", e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -218,7 +218,7 @@
       {#if savedLoading && !saved.length}
         <div class="dim small pad">Loading…</div>
       {:else if savedError}
-        <div class="dim small pad">Couldn't load saved actions. <button class="btn small" onclick={() => void loadSaved()}>Retry</button></div>
+        <div class="dim small pad">Couldn’t load saved actions. <button class="btn small" onclick={() => void loadSaved()}>Retry</button></div>
       {:else if !saved.length}
         <div class="dim small pad">None yet — build a request and Save it.</div>
       {:else}
@@ -348,7 +348,7 @@
   .ph-sec {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 8px 6px 4px;
   }

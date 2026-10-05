@@ -429,10 +429,10 @@ test('phone: navigator + activity drawers open within the viewport', async ({ pa
   await expect(leftDrawer).toBeHidden();
 
   // Open the right activity drawer (agent session focused → the panel toggle shows).
-  const rightToggle = page.locator('.mtop-btn[aria-label="Toggle right panel"]');
+  const rightToggle = page.locator('.mtop-btn[aria-label="Session panel"]');
   if (await rightToggle.count()) {
     await rightToggle.click();
-    const rightDrawer = page.locator('.drawer[aria-label="Activity"]').first();
+    const rightDrawer = page.locator('.drawer[aria-label="Session panel"]').first();
     await expect(rightDrawer).toBeVisible();
     await expectOnScreen(page, await settledBox(rightDrawer), 'activity drawer');
     await expectNoHorizontalOverflow(page);

@@ -112,7 +112,7 @@
   {#if loading && !summary}
     <Skeleton rows={3} />
   {:else if error && !summary}
-    <EmptyState icon="warning" title="Couldn't load Usage" body={error}>
+    <EmptyState icon="warning" title="Couldn’t load Usage" body={error}>
       <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
     </EmptyState>
   {:else if status && !status.available}

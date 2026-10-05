@@ -132,7 +132,7 @@
       selected = null;
       await load();
     } catch (e) {
-      toasts.error("Couldn't restore", loadErrorText(e));
+      toasts.error("Couldn’t restore", loadErrorText(e));
     } finally {
       restoring = false;
     }
@@ -220,7 +220,7 @@
         </button>
       </div>
       {#if detailError}
-        <p class="wb-err" role="alert">Couldn't load revision {selected}: {detailError}
+        <p class="wb-err" role="alert">Couldn’t load revision {selected}: {detailError}
           <button class="btn small" onclick={() => { const s = selected; selected = null; queueMicrotask(() => (selected = s)); }}>Retry</button>
         </p>
       {:else if !detail}

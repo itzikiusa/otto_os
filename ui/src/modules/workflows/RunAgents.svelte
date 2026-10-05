@@ -218,7 +218,7 @@
       case 'skipped':
         return { ...base, key: 'ended', label: 'Skipped', tone: 'neutral', hint: 'Skipped' };
       case 'cancelled':
-        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was cancelled' };
+        return { ...base, key: 'ended', label: 'Canceled', tone: 'neutral', hint: 'The review was canceled' };
       case 'fallback':
         return { ...base, key: 'failed', label: 'Fallback', tone: 'warning', hint: 'The configured summarizer was unavailable — a deterministic fallback ran' };
       case 'error':
@@ -249,7 +249,7 @@
           <span class="grp-name" title={nodeName(g.id)}>{nodeName(g.id)}</span>
           <span class="grp-status"><StatusBadge status={runStatus(g.status)} variant="text" /></span>
           <span class="grow"></span>
-          <span class="grp-count" title={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
+          <span class="grp-count" role="img" title={plural(g.sessions.length, 'session')} aria-label={plural(g.sessions.length, 'session')}>{g.sessions.length}</span>
         </div>
         {#each g.sessions as sid (sid)}
           <div class="sess" data-sess={sid}>
@@ -324,7 +324,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .grp-name {

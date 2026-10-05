@@ -71,6 +71,25 @@
 //                     "bare input, nothing lights up" case → use `.input` or
 //                     `.input-group` (app.css), or add a :focus-within ring.
 //
+//   hover-only-reveal a rule set hiding a control (`opacity: 0` /
+//                     `visibility: hidden`) that the file reveals on `:hover`
+//                     (`.row:hover .x { opacity: 1 }`) with no keyboard or
+//                     touch path: no `:focus-visible` / `:focus-within`
+//                     reveal of the same class and no `(hover: none)` query
+//                     in the file. Keyboard users tab onto an invisible
+//                     button and touch screens never see it → use the
+//                     global `.reveal-on-hover` (app.css), which covers all
+//                     three.
+//   heavy-weight      font-weight ≥ 650 / bold (or the same inside a `font:`
+//                     shorthand) — chrome uses 400/500/600.
+//
+// One ratcheted rule scans MARKUP:
+//
+//   a11y-ignore       a `svelte-ignore a11y_…` comment — each one silences a
+//                     real accessibility check (a click on a div, a missing
+//                     label…). Fix the markup (a real <button>, a label)
+//                     instead of muting the compiler.
+//
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
 //
@@ -203,10 +222,15 @@ const RULES = {
   'status-as-text': 'color: var(--status-*) — status tokens are for dots/bars; text uses --success/--danger/--warning/--text-dim',
   'token-fallback': 'var(--token, fallback) on a token defined in lib/tokens.css — drop the fallback',
   'radius-literal': 'off-scale border-radius literal — use var(--radius-s|m|l) (0, 1-2px hairlines, 50%, 999px allowed)',
-  'heavy-weight': 'font-weight ≥ 700 — chrome uses 400/500/600',
+  'heavy-weight': 'font-weight ≥ 650 (or bold in a font: shorthand) — chrome uses 400/500/600',
+  'hover-only-reveal': 'control hidden until :hover with no :focus-visible/:focus-within reveal and no (hover: none) fallback — use .reveal-on-hover (app.css)',
+  'a11y-ignore': 'svelte-ignore a11y_… — fix the markup (real <button>, label) instead of silencing the check',
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
   'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
   'private-keyframes': 'private @keyframes — spinners use .spinner / otto-spin, live-dot pulses otto-pulse, entrances otto-fade-in / otto-pop-in (app.css); keep a local one only when the motion is genuinely different',
+  'transition-literal': 'transition with a literal 80–220 ms duration — use var(--dur-fast) / var(--dur-enter)',
+  'straight-couldnt': "straight apostrophe in “Couldn't” — write Couldn’t (content.md §3)",
+  'toast-failed-title': 'toasts.error titled “… failed” / “Could not …” — use toastError(\'Couldn’t <verb> …\', e)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -318,10 +342,12 @@ for (const f of files) {
       if (PHYSICAL.test(prop)) hit('physical-prop', f, at, `${prop}:${value.trimEnd()}`);
       if (prop === 'text-align' && /^\s*(left|right)\b/.test(value)) hit('physical-prop', f, at, `text-align:${value.trimEnd()}`);
       if (prop === 'color' && /^\s*var\(\s*--accent\s*\)/.test(value)) hit('accent-text', f, at, 'color: var(--accent)');
+      if (prop === 'transition' && /\b(?:(?:8|9)\d|1\d\d|2[01]\d|220)ms\b|\b0?\.(?:1|2)\d?s\b/.test(value)) hit('transition-literal', f, at, `transition:${value.trimEnd()}`);
       if (prop === 'color' && /var\(\s*--status-/.test(value)) hit('status-as-text', f, at, `color:${value.trimEnd()}`);
       for (const m of value.matchAll(/var\(\s*(--[\w-]+)\s*,/g)) if (TOKEN_NAMES.has(m[1])) hit('token-fallback', f, vAt + m.index, m[0]);
       if (prop === 'border-radius' && /^\s*([3-9]|1[0-9]|2[0-9])px\s*$/.test(value)) hit('radius-literal', f, at, `border-radius:${value.trimEnd()}`);
-      if (prop === 'font-weight' && /^\s*(700|800|900|bold)\b/.test(value)) hit('heavy-weight', f, at, `font-weight:${value.trimEnd()}`);
+      if (prop === 'font-weight' && /^\s*(6[5-9]\d|[7-9]\d\d|bold|bolder)\b/.test(value)) hit('heavy-weight', f, at, `font-weight:${value.trimEnd()}`);
+      if (prop === 'font' && /(?:^|\s)(6[5-9]\d|[7-9]\d\d|bold|bolder)(?=\s)/.test(value)) hit('heavy-weight', f, at, `font:${value.trimEnd()}`);
       if ((prop === 'outline' || prop === 'outline-color') && /var\(\s*--accent\s*\)/.test(value)) hit('focus-accent', f, at, `${prop}:${value.trimEnd()}`);
       if (prop === 'padding' || prop === 'margin' || prop === 'inset') {
         const parts = splitTop(value.replace(/!important/, '').trim());
@@ -368,6 +394,27 @@ for (const f of files) {
   const fileHasFocusRing =
     sets_(/:focus-within/).length > 0 ||
     sets_(/:focus(?!-within)/).some((s) => sets2(s, ['border-color', 'box-shadow', 'outline', 'outline-color']));
+  // hover-only-reveal: the hidden control is keyed by the LAST class of each
+  // selector part (`.row:hover .x-close` → `x-close`).
+  const lastClass = (sel) => /\.([\w-]+)(?:[^.\s>+~]*)$/.exec(sel.trim())?.[1];
+  const hides = (s) => s.decls.some((d) => (d.prop === 'opacity' && /^0(?:\.0+)?\s*(?:!important)?$/.test(d.value)) || (d.prop === 'visibility' && /^hidden\b/.test(d.value)));
+  const shows = (s) => s.decls.some((d) => (d.prop === 'opacity' && !/^0(?:\.0+)?\s*(?:!important)?$/.test(d.value)) || (d.prop === 'visibility' && /^visible\b/.test(d.value)));
+  const touchFallback = blocks.some(({ css }) => /\((?:any-)?hover\s*:\s*none\)/.test(css));
+  if (!touchFallback) {
+    const revealedBy = (cls, re) => sets.some((r) => shows(r) && r.sel.split(',').some((part) => re.test(part) && lastClass(part) === cls));
+    const flagged = new Set();
+    for (const s of sets) {
+      if (!hides(s)) continue;
+      for (const part of s.sel.split(',')) {
+        const cls = lastClass(part);
+        if (!cls || flagged.has(cls) || /:(?:hover|focus)/.test(part)) continue;
+        if (revealedBy(cls, /:hover/) && !revealedBy(cls, /:focus-visible|:focus-within|:focus\b/)) {
+          flagged.add(cls);
+          hit('hover-only-reveal', f, s.decls[0]?.at ?? 0, `"${part.trim()}" is revealed on :hover only`);
+        }
+      }
+    }
+  }
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
@@ -376,6 +423,16 @@ for (const f of files) {
       hit('outline-removed', f, ol.at, `"${s.sel}" — outline: ${ol.value} with no focus replacement`);
     }
   }
+}
+
+// ---------- copy ratchets (script + markup text) ----------
+for (const f of files) {
+  if (f.path.endsWith('.svelte')) {
+    for (const m of f.text.matchAll(/svelte-ignore[^\n]*?\ba11y_[\w]+/g)) hit('a11y-ignore', f, m.index, m[0]);
+  }
+  if (!/\.(svelte|ts)$/.test(f.path)) continue;
+  for (const m of f.text.matchAll(/Couldn't/g)) hit('straight-couldnt', f, m.index, "Couldn't");
+  for (const m of f.text.matchAll(/toasts\.error\((['"`])(?:[A-Z][A-Za-z ]*? failed|Could not )/g)) hit('toast-failed-title', f, m.index, m[0]);
 }
 
 // ---------- rule 3 (HARD): icon-only buttons — scan markup (script/style/comments blanked) ----------

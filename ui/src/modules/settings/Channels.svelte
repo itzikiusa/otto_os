@@ -101,7 +101,7 @@
       await copyTextOrThrow(text);
       toasts.success('Copied to the clipboard');
     } catch {
-      toasts.error("Couldn't copy", 'Select the text and copy it manually.');
+      toasts.error("Couldn’t copy", 'Select the text and copy it manually.');
     }
   }
 
@@ -205,7 +205,7 @@
         updated.enabled ? 'Enabled' : 'Saved as disabled',
       );
     } catch (e) {
-      toasts.error(`Couldn't save the ${channelLabel(editChannel)} integration`, loadErrorText(e));
+      toasts.error(`Couldn’t save the ${channelLabel(editChannel)} integration`, loadErrorText(e));
     } finally {
       editBusy = false;
     }
@@ -235,7 +235,7 @@
       integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
       refreshStatusSoon();
     } catch (e) {
-      toasts.error(`Couldn't ${intg.enabled ? 'disable' : 'enable'} ${channelLabel(intg.channel)}`, loadErrorText(e));
+      toasts.error(`Couldn’t ${intg.enabled ? 'disable' : 'enable'} ${channelLabel(intg.channel)}`, loadErrorText(e));
     }
   }
 
@@ -243,17 +243,25 @@
   // Delete
   // ---------------------------------------------------------------------------
 
+  /** Integrations whose removal is in flight, by channel — that row's button disables. */
+  let removing = $state<Partial<Record<Channel, boolean>>>({});
+
   async function remove(channel: Channel): Promise<void> {
-    if (!wsId) return;
+    if (!wsId || removing[channel]) return;
     const label = channelLabel(channel);
     const secretWord = channel === 'webhook' ? 'The key' : 'Tokens';
-    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration', confirmLabel: 'Remove' }))) return;
+    if (!(await confirmer.ask(`Remove the ${label} integration? ${secretWord} will be deleted from the Keychain.`, { title: 'Remove integration?', confirmLabel: 'Remove' }))) return;
+    removing = { ...removing, [channel]: true };
     try {
       await api.del(`/workspaces/${wsId}/integrations/${channel}`);
       integrations = integrations.filter((i) => i.channel !== channel);
       toasts.success(`${label} integration removed`);
     } catch (e) {
-      toasts.error(`Couldn't remove the ${label} integration`, loadErrorText(e));
+      toasts.error(`Couldn’t remove the ${label} integration`, loadErrorText(e));
+    } finally {
+      const next = { ...removing };
+      delete next[channel];
+      removing = next;
     }
   }
 
@@ -286,10 +294,10 @@
       if (resp.ok) {
         toasts.success('Test message sent', `Posted to the default ${channel === 'webhook' ? 'callback URL' : 'chat'}.`);
       } else {
-        toasts.error("Couldn't send the test message", resp.error ?? 'The provider gave no reason.');
+        toasts.error("Couldn’t send the test message", resp.error ?? 'The provider gave no reason.');
       }
     } catch (e) {
-      toasts.error("Couldn't send the test message", loadErrorText(e));
+      toasts.error("Couldn’t send the test message", loadErrorText(e));
     } finally {
       testBusy = null;
     }
@@ -433,8 +441,15 @@
               <button class="icon-btn ch-tool" title="Edit {label} integration" aria-label="Edit {label} integration" onclick={() => openEdit(channel)}>
                 <Icon name="edit" size={14} />
               </button>
-              <button class="icon-btn ch-tool" title="Remove {label} integration" aria-label="Remove {label} integration" onclick={() => remove(channel)}>
-                <Icon name="trash" size={14} />
+              <button
+                class="icon-btn ch-tool"
+                title={removing[channel] ? `Removing ${label} integration…` : `Remove ${label} integration`}
+                aria-label={removing[channel] ? `Removing ${label} integration…` : `Remove ${label} integration`}
+                aria-busy={removing[channel] ? 'true' : undefined}
+                disabled={removing[channel]}
+                onclick={() => remove(channel)}
+              >
+                {#if removing[channel]}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="trash" size={14} />{/if}
               </button>
             {:else}
               <button class="btn small ch-tool" onclick={() => openEdit(channel)}>Set up…</button>

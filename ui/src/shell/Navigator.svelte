@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../lib/toastError';
   // Expanded 240px navigator: modules in foldable macOS source-list sections
   // (Agents with its nested session lists in Work), workspaces section,
   // user/settings at the bottom.
@@ -361,7 +362,7 @@
     try {
       await ws.updateWorkspace(w.id, { name });
     } catch (e) {
-      toasts.error('Rename failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t rename', e);
     }
   }
 
@@ -378,7 +379,7 @@
       await ws.updateWorkspace(w.id, { root_path: root });
       toasts.success('Folder changed', `${w.name} → ${root}`);
     } catch (e) {
-      toasts.error('Change failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t change it', e);
     }
   }
 
@@ -747,8 +748,9 @@
       class="icon-btn nav-back"
       onclick={() => router.back()}
       disabled={!router.canBack}
-      title="Back (⌘⇧←)"
-      aria-label="Back"
+      title="Go back"
+      aria-label="Go back"
+      aria-keyshortcuts="Meta+Shift+ArrowLeft"
     >
       <Icon name="chevronLeft" size={14} />
     </button>
@@ -756,8 +758,9 @@
       class="icon-btn"
       onclick={() => router.forward()}
       disabled={!router.canForward}
-      title="Forward (⌘⇧→)"
-      aria-label="Forward"
+      title="Go forward"
+      aria-label="Go forward"
+      aria-keyshortcuts="Meta+Shift+ArrowRight"
     >
       <Icon name="chevronRight" size={14} />
     </button>
@@ -881,7 +884,7 @@
               <span class="group-label">{sec.group.label}</span>
               {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
               {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
-                <span class="count-chip working" title="working sessions">{ws.workingCount}</span>
+                <span class="count-chip working" title="Working sessions">{ws.workingCount}</span>
               {/if}
               {#if !pinned}
                 <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
@@ -1017,6 +1020,7 @@
       class:active={router.module === 'walkthroughs'}
       aria-current={router.module === 'walkthroughs' ? 'page' : undefined}
       onclick={() => router.go('walkthroughs')}
+      title="Help"
     >
       <Icon name="info" size={14} />
       <span class="grow">Help</span>
@@ -1026,7 +1030,8 @@
       class:active={router.module === 'settings'}
       aria-current={router.module === 'settings' ? 'page' : undefined}
       onclick={() => router.go('settings/appearance')}
-      title="Settings (⌘,)"
+      title="Settings"
+      aria-keyshortcuts="Meta+,"
     >
       <Icon name="gear" size={14} />
       <span class="grow">Settings</span>
@@ -1129,8 +1134,9 @@
         class="row-action mv"
         onclick={() => move(m, -1)}
         disabled={first}
-        title="Move up (⌥↑)"
+        title={`Move ${m.label} up`}
         aria-label={`Move ${m.label} up`}
+        aria-keyshortcuts="Alt+ArrowUp"
       >
         <Icon name="arrowUp" size={12} />
       </button>
@@ -1138,8 +1144,9 @@
         class="row-action mv"
         onclick={() => move(m, 1)}
         disabled={last}
-        title="Move down (⌥↓)"
+        title={`Move ${m.label} down`}
         aria-label={`Move ${m.label} down`}
+        aria-keyshortcuts="Alt+ArrowDown"
       >
         <Icon name="arrowDown" size={12} />
       </button>
@@ -1665,7 +1672,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 6px 8px 4px;
   }
@@ -1712,7 +1719,7 @@
     font-size: var(--fs-m);
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .nav-item:hover {
     background: color-mix(in srgb, var(--text-dim) 12%, transparent);
@@ -1769,7 +1776,7 @@
   /* A focused session row is the quieter variant: a lighter tint, no bar —
      the Agents row above it already carries the strong marker. */
   .nav-item.nested-item.active {
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    background: var(--accent-soft);
     font-weight: 500;
   }
   .nav-item.nested-item.active::before {
@@ -1870,7 +1877,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1889,7 +1896,7 @@
     display: grid;
     place-items: center;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .group-head:hover .group-chev,
   .group-head:focus-visible .group-chev,
@@ -2084,7 +2091,7 @@
      since they change what the list below shows. The fold chevron stays. */
   .agents-row > .twisty:not(.on):not([aria-expanded]) {
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .agents-row:hover > .twisty:not(.on):not([aria-expanded]),
   .agents-row:focus-within > .twisty:not(.on):not([aria-expanded]) {
@@ -2151,7 +2158,7 @@
   .arch-all input, .arch-check { margin: 0; accent-color: var(--accent); }
   .arch-check { flex-shrink: 0; }
   .sel-toggle.on { color: var(--accent-text); }
-  .nested-row.selected .nested-item { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .nested-row.selected .nested-item { background: var(--accent-soft); }
   .row-action {
     display: grid;
     place-items: center;
@@ -2163,7 +2170,7 @@
     border-radius: var(--radius-s);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .nested-row:hover .row-action {
     opacity: 1;
@@ -2326,7 +2333,7 @@
     font-size: var(--fs-s);
     font-weight: 600;
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .needs-you-filter:hover {
     background: color-mix(in srgb, var(--status-warn) 14%, transparent);

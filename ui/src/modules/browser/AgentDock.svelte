@@ -179,7 +179,7 @@
   {#if open && sessionId}
     <!-- The live, fully-interactive shell of the bound agent (the SAME Terminal
          as Agents). readOnly is FALSE — the user types directly to it. -->
-    <div class="agent-shell">
+    <div class="agent-shell otto-force-dark">
       {#key sessionId}
         <Terminal {sessionId} readOnly={readOnly} resumable forceDark preferDom />
       {/key}
@@ -279,8 +279,10 @@
     min-height: 0;
     display: flex;
     position: relative;
-    /* The Terminal is forceDark; this only shows for a frame while it mounts. */
-    background: var(--bg);
+    /* The Terminal is forceDark, so the shell is the same dark island
+       (.otto-force-dark, tokens.css): the frame before it mounts is already the
+       terminal's own background, never a light flash. */
+    background: var(--term-bg);
   }
   .agent-shell > :global(*) {
     flex: 1 1 auto;

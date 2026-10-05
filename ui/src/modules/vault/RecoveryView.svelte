@@ -122,7 +122,7 @@
     {#if loading}<p role="status">Loading trash…</p>{:else if trash.length === 0 && !error}<p>The trash is empty. Notes you move to trash show up here until you restore them.</p>{/if}
     {#each trash as entry (entry.id)}
       <article class="trash-entry">
-        <div><strong>{entry.original_path}</strong><small title={new Date(entry.deleted_at).toLocaleString()}>Deleted {rel(entry.deleted_at)} · {entry.kind}</small></div>
+        <div><strong>{entry.original_path}</strong><small title={new Date(entry.deleted_at).toLocaleString()}>Deleted {rel(entry.deleted_at)} · {entry.kind === 'dir' ? 'Folder' : 'File'}</small></div>
         <label>Restore path<input aria-label={`Restore path for ${entry.original_path}`} placeholder={entry.original_path} bind:value={destination[entry.id]} /></label>
         <button class="btn small" disabled={busy} onclick={() => void restoreTrash(entry)}>Restore</button>
       </article>

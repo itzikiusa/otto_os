@@ -15,6 +15,7 @@
   import { rel } from '../../lib/stores/now.svelte';
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import type { TaskStatus, TrailKind, TrailSource } from '../../lib/api/types';
 
   const session = $derived(ws.activeSession);
@@ -186,13 +187,16 @@
   <div class="activity">
     {#if loadError}
       <!-- The trail + tasks didn't load: say so (an empty board would read as
-           "the agent has done nothing"), with Retry. -->
-      <div class="load-error" role="alert">
-        <Icon name="warning" size={14} />
-        <span class="grow">Couldn't load this session's activity. {loadError}</span>
-        <button class="btn small" onclick={() => session && wsId && void activity.load(wsId, session.id, true)}>
-          <Icon name="refresh" size={12} /> Retry
-        </button>
+           "the agent has done nothing"), with Retry — inline when nothing is
+           loaded, a slim stale bar over what is. -->
+      <div class="load-state">
+        <LoadState
+          what="this session’s activity"
+          variant="compact"
+          error={loadError}
+          empty={tasks.length === 0 && trail.length === 0}
+          onretry={() => session && wsId && void activity.load(wsId, session.id, true)}
+        />
       </div>
     {/if}
     <!-- Task tracker ------------------------------------------------------- -->
@@ -397,7 +401,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .count {
@@ -501,7 +505,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     border-radius: 999px;
     padding: 0 5px;
     line-height: 14px;
@@ -532,7 +536,7 @@
     height: 100%;
     background: var(--accent);
     border-radius: 999px;
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .tasks {
     list-style: none;
@@ -748,7 +752,7 @@
   .row-src {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .src-user .row-src {
@@ -771,23 +775,7 @@
     max-height: 220px;
     overflow: auto;
   }
-  .load-error {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-block-end: 10px;
-    padding: 8px 10px;
-    border-radius: var(--radius-m);
-    background: var(--danger-soft);
-    color: var(--text);
-    font-size: var(--fs-s);
-  }
-  .load-error > :global(svg) {
-    color: var(--danger);
-    flex-shrink: 0;
-  }
-  .load-error .grow {
-    flex: 1;
-    min-width: 0;
+  .load-state {
+    margin-block-end: 8px;
   }
 </style>

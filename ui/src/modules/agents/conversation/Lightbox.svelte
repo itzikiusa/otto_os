@@ -23,7 +23,7 @@
 
 <div class="lb" role="dialog" aria-modal="true" aria-label={alt || 'Image'} use:dialogFocus={onclose}>
   <div class="lb-backdrop" role="presentation" onclick={onclose}></div>
-  <button class="lb-close icon-btn" aria-label="Close" title="Close (Esc)" onclick={onclose}><Icon name="x" size={16} /></button>
+  <button class="lb-close icon-btn" aria-label="Close" title="Close" aria-keyshortcuts="Escape" onclick={onclose}><Icon name="x" size={16} /></button>
   <img {src} {alt} />
 </div>
 
@@ -32,7 +32,7 @@
     position: fixed;
     inset: 0;
     z-index: var(--z-modal);
-    background: color-mix(in srgb, #000 78%, transparent);
+    background: var(--scrim-media);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -56,6 +56,6 @@
     position: absolute;
     top: 12px;
     inset-inline-end: 12px;
-    color: #fff; /* on the fixed dark scrim in every theme */
+    color: var(--on-scrim);
   }
 </style>

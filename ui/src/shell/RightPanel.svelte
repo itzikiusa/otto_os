@@ -61,10 +61,11 @@
 
 <script lang="ts">
   // Collapsible right panel (⌘J): Git / Files / Notes / Activity / Outputs / Canvas / Info / Browser / API tabs ⇄ 36px icon strip.
-  import Icon, { type IconName } from '../lib/components/Icon.svelte';
+  import Icon from '../lib/components/Icon.svelte';
   import EmptyState from '../lib/components/EmptyState.svelte';
   import Skeleton from '../lib/components/Skeleton.svelte';
   import { ui, type RightTab } from '../lib/stores/ui.svelte';
+  import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startMouseDrag } from '../lib/dragCursor';
   import { ws } from '../lib/stores/workspace.svelte';
   import { getToken } from '../lib/api/client';
@@ -174,20 +175,8 @@
     ctxMenu.show(e, items);
   }
 
-  const tabs: { id: RightTab; icon: IconName; label: string }[] = [
-    { id: 'git', icon: 'branch', label: 'Git' },
-    { id: 'files', icon: 'file', label: 'Files' },
-    { id: 'notes', icon: 'note', label: 'Notes' },
-    { id: 'activity', icon: 'zap', label: 'Activity' },
-    // Outputs — artifacts the focused agent produced, with sandboxed previews
-    // (docs/design/conversation-view.md §5.6). Gated like the rest on an
-    // active agent session by the shell.
-    { id: 'outputs', icon: 'layers', label: 'Outputs' },
-    { id: 'canvas', icon: 'shapes', label: 'Canvas' },
-    { id: 'info', icon: 'info', label: 'Info' },
-    { id: 'browser', icon: 'globe', label: 'Browser' },
-    { id: 'api', icon: 'send', label: 'API' },
-  ];
+  // One list with the ⌘K "Open <tab> panel" commands (lib/rightTabs.ts).
+  const tabs = RIGHT_TABS;
 
   let notes = $state('');
   let notesLoadedFor: string | null = $state(null);
@@ -303,7 +292,7 @@
     <Panel {...props} />
   {:else if failedPanels.has(key)}
     <div class="rp-fail" role="alert">
-      <span>Couldn't load this panel.</span>
+      <span>Couldn’t load this panel.</span>
       <button class="btn small" onclick={() => void loadPanel(key)}>Retry</button>
     </div>
   {:else}
@@ -325,7 +314,7 @@
         class="resize-handle"
         role="separator"
         tabindex="0"
-        aria-label="Resize the session panel"
+        aria-label="Resize the {SESSION_PANEL}"
         onmousedown={startResize}
         ondblclick={() => ui.setRightWidth(300)}
         title={RESIZE_TITLE}
@@ -333,7 +322,7 @@
       ></div>
     {/if}
     <header class="rpanel-head">
-      <div class="rpanel-tabs" role="tablist" tabindex="-1" aria-label="Session panel" bind:this={tabsEl} onkeydown={onTabsKey}>
+      <div class="rpanel-tabs" role="tablist" tabindex="-1" aria-label={SESSION_PANEL} bind:this={tabsEl} onkeydown={onTabsKey}>
         {#each tabs as t (t.id)}
           <button
             class="rtab"
@@ -372,7 +361,7 @@
       <button
         class="icon-btn"
         onclick={() => ui.toggleRight()}
-        title="Collapse panel (⌘J)"
+        title="Collapse panel" aria-keyshortcuts="Meta+J"
         aria-label="Collapse panel"
       >
         <Icon name="panel" size={13} />
@@ -440,7 +429,7 @@
   </aside>
 {/if}
 {#if !open}
-  <aside class="rstrip" aria-label="Session panel">
+  <aside class="rstrip" aria-label={SESSION_PANEL}>
     {#each tabs as t (t.id)}
       <button
         class="icon-btn strip-btn"
@@ -555,7 +544,7 @@
     font-size: var(--fs-s);
     font-weight: 500;
     cursor: pointer;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .rtab:hover {
     background: var(--surface-2);
@@ -603,7 +592,7 @@
     cursor: pointer;
   }
   .ver.active {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
     border-color: var(--accent);
   }

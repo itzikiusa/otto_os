@@ -74,7 +74,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 
 **Around the session**
 - Pane ⋯ menu: Rename…, Additional directories…, Hand over to…, Attach Jira issue…, Attach product story… (injects the refined story into the session), Canvas…, Pin, Archive, Delete.
-- Right panel (`⌘J`): Git, Files, Notes, Activity (the agent's tool calls, commands, file edits and task progress, plus your own notes), Outputs (files, PRs, images and reports the agent produced, with previews), Canvas, Info, Browser and API.
+- Session panel (`⌘J`): Git, Files, Notes, Activity (the agent's tool calls, commands, file edits and task progress, plus your own notes), Outputs (files, PRs, images and reports the agent produced, with previews), Canvas, Info, Browser and API.
 - **Share…** creates a link to watch (Viewer) or type in (Editor) a session, with an expiry, an optional label and an optional emailed one-time code.
 - Sidebar: search all sessions, filter to **Needs you**, show sessions from all workspaces, sort by recent or drag to a manual order, and see Slack and Telegram sessions in their own groups.
 - **Update all CLIs** (`⌘U`) runs each provider's update command in a session.
@@ -107,7 +107,7 @@ Agents is where your coding agents run. Each session is a real terminal on this 
 | `⌘+` / `⌘−` / `⌘0` | Terminal font larger / smaller / reset (terminal focused) |
 | `⌘⇧B` | Broadcast to sessions |
 | `⌘U` | Update all agent CLIs |
-| `⌘J` | Toggle the right panel |
+| `⌘J` | Toggle the Session panel |
 
 ## Tips and limits
 

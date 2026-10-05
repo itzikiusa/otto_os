@@ -8,6 +8,7 @@
   // Drift: library bodies arrive with the list; provider SKILL.md bodies are
   // fetched in the background (4 at a time) only for skills that exist in more
   // than one editable place, so the dots settle a moment after the list shows.
+  import { untrack } from 'svelte';
   import type { BundledSkillView, LibrarySkill, ProviderSkillInfo } from '../../lib/api/types';
   import { skillLabApi } from '../../lib/api/skillLab';
   import { toasts } from '../../lib/toast.svelte';
@@ -83,7 +84,7 @@
       bun.status === 'rejected' ? 'the bundled catalog' : '',
       prov.status === 'rejected' ? 'the Claude / Codex / Antigravity skill folders' : '',
     ].filter(Boolean);
-    partialError = !loadError && failed.length > 0 ? `Couldn't read ${failed.join(' or ')} — those copies are missing from the list.` : null;
+    partialError = !loadError && failed.length > 0 ? `Couldn’t read ${failed.join(' or ')} — those copies are missing from the list.` : null;
     library = lib.status === 'fulfilled' ? lib.value : [];
     bundled = bun.status === 'fulfilled' ? bun.value : [];
     providerSkills = prov.status === 'fulfilled' ? prov.value : [];
@@ -244,6 +245,19 @@
     const g = (last && groups.find((x) => x.name === last)) || shown[0] || groups[0];
     select(g);
     phoneDetail = false;
+  });
+  // A search / filter that hides the open skill moves the detail to the first
+  // skill still listed — never a "pick one" pane beside a non-empty list. Not
+  // while the editor holds unsaved edits (that would unmount it), and not on a
+  // phone (the list is the screen there; the detail opens on a tap).
+  $effect(() => {
+    const list = shown;
+    if (loading || list.length === 0 || editorDirty || viewport.isPhone) return;
+    if (selName && list.some((g) => g.name === selName)) return;
+    untrack(() => {
+      selName = list[0].name;
+      selSource = defaultSource(list[0]);
+    });
   });
   $effect(() => {
     if (selName) rememberSelection('skills-lab', selName);
@@ -459,10 +473,10 @@
             {onopenreview}
           />
         {:else}
+          <!-- With skills listed the effects above always open one, so the
+               only empty detail is an empty library. -->
           {#if groups.length === 0}
             <EmptyState title="No skills yet" body="Create a skill or import a package to see its method, files and history here." icon="zap" actionLabel="New skill…" actionIcon="plus" onaction={openNew} />
-          {:else}
-            <EmptyState title="{groups.length} {groups.length === 1 ? 'skill' : 'skills'}" body="Pick a skill on the left to see its method, files and history." icon="zap" />
           {/if}
         {/if}
       </section>
@@ -531,7 +545,7 @@
     color: var(--text-dim);
   }
   .search:focus-within {
-    border-color: var(--accent);
+    border-color: var(--accent-text);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
   }
   /* The focus ring is drawn on the .search wrapper (:focus-within above). */

@@ -268,7 +268,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .num-empty {
     font-size: 28px;

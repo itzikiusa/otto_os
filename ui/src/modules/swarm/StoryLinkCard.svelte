@@ -99,7 +99,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
   }
   .slc-title {
     font-weight: 500;

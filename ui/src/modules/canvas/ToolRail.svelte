@@ -73,7 +73,7 @@
     aria-haspopup="menu"
     onclick={openShapeMenu}
   >
-    <Icon name="square" />
+    <Icon name="stop" />
   </button>
 
   <button

@@ -189,7 +189,7 @@
   h4 {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin: 12px 0 6px;
   }

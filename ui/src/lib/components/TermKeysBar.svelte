@@ -145,7 +145,7 @@
     font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-    transition: background 0.1s;
+    transition: background var(--dur-fast);
     /* Prevent double-tap zoom on individual buttons */
     touch-action: manipulation;
     flex-shrink: 0;

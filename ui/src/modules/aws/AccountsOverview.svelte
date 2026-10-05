@@ -11,7 +11,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import EnvBadge from '../../lib/components/EnvBadge.svelte';
   import { fmtAgo, roleFromArn, awsErrorText } from './util';
@@ -20,14 +20,17 @@
   import type { AwsAccount, Feature } from '../../lib/api/types';
 
   interface Props {
-    /** Account filter text (the input lives in the AWS page header). */
-    filter?: string;
     onadd: () => void;
     onedit: (a: AwsAccount) => void;
     ondelete: (a: AwsAccount) => void;
     onsignin: (a: AwsAccount) => void;
   }
-  let { filter = '', onadd, onedit, ondelete, onsignin }: Props = $props();
+  let { onadd, onedit, ondelete, onsignin }: Props = $props();
+
+  // The account filter sits above the cards it narrows (only once there are
+  // enough accounts to need it) — not in the page header.
+  let filter = $state('');
+  const showFilter = $derived(aws.accounts.length > 3);
 
   const canAdmin = $derived(auth.isRoot);
   const visible = $derived.by(() => {
@@ -92,10 +95,16 @@
 </script>
 
 <div class="ov">
-  {#if aws.accountsLoading && !aws.accountsLoaded}
-    <div class="pad" role="status"><p class="load-note">Loading accounts…</p><Skeleton rows={3} height={90} /></div>
-  {:else if aws.accountsError && aws.accounts.length === 0}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load accounts" body={awsErrorText(aws.accountsError)} actionLabel="Retry" onaction={() => void aws.loadAccounts()} />
+  {#if (aws.accountsLoading && !aws.accountsLoaded) || (aws.accountsError && aws.accounts.length === 0)}
+    <LoadState
+      variant="page"
+      what="accounts"
+      loading={aws.accountsLoading}
+      error={aws.accountsError ? awsErrorText(aws.accountsError) : null}
+      empty
+      rows={3}
+      onretry={() => void aws.loadAccounts()}
+    />
   {:else if aws.accounts.length === 0}
     <EmptyState
       variant="page"
@@ -109,6 +118,24 @@
       onaction={canAdmin ? onadd : undefined}
     />
   {:else}
+    {#if showFilter}
+      <div class="ov-bar">
+        <label class="ov-filter input-group">
+          <Icon name="search" size={13} />
+          <input type="search" placeholder="Filter accounts…" bind:value={filter} aria-label="Filter accounts" />
+        </label>
+        {#if filter.trim()}<span class="dim">{visible.length} of {aws.accounts.length}</span>{/if}
+      </div>
+    {/if}
+    {#if visible.length === 0}
+      <EmptyState
+        icon="search"
+        title="No accounts match “{filter.trim()}”"
+        actionLabel="Clear filter"
+        actionKind="secondary"
+        onaction={() => (filter = '')}
+      />
+    {/if}
     <div class="cards">
       {#each visible as a (a.id)}
         {@const p = aws.perms(a.id)}
@@ -123,7 +150,7 @@
             <span class="dot" style="background:{a.color || 'var(--text-dim)'}"></span>
             <h2 class="name">{a.name}</h2>
             <EnvBadge env={a.environment} />
-            <button class="icon-btn more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title="Actions"><Icon name="more" size={14} /></button>
+            <button class="icon-btn more" onclick={(e) => menu(e, a)} aria-label={`Actions for ${a.name}`} title={`Actions for ${a.name}`}><Icon name="more" size={14} /></button>
           </div>
           <dl class="meta">
             <dt>Identity</dt>
@@ -203,10 +230,22 @@
 {/if}
 
 <style>
-  .load-note {
-    margin: 0 0 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
+  .ov-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px 0;
+  }
+  .ov-filter {
+    height: 28px;
+    padding: 0 8px;
+    border-radius: var(--radius-m);
+    background: var(--bg);
+    width: min(280px, 100%);
+  }
+  .ov-filter input {
+    flex: 1;
+    min-width: 0;
   }
   .ov {
     display: flex;
@@ -214,9 +253,6 @@
     min-height: 0;
     overflow: auto;
     height: 100%;
-  }
-  .pad {
-    padding: 18px 20px;
   }
   .cards {
     display: grid;

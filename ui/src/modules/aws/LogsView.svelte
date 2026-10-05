@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // CloudWatch Logs: log groups (server-side prefix search, paged) on the left;
   // on the right either the Events view — stream picker, time-range presets,
   // filter pattern, a windowed event table with a JSON-aware detail pane and a
@@ -303,7 +304,7 @@
       await copyTextOrThrow(text);
       toasts.success(`Copied ${what}`);
     } catch (e) {
-      toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t copy', e);
     }
   }
 
@@ -414,7 +415,7 @@
       await awsApi.logsInsightsStop(account.id, id, region);
       toasts.info('Query stopped');
     } catch (e) {
-      toasts.error('Stop failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t stop', e);
     }
   }
 
@@ -485,7 +486,7 @@
       <EmptyState
         actionKind={groupsLogin ? 'primary' : 'secondary'}
         icon="warning"
-        title="Couldn't list log groups"
+        title="Couldn’t list log groups"
         body={awsErrorText(groupsError)}
         actionLabel={groupsLogin ? 'Sign in' : 'Retry'}
         onaction={groupsLogin ? onsignin : () => void loadGroups()}
@@ -564,7 +565,7 @@
               <EmptyState
                 actionKind={eventsLogin ? 'primary' : 'secondary'}
                 icon="warning"
-                title="Couldn't read log events"
+                title="Couldn’t read log events"
                 body={awsErrorText(eventsError)}
                 actionLabel={eventsLogin ? 'Sign in' : 'Retry'}
                 onaction={eventsLogin ? onsignin : () => void loadEvents()}
@@ -637,7 +638,7 @@
           {/if}
           <button class="btn small" onclick={() => void saveQuery()} disabled={!query.trim()}>Save</button>
           {#if iRunning}
-            <button class="btn small danger" onclick={() => void stopInsights()}><Icon name="stop" size={12} /> Stop</button>
+            <button class="btn small" onclick={() => void stopInsights()} title="Stop the Insights query"><Icon name="stop" size={12} /> Stop</button>
           {:else}
             <button class="btn small primary" onclick={() => void runInsights()} disabled={!insightGroups.length || !query.trim()} title={!insightGroups.length ? 'Tick at least one log group' : 'Run the query (billed per GB scanned)'}><Icon name="play" size={12} /> Run</button>
           {/if}
@@ -855,7 +856,7 @@
     font-weight: 600;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 5px 10px;
     border-bottom: 1px solid var(--border);

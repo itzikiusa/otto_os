@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { CLUSTER_VIEWS, clusterViewKey, type ClusterView } from './types';
+  import { CLUSTER_VIEWS, type ClusterView } from './types';
+  import { onTabKey } from '../../lib/tabKeys';
   import { toastError } from '../../lib/toastError';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
   // (Overview / Topics / Consumer Groups / Schema Registry / Replay / Lag Alerts)
@@ -62,7 +63,7 @@
     try {
       const r = await api.post<TestClusterResp>(`/brokers/clusters/${cluster.id}/test`, {});
       if (r.ok) toasts.success('Connected', `${r.message} · ${r.latency_ms}ms`);
-      else toasts.error('Connection failed', r.message);
+      else toasts.error('Couldn’t connect', r.message);
     } catch (e) {
       toastError('Couldn’t test the connection', e);
     } finally {
@@ -98,7 +99,7 @@
     </div>
   </header>
 
-  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={(e) => { const next = clusterViewKey(e, tab); if (next) tab = next; }}>
+  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
         {#each CLUSTER_VIEWS as v (v.id)}
           <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
         {/each}

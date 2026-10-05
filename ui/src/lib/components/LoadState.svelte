@@ -10,8 +10,8 @@
   //   </LoadState>
   //
   // Precedence:
-  //   • error + nothing to show  → inline "Couldn't load {what}" + detail + Retry
-  //   • error + stale data       → the data, with a slim "refresh failed" bar + Retry
+  //   • error + nothing to show  → inline "Couldn’t load {what}" + detail + Retry
+  //   • error + stale data       → the data, with a slim "Couldn’t refresh" bar + Retry
   //   • loading + nothing yet    → Skeleton after a ~150 ms grace (the height is
   //                                reserved at once; a fast load never flashes it)
   //   • empty                    → `emptyView` (or nothing)
@@ -24,7 +24,7 @@
   import Skeleton from './Skeleton.svelte';
 
   interface Props {
-    /** Noun for the headline: "Couldn't load {what}". */
+    /** Noun for the headline: "Couldn’t load {what}". */
     what: string;
     loading?: boolean;
     /** Human cause of the last failed load (see `loadErrorText`); null/'' = ok. */
@@ -61,13 +61,13 @@
 {#if error && empty}
   {#if variant === 'compact'}
     <div class="ls-compact" role="alert" data-testid="load-error">
-      <span class="ls-compact-text"><Icon name="warning" size={12} /> Couldn't load {what}. <span class="ls-detail">{error}</span></span>
+      <span class="ls-compact-text"><Icon name="warning" size={12} /> Couldn’t load {what}. <span class="ls-detail">{error}</span></span>
       {#if onretry}<button class="btn small" onclick={onretry} disabled={loading}>{loading ? 'Retrying…' : 'Retry'}</button>{/if}
     </div>
   {:else}
     <div class="ls-error" class:page={variant === 'page'} role="alert" data-testid="load-error">
       <div class="ls-icon"><Icon name="warning" size={variant === 'page' ? 26 : 22} /></div>
-      <h3>Couldn't load {what}</h3>
+      <h3>Couldn’t load {what}</h3>
       <p class="ls-detail">{error}</p>
       {#if onretry}
         <button class="btn ls-retry" onclick={onretry} disabled={loading}>
@@ -87,7 +87,7 @@
   {#if error}
     <div class="ls-stale" role="status" data-testid="load-stale">
       <Icon name="warning" size={12} />
-      <span class="ls-stale-text" title={error}>Showing the last good load — refresh failed: {error}</span>
+      <span class="ls-stale-text" title={error}>Couldn’t refresh {what} — showing the last good load. {error}</span>
       {#if onretry}<button class="btn small ghost" onclick={onretry} disabled={loading}>Retry</button>{/if}
     </div>
   {/if}

@@ -27,7 +27,7 @@ This page covers the first run and the shape of the window. Every other section 
 **The window**
 - **Sidebar**: every module you can use, grouped into Work, Automate, Build, Infrastructure, Insight and Plugins. Press `⌘1` to show or hide it. Reorder or hide items in **Settings → Appearance → Sidebar**, or use **Customize sidebar** at the bottom of the expanded sidebar.
 - **Tab bar**: your open sessions and connections. Right-click a tab to close others, close to the right, reopen a closed tab, share a session, open it in a new window, or switch between the tabbed and tiled views.
-- **Right panel**: Git, Files, Notes, Activity, Outputs, Canvas, Info, Browser and API tabs for the focused session. Press `⌘J` to toggle it. Drag its edge to resize it; double-click the edge to reset.
+- **Session panel**: Git, Files, Notes, Activity, Outputs, Canvas, Info, Browser and API tabs for the focused session. Press `⌘J` to toggle it. Drag its edge to resize it; double-click the edge to reset.
 - **Status bar**: working agents, the network listener state, the current branch and a clock. The floating bar docks here as a small **Ask Otto** chip.
 - **Floating bar**: the "Type or speak…" pill at the bottom of the window. It's the command bar and Ask Otto in one. See [Command bar](#/walkthroughs/command-bar).
 
@@ -59,7 +59,7 @@ This page covers the first run and the shape of the window. Every other section 
 | `⌘T` | New session |
 | `⌘W` | Close the current tab |
 | `⌘1` | Show or hide the sidebar |
-| `⌘J` | Show or hide the right panel |
+| `⌘J` | Show or hide the Session panel |
 | `⌘,` | Open Settings |
 | `?` | Show all keyboard shortcuts |
 

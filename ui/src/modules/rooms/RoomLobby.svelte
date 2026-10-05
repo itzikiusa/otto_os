@@ -47,7 +47,7 @@
   }
 </script>
 <div class="rooms-page">
-  <PageHeader title="Rooms" icon="people" subtitle="Work together in a session">
+  <PageHeader title="Rooms" subtitle="Work together in a session">
     {#snippet actions()}<button class="btn" onclick={() => router.go('rooms/recaps')}>Recap archives</button>{#if auth.isRoot}<button class="btn" onclick={() => settingsOpen = true}>Connection settings…</button>{/if}<button class="btn primary" onclick={() => joinOpen = true}>Join room…</button>{/snippet}
   </PageHeader>
   <PageBody>

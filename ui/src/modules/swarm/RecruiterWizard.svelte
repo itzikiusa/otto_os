@@ -155,7 +155,7 @@
       // retry doesn't silently double them.
       const msg = e instanceof Error ? e.message : String(e);
       if (hired > 0) toasts.error(`Hired ${hired} of ${n} — the rest failed`, msg);
-      else toasts.error("Couldn't hire the agent", msg);
+      else toasts.error("Couldn’t hire the agent", msg);
     } finally {
       busy = false;
     }

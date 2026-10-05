@@ -53,11 +53,11 @@ test('Outputs switching from a pending preview to a link clears loading', async 
   await boot(page);
   const panel = page.getByTestId('outputs-panel');
   await panel.getByRole('option').first().click();
-  await expect(panel.getByText('Loading preview…')).toBeVisible();
+  await expect(panel.getByRole('status', { name: 'Loading the preview' })).toBeVisible();
   await panel.getByRole('option').nth(1).click();
   try {
     await expect(panel.getByRole('link', { name: 'https://example.com/review' })).toBeVisible();
-    await expect(panel.getByText('Loading preview…')).toBeHidden();
+    await expect(panel.getByRole('status', { name: 'Loading the preview' })).toBeHidden();
   } finally { release(); }
 });
 for (const variant of [

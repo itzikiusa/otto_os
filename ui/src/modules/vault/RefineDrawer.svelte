@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // "Refine with Otto" — a bottom drawer under the note editor/reading view.
   // One refine session per note (server-side): the first Send spawns it (the
   // POST is LONG — it resolves when the agent's turn completes), and ~800ms
@@ -147,7 +148,7 @@
     } catch (e) {
       if (myEpoch !== epoch) return;
       stopPolling();
-      toasts.error('Refine failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t refine', e);
     } finally {
       if (myEpoch === epoch) sending = false;
     }
@@ -192,7 +193,7 @@
     try {
       await resetRefineSession(vault.wsId, vault.current.id, path);
     } catch (e) {
-      toasts.error('Reset failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t reset', e);
       return;
     }
     sessionId = null;

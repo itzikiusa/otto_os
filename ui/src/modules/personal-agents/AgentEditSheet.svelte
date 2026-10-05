@@ -22,6 +22,8 @@
     onclose: () => void;
   }
   let { agent, template = null, onclose }: Props = $props();
+  /** Prefix for the label↔control ids (several sheets can be mounted). */
+  const uid = $props.id();
 
   // Templates only apply to a brand-new agent: they pre-fill the form and, on
   // create, add the template's first schedule.
@@ -171,86 +173,89 @@
     {/if}
 
     {#if !agent}
-      <label class="fld">
-        <span>Start from a template (optional)</span>
-        <select disabled={busy || !!createdAgent} value={fTemplate} onchange={(e) => applyTemplate((e.currentTarget as HTMLSelectElement).value)} data-testid="agent-template">
+      <div class="field">
+        <label for="{uid}-template">Start from a template (optional)</label>
+        <select id="{uid}-template" class="input" disabled={busy || !!createdAgent} value={fTemplate} onchange={(e) => applyTemplate((e.currentTarget as HTMLSelectElement).value)} data-testid="agent-template">
           <option value="">Blank agent</option>
-          {#each TEMPLATES as t (t.id)}<option value={t.id}>{t.avatar} {t.title} — {t.description}</option>{/each}
+          {#each TEMPLATES as t (t.id)}<option value={t.id}>{t.title} — {t.description}</option>{/each}
         </select>
         {#if scheduleNote}<span class="note">{scheduleNote}</span>{/if}
-      </label>
+      </div>
     {/if}
 
-    <div class="fld-row">
-      <label class="fld grow">
-        <span>Name</span>
-        <input bind:value={fName} placeholder="Daily Recap" />
-      </label>
-      <label class="fld narrow">
-        <span>Avatar (emoji, optional)</span>
-        <input bind:value={fAvatar} placeholder="📰" maxlength="8" />
-      </label>
+    <div class="field-row">
+      <div class="field grow">
+        <label for="{uid}-name">Name</label>
+        <input id="{uid}-name" class="input" bind:value={fName} placeholder="Daily Recap" />
+      </div>
+      <div class="field narrow">
+        <label for="{uid}-avatar">Avatar (optional)</label>
+        <input id="{uid}-avatar" class="input" bind:value={fAvatar} maxlength="8" />
+        <span class="hint">Empty shows the name’s initial.</span>
+      </div>
     </div>
 
-    <label class="fld">
-      <span>Persona (soul) — who this agent is, materialized into its workspace</span>
-      <textarea bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
-    </label>
+    <div class="field">
+      <label for="{uid}-soul">Persona (soul) — who this agent is, materialized into its workspace</label>
+      <textarea id="{uid}-soul" class="input" bind:value={fSoul} rows="6" placeholder="You are a diligent chronicler…"></textarea>
+    </div>
 
-    <div class="fld-row">
-      <label class="fld">
-        <span>Provider</span>
+    <div class="field-row">
+      <div class="field">
+        <label for="{uid}-provider">Provider</label>
         <select
+          id="{uid}-provider"
+          class="input"
           value={PROVIDERS.includes(fProvider) ? fProvider : 'custom'}
           onchange={(e) => onProviderSelect((e.currentTarget as HTMLSelectElement).value)}
         >
           {#each PROVIDERS as p (p)}<option value={p}>{p}</option>{/each}
           <option value="custom">Custom…</option>
         </select>
-      </label>
-      <div class="fld">
+      </div>
+      <div class="cell">
         <ModelPicker provider={fProvider} value={fModel} onchange={(m) => (fModel = m)} />
       </div>
     </div>
 
     {#if !PROVIDERS.includes(fProvider)}
-      <label class="fld">
-        <span>Custom provider slug</span>
-        <input bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
-      </label>
+      <div class="field">
+        <label for="{uid}-slug">Custom provider slug</label>
+        <input id="{uid}-slug" class="input" bind:value={fProvider} placeholder="my-custom-agent (register it in Settings first)" />
+      </div>
     {/if}
 
-    <label class="fld">
-      <span>Working dir (optional — empty = a private per-agent folder)</span>
-      <PathField bind:value={fCwd}><input bind:value={fCwd} placeholder="defaults to the agent's own workspace" /></PathField>
-    </label>
+    <div class="field">
+      <label for="{uid}-cwd">Working dir (optional — empty = a private per-agent folder)</label>
+      <PathField bind:value={fCwd}><input id="{uid}-cwd" class="input" bind:value={fCwd} placeholder="defaults to the agent's own workspace" /></PathField>
+    </div>
 
-    <div class="fld-row">
-      <label class="fld">
-        <span>Delivery</span>
-        <select bind:value={fDestType}>
+    <div class="field-row">
+      <div class="field">
+        <label for="{uid}-dest">Delivery</label>
+        <select id="{uid}-dest" class="input" bind:value={fDestType}>
           <option value="none">None (reports on the agent page only)</option>
           <option value="slack">Slack</option>
           <option value="telegram">Telegram</option>
           <option value="email">Email</option>
           <option value="webhook">HTTP webhook</option>
         </select>
-      </label>
+      </div>
       {#if fDestType === 'slack' || fDestType === 'telegram'}
-        <label class="fld">
-          <span>Chat / channel id (optional)</span>
-          <input bind:value={fChatId} placeholder="defaults to the integration channel" />
-        </label>
+        <div class="field">
+          <label for="{uid}-chat">Chat / channel id (optional)</label>
+          <input id="{uid}-chat" class="input" bind:value={fChatId} placeholder="defaults to the integration channel" />
+        </div>
       {:else if fDestType === 'email'}
-        <label class="fld">
-          <span>Send to (email)</span>
-          <input bind:value={fEmailTo} placeholder="you@example.com" />
-        </label>
+        <div class="field">
+          <label for="{uid}-email">Send to (email)</label>
+          <input id="{uid}-email" class="input" bind:value={fEmailTo} placeholder="you@example.com" />
+        </div>
       {:else if fDestType === 'webhook'}
-        <label class="fld">
-          <span>Webhook URL</span>
-          <input bind:value={fUrl} placeholder="https://…" />
-        </label>
+        <div class="field">
+          <label for="{uid}-url">Webhook URL</label>
+          <input id="{uid}-url" class="input" bind:value={fUrl} placeholder="https://…" />
+        </div>
       {/if}
     </div>
     {#if fDestType !== 'none'}
@@ -290,19 +295,11 @@
   }
   .note { margin: 0; font-size: var(--fs-s); color: var(--accent-text); }
   .note.dim { color: var(--text-dim); }
-  .fld-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .fld-row .fld { flex: 1; min-width: 180px; }
-  .fld-row .narrow { flex: 0 0 10rem; min-width: 10rem; }
-  .fld { display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-m); color: var(--text); }
-  .fld span { color: var(--text-dim); font-size: var(--fs-s); }
-  .fld input, .fld select, .fld textarea {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius-s); padding: 6px 8px; font: inherit;
-  }
-  .fld input::placeholder, .fld textarea::placeholder { color: var(--text-dim); }
-  .fld input:focus-visible, .fld select:focus-visible, .fld textarea:focus-visible {
-    outline: 2px solid var(--accent-text); outline-offset: 1px;
-  }
+  /* Global .field/.input; the sheet's own gap spaces them, rows share a line. */
+  .sheet .field { margin-bottom: 0; }
+  .field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .field-row > .field, .field-row > .cell { flex: 1; min-width: 180px; }
+  .field-row > .narrow { flex: 0 0 10rem; min-width: 10rem; }
   .toggles { display: flex; flex-direction: column; gap: 6px; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); color: var(--text); }
 </style>

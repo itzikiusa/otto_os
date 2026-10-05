@@ -178,7 +178,7 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     overflow: hidden;
@@ -207,7 +207,7 @@
     background: var(--surface-2);
   }
   .rt-row.selected {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   .rt-row:focus-visible {
     box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);

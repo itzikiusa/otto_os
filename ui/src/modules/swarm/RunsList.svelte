@@ -60,7 +60,7 @@
     try {
       await swarm.stopRun(r.id);
     } catch (e) {
-      toasts.error("Couldn't stop the run", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t stop the run", e instanceof Error ? e.message : String(e));
     }
   }
 

@@ -200,7 +200,7 @@ async function selectCluster(page: Page): Promise<void> {
   const row = page.locator('.cluster .cn', { hasText: clusterName }).first();
   await expect(row).toBeVisible({ timeout: 15_000 });
   await row.click();
-  await expect(page.locator('.cluster-head .name', { hasText: clusterName })).toBeVisible({
+  await expect(page.locator('.cluster-head .ph-title', { hasText: clusterName })).toBeVisible({
     timeout: 15_000,
   });
 }

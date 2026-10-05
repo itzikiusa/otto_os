@@ -112,7 +112,7 @@
 
       <p class="note">
         <Icon name="info" size={13} />
-        Saving makes v{nextSeq}. Designs that follow the approved kit keep {approvedSeq ? `v${approvedSeq}` : 'the current tokens'} until you approve v{nextSeq}.
+        Saving makes v{nextSeq}. Designs that follow the approved kit keep {approvedSeq ? `v${approvedSeq}` : 'the current tokens'} until you accept v{nextSeq}.
       </p>
     {/if}
   </div>

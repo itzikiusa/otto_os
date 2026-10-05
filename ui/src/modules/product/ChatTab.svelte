@@ -146,7 +146,7 @@
               </button>
               {#if c.status === 'active'}
                 <button
-                  class="archive-btn"
+                  class="archive-btn reveal-on-hover"
                   onclick={() => archiveChat(c.id)}
                   title="Archive this chat"
                   aria-label="Archive chat"
@@ -205,14 +205,14 @@
     display: flex;
     align-items: center;
     border-radius: 0;
-    transition: background 100ms;
+    transition: background var(--dur-fast);
     position: relative;
   }
   .chat-item:hover {
     background: var(--hover);
   }
   .chat-item.active {
-    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    background: var(--accent-soft);
   }
   .chat-item.archived {
     opacity: 0.65;
@@ -253,7 +253,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 1px 5px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 16%, transparent);
@@ -271,7 +271,7 @@
   .archive-btn {
     flex-shrink: 0;
     margin-inline-end: 8px;
-    padding: 2px 7px;
+    padding: 2px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
     background: transparent;
@@ -279,13 +279,21 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast);
     white-space: nowrap;
   }
+  /* Revealed on row hover / keyboard focus, and always shown on a touch
+     screen (no hover there) — the shared .reveal-on-hover recipe. */
   .chat-item:hover .archive-btn,
+  .chat-item:focus-within .archive-btn,
   .chat-item.active .archive-btn,
   .archive-btn:focus-visible {
     opacity: 1;
+  }
+  @media (hover: none) {
+    .archive-btn {
+      opacity: 1;
+    }
   }
   .archive-btn:hover {
     background: var(--hover);

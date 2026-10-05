@@ -198,7 +198,7 @@
   .lbl {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     width: 32px;
   }

@@ -65,7 +65,7 @@
     <div class="inline-error" role="alert">
       <Icon name="warning" size={16} />
       <div>
-        <p class="title">Couldn't check the live browser engine</p>
+        <p class="title">Couldn’t check the live browser engine</p>
         <p class="detail">{browserLive.loadError}</p>
       </div>
       <button class="btn" onclick={() => void browserLive.load()}>Retry</button>
@@ -145,7 +145,7 @@
         <p class="field-error" role="alert">This Otto build has no checksum for that engine, so it can't be downloaded safely.</p>
       {/if}
       {#if startError}
-        <p class="field-error" role="alert">Couldn't start the download: {startError}</p>
+        <p class="field-error" role="alert">Couldn’t start the download: {startError}</p>
       {/if}
       {#if onreader}
         <button class="btn ghost" onclick={onreader}>Use Reader view instead</button>
@@ -215,7 +215,7 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width 200ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .meta {
     margin: 0;

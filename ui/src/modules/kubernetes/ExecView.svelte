@@ -152,7 +152,7 @@
   .term {
     flex: 1;
     min-height: 260px;
-    background: #000;
+    background: var(--term-bg);
   }
   .launch {
     padding: 16px;

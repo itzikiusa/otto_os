@@ -179,7 +179,7 @@
   .composite { display: flex; align-items: baseline; gap: 6px; }
   .composite .num { font-size: var(--fs-2xl); font-weight: 600; line-height: 1; color: var(--text); font-variant-numeric: tabular-nums; }
   .composite .lbl, .done, .rlabel, .pmsg { font-size: var(--fs-xs); color: var(--text-dim); }
-  .composite .lbl { text-transform: uppercase; letter-spacing: 0.04em; }
+  .composite .lbl { text-transform: uppercase; letter-spacing: .06em; }
   .meta { display: flex; align-items: center; gap: 8px; }
   .proof { padding: 2px 8px; border-radius: 999px; font-size: var(--fs-xs); font-weight: 500; white-space: nowrap; }
   .done { font-variant-numeric: tabular-nums; }

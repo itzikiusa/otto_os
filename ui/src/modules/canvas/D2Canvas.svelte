@@ -260,7 +260,7 @@
   async function copySource(): Promise<void> {
     const ok = await copyText(canvas.source ?? '');
     if (ok) toasts.success('Copied', 'D2 source copied to clipboard.');
-    else toasts.error('Copy failed', 'Could not copy to the clipboard.');
+    else toasts.error('Couldn’t copy', 'Could not copy to the clipboard.');
   }
 
   /** Ask the agent to edit this scene's .d2 source. */
@@ -585,7 +585,7 @@
   .mode-bar {
     position: absolute;
     top: 12px;
-    left: 12px;
+    inset-inline-start: 12px;
     z-index: 5;
     display: inline-flex;
     align-items: center;

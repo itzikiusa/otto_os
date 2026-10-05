@@ -142,7 +142,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--accent-text);
     background: var(--accent-soft);
     padding: 2px 8px;
@@ -170,7 +170,7 @@
   .tag { cursor: pointer; color: var(--accent-text); }
   .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-block-start: 12px; }
   .sn-card { border: 1px solid var(--border); border-radius: var(--radius-m); padding: 8px 10px; min-width: 0; background: var(--bg); }
-  h4 { margin: 0 0 6px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+  h4 { margin: 0 0 6px; font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
   .n { font-weight: 400; margin-inline-start: 4px; }
   ul { margin: 0; padding-inline-start: 16px; }
   li { margin: 2px 0; overflow-wrap: anywhere; }

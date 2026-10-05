@@ -526,7 +526,7 @@
   label {
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 6px;
     font-size: var(--fs-s);
   }
   input,
@@ -537,7 +537,7 @@
     background: var(--surface-2);
     color: var(--text);
     border: 1px solid var(--border);
-    padding: 7px;
+    padding: 8px;
     border-radius: var(--radius-s);
   }
   textarea {
@@ -548,7 +548,7 @@
   .operations {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 9px;
+    gap: 8px;
   }
   .operations label {
     flex-direction: row;
@@ -562,7 +562,7 @@
     overflow-wrap: anywhere;
   }
   .preview {
-    padding: 14px;
+    padding: 12px;
     background: var(--surface-2);
     display: flex;
     flex-direction: column;
@@ -571,9 +571,9 @@
   .decision {
     display: grid;
     grid-template-columns: 1fr auto;
-    gap: 5px;
+    gap: 6px;
     border-block-end: 1px solid var(--border);
-    padding: 10px 0;
+    padding: 12px 0;
     font-size: var(--fs-s);
   }
   .decision p,
@@ -592,7 +592,7 @@
   details[open] {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
   .mode {
     max-width: 360px;

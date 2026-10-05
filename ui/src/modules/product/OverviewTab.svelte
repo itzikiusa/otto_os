@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Overview tab — shows the selected story's detail: title, source link, stage
   // badge, issue_type, a version dropdown (with body_md rendering), Refresh
   // button, watch toggle, and (for Jira stories) a rich section with status,
@@ -208,7 +209,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Could not save tag', product.errMsg(e));
+      toasts.error('Couldn’t save tag', product.errMsg(e));
     } finally {
       tagSaving = false;
     }
@@ -220,7 +221,7 @@
     try {
       await product.updateStory({ tags: updated });
     } catch (e) {
-      toasts.error('Could not remove tag', product.errMsg(e));
+      toasts.error('Couldn’t remove tag', product.errMsg(e));
     }
   }
 
@@ -356,10 +357,10 @@
     runningDiscovery = true;
     try {
       await product.discover(discoverySwarmId ? { swarm_id: discoverySwarmId } : {});
-      toasts.success('Discovery started', 'The swarm is now analysing the story.');
+      toasts.success('Discovery started', 'The swarm is now analyzing the story.');
       await product.changeTab('discovery');
     } catch (e) {
-      toasts.error('Discovery failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t discovery', e);
     } finally {
       runningDiscovery = false;
     }
@@ -478,7 +479,7 @@
       );
       transitionsLoaded = true;
     } catch (e) {
-      toasts.error('Could not load transitions', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t load transitions', e instanceof Error ? e.message : String(e));
     } finally {
       transitionsLoading = false;
     }
@@ -554,7 +555,7 @@
       await loadIssueFull();
       await product.refresh();
     } catch (e) {
-      toasts.error('Transition failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t move the issue', e);
     } finally {
       transitionWorking = false;
     }
@@ -569,7 +570,7 @@
       );
       assignablesLoaded = true;
     } catch (e) {
-      toasts.error('Could not load assignable users', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t load assignable users', e instanceof Error ? e.message : String(e));
     } finally {
       assignablesLoading = false;
     }
@@ -596,7 +597,7 @@
       toasts.info('Assignee updated');
       await loadIssueFull();
     } catch (e) {
-      toasts.error('Assign failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t assign', e);
     } finally {
       assigneeWorking = false;
     }
@@ -614,7 +615,7 @@
         `/issue/${story.account_id}/${story.source_key}/editmeta`,
       );
     } catch (e) {
-      toasts.error('Could not load editable fields', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t load editable fields', e instanceof Error ? e.message : String(e));
       editmeta = []; // loaded-but-empty: every field stays read-only
     } finally {
       editmetaLoading = false;
@@ -763,7 +764,7 @@
       fieldDraft = null;
       toasts.info('Field updated');
     } catch (e) {
-      toasts.error('Could not update field', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t update field', e instanceof Error ? e.message : String(e));
     } finally {
       fieldSaving = false;
     }
@@ -803,7 +804,7 @@
       titleDraft = '';
       toasts.info('Title updated');
     } catch (e) {
-      toasts.error('Could not update title', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t update title', e instanceof Error ? e.message : String(e));
     } finally {
       titleSaving = false;
     }
@@ -844,7 +845,7 @@
       descDraft = '';
       toasts.info('Description updated');
     } catch (e) {
-      toasts.error('Could not update description', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t update description', e instanceof Error ? e.message : String(e));
     } finally {
       descSaving = false;
     }
@@ -888,7 +889,7 @@
       await product.loadVersions();
       versionsLoaded = true;
     } catch (e) {
-      toasts.error('Could not load versions', product.errMsg(e));
+      toasts.error('Couldn’t load versions', product.errMsg(e));
     }
   }
 
@@ -902,7 +903,7 @@
     try {
       viewingVersion = await product.getVersion(vid);
     } catch (err) {
-      toasts.error('Could not load version', product.errMsg(err));
+      toasts.error('Couldn’t load version', product.errMsg(err));
     } finally {
       versionLoading = false;
     }
@@ -923,7 +924,7 @@
         await loadDevStatus();
       }
     } catch (e) {
-      toasts.error('Refresh failed', product.errMsg(e));
+      toasts.error('Couldn’t refresh', product.errMsg(e));
     } finally {
       refreshing = false;
     }
@@ -935,7 +936,7 @@
       await product.updateDraft({ title: draftTitle, body_md: draftBody });
       toasts.success('Draft saved');
     } catch (e) {
-      toasts.error('Save failed', product.errMsg(e));
+      toasts.error('Couldn’t save', product.errMsg(e));
     } finally {
       draftSaving = false;
     }
@@ -987,7 +988,7 @@
       newTranscriptBody = '';
       toasts.success('Transcript added');
     } catch (e) {
-      toasts.error('Add transcript failed', product.errMsg(e));
+      toasts.error('Couldn’t add transcript', product.errMsg(e));
     } finally {
       addingTranscript = false;
     }
@@ -1003,7 +1004,7 @@
       await product.deleteTranscript(t.id);
       toasts.info('Transcript removed');
     } catch (e) {
-      toasts.error('Remove failed', product.errMsg(e));
+      toasts.error('Couldn’t remove', product.errMsg(e));
     }
   }
 
@@ -1046,7 +1047,7 @@
     try {
       await product.updateStory({ watch_enabled: !story.watch_enabled });
     } catch (e) {
-      toasts.error('Could not update watch', product.errMsg(e));
+      toasts.error('Couldn’t update watch', product.errMsg(e));
     } finally {
       watchWorking = false;
     }
@@ -1072,7 +1073,7 @@
       toasts.success('Comment posted');
       await loadIssueFull();
     } catch (e) {
-      toasts.error('Could not post comment', e instanceof Error ? e.message : String(e));
+      toasts.error('Couldn’t post comment', e instanceof Error ? e.message : String(e));
     } finally {
       postingComment = false;
     }
@@ -1098,7 +1099,7 @@
     try {
       await product.updateStory({ stage });
     } catch (e) {
-      toasts.error('Could not update stage', product.errMsg(e));
+      toasts.error('Couldn’t update stage', product.errMsg(e));
     }
   }
 
@@ -1184,7 +1185,7 @@
       </div>
     {:else if ef.schema_type === 'array'}
       <!-- labels / free-text array (no allowed values) → comma-separated text -->
-      <input class="field-input" type="text" placeholder="comma,separated" bind:value={fieldDraft} />
+      <input class="field-input" type="text" placeholder="e.g. backend, payments" bind:value={fieldDraft} />
     {:else}
       <!-- string / unknown → raw text -->
       <input class="field-input" type="text" bind:value={fieldDraft} />
@@ -1296,7 +1297,7 @@
           <input
             class="tag-input"
             bind:value={tagInput}
-            placeholder="+ tag"
+            placeholder="Add tag…"
             disabled={tagSaving}
             aria-label="Add tag"
             spellcheck="false"
@@ -1397,7 +1398,7 @@
                 id="draft-title"
                 class="input"
                 bind:value={draftTitle}
-                placeholder="Story title…"
+                placeholder="e.g. Players can set a weekly deposit limit"
                 spellcheck="false"
               />
             </div>
@@ -1409,7 +1410,7 @@
                 class="textarea"
                 bind:value={draftBody}
                 rows={14}
-                placeholder="Write your story or paste notes here…"
+                placeholder="e.g. As a player, I want to cap my weekly deposits… (or paste meeting notes)"
                 spellcheck="false"
                 onpaste={handleBodyPaste}
               ></textarea>
@@ -1490,7 +1491,7 @@
                 class="textarea"
                 bind:value={newTranscriptBody}
                 rows={5}
-                placeholder="Paste conversation or notes here…"
+                placeholder="e.g. PO: the limit resets every Monday at midnight…"
                 spellcheck="false"
               ></textarea>
               <button
@@ -1543,7 +1544,7 @@
                   class="desc-textarea"
                   bind:value={descDraft}
                   rows={16}
-                  placeholder="Write the description in Markdown…"
+                  placeholder="e.g. ## Goal — let players cap their weekly deposits"
                   spellcheck="false"
                   aria-label="Description (Markdown)"
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); cancelEditDesc(); } }}
@@ -2208,7 +2209,7 @@
     line-height: 1;
     color: var(--accent-text);
     opacity: 0.6;
-    transition: opacity 100ms;
+    transition: opacity var(--dur-fast);
   }
   .tag-remove:hover {
     opacity: 1;
@@ -2225,7 +2226,7 @@
     padding: 2px 9px;
     width: 72px;
     outline: none;
-    transition: border-color 120ms, width 120ms;
+    transition: border-color var(--dur-fast), width var(--dur-fast);
   }
   .tag-input:focus {
     border-color: var(--accent-text);
@@ -2271,7 +2272,7 @@
     text-align: start;
     font-size: var(--fs-s);
     color: var(--text);
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .related-item:hover {
     background: var(--hover);
@@ -2359,7 +2360,7 @@
     font-size: var(--fs-m);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms, color 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
   }
   .title-row:hover .title-edit-btn,
   .title-row:focus-within .title-edit-btn,
@@ -2460,7 +2461,7 @@
     color: var(--text-dim);
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     white-space: nowrap;
   }
   .ver-select {
@@ -2568,7 +2569,7 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     border-radius: var(--radius-s);
-    transition: background 100ms;
+    transition: background var(--dur-fast);
   }
   .jira-coll-trigger:hover {
     background: var(--hover);
@@ -2670,7 +2671,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .change-btn:hover:not(:disabled) {
     background: var(--hover);
@@ -2749,7 +2750,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 100ms, background 100ms, color 100ms;
+    transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast);
   }
   .detail-val-row:hover .field-edit-btn,
   .detail-val-row:focus-within .field-edit-btn,
@@ -2842,7 +2843,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms, border-color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast);
   }
   .desc-edit-btn:hover {
     background: var(--hover);
@@ -2898,7 +2899,7 @@
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     min-width: 70px;
   }
   .link-key {
@@ -2948,7 +2949,7 @@
     color: var(--text-dim);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     padding: 6px 0 2px;
   }
   .dev-row {
@@ -2977,7 +2978,7 @@
   }
   .dev-pr-status {
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
   }
   .dev-repo {
     margin-inline-start: auto;
@@ -3154,7 +3155,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     cursor: pointer;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .att-load-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 10%, transparent);
@@ -3200,7 +3201,7 @@
     font-weight: 500;
     color: var(--text-dim);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .input {
     background: var(--surface);
@@ -3288,7 +3289,7 @@
     text-align: start;
     color: var(--text);
     font-size: var(--fs-s);
-    transition: background 80ms;
+    transition: background var(--dur-fast);
   }
   .transcript-toggle:hover {
     background: var(--hover);
@@ -3317,7 +3318,7 @@
     cursor: pointer;
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    transition: color 80ms, background 80ms;
+    transition: color var(--dur-fast), background var(--dur-fast);
     margin-inline-end: 4px;
     border-radius: var(--radius-s);
   }

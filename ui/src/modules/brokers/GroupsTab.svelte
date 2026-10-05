@@ -103,8 +103,9 @@
     const current = () => request === detailRequest && cluster.id === clusterId && selected === id;
     dryRunResult = null;
     dryRunLoading = false;
+    // Refreshing the open group keeps its rows on screen; switching blanks them.
+    if (selected !== id) detail = null;
     selected = id;
-    detail = null;
     detailError = null;
     detailLoading = true;
     resetTopic = '';
@@ -236,7 +237,7 @@
       );
       if (current()) dryRunResult = preview;
     } catch (e) {
-      if (current()) toasts.error("Couldn't preview the reset", e instanceof Error ? e.message : String(e));
+      if (current()) toasts.error("Couldn’t preview the reset", e instanceof Error ? e.message : String(e));
     } finally {
       if (request === detailRequest) dryRunLoading = false;
     }
@@ -276,7 +277,7 @@
       if (current()) detail = updated;
       toasts.success(`Offsets reset for "${groupId}"`);
     } catch (e) {
-      toasts.error("Couldn't reset offsets", e instanceof Error ? e.message : String(e));
+      toasts.error("Couldn’t reset offsets", e instanceof Error ? e.message : String(e));
     } finally {
       resetting = false;
     }
@@ -293,14 +294,7 @@
     bind:clientHeight={groupsTw.viewH}
     onscroll={groupsTw.onscroll}
   >
-    {#if loadError}
-      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups} />
-    {/if}
-    {#if loadError && groups.length === 0}
-      <!-- rendered above -->
-    {:else if loading}
-      <p class="muted pad">Loading consumer groups…</p>
-    {:else if accessDenied}
+    {#if accessDenied}
       <div class="acl-denied pad">
         <p class="acl-title">Consumer-group access not granted</p>
         <p class="muted">{accessMsg}</p>
@@ -310,9 +304,11 @@
           requests); grant the ACL and re-test the cluster, and this tab will populate.
         </p>
       </div>
-    {:else if groups.length === 0}
-      <p class="muted pad">No consumer groups.</p>
     {:else}
+      <!-- First load: skeleton; failed load: inline error (or a stale bar over
+           the last good list); a refresh keeps the rows on screen. -->
+      <LoadState what="consumer groups" variant="compact" {loading} error={loadError} empty={groups.length === 0} onretry={loadGroups}>
+        {#snippet emptyView()}<p class="muted pad">No consumer groups on this cluster.</p>{/snippet}
       {#if groupsWin.top}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.top}px"></div>{/if}
       {#each groups.slice(groupsWin.start, groupsWin.end) as g (g.group_id)}
         <button class="grow-row" class:sel={selected === g.group_id} onclick={() => open(g.group_id)}>
@@ -324,6 +320,7 @@
         </button>
       {/each}
       {#if groupsWin.bottom}<div class="tw-spacer" aria-hidden="true" style="height:{groupsWin.bottom}px"></div>{/if}
+      </LoadState>
     {/if}
   </div>
 
@@ -331,12 +328,14 @@
   <div class="divider-slot"><PaneDivider bind:width={listW} storageKey="brokers.groupsListW" label="Resize the group list" /></div>
 
   <div class="detail">
-    {#if detailLoading}
-      <p class="muted pad">Loading group…</p>
-    {:else if detailError && selected}
+    {#if (detailLoading || detailError) && !detail && selected}
       {@const gid = selected}
-      <LoadState what="this group" error={detailError} empty onretry={() => open(gid)} />
+      <LoadState what="this group" loading={detailLoading} error={detailError} empty onretry={() => open(gid)} />
     {:else if detail}
+      {#if detailError && selected}
+        {@const gid = selected}
+        <LoadState what="this group" error={detailError} empty={false} onretry={() => open(gid)} />
+      {/if}
       <header>
         <span class="gid big">{detail.group_id}</span>
         <span class="state {stateClass(detail.state)}">{detail.state}</span>
@@ -348,6 +347,7 @@
           <button
             class="icon-btn"
             onclick={() => open(gid)}
+            disabled={detailLoading}
             aria-label="Refresh lag"
             title="Refresh lag"
           >
@@ -562,7 +562,7 @@
     background: color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .grow-row.sel {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     border-inline-start-color: var(--accent);
   }
   /* Windowed rows must be uniform: one-line ids (full id in the title). */
@@ -603,7 +603,7 @@
   .state {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: var(--radius-s);
   }
@@ -701,7 +701,7 @@
     margin: 16px 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   table {

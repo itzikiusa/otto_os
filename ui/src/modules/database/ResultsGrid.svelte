@@ -1129,7 +1129,7 @@
       await withProgress('TSV', () => copyBuilt(tsvParts));
       toasts.success('Copied', `Result copied as TSV${exportScope}`);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
   function download(parts: string[], name: string, mime: string): void {
@@ -1158,7 +1158,7 @@
       const what = kind === 'columns' ? 'Column names copied' : `Result copied as ${kind.toUpperCase()}${exportScope}`;
       toasts.success('Copied', what);
     } catch {
-      toasts.error('Copy failed');
+      toasts.error('Couldn’t copy');
     }
   }
 
@@ -1968,7 +1968,7 @@
   .pg-unordered {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--warning);
     background: var(--status-warn-soft);
     border-radius: 999px;
@@ -2342,7 +2342,7 @@
     color: var(--text-dim);
     font-size: var(--fs-s);
     cursor: pointer;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .vs:hover {
     color: var(--text);

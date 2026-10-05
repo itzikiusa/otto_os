@@ -4,6 +4,7 @@
   // deliberately tiny — this is a node-internal helper, not a public component.
   import { untrack } from 'svelte';
   import Self from './JsonTree.svelte';
+  import Icon from '../../../lib/components/Icon.svelte';
 
   interface Props {
     value: unknown;
@@ -46,10 +47,10 @@
   }
 </script>
 
-<div class="row" style:padding-left={`${depth > 0 ? 12 : 0}px`}>
+<div class="row" style:padding-inline-start={`${depth > 0 ? 12 : 0}px`}>
   {#if isObject}
     <button class="caret" onclick={() => (open = !open)} aria-expanded={open}>
-      <span class="tw" class:open>▸</span>
+      <span class="tw" class:open aria-hidden="true"><Icon name="chevronRight" size={10} /></span>
       {#if name !== null}<span class="key">{name}:</span>{/if}
       {#if !open}<span class="sum">{summary}</span>{/if}
     </button>
@@ -86,13 +87,21 @@
     text-align: start;
   }
   .tw {
-    display: inline-block;
-    transition: transform 120ms ease;
+    display: inline-flex;
+    transition: transform var(--dur-fast) ease;
     color: var(--text-dim);
-    font-size: var(--fs-xs);
   }
   .tw.open {
     transform: rotate(90deg);
+  }
+  /* RTL: the closed chevron points along the reading direction. */
+  :global([dir='rtl']) .tw:not(.open) {
+    transform: scaleX(-1);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tw {
+      transition: none;
+    }
   }
   .children {
     border-inline-start: 1px solid var(--border);

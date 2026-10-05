@@ -216,7 +216,7 @@
     flex-direction: column;
     gap: 8px;
     cursor: pointer;
-    transition: border-color 130ms ease-out, background 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .cluster:hover,
   .cluster:focus-within {

@@ -324,7 +324,7 @@ test('history shows the agent chip and the agent filter', async ({ page }) => {
   await page.getByRole('tab', { name: 'History' }).click();
   const rows = page.locator('.hist-row');
   await expect(rows).toHaveCount(2);
-  await expect(page.locator('.hist-row .src-chip.agent')).toHaveCount(1);
+  await expect(page.locator('.hist-row .agent-chip')).toHaveCount(1);
 
   await page.getByLabel('Show only agent runs').click();
   await expect(rows).toHaveCount(1);

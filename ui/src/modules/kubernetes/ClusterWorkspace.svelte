@@ -696,7 +696,7 @@
     color: var(--text);
   }
   .kind.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
     color: var(--text);
     font-weight: 500;
   }
@@ -814,7 +814,7 @@
   .k9s-term {
     flex: 1;
     min-height: 0;
-    background: #000;
+    background: var(--term-bg);
   }
   .hints {
     display: grid;

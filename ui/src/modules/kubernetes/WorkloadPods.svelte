@@ -98,13 +98,16 @@
       <div class="dim pad">No pods match <code class="mono">{selector}</code>.</div>
     {/snippet}
       <div class="wp-head" class:metrics={hasMetrics}>
-        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts">↻</span>
+        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts"><Icon name="refresh" size={11} /><span class="sr-only">Restarts</span></span>
         {#if hasMetrics}<span class="num">CPU</span><span class="num">MEM</span>{/if}
         <span class="num">Age</span><span></span>
       </div>
       {#each pods as p (p.name)}
-        <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics} role="button" tabindex="0" onclick={() => onopenpod(p.name)} onkeydown={(e) => { if (e.key === 'Enter') onopenpod(p.name); }} title={p.name}>
-          <span class="mono ell">{p.name}</span>
+        <!-- The row itself is not interactive: the pod name is the open control (a
+             real <button>, Enter + Space), and Logs / Shell are its siblings —
+             never nested inside another interactive element. -->
+        <div class="wp-row {healthClass(p.health, p.status)}" class:metrics={hasMetrics}>
+          <button type="button" class="wp-name mono ell" title="Open {p.name}" onclick={() => onopenpod(p.name)}>{p.name}</button>
           <span class="num mono">{p.ready ?? ''}</span>
           <span class="status-pill"><span class="hdot"></span><span class="ell">{p.status}</span></span>
           <span class="num mono" class:warn={(p.restarts ?? 0) > 0}>{p.restarts ?? ''}</span>
@@ -114,8 +117,8 @@
           {/if}
           <span class="num mono">{formatAge(rowAge(p))}</span>
           <span class="acts">
-            <button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'logs'); }} title="Logs" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
-            {#if canEdit}<button class="icon-btn" onclick={(e) => { e.stopPropagation(); onopenpod(p.name, 'terminal'); }} title="Shell (exec)" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
+            <button class="icon-btn" onclick={() => onopenpod(p.name, 'logs')} title="Logs of {p.name}" aria-label="Logs of {p.name}"><Icon name="file" size={12} /></button>
+            {#if canEdit}<button class="icon-btn" onclick={() => onopenpod(p.name, 'terminal')} title="Shell into {p.name}" aria-label="Shell into {p.name}"><Icon name="terminal" size={12} /></button>{/if}
           </span>
         </div>
       {/each}
@@ -161,7 +164,7 @@
   .wp-head {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     color: var(--text-dim);
     border-bottom: 1px solid var(--border);
@@ -169,12 +172,26 @@
   }
   .wp-row {
     border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-    cursor: pointer;
-    outline: none;
   }
   .wp-row:hover,
-  .wp-row:focus-visible {
+  .wp-row:focus-within {
     background: var(--surface-2);
+  }
+  .wp-name {
+    display: block;
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .wp-name:hover {
+    text-decoration: underline;
+  }
+  .wp-name:focus-visible {
+    border-radius: var(--radius-s);
   }
   .num {
     text-align: end;

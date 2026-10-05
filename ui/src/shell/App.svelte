@@ -43,6 +43,7 @@
   import { navPending } from '../lib/navPending.svelte';
   import { startSnip } from '../lib/snip';
   import { ui, isTauri } from '../lib/stores/ui.svelte';
+  import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startWindowDrag } from '../lib/windowDrag';
   import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
@@ -566,35 +567,42 @@
   // ---- palette commands: core ----
   $effect(() => {
     const unreg = registry.register('core', [
-      { id: 'core.new-session', title: 'New session…', group: 'Sessions', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
-      { id: 'core.new-session-scratch', title: 'New session (no workspace)…', group: 'Sessions', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
-      { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Sessions', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
-      { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Sessions', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
-      { id: 'core.close-tab', title: 'Close tab', group: 'Sessions', shortcut: '⌘W', run: () => ws.closeActiveTab() },
-      { id: 'core.reopen-tab', title: 'Reopen closed tab', group: 'Sessions', shortcut: '⌘⇧T', keywords: 'restore undo close tab session', run: () => ws.reopenClosedTab() },
-      { id: 'core.next-session', title: 'Next session', group: 'Sessions', shortcut: '⌘]', keywords: 'switch tab forward cycle', run: () => ws.cycleTab(1) },
-      { id: 'core.prev-session', title: 'Previous session', group: 'Sessions', shortcut: '⌘[', keywords: 'switch tab back cycle', run: () => ws.cycleTab(-1) },
-      { id: 'core.split-v', title: 'Split vertically', group: 'Sessions', shortcut: '⌘D', run: () => ws.split('col') },
-      { id: 'core.split-h', title: 'Split horizontally', group: 'Sessions', shortcut: '⌘⇧D', run: () => ws.split('row') },
-      { id: 'core.new-workspace', title: 'Add workspace…', group: 'Workspaces', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
+      { id: 'core.new-session', title: 'New session…', group: 'Session', shortcut: '⌘T', keywords: 'spawn agent terminal claude codex shell', run: () => (ui.newSessionOpen = true) },
+      { id: 'core.new-session-scratch', title: 'New session (no workspace)…', group: 'Session', keywords: 'scratch home adhoc workspace-less', run: () => { ui.newSessionScratch = true; ui.newSessionOpen = true; } },
+      { id: 'core.ask-otto', title: 'Ask Otto (plain English)', group: 'Session', shortcut: '⌘I', keywords: 'orchestrate natural language command free text', run: () => ui.openPalette('english') },
+      { id: 'core.broadcast', title: 'Broadcast message to sessions', group: 'Session', shortcut: '⌘⇧B', keywords: 'send message every agent tell all selected', run: () => ui.openBroadcast() },
+      { id: 'core.close-tab', title: 'Close tab', group: 'Session', shortcut: '⌘W', run: () => ws.closeActiveTab() },
+      { id: 'core.reopen-tab', title: 'Reopen closed tab', group: 'Session', shortcut: '⌘⇧T', keywords: 'restore undo close tab session', run: () => ws.reopenClosedTab() },
+      { id: 'core.next-session', title: 'Next session', group: 'Session', shortcut: '⌘]', keywords: 'switch tab forward cycle', run: () => ws.cycleTab(1) },
+      { id: 'core.prev-session', title: 'Previous session', group: 'Session', shortcut: '⌘[', keywords: 'switch tab back cycle', run: () => ws.cycleTab(-1) },
+      { id: 'core.split-v', title: 'Split vertically', group: 'Pane', shortcut: '⌘D', run: () => ws.split('col') },
+      { id: 'core.split-h', title: 'Split horizontally', group: 'Pane', shortcut: '⌘⇧D', run: () => ws.split('row') },
+      { id: 'core.new-workspace', title: 'New workspace…', group: 'Session', keywords: 'create new project folder directory', run: () => (ui.newWorkspaceOpen = true) },
       { id: 'core.update-clis', title: 'Update all CLIs', group: 'Tools', shortcut: '⌘U / ⌘⇧U', keywords: 'upgrade claude codex agy cli version', run: () => void updateAllCLIs() },
       { id: 'core.snip', title: 'Take a screenshot (snip)', group: 'Tools', shortcut: '⌘⇧S', keywords: 'snip screenshot capture screen region annotate clipboard grab shot', run: () => void startSnip() },
-      { id: 'core.go-settings', title: 'Open Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
+      { id: 'core.go-settings', title: 'Go to Settings', group: 'Navigate', shortcut: '⌘,', keywords: 'preferences appearance', run: () => router.go('settings/appearance') },
       { id: 'core.go-back', title: 'Go back', group: 'Navigate', shortcut: '⌘⇧←', keywords: 'previous page history return', run: () => router.back() },
       { id: 'core.go-forward', title: 'Go forward', group: 'Navigate', shortcut: '⌘⇧→', keywords: 'next page history', run: () => router.forward() },
       { id: 'core.toggle-rail', title: 'Toggle sidebar', group: 'View', shortcut: '⌘1', run: () => ui.toggleRail() },
-      { id: 'core.toggle-right', title: 'Toggle right panel', group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
+      { id: 'core.toggle-right', title: `Toggle ${SESSION_PANEL}`, group: 'View', shortcut: '⌘J', run: () => ui.toggleRight() },
       ...(isTauri ? [{ id: 'core.open-in-window', title: 'Open in new window', group: 'View', keywords: 'pop out popout detach separate native window', run: () => void openPopout(currentRoute(), moduleLabel(moduleName)).catch((e: unknown) => toastError('Couldn’t open window', e)) }] : []),
-      { id: 'core.scheme-auto', title: 'Scheme: Auto (follow system)', group: 'Appearance', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
-      { id: 'core.scheme-light', title: 'Scheme: Light', group: 'Appearance', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
-      { id: 'core.scheme-dark', title: 'Scheme: Dark', group: 'Appearance', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
-      { id: 'core.theme-native', title: 'Theme: Native', group: 'Appearance', run: () => ui.setTheme('native') },
-      { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'Appearance', run: () => ui.setTheme('pro-dark') },
-      { id: 'core.theme-warm', title: 'Theme: Warm', group: 'Appearance', run: () => ui.setTheme('warm') },
-      { id: 'core.notes', title: 'Open Notes panel', group: 'View', run: () => ui.openRight('notes') },
-      { id: 'core.git-panel', title: 'Open Git panel', group: 'View', run: () => ui.openRight('git') },
-      { id: 'core.shortcuts', title: 'Keyboard shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
-      { id: 'core.logout', title: 'Sign out', group: 'Account', run: () => auth.logout() },
+      { id: 'core.scheme-auto', title: 'Scheme: Auto (follow system)', group: 'View', keywords: 'color scheme light dark system automatic mode', run: () => ui.setScheme('auto') },
+      { id: 'core.scheme-light', title: 'Scheme: Light', group: 'View', keywords: 'color scheme mode day', run: () => ui.setScheme('light') },
+      { id: 'core.scheme-dark', title: 'Scheme: Dark', group: 'View', keywords: 'color scheme mode night', run: () => ui.setScheme('dark') },
+      { id: 'core.theme-native', title: 'Theme: Native', group: 'View', run: () => ui.setTheme('native') },
+      { id: 'core.theme-pro-dark', title: 'Theme: Pro Dark', group: 'View', run: () => ui.setTheme('pro-dark') },
+      { id: 'core.theme-warm', title: 'Theme: Warm', group: 'View', run: () => ui.setTheme('warm') },
+      // One "Open <tab> panel" per Session-panel tab (lib/rightTabs.ts).
+      ...RIGHT_TABS.map((t) => ({
+        id: t.id === 'git' ? 'core.git-panel' : t.id === 'notes' ? 'core.notes' : `core.panel-${t.id}`,
+        title: `Open ${t.label} panel`,
+        group: 'View',
+        detail: SESSION_PANEL,
+        keywords: `session panel right side ${t.id}`,
+        run: () => ui.openRight(t.id),
+      })),
+      { id: 'core.shortcuts', title: 'Show keyboard shortcuts', group: 'Help', shortcut: '?', keywords: 'keys cheat sheet bindings hotkeys', run: () => (shortcutsOpen = true) },
+      { id: 'core.logout', title: 'Sign out', group: 'Tools', run: () => auth.logout() },
     ]);
     return unreg;
   });
@@ -658,7 +666,7 @@
       'settings',
       sections.map((s) => ({
         id: `settings.${s.id}`,
-        title: `Settings: ${s.label}`,
+        title: `Go to ${s.label} settings`,
         group: 'Settings',
         detail: settingsGroupLabel(s.group),
         keywords: `settings preferences ${s.id.replace(/-/g, ' ')} ${s.keywords ?? ''}`,
@@ -709,14 +717,14 @@
     if (!active) return registry.register('focused-session', []);
     const isAgent = active.kind === 'agent';
     const cmds = [
-      { id: 'focus.restart', title: 'Restart focused session', group: 'Sessions', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
-      { id: 'focus.archive', title: 'Archive focused session', group: 'Sessions', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
-      { id: 'focus.rename', title: 'Rename focused session…', group: 'Sessions', keywords: 'title name active current', run: () => void renameActiveSession() },
+      { id: 'focus.restart', title: 'Restart focused session', group: 'Session', keywords: 'reload reboot relaunch active current', run: () => void ws.requestRestart(active.id) },
+      { id: 'focus.archive', title: 'Archive focused session', group: 'Session', keywords: 'close hide stash active current', run: () => void ws.archiveSession(active.id) },
+      { id: 'focus.rename', title: 'Rename focused session…', group: 'Session', keywords: 'title name active current', run: () => void renameActiveSession() },
       ...(isAgent
-        ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Sessions', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
+        ? [{ id: 'focus.handover', title: 'Hand over focused session…', group: 'Session', keywords: 'handoff transfer pass context active current', run: () => openSessionAction('handover') }]
         : []),
-      { id: 'focus.attach-issue', title: 'Attach Jira issue to focused session…', group: 'Sessions', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
-      { id: 'focus.attach-product', title: 'Attach product story to focused session…', group: 'Sessions', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
+      { id: 'focus.attach-issue', title: 'Attach Jira issue to focused session…', group: 'Session', keywords: 'jira ticket link story active current', run: () => openSessionAction('attach-issue') },
+      { id: 'focus.attach-product', title: 'Attach product story to focused session…', group: 'Session', keywords: 'product story link context active current', run: () => openSessionAction('attach-product') },
     ];
     return registry.register('focused-session', cmds);
   });
@@ -728,7 +736,7 @@
       ws.workspaces.map((w) => ({
         id: `ws.${w.id}`,
         title: `Switch workspace: ${w.name}`,
-        group: 'Workspaces',
+        group: 'Session',
         keywords: w.root_path,
         run: () => void ws.select(w.id),
       })),
@@ -759,8 +767,9 @@
       'sessions',
       list.filter((s) => !s.archived).map((s) => ({
         id: `session.${s.id}`,
-        title: `Focus session: ${s.title}`,
-        group: 'Sessions',
+        title: `Focus ${s.title}`,
+        detail: 'Session',
+        group: 'Session',
         keywords: s.provider,
         run: () => {
           ws.navigateToSession(s.id);
@@ -801,7 +810,7 @@
           'connections',
           conns.map((c) => ({
             id: `connect.${c.id}`,
-            title: `Connect: ${c.name}`,
+            title: `Connect to ${c.name}`,
             group: 'Connections',
             keywords: `${c.kind} open`,
             run: async () => {
@@ -907,13 +916,13 @@
   $effect(() => {
     if (!sidePane.supported) return registry.register('split', []);
     const cmds: Command[] = [
-      { id: 'split.pick', title: 'Open side pane…', group: 'View', shortcut: '⌘\\', keywords: 'split side by side two panes pane module picker compare', run: () => openSidePicker() },
+      { id: 'split.pick', title: 'Open side pane…', group: 'Pane', shortcut: '⌘\\', keywords: 'split side by side two panes pane module picker compare', run: () => openSidePicker() },
       ...splitModules
         .filter((m) => m.id !== sidePane.primaryKey && m.id !== (sidePane.active ? sidePane.key : null))
         .map((m) => ({
           id: `split.open-${m.id}`,
           title: `Open ${m.label} side by side`,
-          group: 'View',
+          group: 'Pane',
           detail: groupLabel(m.group),
           keywords: `split side by side pane ${m.id.replace(/[-/]/g, ' ')} ${m.keywords ?? ''}`,
           run: () => sidePane.open(m.id, { label: m.label }),
@@ -923,25 +932,25 @@
       const side = sideMeta.label;
       if (isTauri) {
         if (sidePane.detached) cmds.push(
-          { id: 'split.return', title: 'Return to split', group: 'View', keywords: 'pane window attach restore', run: () => sidePane.returnToSplit() },
-          { id: 'split.top', title: 'Toggle pane keep on top', group: 'View', keywords: 'pane window float', run: () => paneWindowAction('toggle-top') },
-          { id: 'split.fill', title: 'Fill display with pane', group: 'View', keywords: 'pane window maximize', run: () => paneWindowAction('maximize') },
-          { id: 'split.fullscreen', title: 'Toggle pane fullscreen', group: 'View', keywords: 'pane window fullscreen', run: () => paneWindowAction('toggle-fullscreen') },
-          { id: 'split.display', title: 'Move pane to display…', group: 'View', keywords: 'pane window monitor', run: () => showPaneDisplays() },
+          { id: 'split.return', title: 'Return to split', group: 'Pane', keywords: 'pane window attach restore', run: () => sidePane.returnToSplit() },
+          { id: 'split.top', title: 'Toggle pane keep on top', group: 'Pane', keywords: 'pane window float', run: () => paneWindowAction('toggle-top') },
+          { id: 'split.fill', title: 'Fill display with pane', group: 'Pane', keywords: 'pane window maximize', run: () => paneWindowAction('maximize') },
+          { id: 'split.fullscreen', title: 'Toggle pane fullscreen', group: 'Pane', keywords: 'pane window fullscreen', run: () => paneWindowAction('toggle-fullscreen') },
+          { id: 'split.display', title: 'Move pane to display…', group: 'Pane', keywords: 'pane window monitor', run: () => showPaneDisplays() },
         );
         else cmds.push(
-          { id: 'split.detach-primary', title: 'Detach main pane', group: 'View', keywords: 'pane window float display', run: () => sidePane.detachPane('primary') },
-          { id: 'split.detach-side', title: 'Detach side pane', group: 'View', keywords: 'pane window float display', run: () => sidePane.detachPane('side') },
+          { id: 'split.detach-primary', title: 'Detach main pane', group: 'Pane', keywords: 'pane window float display', run: () => sidePane.detachPane('primary') },
+          { id: 'split.detach-side', title: 'Detach side pane', group: 'Pane', keywords: 'pane window float display', run: () => sidePane.detachPane('side') },
         );
       }
       cmds.push(
-        { id: 'split.close', title: 'Close side pane', group: 'View', shortcut: '⌘\\', keywords: `split side by side ${side}`, run: () => sidePane.close() },
-        { id: 'split.swap', title: 'Swap panes', group: 'View', keywords: `split side by side flip ${side}`, run: () => sidePane.swap() },
-        { id: 'split.promote', title: `Open ${side} in main pane`, group: 'View', keywords: 'split side by side promote maximize', run: () => sidePane.promote() },
-        { id: 'split.reset', title: 'Reset split to 50/50', group: 'View', keywords: 'split side by side divider equal half', run: () => sidePane.resetSplit() },
+        { id: 'split.close', title: 'Close side pane', group: 'Pane', shortcut: '⌘\\', keywords: `split side by side ${side}`, run: () => sidePane.close() },
+        { id: 'split.swap', title: 'Swap panes', group: 'Pane', keywords: `split side by side flip ${side}`, run: () => sidePane.swap() },
+        { id: 'split.promote', title: `Open ${side} in main pane`, group: 'Pane', keywords: 'split side by side promote maximize', run: () => sidePane.promote() },
+        { id: 'split.reset', title: 'Reset split to 50/50', group: 'Pane', keywords: 'split side by side divider equal half', run: () => sidePane.resetSplit() },
         sidePane.focused
-          ? { id: 'split.focus-main', title: `Focus ${mainMeta.label} (main pane)`, group: 'View', keywords: 'split pane switch', run: () => sidePane.focusMain() }
-          : { id: 'split.focus-side', title: `Focus ${side} (side pane)`, group: 'View', keywords: 'split pane switch', run: () => sidePane.focusPane() },
+          ? { id: 'split.focus-main', title: `Focus ${mainMeta.label} (main pane)`, group: 'Pane', keywords: 'split pane switch', run: () => sidePane.focusMain() }
+          : { id: 'split.focus-side', title: `Focus ${side} (side pane)`, group: 'Pane', keywords: 'split pane switch', run: () => sidePane.focusPane() },
       );
     }
     return registry.register('split', cmds);
@@ -1127,7 +1136,7 @@
       <button
         class="mtop-btn"
         onclick={() => (ui.navDrawerOpen = !ui.navDrawerOpen)}
-        title="Menu"
+        title="Open navigator"
         aria-label="Open navigator"
       >
         <Icon name="sidebar" size={18} />
@@ -1148,8 +1157,9 @@
         class="mtop-btn"
         class:active={ui.rightOpen}
         onclick={() => ui.toggleRight()}
-        title="Activity panel"
-        aria-label="Toggle right panel"
+        title={SESSION_PANEL}
+        aria-label={SESSION_PANEL}
+        aria-expanded={ui.rightOpen}
       >
         <Icon name="panel" size={18} />
       </button>
@@ -1222,16 +1232,16 @@
             {/if}
           </div>
 
-          <!-- Right panel (Activity/Git/Files/…) for the focused session. Shown in
+          <!-- The Session panel (Git/Files/Activity/…) for the focused session. Shown in
                every Agents layout — tabbed, split, AND tiled — so per-session activity
                stays visible in multi-session views (it tracks `ws.activeSession`, the
                focused pane/tile), not just when a single session is on screen. It
                belongs to the Agents pane, so a side-by-side split keeps it there. -->
           {#if showRightPanel}
-            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label="Activity" width="min(92vw, 360px)">
+            <Drawer bind:open={ui.rightOpen} inline={!compactShell} side="right" label={SESSION_PANEL} width="min(92vw, 360px)">
               <!-- Loaded with the Agents page (shell/pages.svelte.ts). -->
               {@const RightPanel = loadedRightPanel()}
-              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" role="status" aria-label="Loading activity panel"><Skeleton rows={4} height={28} /></div>{/if}
+              {#if RightPanel}<RightPanel forceOpen={compactShell} />{:else}<div class="rp-loading" role="status" aria-label="Loading the {SESSION_PANEL}"><Skeleton rows={4} height={28} /></div>{/if}
             </Drawer>
           {/if}
         </div>
@@ -1474,7 +1484,7 @@
   }
   .mtop-btn.active {
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--accent-soft);
   }
   .mtop-title {
     font-size: var(--fs-m);

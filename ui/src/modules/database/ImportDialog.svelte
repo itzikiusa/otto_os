@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // File → table import dialog (0002): the mirror of the export-to-path
   // ("Export all rows…") dialog. Picks a local file on the daemon host, a
   // format, a target table, and a batch size, then streams batched INSERTs
@@ -107,7 +108,7 @@
       if (typeof res.error === 'string' && res.error.startsWith('write_blocked:')) {
         const ok = await confirmGuardedWrite();
         if (!ok) {
-          toasts.info('Import cancelled');
+          toasts.info('Import canceled');
           progress = null;
           return;
         }
@@ -122,7 +123,7 @@
       }
 
       if (typeof res.error === 'string') {
-        toasts.error('Import failed', res.error);
+        toasts.error('Couldn’t import', res.error);
         return;
       }
       if (res.done) {
@@ -147,11 +148,11 @@
       // A user-initiated cancel isn't a failure. The server-side stream stops
       // when the connection drops; batches already committed stay in the table.
       if (e instanceof DOMException && e.name === 'AbortError') {
-        toasts.info('Import cancelled', 'Batches already written stay in the table.');
+        toasts.info('Import canceled', 'Batches already written stay in the table.');
         progress = null;
         return;
       }
-      toasts.error('Import failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t import', e);
     } finally {
       importing = false;
       importAbort = null;

@@ -374,7 +374,7 @@
     margin: 12px 0 6px;
     font-size: var(--fs-s);
     text-transform: uppercase;
-    letter-spacing: 0.4px;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .mime {

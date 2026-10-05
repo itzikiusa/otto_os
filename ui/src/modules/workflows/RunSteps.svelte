@@ -340,7 +340,7 @@
         <span class="dot {runStatus(ns.status).key}" aria-hidden="true"></span>
         <span class="name">{nodeName(ns.node_id)}</span>
         <StatusBadge status={runStatus(ns.status)} variant="text" dot={false} />
-        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="This step was retried">{ns.attempts} attempts</span>{/if}
+        {#if (ns.attempts ?? 1) > 1}<span class="chip" title="This step was retried">{plural(ns.attempts ?? 1, 'attempt')}</span>{/if}
         <span class="sp-grow"></span>
         {#if ns.duration_ms != null}
           <span class="ms">{fmtMs(ns.duration_ms)}</span>
@@ -633,7 +633,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     margin-bottom: 6px;
   }
@@ -693,7 +693,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .zbig {

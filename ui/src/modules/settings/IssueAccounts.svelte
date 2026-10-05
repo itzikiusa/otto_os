@@ -87,7 +87,7 @@
   function testLabel(r: Exclude<TestResult, 'busy'>): string {
     return r.ok
       ? `Connected · ${r.projects} project${r.projects === 1 ? '' : 's'} visible`
-      : `Couldn't connect: ${r.error}`;
+      : `Couldn’t connect: ${r.error}`;
   }
 
   async function load(): Promise<void> {
@@ -142,7 +142,7 @@
       closeModal();
       toasts.success('Jira account added', a.label);
     } catch (e) {
-      toasts.error("Couldn't add the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t add the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -167,20 +167,29 @@
       closeModal();
       toasts.success('Jira account updated', updated.label);
     } catch (e) {
-      toasts.error("Couldn't save the Jira account", loadErrorText(e));
+      toasts.error("Couldn’t save the Jira account", loadErrorText(e));
     } finally {
       busy = false;
     }
   }
 
+  /** Accounts whose delete is in flight, by id — that row's button disables. */
+  let deleting = $state<Record<string, boolean>>({});
+
   async function remove(a: IssueAccount): Promise<void> {
-    if (!(await confirmer.ask(`Delete account "${a.label}"? Its token is removed from the Keychain.`, { title: 'Delete account' }))) return;
+    if (deleting[a.id]) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', confirmLabel: 'Delete account' }))) return;
+    deleting = { ...deleting, [a.id]: true };
     try {
       await api.del(`/issue/accounts/${a.id}`);
       accounts = accounts.filter((x) => x.id !== a.id);
       toasts.success('Jira account deleted', a.label);
     } catch (e) {
-      toasts.error("Couldn't delete the Jira account", loadErrorText(e));
+      toasts.error('Couldn’t delete the Jira account', loadErrorText(e));
+    } finally {
+      const next = { ...deleting };
+      delete next[a.id];
+      deleting = next;
     }
   }
 </script>
@@ -256,8 +265,15 @@
           <button class="icon-btn acct-tool" title="Edit {a.label}" aria-label="Edit {a.label}" onclick={() => openEdit(a)}>
             <Icon name="edit" size={14} />
           </button>
-          <button class="icon-btn acct-tool" title="Delete {a.label}" aria-label="Delete {a.label}" onclick={() => remove(a)}>
-            <Icon name="trash" size={14} />
+          <button
+            class="icon-btn acct-tool"
+            title={deleting[a.id] ? `Deleting ${a.label}…` : `Delete ${a.label}`}
+            aria-label={deleting[a.id] ? `Deleting ${a.label}…` : `Delete ${a.label}`}
+            aria-busy={deleting[a.id] ? 'true' : undefined}
+            disabled={deleting[a.id]}
+            onclick={() => remove(a)}
+          >
+            {#if deleting[a.id]}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="trash" size={14} />{/if}
           </button>
         </div>
       {/each}

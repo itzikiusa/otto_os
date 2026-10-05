@@ -278,6 +278,49 @@ export function storyStage(raw: string | null | undefined): StatusInfo {
 }
 
 // ---------------------------------------------------------------------------
+// Design Hall review status
+// ---------------------------------------------------------------------------
+
+const DESIGN_INFO: Record<string, Omit<StatusInfo, 'key'>> = {
+  draft: { label: 'Draft', tone: 'neutral' },
+  review: { label: 'In review', tone: 'warning' },
+  approved: { label: 'Approved', tone: 'success' },
+  shipped: { label: 'Shipped', tone: 'info' },
+  archived: { label: 'Archived', tone: 'neutral' },
+};
+
+/** A Design Hall artifact's review status (the artifact header's status menu,
+ *  cards, the graph strip, brand-kit "used in"). Unknown statuses keep their
+ *  own sentence-cased label with a neutral tone. */
+export function designStatus(raw: string | null | undefined): StatusInfo {
+  const k = (raw ?? '').trim().toLowerCase();
+  const info = DESIGN_INFO[k];
+  if (info) return { key: k, ...info };
+  return { key: k || 'unknown', label: k ? sentenceCase(k) : 'Unknown', tone: 'neutral' };
+}
+
+// ---------------------------------------------------------------------------
+// Badge tones (lib/components/Badge.svelte)
+// ---------------------------------------------------------------------------
+
+/** The `.chip` tone vocabulary `Badge` renders. `accent` marks a selection or
+ *  "yours", never a status. */
+export type BadgeTone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral' | 'accent';
+
+const BADGE_OF: Record<Tone, BadgeTone> = {
+  success: 'ok',
+  warning: 'warn',
+  danger: 'bad',
+  info: 'info',
+  neutral: 'neutral',
+};
+
+/** Semantic status tone → the Badge / `.chip` tone. */
+export function badgeTone(tone: Tone): BadgeTone {
+  return BADGE_OF[tone];
+}
+
+// ---------------------------------------------------------------------------
 // Why / when a session went dormant (review A4)
 // ---------------------------------------------------------------------------
 

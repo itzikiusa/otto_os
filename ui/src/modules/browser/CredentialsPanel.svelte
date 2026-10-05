@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Site credentials for the in-app browser: list/add/edit/delete + a
   // confirm-gated reveal. The password is NEVER in the list/edit payload —
   // `BrowserCredential` has no password field at all (mirrors
@@ -116,7 +117,7 @@
       }
       closeForm();
     } catch (e) {
-      toasts.error('Save failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t save', e);
     } finally {
       saving = false;
     }
@@ -134,7 +135,7 @@
       if (revealed?.id === c.id) revealed = null;
       toasts.success('Credential deleted', `${c.domain} · ${c.username}`);
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -149,7 +150,7 @@
       const resp = await browserApi.revealCredential(c.id);
       revealed = { id: c.id, password: resp.password };
     } catch (e) {
-      toasts.error('Reveal failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t reveal', e);
     } finally {
       revealingId = null;
     }
@@ -165,7 +166,7 @@
       await copyTextOrThrow(revealed.password);
       toasts.success('Copied', 'Password copied to clipboard.');
     } catch {
-      toasts.error('Copy failed', 'Could not write to clipboard.');
+      toasts.error('Couldn’t copy', 'Could not write to clipboard.');
     }
   }
 </script>
@@ -341,7 +342,7 @@
   .badge {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 0.1rem 0.35rem;
     border-radius: var(--radius-s);
     background: var(--accent-solid);

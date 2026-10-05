@@ -153,7 +153,7 @@
     display: inline-flex;
     color: var(--text-dim);
     opacity: 0;
-    transition: opacity 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
   .srow:hover .go,
   .srow:focus-visible .go {

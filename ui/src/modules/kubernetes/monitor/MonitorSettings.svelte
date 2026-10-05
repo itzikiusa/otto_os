@@ -27,7 +27,8 @@
   } from '../../../lib/api/types';
   import Icon from '../../../lib/components/Icon.svelte';
   import Modal from '../../../lib/components/Modal.svelte';
-  import Skeleton from '../../../lib/components/Skeleton.svelte';
+  import LoadState from '../../../lib/components/LoadState.svelte';
+  import Switch from '../../../lib/components/Switch.svelte';
   import { collectorLine, rbacMessage } from './monitor-util';
 
   interface Props {
@@ -248,15 +249,15 @@
 </script>
 
 <div class="settings" data-testid="k8s-monitor-settings">
-  {#if loading && !cfg}
-    <Skeleton rows={6} height={40} />
-  {:else if loadError && !cfg}
-    <div class="error">{loadError} <button class="btn small" onclick={() => void load()}>Retry</button></div>
-  {:else if cfg}
+  {#if !cfg}
+    <LoadState what="monitoring settings" {loading} error={loadError} empty onretry={() => void load()} rows={6} />
+  {:else}
     <section class="card block">
       <div class="row between">
+        <!-- A <label> around the switch makes its text a click target too (a
+             <button> is labelable); the switch keeps its own accessible name. -->
         <label class="toggle">
-          <input type="checkbox" bind:checked={cfg.enabled} disabled={!canEdit} data-testid="k8s-monitor-enabled" />
+          <span class="sw-slot" data-testid="k8s-monitor-enabled"><Switch checked={cfg.enabled} onchange={(v) => { if (cfg) cfg.enabled = v; }} label="Monitoring" disabled={!canEdit} /></span>
           <span class="strong">Monitoring {cfg.enabled ? 'on' : 'off'}</span>
         </label>
         <div class="row">
@@ -305,11 +306,11 @@
         </div>
       </div>
       <label class="toggle small">
-        <input type="checkbox" bind:checked={cfg.metrics_server} disabled={!canEdit} data-testid="k8s-monitor-metrics-server" />
+        <span class="sw-slot" data-testid="k8s-monitor-metrics-server"><Switch checked={cfg.metrics_server} onchange={(v) => { if (cfg) cfg.metrics_server = v; }} label="Probe metrics-server every cycle" disabled={!canEdit} /></span>
         <span>Probe metrics-server every cycle <span class="dim">(CPU + working-set memory; turn off when RBAC denies it — saves one call per namespace per cycle)</span></span>
       </label>
       <label class="toggle small">
-        <input type="checkbox" bind:checked={cfg.request_labels} disabled={!canEdit} data-testid="k8s-monitor-request-labels" />
+        <span class="sw-slot" data-testid="k8s-monitor-request-labels"><Switch checked={cfg.request_labels ?? false} onchange={(v) => { if (cfg) cfg.request_labels = v; }} label="Keep request path labels" disabled={!canEdit} /></span>
         <span>Keep request path labels <span class="dim">(per-route <code>path</code> + <code>method</code> on the request / latency counters — never on histogram buckets — so the Fleet dashboard's Requests tab can drill down to a route; multiplies request rows per pod by the number of routes)</span></span>
       </label>
     </section>
@@ -457,6 +458,14 @@
     gap: 8px;
     cursor: pointer;
   }
+  .toggle.small {
+    align-items: flex-start;
+  }
+  .sw-slot {
+    display: inline-flex;
+    flex: none;
+    padding-block-start: 1px;
+  }
   .strong {
     font-weight: 600;
   }
@@ -467,8 +476,8 @@
     font-size: var(--fs-s);
     padding: 8px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, orange 8%, var(--surface));
-    border: 1px solid color-mix(in srgb, orange 30%, var(--border));
+    background: var(--warning-soft);
+    border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
   }
   .rbac code {
     display: block;

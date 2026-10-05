@@ -343,10 +343,10 @@
   .crumb {
     display: flex;
     align-items: center;
-    gap: 3px;
+    gap: 4px;
     font-size: var(--fs-s);
     color: var(--text-dim);
-    padding: 2px 2px 10px;
+    padding: 2px 2px 12px;
     overflow-x: auto;
     white-space: nowrap;
   }
@@ -366,7 +366,7 @@
   .pick-tools {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     margin-bottom: 8px;
   }
   .filter-input {
@@ -376,7 +376,7 @@
   .hidden-toggle {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     flex-shrink: 0;
     font-size: var(--fs-s);
     color: var(--text-dim);
@@ -413,7 +413,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 7px 10px;
+    padding: 8px 12px;
     border: none;
     background: transparent;
     color: var(--text);
@@ -440,7 +440,7 @@
   .use {
     flex-shrink: 0;
     margin-inline-end: 8px;
-    padding: 3px 10px;
+    padding: 4px 12px;
     font-size: var(--fs-xs);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
@@ -454,15 +454,15 @@
   }
   .chip {
     font-size: var(--fs-xs);
-    padding: 1px 5px;
+    padding: 2px 6px;
     border-radius: var(--radius-s);
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent-text);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .pad {
-    padding: 14px;
+    padding: 16px;
     font-size: var(--fs-s);
   }
   .last-opened { font-size: var(--fs-xs); margin-bottom: 3px; }

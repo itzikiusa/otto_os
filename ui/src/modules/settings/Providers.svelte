@@ -412,7 +412,7 @@
     if (
       !(await confirmer.ask(
         `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You'd have to re-enter its command to add it back.`,
-        { title: 'Remove provider', confirmLabel: 'Remove' },
+        { title: 'Remove provider?', confirmLabel: 'Remove' },
       ))
     )
       return;
@@ -425,8 +425,10 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('providers')} subtitle="Agent CLIs Otto can spawn as sessions">
     {#snippet actions()}
+      <!-- Not .primary: a maintenance command that opens a session, not this
+           page's main job (and the header allows at most one primary). -->
       <button
-        class="btn small primary"
+        class="btn small"
         data-icon="download"
         onclick={updateAllCLIs}
         disabled={updating || loading}

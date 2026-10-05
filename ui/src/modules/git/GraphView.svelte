@@ -270,6 +270,12 @@
    *  Retry, never as "No commits found." (a later-page failure keeps the rows
    *  and just retries on the next scroll). */
   let commitsError = $state<string | null>(null);
+  /** Background / post-action refreshes that failed while history is on
+   *  screen. One miss stays quiet (the next tick usually heals it); two in a
+   *  row raise a slim "showing the last good load" bar with Retry instead of
+   *  leaving the graph silently stale. */
+  let refreshFailures = 0;
+  let refreshError = $state<string | null>(null);
 
   // ── History paging ────────────────────────────────────────────────────────
   // There is no ceiling on how far back the graph can reach. The page is big
@@ -620,6 +626,8 @@
     inflight = null;
     commitsError = null;
     refsError = null;
+    refreshFailures = 0;
+    refreshError = null;
 
     const snap = graphCache.get(id);
     if (snap) {
@@ -1027,8 +1035,12 @@
       commitsError = null;
       skipCursor = g.commits.length;
       hasMore = g.more ?? g.commits.length >= g.want;
+      refreshFailures = 0;
+      refreshError = null;
     } else if (commits.length === 0) {
       commitsError = loadErrorText(g.error);
+    } else if (++refreshFailures >= 2) {
+      refreshError = loadErrorText(g.error);
     }
     if (g.stashes) {
       if (!sameJson(stashes, g.stashes)) stashes = g.stashes;
@@ -1644,7 +1656,7 @@
    */
   async function openWorktree(w: WorktreeInfo): Promise<void> {
     if (w.prunable) {
-      toasts.error('Cannot open', 'Worktree directory is gone — prune the stale entry first');
+      toasts.error('Couldn’t open the worktree', 'Its folder is gone — prune the stale entry first');
       return;
     }
     const path = normPath(w.path);
@@ -1662,7 +1674,7 @@
     const parent = git.allRepos.find((r) => r.id === repoId);
     const wsId = workspaceId || parent?.workspace_id || ws.currentId;
     if (!wsId) {
-      toasts.error('Open worktree failed', 'No workspace available to register the worktree');
+      toasts.error('Couldn’t open worktree', 'No workspace available to register the worktree');
       return;
     }
     openWtBusy = w.path;
@@ -3357,38 +3369,27 @@
         </button>
         {#if tagsOpen}
           {#each refs.tags.slice(0, leafLimit('tags:')) as t (t.name)}
-            <div
+            <div class="ref-action-row">
+            <button
               class="ref-row tag"
               class:ref-row-busy={revealBusy === t.name}
-              role="button"
-              tabindex="0"
               title="{t.name} — click to show it on the graph, right-click for actions"
               onclick={() => selectTagRow(t)}
               oncontextmenu={(e) => tagMenu(e, t)}
-              onkeydown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') selectTagRow(t);
-              }}
             >
               <Icon name="tag" size={10} />
               <span class="mono ref-name">{t.name}</span>
-              <!-- Actions stay reachable without a right-click (trackpad/touch),
-                   since left-click now jumps to the tag instead of opening them. -->
-              <span
-                class="ref-more"
-                role="button"
-                tabindex="-1"
-                title="Tag actions"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  tagMenu(e, t);
-                }}
-                onkeydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.stopPropagation();
-                    tagMenu(e, t);
-                  }
-                }}
-              ><Icon name="more" size={13} /></span>
+            </button>
+            <!-- Actions stay reachable without a right-click (trackpad/touch),
+                 since left-click jumps to the tag instead of opening them: a
+                 real sibling button (never a control nested in the row). -->
+            <button
+              class="icon-btn ref-action ref-more"
+              title="Actions for tag {t.name}"
+              aria-label="Actions for tag {t.name}"
+              aria-haspopup="menu"
+              onclick={(e) => tagMenu(e, t)}
+            ><Icon name="more" size={13} /></button>
             </div>
           {:else}
             <div class="dim ref-empty">No tags</div>
@@ -3446,7 +3447,7 @@
               class:current={isHere}
               disabled={w.prunable || openWtBusy !== ''}
               title={w.prunable
-                ? `${w.path} · stale (directory gone)`
+                ? `${w.path} · stale (folder gone)`
                 : isHere
                   ? `Current worktree · ${w.path}`
                   : `Open worktree · ${w.path}${w.branch ? ` · ${w.branch}` : ' · detached'}${w.dirty ? ' · uncommitted changes' : ''}`}
@@ -3577,6 +3578,11 @@
     {:else if commits.length === 0}
       <div class="dim" style="padding: 18px; font-size: var(--fs-s)">No commits yet — changes you commit from the WIP row appear here.</div>
     {:else}
+      {#if refreshError}
+        <div class="graph-stale">
+          <LoadState what="the graph" error={refreshError} onretry={() => void reloadGraph()} />
+        </div>
+      {/if}
       <div class="graph-list">
         <!-- Column header — orients the three zones (which column holds refs,
              which holds the graph) so the ref gutter isn't read as part of the
@@ -4102,7 +4108,7 @@
     cursor: pointer;
     text-transform: uppercase;
     text-align: start;
-    transition: color 110ms ease-out;
+    transition: color var(--dur-fast) ease-out;
   }
   .ref-header:hover {
     color: var(--text);
@@ -4135,7 +4141,7 @@
     font-size: var(--fs-xs);
     cursor: pointer;
     text-align: start;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-folder:hover {
     background: var(--surface-2);
@@ -4195,7 +4201,7 @@
     cursor: pointer;
     text-align: start;
     overflow: hidden;
-    transition: background 100ms ease-out, color 100ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .ref-more-leaves {
     display: flex;
@@ -4228,30 +4234,19 @@
   /* Tag actions: revealed on hover/focus so the row stays clean, but always
      present for pointers that have no right-click. */
   .ref-more {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    margin-inline-start: auto;
-    padding-inline: 4px;
-    color: var(--text-dim);
     opacity: 0;
-    cursor: pointer;
-    transition: opacity 100ms ease-out, color 100ms ease-out;
+    transition: opacity var(--dur-fast) ease-out;
   }
-  .ref-row:hover .ref-more,
-  .ref-row:focus-within .ref-more,
+  .ref-action-row:hover .ref-more,
+  .ref-action-row:focus-within .ref-more,
   .ref-more:focus-visible {
     opacity: 1;
   }
-  /* "Always present for pointers with no right-click" — made true: a pointer
-     that cannot hover keeps the tag actions visible. */
+  /* A pointer that cannot hover keeps the tag actions visible. */
   @media (hover: none) {
     .ref-more {
       opacity: 1;
     }
-  }
-  .ref-more:hover {
-    color: var(--text);
   }
   /* Folder children sit just inside the tree guide of `.folder-children`. */
   .ref-row.nested {
@@ -4262,11 +4257,11 @@
   .ref-row.current {
     color: var(--accent-text);
     font-weight: 600;
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    background: var(--accent-soft);
     box-shadow: inset 2px 0 0 0 var(--accent);
   }
   .ref-row.current:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    background: var(--accent-soft);
     color: var(--accent-text);
   }
   :global([dir='rtl']) .ref-row.current {
@@ -4377,7 +4372,7 @@
     min-width: 0;
     overflow-y: auto;
     overflow-x: auto;
-    transition: flex 180ms ease-out;
+    transition: flex var(--dur-enter) ease-out;
   }
   /* When detail is open, the commit list becomes a fixed-width column and the
      detail panel flexes to fill the rest of the page (see .detail-visible). */
@@ -4398,6 +4393,13 @@
   }
   .graph-resizer:hover {
     background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  /* Repeated refresh failures: the stale bar rides above the sticky column
+     header and stays put while the history scrolls. */
+  .graph-stale {
+    position: sticky;
+    top: 0;
+    z-index: 4;
   }
   .graph-list {
     display: flex;
@@ -4478,7 +4480,7 @@
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 100ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .graph-row:hover {
     background: var(--surface-2);
@@ -4746,7 +4748,7 @@
     gap: 4px;
     overflow: hidden;
     padding-inline: 6px;
-    transition: width 180ms ease-out;
+    transition: width var(--dur-enter) ease-out;
   }
   .chip-label {
     overflow: hidden;
@@ -4823,7 +4825,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding: 5px 8px 2px;
   }
@@ -4859,7 +4861,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     padding: 1px 6px;
     border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 20%, transparent);
@@ -4965,7 +4967,7 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: width 180ms ease-out;
+    transition: width var(--dur-enter) ease-out;
     border-inline-start: 1px solid var(--border);
     background: var(--surface);
   }
@@ -4988,7 +4990,7 @@
   .detail-empty-label {
     font-size: var(--fs-xs);
     font-weight: 600;
-    letter-spacing: 0.1em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     text-transform: uppercase;
   }

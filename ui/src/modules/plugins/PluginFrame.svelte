@@ -11,7 +11,7 @@
   //
   // Load states: the UI entry is probed before the iframe mounts, so a
   // disabled/uninstalled plugin (404) or an unreachable daemon renders an
-  // inline "Couldn't load" + Retry instead of an empty/raw daemon page in the
+  // inline "Couldn’t load" + Retry instead of an empty/raw daemon page in the
   // frame; a skeleton covers the frame until it fires `load`.
   import { untrack } from 'svelte';
   import { baseUrl, getToken } from '../../lib/api/client';
@@ -36,7 +36,7 @@
 
   // 'missing' = the daemon has no UI for this slug (disabled, uninstalled or
   // UI-less) — not a failure to retry, so it gets an empty state with a way
-  // to the plugin settings instead of "Couldn't load" + Retry.
+  // to the plugin settings instead of "Couldn’t load" + Retry.
   let probe = $state<'loading' | 'ok' | 'error' | 'missing'>('loading');
   let probeError = $state<string | null>(null);
   let frameLoaded = $state(false);

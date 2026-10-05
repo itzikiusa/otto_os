@@ -167,7 +167,7 @@ test('environment secret lock: value is write-only', async ({ page }) => {
   await rows.nth(-2).locator('.var-val').fill('https://x');
   await rows.last().locator('.var-key').fill('api_token');
   await rows.nth(-2).locator('.var-val').fill('hush-hush');
-  await rows.nth(-2).getByRole('button', { name: 'Toggle secret' }).click();
+  await rows.nth(-2).getByRole('button', { name: 'Keep the value in the Keychain' }).click();
   await page.getByRole('button', { name: 'Save changes' }).click();
 
   // GET returns the key name only — never the value.

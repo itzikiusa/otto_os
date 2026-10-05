@@ -71,7 +71,8 @@
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    padding-block: 10px; padding-inline: 0 10px;
+    padding-block: 12px;
+    padding-inline: 0 12px;
     /* Opaque, but the same edge + elevation as every floating layer. */
     background: var(--surface);
     border: 1px solid var(--glass-border);
@@ -125,7 +126,7 @@
   }
   .toast-count {
     margin-inline-start: 6px;
-    padding: 0 5px;
+    padding: 0 6px;
     border-radius: 999px;
     background: var(--surface-2);
     color: var(--text-dim);

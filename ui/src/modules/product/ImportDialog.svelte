@@ -126,7 +126,7 @@
     {#if accountsLoading}
       <div class="loading">Loading accounts…</div>
     {:else if accountsError}
-      <div class="field-error" role="alert">Couldn't load your Jira / Confluence accounts. {accountsError}</div>
+      <div class="field-error" role="alert">Couldn’t load your Jira / Confluence accounts. {accountsError}</div>
       <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
     {:else if accounts.length === 0}
       <div class="no-accounts">
@@ -305,7 +305,7 @@
     font-size: var(--fs-s);
     cursor: pointer;
     color: var(--text-dim);
-    transition: border-color 110ms, color 110ms, background 110ms;
+    transition: border-color var(--dur-fast), color var(--dur-fast), background var(--dur-fast);
     user-select: none;
   }
   .kind-opt input {
@@ -314,7 +314,7 @@
   .kind-opt.active {
     border-color: var(--accent);
     color: var(--accent-text);
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
   }
   .kind-opt:hover:not(.active) {
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
@@ -328,7 +328,7 @@
     gap: 10px;
     padding: 8px 12px;
     margin-bottom: 10px;
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    background: var(--accent-soft);
     border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
     border-radius: var(--radius-s);
     font-size: var(--fs-s);

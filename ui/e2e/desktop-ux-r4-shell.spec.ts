@@ -42,7 +42,7 @@ test('panel notes retain the focused unsaved draft through desktop tablet phone 
     await expectNoHorizontalOverflow(page);
     if (width !== 1440) await page.screenshot({ path: info.outputPath(`notes-${width}.png`) });
   }
-  await expect(page.getByRole('dialog', { name: 'Activity', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Session panel', exact: true })).toHaveCount(0);
   release();
 });
 

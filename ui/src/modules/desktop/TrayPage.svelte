@@ -269,7 +269,7 @@
   <div class="body">
     {#if loadError}
       <div class="state" role="alert">
-        <p>Couldn't refresh your work: {loadError}</p>
+        <p>Couldn’t refresh your work: {loadError}</p>
         {#if loaded}<p>Showing the last loaded activity.</p>{/if}
         <button class="btn small" onclick={refreshAll}>Retry</button>
       </div>
@@ -424,7 +424,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .row {

@@ -258,7 +258,7 @@ test('a failed load shows an error with Retry, not "all caught up"', async ({ pa
   await openPage(page, 'git');
   await navBell(page).click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
-  await expect(panel.getByText("Couldn't load notifications")).toBeVisible();
+  await expect(panel.getByText("Couldn’t load notifications")).toBeVisible();
   await expect(panel.getByRole('button', { name: /Retry/ })).toBeVisible();
   await expect(panel.getByText("You're all caught up")).toHaveCount(0);
 });

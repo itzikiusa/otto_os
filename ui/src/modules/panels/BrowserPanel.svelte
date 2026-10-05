@@ -21,6 +21,8 @@
   import { nativeBrowser, nativeBrowserAvailable } from '../../lib/nativeBrowser';
   import { api, baseUrl, getToken } from '../../lib/api/client';
   import { toasts } from '../../lib/toast.svelte';
+  import { toastError } from '../../lib/toastError';
+  import { plural } from '../../lib/plural';
   import Icon from '../../lib/components/Icon.svelte';
   import type { AttachedIssue } from '../../lib/api/types';
 
@@ -437,7 +439,7 @@
   // ── Send to agent ─────────────────────────────────────────────────────────
   async function sendToAgent(): Promise<void> {
     if (!ws.activeSessionId || ws.activeSession?.kind !== 'agent') {
-      toasts.error('No agent session', 'Open an agent session to receive the feedback.');
+      toasts.error('Can’t send yet', 'Open an agent session to receive the feedback.');
       return;
     }
 
@@ -455,9 +457,9 @@
     try {
       await api.post(`/sessions/${ws.activeSessionId}/input`, { text, submit: true });
       annotations = [];
-      toasts.success('Sent to agent', `${n} comment(s)`);
-    } catch {
-      toasts.error('Failed to send', 'Could not inject message into the agent session.');
+      toasts.success('Sent to agent', plural(n, 'comment'));
+    } catch (e) {
+      toastError('Couldn’t send the comments to the agent', e);
     }
   }
 </script>
@@ -737,7 +739,7 @@
     font-size: var(--fs-s);
     cursor: pointer;
     white-space: nowrap;
-    transition: background 120ms ease-out, color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
   }
   .btab:hover {
     background: var(--surface-2);
@@ -776,7 +778,7 @@
     color: var(--text-dim);
     cursor: pointer;
     opacity: 0;
-    transition: opacity 120ms ease-out, background 120ms ease-out;
+    transition: opacity var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .btab:hover .btab-close,
   .btab:focus-within .btab-close,
@@ -895,7 +897,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
@@ -910,7 +912,7 @@
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
     color: var(--text);
     width: 100%;
   }

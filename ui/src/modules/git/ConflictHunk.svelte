@@ -361,7 +361,7 @@
     font-size: var(--fs-xs);
     padding: 3px 9px;
     cursor: pointer;
-    transition: background 100ms, color 100ms;
+    transition: background var(--dur-fast), color var(--dur-fast);
   }
   .edit-btn:hover,
   .edit-done:hover {

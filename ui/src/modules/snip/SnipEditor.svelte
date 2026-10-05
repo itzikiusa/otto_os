@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { toastError } from '../../lib/toastError';
   // Snip annotation editor — chrome-less full-screen view at `#/snip/{id}`.
   //
   // Single canvas at the image's natural pixel size, CSS-scaled to fit; all
@@ -278,7 +279,7 @@
         return true;
       } catch (e) {
         copyState = 'failed';
-        toasts.error('Copy failed', e instanceof Error ? e.message : String(e));
+        toastError('Couldn’t copy', e);
         return hash === null;
       }
     })();
@@ -684,7 +685,7 @@
       toasts.info('Snip deleted');
       await close();
     } catch (e) {
-      toasts.error('Delete failed', e instanceof Error ? e.message : String(e));
+      toastError('Couldn’t delete', e);
     }
   }
 
@@ -773,10 +774,10 @@
       {/each}
     </div>
     <div class="group history">
-      <button class="tb" data-act="undo" title="Undo (⌘Z)" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
+      <button class="tb" data-act="undo" title="Undo" aria-keyshortcuts="Meta+Z" aria-label="Undo" disabled={!undoStack.length} onclick={undo}>
         <Icon name="undo" size={13} />
       </button>
-      <button class="tb" data-act="redo" title="Redo (⇧⌘Z)" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
+      <button class="tb" data-act="redo" title="Redo" aria-keyshortcuts="Shift+Meta+Z" aria-label="Redo" disabled={!redoStack.length} onclick={redo}>
         <span class="mirror"><Icon name="undo" size={13} /></span>
       </button>
     </div>
@@ -917,7 +918,7 @@
   .tb.active {
     color: var(--text);
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    background: var(--accent-soft);
   }
   /* The icon set has no redo glyph: redo is undo, mirrored. (Not an RTL
      override: in RTL the Icon flips undo and this mirrors it back, so redo

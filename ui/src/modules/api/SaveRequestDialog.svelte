@@ -64,7 +64,7 @@
         <option value={NEW}>New collection…</option>
       </select>
       {#if target === NEW}
-        <input class="input new-col" bind:value={newCollection} placeholder="Collection name, e.g. Payments API" aria-label="New collection name" />
+        <input class="input new-col" bind:value={newCollection} placeholder="Payments API" aria-label="New collection name" />
       {/if}
       <span class="hint">Collections group requests by API or feature. Everyone in this workspace can see saved requests; stored credentials go to the macOS Keychain.</span>
     </div>

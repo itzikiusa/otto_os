@@ -396,7 +396,7 @@
     background: transparent;
     cursor: pointer;
     text-align: start;
-    transition: background 120ms ease-out, border-color 120ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
     width: 100%;
   }
   .issue-row:hover {
@@ -427,7 +427,7 @@
     flex-shrink: 0;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
   }
   .no-results {
     padding: 16px;
@@ -445,7 +445,7 @@
     border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
     border-radius: var(--radius-s);
     cursor: pointer;
-    transition: background 120ms ease-out;
+    transition: background var(--dur-fast) ease-out;
   }
   .load-more-btn:hover:not(:disabled) {
     background: color-mix(in srgb, var(--accent) 8%, transparent);

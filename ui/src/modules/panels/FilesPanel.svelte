@@ -106,7 +106,7 @@
     font-size: var(--fs-xs);
     border-radius: var(--radius-s);
     color: var(--text-dim);
-    transition: color 120ms ease-out, background 120ms ease-out;
+    transition: color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .fp-add-btn:hover:not(:disabled) {
     color: var(--text);

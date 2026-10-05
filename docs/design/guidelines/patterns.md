@@ -181,8 +181,15 @@ mixed across kinds:
 | Kind | Verbs | Notes |
 |---|---|---|
 | **Gates** (approval queues: MCP, workflow `human_approval`, Run with Otto, finding gates, browser actions) | **Approve** / **Deny…** | `ApprovalActions` |
-| **Agent proposals** (rules, memories, drafts, suggested edits) | **Accept** / **Keep** … **Reject** / **Discard** | Applying is explicit ([§2](#2-agent-authored-content)) |
+| **Agent proposals** (rules, memories, drafts, suggested edits) | **Accept** (apply a change) or **Keep** (retain a learned fact / memory) as the `.btn primary`; **Reject** as a neutral `.btn` beside it (never red, no `…` unless it asks for a reason) | Applying is explicit ([§2](#2-agent-authored-content)). Order: Reject · Accept/Keep, primary last |
 | **Join requests** (a participant asking into a room) | **Admit** / **Decline** | Neutral, not danger: declining is a normal answer, not a destructive act |
+
+**Links and PRs.** A link that lets someone else see or drive a session is
+outward: creating a **viewer link** or a **control link** (Share) confirms with
+`confirmOutward` — where (the link, valid until …), what (the session), who
+(anyone holding the link). **Opening a PR** confirms the repo, `base ← head`
+and title. A **PR comment** composer shows its own "Posts to PR #N…" line
+above Send, so the composer is the preview and Send needs no second dialog.
 
 **Two documented exceptions to "outward means confirm".** A plain `git push`
 of the *current branch* is not confirmed (it is the everyday save-to-remote; a
@@ -301,7 +308,25 @@ $effect(() => {
 
 - `group` is the module name, `keywords` holds synonyms, and `shortcut` is a
   display-only hint. Titles are sentence case. A trailing `…` means the
-  command asks for more input.
+  command asks for more input (a form, a picker, a name) — nothing else.
+- **Title grammar.** Verb first. Pages and sections are **"Go to X"** ("Go to
+  Settings", "Go to Notifications settings", "Go to Help"); Session-panel tabs
+  are **"Open X panel"**; creation is **"New X…"** ("New workspace…", "New
+  session…"); a sheet is **"Show X"** ("Show keyboard shortcuts"); a toggle is
+  **"Toggle X"**. Don't repeat the group as a prefix ("Add widget…" in the
+  Home group, not "Home: add widget…"); a prefix stays only when the group
+  doesn't say it ("Theme: Warm" in View, "Guide: Vault" in Help).
+- **One group vocabulary.** Shell commands use exactly these groups, and module
+  verbs use the module's sidebar name (Git, Workflows, Design Hall…):
+
+  | Group | Holds |
+  |---|---|
+  | **Session** | new / close / reopen / cycle sessions, the focused session's verbs, workspaces, Ask Otto, broadcast |
+  | **Pane** | splits, the side-by-side pane, layout presets, moving and detaching panes |
+  | **View** | sidebar, the Session panel and its tabs, scheme and theme, new window, Favorites |
+  | **Navigate** | Go to <module>, back / forward |
+  | **Tools** | CLI updates, snip, sign out |
+  | **Help** · **Settings** | guides and the shortcut sheet · settings sections |
 - Register **context commands** only while their context exists (the focused
   session, the open item).
 - "Go to <module>" commands come from the sidebar registry. Don't add them by
@@ -309,7 +334,11 @@ $effect(() => {
 
 **Global shortcuts** live in one place: `lib/keys.ts` (`installKeyMap`, the
 `KeyAction` union) plus the `KEYMAP` table, which is the only source for the
-`?` cheat sheet. Adding a shortcut means changing both.
+`?` cheat sheet. Adding a shortcut means changing both — and the Help guide's
+tables (`modules/help/sections/keyboard-shortcuts.md`), which
+`unit/keymapHelp.test.ts` holds to the same groups and rows. Page-scoped
+chords (⌘S in an editor, ⌘E in a Vault note…) go in its "Page shortcuts"
+group.
 
 - Use ⌘ chords for global actions. Bare letters are only for a focused widget
   (a grid, a canvas) and never while a text field or terminal has focus.

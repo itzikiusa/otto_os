@@ -142,7 +142,7 @@
     font: inherit;
     font-size: var(--fs-s);
     cursor: pointer;
-    transition: background 130ms ease-out, border-color 130ms ease-out;
+    transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out;
   }
   .vchip:hover {
     background: var(--hover);

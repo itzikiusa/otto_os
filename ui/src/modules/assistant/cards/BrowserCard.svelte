@@ -73,7 +73,7 @@
   }
 </script>
 
-<ActionCard icon="compass" kind="Browser" summary={task.title} attention={youHaveIt} testid="card-browser">
+<ActionCard icon="compass" heading="Browser" summary={task.title} attention={youHaveIt} testid="card-browser">
   {#snippet pill()}
     {#if youHaveIt && task.kind !== 'delegation'}
       <StatePill tone="warn" label="You have control" />

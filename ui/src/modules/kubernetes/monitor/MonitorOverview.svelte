@@ -80,7 +80,7 @@
       await copyTextOrThrow(text);
       toasts.success('Copied', 'RBAC message copied to the clipboard.');
     } catch {
-      toasts.error('Copy failed', text);
+      toasts.error('Couldn’t copy', text);
     }
   }
 
@@ -112,7 +112,7 @@
   {#if loading && !rows.length}
     <div class="grid"><Skeleton rows={3} height={140} /></div>
   {:else if error && !rows.length}
-    <EmptyState actionKind="secondary" icon="warning" title="Couldn't load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
+    <EmptyState actionKind="secondary" icon="warning" title="Couldn’t load the overview" body={error} actionLabel="Retry" onaction={() => void load()} />
   {:else if !rows.length}
     <EmptyState icon="helm" title="No clusters yet" body="Add a cluster in the Kubernetes console first, then enable monitoring on it here. Pod-level metrics come from your services’ own endpoints." actionLabel="Open clusters" onaction={() => router.go('kubernetes')} />
   {:else}
@@ -228,7 +228,7 @@
     flex-direction: column;
     gap: 10px;
     cursor: pointer;
-    transition: border-color 130ms ease-out, background 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out, background var(--dur-fast) ease-out;
   }
   .cluster:hover,
   .cluster:focus-visible {
@@ -302,7 +302,7 @@
   .k {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .v {

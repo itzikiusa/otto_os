@@ -452,7 +452,7 @@ export function goToEntries(mods: SidebarModule[]): GoToEntry[] {
   const taken = new Set(mods.map((m) => m.id));
   const extras = EXTRA_GOTO.filter((e) => !taken.has(e.id)).map((e): GoToEntry => ({
     id: `core.go-${e.id}`,
-    title: e.id === 'walkthroughs' ? 'Open Help' : `Go to ${e.label}`,
+    title: `Go to ${e.label}`,
     detail: e.detail,
     keywords: e.keywords,
     route: e.route,

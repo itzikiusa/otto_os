@@ -6,6 +6,7 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import { toasts } from '../../lib/toast.svelte';
+  import Icon from '../../lib/components/Icon.svelte';
   import { renderMarkdown } from '../../lib/md';
   import DiffView from '../../lib/components/DiffView.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
@@ -67,6 +68,13 @@
     } catch (e) {
       console.error('[RewriteTab] poll error', e);
     }
+  }
+
+  /** Stop waiting for the rewrite (neutral: the agent already started keeps
+   *  running, and its suggested version still lands here when it's written). */
+  function stopWaiting(): void {
+    clearPoll();
+    toasts.info('Stopped waiting for the rewrite', 'The agent already started keeps running — its suggested version appears here when it’s ready.');
   }
 
   function startPolling(): void {
@@ -147,7 +155,7 @@
         sourceVersion = fullSource;
       }
     } catch (e) {
-      if (suggestedVersion) toasts.error('Could not load version bodies', product.errMsg(e));
+      if (suggestedVersion) toasts.error('Couldn’t load version bodies', product.errMsg(e));
       else loadError = loadErrorText(e);
     } finally {
       loadingBodies = false;
@@ -164,7 +172,7 @@
       toasts.info('Rewrite triggered', 'Waiting for suggested version to appear…');
       startPolling();
     } catch (e) {
-      toasts.error('Rewrite failed', product.errMsg(e));
+      toasts.error('Couldn’t rewrite', product.errMsg(e));
     } finally {
       generating = false;
     }
@@ -195,7 +203,7 @@
       await product.publishVersion(suggestedVersion.id);
       toasts.success('Published', 'Suggested version published back to source.');
     } catch (e) {
-      toasts.error('Publish failed', product.errMsg(e));
+      toasts.error('Couldn’t publish', product.errMsg(e));
     } finally {
       publishing = false;
     }
@@ -247,6 +255,9 @@
         </button>
 
         {#if pollTimer !== null}
+          <button class="btn" onclick={stopWaiting} title="Stop waiting for the rewrite (the agent already started keeps running)">
+            <Icon name="stop" size={12} /> Stop
+          </button>
           <span class="polling-indicator">checking every 3s…</span>
         {/if}
       </div>
@@ -391,7 +402,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
     white-space: nowrap;
   }
@@ -434,7 +445,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .cn-body {
@@ -494,7 +505,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     padding: 2px 8px;
     border-radius: 999px;
   }

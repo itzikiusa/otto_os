@@ -76,7 +76,7 @@ export async function startSnip(): Promise<void> {
     if (msg.includes('already in progress')) {
       toasts.warn('A screen capture is already in progress');
     } else {
-      toasts.error('Screen capture failed', msg);
+      toasts.error('Couldn’t capture the screen', msg);
     }
   } finally {
     capturing = false;

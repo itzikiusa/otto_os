@@ -26,6 +26,7 @@
   import { renderMarkdownGfm } from '../../lib/md';
   import { formatBytes } from '../../lib/metric-format';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
   import DiffView from '../../lib/components/DiffView.svelte';
   import SkillEditor from './SkillEditor.svelte';
@@ -343,14 +344,10 @@
     {/if}
 
     {#if loadError && (tab === 'overview' || tab === 'edit')}
-      <div class="inline-error" role="alert">
-        <Icon name="warning" size={14} />
-        <div><strong>Couldn’t open the {sourceLabel(variant.source)} copy of {group.name}.</strong> <span class="dim">{loadError}</span></div>
-        <button class="btn small" onclick={() => load(group.name, variant.source)}>Retry</button>
-      </div>
+      <LoadState what="the {sourceLabel(variant.source)} copy of {group.name}" error={loadError} empty onretry={() => load(group.name, variant.source)} />
     {:else if tab === 'overview'}
       {#if loading && !body}
-        <p class="dim" role="status">Loading {group.name}…</p>
+        <LoadState what={group.name} loading empty rows={5} />
       {:else}
         <div class="overview">
           <aside class="meta card" aria-label="Skill metadata">
@@ -755,22 +752,6 @@
   .skill-md :global(ol) {
     padding-inline-start: 0;
     padding-inline-start: 22px;
-  }
-  .inline-error {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-    font-size: var(--fs-s);
-  }
-  .inline-error > :global(svg) {
-    color: var(--danger);
-  }
-  .inline-error > div {
-    flex: 1;
   }
   @container skilldetail (max-width: 760px) {
     .overview {

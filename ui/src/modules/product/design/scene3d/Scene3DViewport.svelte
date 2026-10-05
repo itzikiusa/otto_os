@@ -1203,7 +1203,7 @@
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--text-dim);
     font: 600 var(--fs-xs) / 1 var(--font-ui);
-    letter-spacing: 0.02em;
+    letter-spacing: .06em;
     text-transform: uppercase;
     cursor: pointer;
     backface-visibility: hidden;

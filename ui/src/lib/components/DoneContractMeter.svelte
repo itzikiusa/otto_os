@@ -83,8 +83,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    padding: 14px 16px;
-    margin-bottom: 14px;
+    padding: 12px 16px;
+    margin-block-end: 16px;
   }
   .ring-wrap {
     position: relative;
@@ -145,7 +145,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .dim {
@@ -194,7 +194,7 @@
   .item-top {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 8px;
     flex-wrap: wrap;
   }
   .item-label {
@@ -207,7 +207,7 @@
   .tag {
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.04em;
+    letter-spacing: .06em;
     border-radius: 999px;
     padding: 0 6px;
     line-height: 14px;

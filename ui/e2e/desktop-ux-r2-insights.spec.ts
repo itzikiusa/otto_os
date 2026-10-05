@@ -82,7 +82,7 @@ test('Insights Health keyboard navigation, recovery, dependencies and bundle', a
   await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
-  await page.getByRole('button', { name: /Agent Sessions Degraded/ }).click();
+  await page.getByRole('button', { name: /Agent sessions Degraded/ }).click();
   await expect(page.getByText('/tmp/fake-codex', { exact: true })).toBeVisible();
   const dl = page.waitForEvent('download');
   await page.getByRole('button', { name: 'Download support bundle', exact: true }).click();
@@ -91,7 +91,7 @@ test('Insights Health keyboard navigation, recovery, dependencies and bundle', a
   await expectNoHorizontalOverflow(page);
   const label = page.locator('.feature-label');
   await expect.poll(() => label.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
-  const toggle = page.getByRole('button', { name: /Agent Sessions Degraded/ });
+  const toggle = page.getByRole('button', { name: /Agent sessions Degraded/ });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   await page.screenshot({ path: '/tmp/otto-ux-screenshots/insights-r2-health-phone.png' });
 });
@@ -129,7 +129,7 @@ test('Usage budget failed save preserves draft and delayed save preserves newer 
   const days = page.getByLabel('Compare spend over the last');
   await days.fill('7');
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
-  await expect(page.getByText('Could not save budgets', { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t save budgets', { exact: true })).toBeVisible();
   await expect(days).toHaveValue('7');
   fail = false;
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
@@ -220,7 +220,7 @@ test('History real isolated transcript loads and synthetic import resumes after 
   await page.reload();
   await page.getByTestId('history-row').filter({ hasText: 'Synthetic import review' }).click();
   await page.getByRole('button', { name: 'Resume in Otto', exact: true }).click();
-  await expect(page.getByText('Could not resume', { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t resume', { exact: true })).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Resume in Otto', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${session.id}$`));

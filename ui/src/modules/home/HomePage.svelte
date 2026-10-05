@@ -150,15 +150,15 @@
   $effect(() => {
     const cmds = home.views.map((v, i) => ({
       id: `home.view-${v.id}`,
-      title: `Home: space ${spaceNumber(i)} · ${v.name}`,
+      title: `Go to space ${spaceNumber(i)} · ${v.name}`,
       group: 'Home',
       keywords: `home desktop space view slide ${spaceNumber(i)} ${i + 1}`,
       run: () => home.goTo(i),
     }));
     const unreg = registry.register('home', [
       ...cmds,
-      { id: 'home.add-widget', title: 'Home: add widget…', group: 'Home', keywords: 'home desktop widget box add pin', run: () => (picking = true) },
-      { id: 'home.rotate', title: home.autoRotate ? 'Home: stop cycling spaces' : 'Home: cycle spaces every 30 s', group: 'Home', keywords: 'home dashboard slide auto rotate 30 seconds spaces', run: () => home.setAutoRotate(!home.autoRotate) },
+      { id: 'home.add-widget', title: 'Add widget…', group: 'Home', keywords: 'home desktop widget box add pin', run: () => (picking = true) },
+      { id: 'home.rotate', title: home.autoRotate ? 'Stop cycling spaces' : 'Cycle spaces every 30 s', group: 'Home', keywords: 'home dashboard slide auto rotate 30 seconds spaces', run: () => home.setAutoRotate(!home.autoRotate) },
     ]);
     return unreg;
   });

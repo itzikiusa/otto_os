@@ -105,7 +105,7 @@
       toasts.success(editing ? 'Agent updated' : 'Agent hired');
       onclose();
     } catch (e) {
-      toasts.error(editing ? "Couldn't save the agent" : "Couldn't hire the agent", e instanceof Error ? e.message : String(e));
+      toasts.error(editing ? "Couldn’t save the agent" : "Couldn’t hire the agent", e instanceof Error ? e.message : String(e));
     } finally {
       busy = false;
     }

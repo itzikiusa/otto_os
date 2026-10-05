@@ -3,6 +3,7 @@
 // provider/model labels, the thread → Spaces/Recent grouping, the card mapping
 // (thread turns + tasks → chat cards) and the chat timeline, the needs-you
 // reducer with its stale-frame guard, task grouping, and the routing rows.
+import type { BadgeTone } from '../../lib/status';
 import type {
   AssistantMemoryChip,
   AssistantRouteKind,
@@ -276,7 +277,8 @@ function sortNeeds(items: AssistantTask[]): AssistantTask[] {
 
 // ── tasks ────────────────────────────────────────────────────────────────────
 
-export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
+/** Badge tones the Assistant uses (lib/status `BadgeTone`, minus the accent). */
+export type Tone = Exclude<BadgeTone, 'accent'>;
 
 export const TASK_STATE: Record<AssistantTaskState, { label: string; tone: Tone }> = {
   needs_you: { label: 'Needs you', tone: 'warn' },

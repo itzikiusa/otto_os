@@ -170,7 +170,7 @@ export function registerLazyUiCommands(
       try {
         await ensure();
       } catch {
-        throw new UiCommandError('failed', `Couldn't load the ${module} controls. Check the connection and retry.`);
+        throw new UiCommandError('failed', `Couldn’t load the ${module} controls. Check the connection and retry.`);
       }
       const real = handlers.get(name);
       if (!real || real.handler === stub) {

@@ -118,9 +118,9 @@
     try {
       const photo = await processWallpaper(file);
       if (ui.setAmbientPhoto(photo)) toasts.success('Wallpaper set', 'Stored on this device only.');
-      else toasts.error('Could not store the photo', 'This browser refused the storage — try a smaller image.');
+      else toasts.error('Couldn’t store the photo', 'This browser refused the storage — try a smaller image.');
     } catch (err) {
-      toasts.error('Could not use that image', err instanceof Error ? err.message : String(err));
+      toasts.error('Couldn’t use that image', err instanceof Error ? err.message : String(err));
     } finally {
       photoBusy = false;
     }
@@ -526,7 +526,7 @@
     background: var(--surface);
     padding: 10px;
     cursor: pointer;
-    transition: border-color 130ms ease-out;
+    transition: border-color var(--dur-fast) ease-out;
   }
   .theme-card:hover:not(.selected) {
     border-color: var(--border-strong);
@@ -755,7 +755,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   .sidebar-group-label .grow {

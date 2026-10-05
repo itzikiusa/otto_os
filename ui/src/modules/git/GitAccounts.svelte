@@ -44,7 +44,7 @@
   let formTest: GitAccountTestResp | 'busy' | null = $state(null);
 
   function testLabel(r: GitAccountTestResp): string {
-    if (!r.ok) return `Couldn't connect: ${r.error ?? 'the provider refused the token'}`;
+    if (!r.ok) return `Couldn’t connect: ${r.error ?? 'the provider refused the token'}`;
     const scopes = r.scopes?.length ? ` · scopes: ${r.scopes.join(', ')}` : '';
     return `Connected as ${r.login ?? 'an unknown user'}${scopes}`;
   }
@@ -200,7 +200,7 @@
       closeModal();
       toasts.success('Git account added', a.label);
     } catch (e) {
-      toasts.error("Couldn't add the Git account", loadErrorText(e));
+      toasts.error("Couldn’t add the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -226,7 +226,7 @@
       closeModal();
       toasts.success('Git account updated', updated.label);
     } catch (e) {
-      toasts.error("Couldn't save the Git account", loadErrorText(e));
+      toasts.error("Couldn’t save the Git account", loadErrorText(e));
     } finally {
       busy = false;
     }
@@ -239,7 +239,7 @@
       accounts = accounts.filter((x) => x.id !== a.id);
       toasts.success('Git account deleted', a.label);
     } catch (e) {
-      toasts.error("Couldn't delete the Git account", loadErrorText(e));
+      toasts.error("Couldn’t delete the Git account", loadErrorText(e));
     }
   }
 </script>

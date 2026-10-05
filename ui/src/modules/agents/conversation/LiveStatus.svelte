@@ -22,8 +22,13 @@
     since?: string | null;
     /** Switch this pane to the terminal (null in read-only views). */
     onterminal?: (() => void) | null;
+    /** The events socket is down: "working" is only the last known state, so
+     *  the line says "Reconnecting…" — no spinner, no elapsed clock. */
+    stale?: boolean;
+    /** Tooltip for the stale line (lib/status `sessionState(...).hint`). */
+    staleHint?: string;
   }
-  let { mode, agentName, pending, writing = false, since = null, onterminal = null }: Props = $props();
+  let { mode, agentName, pending, writing = false, since = null, onterminal = null, stale = false, staleHint }: Props = $props();
 
   const line = $derived(pending ? toolLine(pending) : null);
   const doing = $derived(
@@ -41,7 +46,13 @@
   const questions = $derived(pending?.tool === 'ask' ? askQuestions(pending.input) : []);
 </script>
 
-{#if mode === 'working'}
+{#if mode === 'working' && stale}
+  <div class="live-line stale" data-live-status="stale" role="status" title={staleHint}>
+    <Icon name="refresh" size={12} />
+    <span class="who">Reconnecting…</span>
+    <span class="doing"><span class="sep" aria-hidden="true">·</span> {agentName} was working when live updates paused</span>
+  </div>
+{:else if mode === 'working'}
   <div class="live-line" data-live-status="working" role="status">
     <span class="spin" aria-hidden="true"></span>
     <span class="who">{agentName} is working</span>

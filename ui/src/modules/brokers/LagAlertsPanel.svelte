@@ -96,12 +96,10 @@
     Breach status is evaluated each time metrics are refreshed and shown here.
   </p>
 
-  {#if loading}
-    <p class="muted pad">Loading lag alerts…</p>
-  {:else if loadError}
-    <LoadState what="lag alerts" variant="compact" error={loadError} empty onretry={loadAlerts} />
-  {:else}
-    {#if alerts.length > 0}
+  <!-- First load: skeleton; failed load: inline error (or a stale bar over the
+       last good list); a reload after add/delete keeps the rows on screen. -->
+  <LoadState what="lag alerts" variant="compact" {loading} error={loadError} empty={alerts.length === 0} onretry={loadAlerts}>
+    {#snippet emptyView()}<p class="muted pad">No lag alerts yet.</p>{/snippet}
       <table>
         <thead>
           <tr>
@@ -137,14 +135,13 @@
           {/each}
         </tbody>
       </table>
-    {:else}
-      <p class="muted pad">No alerts configured.</p>
-    {/if}
+  </LoadState>
 
+  {#if alerts.length > 0 || (!loading && !loadError)}
     <h5 class="create-head">Add alert</h5>
     <div class="create-row">
-      <input type="text" bind:value={newTopic} placeholder="topic" class="field" aria-label="Topic" />
-      <input type="text" bind:value={newGroup} placeholder="consumer group" class="field wide" aria-label="Consumer group" />
+      <input type="text" bind:value={newTopic} placeholder="orders.events" class="field" aria-label="Topic" />
+      <input type="text" bind:value={newGroup} placeholder="billing-service" class="field wide" aria-label="Consumer group" />
       <label class="thresh-label">
         Threshold
         <input type="number" bind:value={newThreshold} min="1" class="narrow" />
@@ -171,7 +168,7 @@
     margin: 0 0 6px;
     font-size: var(--fs-xs);
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: .06em;
     color: var(--text-dim);
   }
   h5.create-head {

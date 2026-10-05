@@ -96,14 +96,14 @@
     {#if !inline && title}
       <header class="drawer-head">
         <h2>{title}</h2>
-        <button class="icon-btn" onclick={close} aria-label="Close {title.toLowerCase()}" title="Close (Esc)">
+        <button class="icon-btn" onclick={close} aria-label="Close {title}" title="Close {title}" aria-keyshortcuts="Escape">
           <Icon name="x" size={14} />
         </button>
       </header>
       <div class="drawer-body">{@render children()}</div>
     {:else}
       {#if !inline}
-        <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close">
+        <button class="icon-btn drawer-close" onclick={close} aria-label="Close {label}" title="Close {label}" aria-keyshortcuts="Escape">
           <Icon name="x" size={14} />
         </button>
       {/if}
@@ -118,7 +118,7 @@
     inset: 0;
     background: var(--scrim);
     z-index: var(--z-drawer);
-    animation: drawer-fade 140ms ease-out;
+    animation: otto-fade-in var(--dur-fast) var(--ease-out);
   }
   .drawer {
     position: fixed;
@@ -177,42 +177,20 @@
   .drawer.left {
     inset-inline-start: 0;
     border-inline-end: 1px solid var(--border);
-    animation: drawer-in-left 160ms ease-out;
+    --slide-from: -100%;
+    animation: otto-slide-in var(--dur-enter) var(--ease-out);
   }
   .drawer.right {
     inset-inline-end: 0;
     border-inline-start: 1px solid var(--border);
-    animation: drawer-in-right 160ms ease-out;
+    --slide-from: 100%;
+    animation: otto-slide-in var(--dur-enter) var(--ease-out);
   }
   :global([dir='rtl']) .drawer.left {
-    animation-name: drawer-in-right;
+    --slide-from: 100%;
   }
   :global([dir='rtl']) .drawer.right {
-    animation-name: drawer-in-left;
-  }
-  @keyframes drawer-fade {
-    from {
-      opacity: 0;
-    }
-    to {
-      opacity: 1;
-    }
-  }
-  @keyframes drawer-in-left {
-    from {
-      transform: translateX(-100%);
-    }
-    to {
-      transform: translateX(0);
-    }
-  }
-  @keyframes drawer-in-right {
-    from {
-      transform: translateX(100%);
-    }
-    to {
-      transform: translateX(0);
-    }
+    --slide-from: -100%;
   }
   @media (prefers-reduced-motion: reduce) {
     .drawer-backdrop,
