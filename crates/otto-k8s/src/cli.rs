@@ -453,6 +453,43 @@ impl Kubectl {
         }
     }
 
+    /// Run a step whose NON-ZERO exit is an expected outcome (e.g. `rollout
+    /// status` that is not complete yet), returning the raw output. Auth
+    /// failures are still errors, never "not complete" (S6-16): a stale cached
+    /// EKS token gets the same one re-auth retry as [`Self::run_timeout`], and
+    /// a credentials rejection or `Forbidden` that persists is classified.
+    pub async fn run_tolerant<I, S>(&self, args: I, timeout: Duration) -> Result<CliOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        fn auth_failure(program: &str, out: &CliOutput) -> Option<Error> {
+            if out.status == 0 {
+                return None;
+            }
+            let e = classify_failure(program, &out.stderr);
+            (is_credentials_rejected(&e) || out.stderr.to_ascii_lowercase().contains("forbidden"))
+                .then_some(e)
+        }
+        let args: Vec<String> = args.into_iter().map(Into::into).collect();
+        let argv = self.argv(args.iter().cloned());
+        let out = run_raw(&self.program, &argv, &self.env, timeout, None).await?;
+        match auth_failure(&self.program, &out) {
+            None => Ok(out),
+            Some(e) if should_reauth(&e, self.reauth.is_some()) => {
+                tracing::info!("k8s: cached exec token rejected — dropping it and retrying once");
+                let fresh = (self.reauth.as_ref().expect("checked").0)().await?;
+                let argv = fresh.argv(args);
+                let out = run_raw(&fresh.program, &argv, &fresh.env, timeout, None).await?;
+                match auth_failure(&fresh.program, &out) {
+                    None => Ok(out),
+                    Some(e) => Err(e),
+                }
+            }
+            Some(e) => Err(e),
+        }
+    }
+
     /// [`Self::run_timeout`] with stdout capped at `cap` bytes (see
     /// [`run_raw_capped`]); same re-auth retry and failure classification.
     pub async fn run_timeout_capped<I, S>(
@@ -517,6 +554,52 @@ pub fn parse_json(stdout: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sh(script: &str) -> Kubectl {
+        Kubectl {
+            program: "sh".into(),
+            base: vec!["-c".into(), script.into()],
+            base_stream: vec![],
+            env: vec![],
+            reauth: None,
+        }
+    }
+
+    /// S6-16: a tolerant step (rollout status) reports "not complete" for an
+    /// ordinary non-zero exit, but a credentials rejection or Forbidden is an
+    /// error — and a stale cached token gets one re-auth retry.
+    #[tokio::test]
+    async fn tolerant_run_surfaces_auth_failures_and_reauths_once() {
+        let pending = sh("echo 'Waiting for rollout'; exit 1")
+            .run_tolerant(["x"], Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(pending.status, 1);
+
+        let e = sh("echo 'error: You must be logged in to the server (Unauthorized)' >&2; exit 1")
+            .run_tolerant(["x"], Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(is_credentials_rejected(&e), "{e}");
+
+        let e = sh("echo 'Error from server (Forbidden): nope' >&2; exit 1")
+            .run_tolerant(["x"], Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, Error::Forbidden(_)), "{e}");
+
+        let stale =
+            sh("echo 'error: You must be logged in to the server (Unauthorized)' >&2; exit 1")
+                .with_reauth(Reauth(std::sync::Arc::new(|| {
+                    Box::pin(async { Ok(sh("echo 'rollout complete'")) })
+                })));
+        let out = stale
+            .run_tolerant(["x"], Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.contains("rollout complete"));
+    }
 
     #[tokio::test]
     async fn run_raw_capped_kills_an_endless_producer_at_the_cap() {
