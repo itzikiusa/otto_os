@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedVaultDir } from './seed';
-import { openPage, expectNoHorizontalOverflow } from './helpers';
+import { openPage, expectNoHorizontalOverflow, snipAnnotatedPng } from './helpers';
 
 test.use({ serviceWorkers: 'block', viewport: { width: 1280, height: 900 } });
 let workspaceId = '', vaultId = 0;
@@ -110,7 +110,7 @@ test('Snip creates edits selects moves and removes annotations using only the ke
   const id = (await r.json()).id; await ctx.dispose();
   const copies: string[] = [];
   await page.context().route(`**/snips/${id}/annotated`, route => {
-    copies.push(route.request().postDataJSON().data_b64); return route.fulfill({ json: { copied: true } });
+    copies.push(snipAnnotatedPng(route.request())); return route.fulfill({ json: { copied: true } });
   });
   await page.goto(`/#/snip/${id}`);
   const canvas = page.locator('.snip-canvas'); await expect(canvas).toBeVisible();

@@ -5107,9 +5107,18 @@ impl SessionManager {
     }
 
     /// Kill `ids`' live PTYs and mark them exited (see [`Self::shutdown_all`]).
+    ///
+    /// Each session is retired under its resume lock, like every other
+    /// lifecycle op: the status task writes only under that lock and only
+    /// while `live` still maps its handle, so taking it here orders a tick
+    /// that already passed that check BEFORE our `Exited`. Without it, a
+    /// tick's `Working`/`Idle` could land after `Exited` and the next boot
+    /// counted the killed (engine) session as a suspended live one.
     async fn shutdown_ids(&self, ids: Vec<Id>) -> usize {
         let count = ids.len();
         for id in ids {
+            let lock = self.resume_lock(&id);
+            let _guard = lock.lock().await;
             self.networks.clear(&id);
             if let Some((_, handle)) = self.live.remove(&id) {
                 let _ = handle.kill();
@@ -6434,6 +6443,53 @@ mod tests {
         // A (bogus) cyclic table must not hang.
         let cyclic = vec![(2, 1, 5), (1, 2, 7)];
         assert_eq!(descendant_cpu_ms(1, &cyclic), 12);
+    }
+
+    /// A status-task tick that passed its `maps_handle` check before the
+    /// shutdown removed the handle must not overwrite the shutdown's `Exited`
+    /// (the macOS-only `persist_restart` failure: a killed engine session
+    /// came back `suspended` on the next boot).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_waits_for_an_in_flight_status_write() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let session = manager
+            .create(
+                &workspace,
+                &user,
+                CreateSessionReq {
+                    kind: SessionKind::Agent,
+                    provider: Some("shell".into()),
+                    title: Some("Shutdown race".into()),
+                    cwd: Some("/tmp".into()),
+                    connection_id: None,
+                    model: None,
+                    meta: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let id = session.id.clone();
+        // Stand in for the tick: hold the session lock as it does across its
+        // check-then-write.
+        let lock = manager.resume_lock(&id);
+        let guard = lock.lock().await;
+        let shutdown = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.shutdown_all().await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must wait for the in-flight status write"
+        );
+        repo.update_status(&id, SessionStatus::Working)
+            .await
+            .unwrap();
+        drop(guard);
+        assert_eq!(shutdown.await.unwrap(), 1);
+        assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
+        assert_eq!(manager.live_count(), 0);
     }
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {

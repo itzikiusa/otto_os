@@ -7,13 +7,38 @@
 // warm second call is fast. Data-correctness is covered by the crate's
 // `tests/e2e.rs` against the real binary; here we prove the daemon wiring.
 //
-// CI-safe: if no clickhouse binary is installed on the host (engine never
-// becomes available), the data assertions skip rather than fail.
+// CI-safe: if no clickhouse binary is installed on the host, the suite skips
+// up front rather than timing out on an engine that can never come up. CI
+// installs the pinned binary, so there it runs.
 
 import { test, expect, type APIRequestContext } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { apiCtx } from './seed';
 
 const V1 = '/api/v1';
+
+/** Whether the daemon can find a `clickhouse` binary — the same lookup as
+ *  `ClickHouse::locate` (crates/otto-usage/src/clickhouse.rs): PATH, then the
+ *  well-known install locations. The test daemon shares this host's PATH and
+ *  HOME (ui/e2e/global-setup.ts). */
+function hasClickhouseBinary(): boolean {
+  try {
+    if (execFileSync('which', ['clickhouse'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()) return true;
+  } catch {
+    // not on PATH — fall through to the well-known locations
+  }
+  const home = homedir();
+  return [
+    '/usr/local/bin/clickhouse',
+    '/opt/homebrew/bin/clickhouse',
+    join(home, 'clickhouse'),
+    join(home, '.local/bin/clickhouse'),
+    join(home, 'Library/Application Support/Otto/bin/clickhouse'),
+  ].some((p) => existsSync(p));
+}
 
 async function waitAvailable(ctx: APIRequestContext, base: string, ms = 45_000) {
   const deadline = Date.now() + ms;
@@ -31,16 +56,17 @@ async function waitAvailable(ctx: APIRequestContext, base: string, ms = 45_000) 
 test.describe('usage (persistent clickhouse server)', () => {
   test.beforeEach(({}, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop-browser', 'desktop-only suite');
+    test.skip(!hasClickhouseBinary(), 'no clickhouse binary on this host — usage engine stays disabled');
   });
 
   test('status available + all query paths answer + warm call is fast', async () => {
+    // The engine's cold start (server boot + schema) shares the budget with
+    // the wait below; leave room for the queries after it.
+    test.setTimeout(90_000);
     const { ctx, base } = await apiCtx();
     const status = await waitAvailable(ctx, base);
-    if (!status) {
-      await ctx.dispose();
-      test.skip(true, 'no clickhouse binary on this host — usage engine stays disabled');
-      return;
-    }
+    // With a binary present the engine MUST come up — never a silent skip.
+    expect(status, 'usage engine never became available').not.toBeNull();
     // The persistent server is up and the schema is live.
     expect(status.available).toBeTruthy();
     expect(String(status.version || '')).toContain('ClickHouse');
@@ -110,8 +136,9 @@ test.describe('usage (persistent clickhouse server)', () => {
   });
 
   test('Usage page renders against the live daemon', async ({ page }) => {
+    test.setTimeout(90_000);
     const { ctx, base } = await apiCtx();
-    await waitAvailable(ctx, base, 20_000);
+    expect(await waitAvailable(ctx, base), 'usage engine never became available').not.toBeNull();
     await ctx.dispose();
     await page.goto('/#/usage');
     // The page mounts + shows its header regardless of how much data exists.

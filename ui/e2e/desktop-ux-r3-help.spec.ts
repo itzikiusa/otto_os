@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import AxeBuilder from '@axe-core/playwright';
-import { expectNoHorizontalOverflow } from './helpers';
+import { expectNoHorizontalOverflow, tourChapter, tourVideoPath } from './helpers';
 
 test.use({ serviceWorkers: 'block' });
 test.setTimeout(60_000);
@@ -79,7 +79,10 @@ test('coach failed skill discovery has inline retry and skill installation recov
 });
 
 async function realMedia(page: Page) {
-  const bytes = readFileSync(process.env.OTTO_E2E_TOUR_VIDEO!);
+  // Playback needs a real MP4 (CI generates a synthetic one); like the r1/r2
+  // help specs, skip — not crash in readFileSync — when none is provided.
+  test.skip(!tourVideoPath, 'Set OTTO_E2E_TOUR_VIDEO to test actual playback');
+  const bytes = readFileSync(tourVideoPath!);
   await page.route('**/walkthroughs/resolve**', (r) => r.fulfill({ json: { url: `${new URL(page.url()).origin}/__r3tour.mp4` } }));
   await page.route(/otto-tour[^/]*poster\.jpg/, (r) => r.abort());
   await page.route('**/__r3tour.mp4', (r) => {
@@ -198,12 +201,13 @@ test('queued chapter requests use the latest selection and survive fullscreen re
   });
   await page.goto('/#/walkthroughs');
   await expect(page.getByRole('status', { name: 'Loading the tour' })).toBeVisible();
-  await page.getByRole('button', { name: '1:30 Git, reviews and proof' }).click();
-  await page.getByRole('button', { name: '2:37 Insights and Usage' }).click();
+  const insights = tourChapter('Insights and Usage');
+  await page.getByRole('button', { name: tourChapter('Git, reviews and proof').label }).click();
+  await page.getByRole('button', { name: insights.label }).click();
   release();
   const video = page.getByTestId('tour-film-video');
-  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => !el.seeking && el.currentTime > 157 && !el.paused)).toBe(true);
-  await expect(page.getByRole('button', { name: '2:37 Insights and Usage' })).toHaveAttribute('aria-current', 'step');
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement, t) => !el.seeking && el.currentTime > t && !el.paused, insights.start)).toBe(true);
+  await expect(page.getByRole('button', { name: insights.label })).toHaveAttribute('aria-current', 'step');
   if (browserName === 'chromium') {
     await page.getByRole('button', { name: 'CC on', exact: true }).evaluate((button) => {
       button.addEventListener('click', () => { void document.querySelector('video')!.requestFullscreen(); }, { once: true });

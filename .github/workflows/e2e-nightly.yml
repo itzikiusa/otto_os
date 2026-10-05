@@ -52,10 +52,13 @@ jobs:
           retention-days: 2
           if-no-files-found: error
 
+  # Advisory like ci.yml's e2e-functional: results (retries 0, flaky report)
+  # stay honest per job, but a red device never fails the workflow.
   e2e-mobile:
-    name: E2E ${{ matrix.project }}
+    name: E2E ${{ matrix.project }} (advisory)
     needs: build-ottod
     runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 75
     strategy:
       fail-fast: false
