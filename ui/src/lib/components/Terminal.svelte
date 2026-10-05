@@ -238,6 +238,7 @@
   import { copyText } from '../clipboard';
   import { snipApi } from '../snip';
   import { toasts } from '../toast.svelte';
+  import { noteTerminalKey, OPTION_META_HINT_KEY } from '../optionMetaHint';
   import { registerSelectAll } from '../selectall';
   import TermKeysBar from './TermKeysBar.svelte';
   import Icon from './Icon.svelte';
@@ -1869,7 +1870,37 @@
   // (ESC+CR) instead — the same sequence Option/Meta+Enter produces (with
   // macOptionIsMeta on, the default), which these TUIs treat as a newline.
   // Plain Enter is left untouched, so it still submits.
+  // One-time pointer for non-US layouts: ⌥ is Meta by default, so ⌥L (@ on
+  // a German Mac) types nothing. The first such chord says so and offers the
+  // switch (lib/optionMetaHint.ts). Never changes what the key does.
+  const optionMetaHintDeps = {
+    optionAsMeta: () => ui.termOptionAsMeta,
+    shown: () => {
+      try {
+        return localStorage.getItem(OPTION_META_HINT_KEY) === '1';
+      } catch {
+        return true; // no storage → don't nag on every launch
+      }
+    },
+    markShown: () => {
+      try {
+        localStorage.setItem(OPTION_META_HINT_KEY, '1');
+      } catch {
+        /* private mode */
+      }
+    },
+    show: (ch: string) =>
+      toasts.push(
+        'info',
+        'Option is set to act as Meta',
+        `⌥ sends Meta in terminals, so “${ch}” wasn’t typed. Turn it off to type your keyboard layout’s ⌥ characters (Settings → Appearance).`,
+        12000,
+        { action: { label: 'Turn off Option-as-Meta', run: () => ui.setTermOptionAsMeta(false) } },
+      ),
+  };
+
   function termKeyHandler(e: KeyboardEvent): boolean {
+    if (!readOnly) noteTerminalKey(e, optionMetaHintDeps);
     if (
       e.type === 'keydown' &&
       e.key === 'Enter' &&
