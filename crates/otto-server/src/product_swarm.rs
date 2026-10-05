@@ -17,6 +17,7 @@
 //! The route is registered in `orchestrator_routes()` (otto-server) because it
 //! needs the product repo, the swarm repo, and the orchestrator together.
 
+use otto_core::text::clip_chars;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -561,7 +562,7 @@ async fn build_discovery_brief(
         let body = v.body_md.trim();
         if !body.is_empty() {
             context.push_str("### Analysis (latest)\n");
-            context.push_str(&truncate_for_brief(body, 1200));
+            context.push_str(&clip_chars(body, 1200));
             context.push_str("\n\n");
         }
     }
@@ -574,7 +575,7 @@ async fn build_discovery_brief(
         if !notes.is_empty() {
             context.push_str("### Notes\n");
             for n in notes {
-                context.push_str(&format!("- {}\n", truncate_for_brief(n.body.trim(), 200)));
+                context.push_str(&format!("- {}\n", clip_chars(n.body.trim(), 200)));
             }
             context.push('\n');
         }
@@ -649,14 +650,6 @@ fn render_attachments_section(data_dir: &std::path::Path, atts: &[ProductAttachm
 
 /// Truncate `text` to at most `max` chars, appending an ellipsis when cut. Keeps
 /// the brief bounded so a sprawling analysis/note doesn't blow the prompt budget.
-fn truncate_for_brief(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let cut: String = text.chars().take(max).collect();
-    format!("{cut}…")
-}
-
 /// The fixed fallback discovery tasks (§6.2) — used when the discovery planner
 /// returns nothing, so a run is never empty.
 fn fallback_discovery_tasks() -> Vec<ParsedTask> {

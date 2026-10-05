@@ -831,14 +831,7 @@ fn render_feed(header: &str, lines: &[String]) -> String {
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values.  Does NOT append
 /// `…` — the caller adds a continuation note instead.
-fn truncate_to_char_boundary(s: &str, max_chars: usize) -> &str {
-    for (char_count, (byte_idx, _)) in s.char_indices().enumerate() {
-        if char_count == max_chars {
-            return &s[..byte_idx];
-        }
-    }
-    s
-}
+use otto_core::text::prefix_chars as truncate_to_char_boundary;
 
 /// Extract the agent's explicit reply blocks marked with ⟦otto-send⟧ … ⟦/otto-send⟧.
 /// Empty blocks are skipped; unterminated markers are ignored.

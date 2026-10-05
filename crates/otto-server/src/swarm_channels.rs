@@ -261,11 +261,4 @@ impl SwarmTrigger for SwarmTriggerImpl {
     }
 }
 
-fn clip(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
-    }
-}
+use otto_core::text::clip_chars as clip;

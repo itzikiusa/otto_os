@@ -5,6 +5,7 @@
 //! output, and persist the run. Routing of the result (handoffs / reviews /
 //! subtasks) is the Coordinator's job (`swarm_runtime`).
 
+use otto_core::text::clip_chars;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,12 +26,8 @@ use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_
 use crate::state::ServerCtx;
 use serde::Serialize;
 
-/// run_id → cancel flag. Mirrors `product_run::CancelRegistry`.
-pub type CancelRegistry = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
-
-pub fn new_cancel_registry() -> CancelRegistry {
-    Arc::new(Mutex::new(HashMap::new()))
-}
+/// run_id → cancel flag (the shared `otto_core::cancel` registry).
+pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
 
 pub fn register_cancel(reg: &CancelRegistry, run_id: &str) -> Arc<AtomicBool> {
     let flag = Arc::new(AtomicBool::new(false));
@@ -385,7 +382,7 @@ async fn run_turn_inner(
         .rev()
         .map(|m| {
             let who = m.author_agent_id.clone().unwrap_or_else(|| "user".into());
-            format!("[{}] {}: {}", m.kind, who, truncate(&m.body, 200))
+            format!("[{}] {}: {}", m.kind, who, clip_chars(&m.body, 200))
         })
         .collect();
 
@@ -978,15 +975,6 @@ pub async fn emit_run(ctx: &ServerCtx, run_id: &str) {
             swarm_id: run.swarm_id.clone(),
             run: serde_json::to_value(&run).unwrap_or_default(),
         });
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(n).collect();
-        format!("{t}…")
     }
 }
 

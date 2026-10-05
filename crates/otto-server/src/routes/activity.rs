@@ -588,16 +588,7 @@ pub(crate) const TRAIL_DETAIL_CAP: usize = 4 * 1024;
 const TRAIL_STR_KEEP: usize = 1024;
 
 /// `s` cut to at most `max` BYTES on a char boundary.
-fn head_bytes(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
+use otto_core::text::clip_bytes_on_char_boundary as head_bytes;
 
 fn clip_strings(v: &mut Value) {
     match v {
@@ -643,13 +634,7 @@ pub(crate) fn cap_trail_detail(detail: Option<Value>) -> Option<Value> {
 
 /// Truncate `s` to at most `max` chars (char-boundary safe), appending `…`.
 fn clip(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
+    otto_core::text::clip_chars(s.trim(), max)
 }
 
 /// Last path segment of `p` (for terser file summaries).

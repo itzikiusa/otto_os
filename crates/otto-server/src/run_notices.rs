@@ -291,12 +291,7 @@ async fn on_goal_loop(ctx: &ServerCtx, loop_id: &str, status: &str) {
 /// First `max` chars of a (possibly long, multi-line) error, on one line.
 fn clip(s: &str, max: usize) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one.chars().count() <= max {
-        return one;
-    }
-    let mut out: String = one.chars().take(max).collect();
-    out.push('…');
-    out
+    otto_core::text::clip_chars(&one, max)
 }
 
 #[cfg(test)]
