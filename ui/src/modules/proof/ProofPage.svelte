@@ -258,6 +258,9 @@
 
   $effect(() => () => untrack(() => {
     for (const url of Object.values(mediaUrls)) URL.revokeObjectURL(url);
+    // A fetch still in flight lands AFTER this: an empty wanted-set makes it
+    // revoke its URL instead of parking a ≤25 MiB blob on a dead instance.
+    wantedMedia = new Set();
   }));
 
   // Media is fetched LAZILY (backlog B6 / SE-16): a screenshot when its
