@@ -399,7 +399,7 @@
 
   async function detention(s: Student): Promise<void> {
     closeTip();
-    if (await sendToDetention(s, { archive: (id) => ws.archiveSession(id), failed: (title, e) => toastError(title, e) })) {
+    if (await sendToDetention(s, { archive: (id) => ws.requestArchive(id), failed: (title, e) => toastError(title, e) })) {
       removed = new Set([...removed, s.id]);
       void poller?.now();
     }

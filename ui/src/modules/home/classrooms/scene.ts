@@ -21,6 +21,7 @@
 import type * as THREE_NS from 'three';
 import type { Rgba } from '../../../lib/cssColor';
 import { alongPath, doorPosition, exitPath, type Classroom, type ClassroomModel, type Student } from './model';
+import { settleKicks } from './kicks';
 
 type Three = typeof THREE_NS;
 
@@ -105,22 +106,6 @@ export function webglAvailable(): boolean {
     webglProbe = false;
   }
   return webglProbe;
-}
-
-/** Settle every in-flight kick-out whose student the new model no longer
- *  holds: `pose()` only walks ids still seated, so an orphaned kick would never
- *  reach `p ≥ 1` and its promise (the host's success toast) would hang forever.
- *  The delete already succeeded — the refetch dropping the row proves it — so
- *  the walk-out simply ends here. Returns the settled ids. */
-export function settleKicks(kicks: Map<string, { resolve: () => void }>, keep: ReadonlySet<string>): string[] {
-  const settled: string[] = [];
-  for (const [id, k] of kicks) {
-    if (keep.has(id)) continue;
-    kicks.delete(id);
-    k.resolve();
-    settled.push(id);
-  }
-  return settled;
 }
 
 // Figure dimensions (seated).

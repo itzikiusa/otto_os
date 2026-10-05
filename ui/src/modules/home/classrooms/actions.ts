@@ -6,8 +6,10 @@
 //    names the session, its workspace and that the history goes with it —
 //    stronger when the agent is mid-turn. The walk-out animation plays while
 //    the delete is in flight; a failed delete puts the student back.
-//  • Detention = ARCHIVE (`ws.archiveSession`, which toasts its own Undo):
-//    resumable, so it asks nothing.
+//  • Detention = ARCHIVE (`ws.requestArchive`, which toasts its own Undo):
+//    resumable, so it asks nothing — EXCEPT for a working agent, whose
+//    in-flight turn archive stops (Undo can't bring that back), where the
+//    store's working-guard confirms like closing a busy tab does.
 //
 // Both refuse outright when the caller can't manage the session (viewer role
 // or no Agents:Edit) — the UI hides the actions too; the daemon re-checks.
@@ -34,8 +36,9 @@ export interface KickDeps {
 }
 
 export interface DetentionDeps {
-  /** The app's archive path (`ws.archiveSession`, toasts its own Undo). */
-  archive(id: string): Promise<void>;
+  /** The app's guarded archive path (`ws.requestArchive`: confirms a working
+   *  agent, toasts its own Undo). Resolves false when the user cancelled. */
+  archive(id: string): Promise<boolean | void>;
   failed(title: string, e: unknown): void;
 }
 
@@ -84,8 +87,7 @@ export async function kickOut(s: Target, deps: KickDeps): Promise<boolean> {
 export async function sendToDetention(s: Target, deps: DetentionDeps): Promise<boolean> {
   if (!s.canManage) return false;
   try {
-    await deps.archive(s.id);
-    return true;
+    return (await deps.archive(s.id)) !== false;
   } catch (e) {
     deps.failed(`Couldn’t send “${s.title}” to detention`, e);
     return false;
