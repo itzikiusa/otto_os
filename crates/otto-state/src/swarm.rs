@@ -2279,7 +2279,7 @@ impl SwarmRepo {
     ) -> Result<Vec<SwarmGoal>> {
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(dberr("standing goals tx"))?;
         sqlx::query(
