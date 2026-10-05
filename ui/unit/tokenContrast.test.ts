@@ -188,7 +188,7 @@ for (const combo of COMBOS) {
     const knob = hex(all, '--accent-contrast');
     const accent = hex(all, '--accent');
     const solidMix = (all['--accent-solid'] ?? '').match(/color-mix\(in srgb, var\(--accent\) (\d+)%, black\)/);
-    const onTrack = solidMix ? mixSrgb(accent, { r: 0, g: 0, b: 0 }, Number(solidMix[1]) / 100) : accent;
+    const onTrack = solidMix ? mixSrgb(accent, [0, 0, 0], Number(solidMix[1]) / 100) : accent;
     const check = (name: string, a: Rgb, b: Rgb) => {
       const r = contrast(a, b);
       if (r < 3) fails.push(`${name}: ${r.toFixed(2)}`);
