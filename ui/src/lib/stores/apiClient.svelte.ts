@@ -1524,7 +1524,7 @@ class ApiClientStore {
       this.graphqlSchema = types;
       toasts.success('Schema introspected', `${types.length} types`);
     } catch (e) {
-      toasts.error('Couldn’t introspection', errMsg(e));
+      toasts.error('Couldn’t introspect the schema', errMsg(e));
     } finally {
       this.graphqlIntrospecting = false;
     }

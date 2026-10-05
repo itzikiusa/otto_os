@@ -2155,7 +2155,7 @@
         {@const gate = approvalGate(run.approval_node_id)}
         {#if approvalNeedsPreview}
           <section aria-label="Publication review">
-            {#if approvalPreviewLoading}<p>Loading the content and destination for review…</p>
+            {#if approvalPreviewLoading}<LoadState what="the content and destination for review" variant="compact" loading empty />
             {:else if approvalPreviewError}
               <p role="alert">{approvalPreviewError}</p>
               <button class="btn small" onclick={() => { if (run && approvalNode) void loadApprovalPreview(run.id, approvalNode); }}>Retry preview</button>

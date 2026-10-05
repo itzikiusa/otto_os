@@ -1,4 +1,5 @@
 <script lang="ts">
+  import LoadState from './LoadState.svelte';
   import { api } from '../api/client';
   import type { Session, ProviderAccount } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
@@ -84,7 +85,7 @@
       <button class="btn small" type="button" disabled={busy} onclick={check}>Check sign-in</button>
     {/if}
   </div>
-  {#if listLoading}<p role="status">Loading accounts…</p>{/if}
+  {#if listLoading}<LoadState what="accounts" variant="compact" loading empty />{/if}
   {#if listError}<p class="error" role="alert">{listError} <button class="btn small" type="button" onclick={loadAccounts} disabled={listLoading}>Retry accounts</button></p>{/if}
   {#if adding}
     <div class="actions">

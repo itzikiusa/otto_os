@@ -1502,7 +1502,7 @@
                       {#if product.transcriptBodies[t.id] !== undefined}
                         <div class="transcript-body">{product.transcriptBodies[t.id]}</div>
                       {:else if product.transcriptBodyLoading[t.id]}
-                        <div role="status" data-find-skip>Loading transcript…</div>
+                        <div data-find-skip><LoadState what="this transcript" variant="compact" loading empty /></div>
                       {:else}
                         {#if product.transcriptBodyErrors[t.id]}<div role="alert" data-find-skip>{product.transcriptBodyErrors[t.id]}</div>{/if}
                         <button class="btn small" data-find-skip onclick={() => void product.loadTranscriptBody(t.id)}>{product.transcriptBodyErrors[t.id] ? 'Retry' : 'Load transcript'}</button>
@@ -2556,12 +2556,6 @@
   .jira-activity {
     margin-top: 18px;
   }
-  .jira-loading {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    font-style: italic;
-    padding: 8px 0;
-  }
 
   /* ── Jira card ─────────────────────────────────────────────── */
   .jira-card {
@@ -2713,12 +2707,6 @@
   .change-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  .dropdown-loading {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    padding: 10px 12px;
-    font-style: italic;
   }
 
   /* ── Details grid ──────────────────────────────────────────── */

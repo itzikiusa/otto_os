@@ -160,15 +160,6 @@
     margin: 0;
     font-size: var(--fs-s);
   }
-  .err {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-s);
-  }
-  .err :global(svg) {
-    color: var(--danger);
-  }
   .props {
     list-style: none;
     margin: 0;

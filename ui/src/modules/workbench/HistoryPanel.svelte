@@ -305,7 +305,7 @@
         </button>
       </div>
       {#if compareError}
-        <p class="wb-err" role="alert">Couldn't compare revision: {compareError}</p>
+        <p class="wb-err" role="alert">Couldn’t compare revision: {compareError}</p>
       {/if}
       {#if detailError}
         <p class="wb-err" role="alert">Couldn’t load revision {selected}: {detailError}

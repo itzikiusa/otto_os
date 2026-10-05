@@ -186,10 +186,6 @@
     color: var(--text-dim);
     flex: none;
   }
-  .dim {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-  }
   .err {
     display: inline-flex;
     align-items: center;
