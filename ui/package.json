@@ -39,7 +39,8 @@
     "dompurify": "3.4.16",
     "@excalidraw/excalidraw": {
       "sass": "1.105.1"
-    }
+    },
+    "mermaid": "$mermaid"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.3",
