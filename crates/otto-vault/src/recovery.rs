@@ -1,6 +1,12 @@
 //! File-backed recovery records. Hidden directories are deliberately excluded
 //! from the derived index. No retention cleanup silently removes user history.
 //!
+//! **Not committed with the vault.** Vaults are often git repositories (git
+//! sync, shared docs). `.otto-history/` and `.trash/` hold private pre-edit
+//! copies and deleted notes, so each gets a `.gitignore` of `*` when Otto
+//! first writes into it ([`VaultEngine::ignore_recovery_dir`]): history and
+//! trash never ride along into a commit or a push.
+//!
 //! **Revision path index (SD-15, listing half).** History for one note used to
 //! read `meta.json` of every revision, newest first, until 200 matched — up to
 //! 50k file reads per open in a busy vault. `.otto-history/.path-index.jsonl`
@@ -106,7 +112,68 @@ struct PathIndexLine {
     path: String,
 }
 
+/// `(vault root, recovery dir)` pairs whose `.gitignore` is known present —
+/// one `openat` per dir per process, not per save.
+fn ignored_dirs() -> &'static Mutex<std::collections::HashSet<(String, &'static str)>> {
+    static DONE: OnceLock<Mutex<std::collections::HashSet<(String, &'static str)>>> =
+        OnceLock::new();
+    DONE.get_or_init(Default::default)
+}
+
+/// Ignores everything in its directory (itself included).
+const RECOVERY_GITIGNORE: &[u8] =
+    b"# Otto recovery data (private note history / deleted notes): never commit.\n*\n";
+
 impl VaultEngine {
+    /// Make sure `<root>/<dir>/.gitignore` exists (blocking), created through
+    /// the symlink-refusing directory capability and never overwriting a
+    /// file the user put there. Best-effort: a failure only means the dir
+    /// isn't ignored yet — it is retried on the next write.
+    pub(crate) fn ignore_recovery_dir(root: &str, dir: &'static str) {
+        let key = (root.to_string(), dir);
+        if ignored_dirs().lock().is_ok_and(|d| d.contains(&key)) {
+            return;
+        }
+        let Ok((parent, name)) = Self::text_parent(root, &format!("{dir}/.gitignore")) else {
+            return;
+        };
+        let done = match rustix::fs::openat(
+            &parent,
+            name.as_str(),
+            rustix::fs::OFlags::WRONLY
+                | rustix::fs::OFlags::CREATE
+                | rustix::fs::OFlags::EXCL
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR | rustix::fs::Mode::RGRP,
+        ) {
+            Ok(fd) => std::fs::File::from(fd)
+                .write_all(RECOVERY_GITIGNORE)
+                .is_ok(),
+            Err(rustix::io::Errno::EXIST) => true,
+            Err(_) => false,
+        };
+        if done {
+            if let Ok(mut d) = ignored_dirs().lock() {
+                d.insert(key);
+            }
+        }
+    }
+
+    /// [`Self::ignore_recovery_dir`] off the runtime, skipped without a
+    /// task hop once the dir is known ignored.
+    async fn ignore_recovery_dir_async(root: &str, dir: &'static str) {
+        let key = (root.to_string(), dir);
+        if ignored_dirs().lock().is_ok_and(|d| d.contains(&key)) {
+            return;
+        }
+        let _ = blocking(move || {
+            Self::ignore_recovery_dir(&key.0, dir);
+            Ok(())
+        })
+        .await;
+    }
+
     /// Blocking read of one hidden recovery file through the symlink-refusing
     /// directory capability (for the index builder on the blocking pool).
     fn recovery_read_sync(root: &str, rel: &str) -> Result<Option<Vec<u8>>> {
@@ -320,6 +387,7 @@ impl VaultEngine {
         if before == Some(after) {
             return Ok(None);
         }
+        Self::ignore_recovery_dir_async(root, ".otto-history").await;
         let before_hash = before.map(hash);
         let after_hash = hash(after);
         let key = (root.to_string(), path.to_string());
@@ -624,6 +692,7 @@ impl VaultEngine {
     }
 
     pub(crate) async fn record_trash(root: &str, entry: &VaultTrashEntry) -> Result<()> {
+        Self::ignore_recovery_dir_async(root, ".trash").await;
         Self::recovery_write(
             root,
             &format!(".trash/.otto-index/{}.json", entry.id),

@@ -192,7 +192,7 @@ impl IndexState {
         store.get_vault(vault).await?;
         #[cfg(test)]
         store.all_reads.fetch_add(1, Ordering::Relaxed);
-        let mut tx = store.pool().begin().await.map_err(db_error)?;
+        let mut tx = store.pool().begin_read().await.map_err(db_error)?;
         let notes = sqlx::query("SELECT path,title,okf_type,reserved,aliases_json FROM vault_notes WHERE vault_id=? ORDER BY path").bind(vault).fetch_all(&mut *tx).await.map_err(db_error)?;
         let files = sqlx::query_scalar::<_, String>(
             "SELECT path FROM vault_files WHERE vault_id=? ORDER BY path",

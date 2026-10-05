@@ -2885,9 +2885,9 @@ keyword (FTS5) recall. Reads require `ws viewer`, mutations `ws editor`. `Memory
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{ws}/memories | ws viewer | query: `collection?,kind?,story_id?,tag?,include_inactive?,limit?` | `Memory[]` |
-| POST /workspaces/{ws}/memories | ws editor | `NewMemory` | `Memory` (exact-dup save is a NOOP returning the existing row) |
+| POST /workspaces/{ws}/memories | ws editor | `NewMemory` | `Memory` (exact-dup save is a NOOP returning the existing live row; a duplicate of a forgotten/merged memory reactivates that row — `active=true`, `state=accepted`) |
 | GET /workspaces/{ws}/memories/{id} | ws viewer | — | `Memory` |
-| PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory` |
+| PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory`; 409 when the new body duplicates another memory (live or forgotten) in the same collection/scope/story |
 | DELETE /workspaces/{ws}/memories/{id} | ws editor | — | 204 (soft-delete: `active=false`) |
 | GET /workspaces/{ws}/memories/{id}/links | ws viewer | — | `MemoryLink[]` |
 | POST /workspaces/{ws}/memory/search | ws viewer | `MemoryQuery` | `MemoryHit[]` (keyword FTS5 → LIKE fallback, re-ranked) |
@@ -3219,7 +3219,7 @@ Schema history lists identifiers only; opening it does not fetch every schema bo
 | POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory` |
 | POST /workspaces/{ws}/memory/merge | ws editor | `{ids}` | merged `Memory` |
 | POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` |
-| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported}` |
+| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported, import_id}` — `imported` counts the memories this import created (or revived from a forgotten/merged duplicate), which are parked as `suggested`; a section identical to a live memory leaves that memory's state and provenance untouched and is not counted |
 
 ## Must-have wave (Wave 3) — additional routes
 

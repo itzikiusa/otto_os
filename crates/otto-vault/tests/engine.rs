@@ -1200,3 +1200,41 @@ async fn regression_case_only_rename_prunes_old_row() {
         vec!["runbooks/deploy.md".to_string()]
     );
 }
+
+/// r10: history and trash live inside the user's (often git-synced) vault;
+/// both directories ignore themselves so private pre-edit copies and deleted
+/// notes never ride along into a commit. A user's own `.gitignore` there is
+/// never overwritten.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_and_trash_directories_are_gitignored() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    eng.write_note(WS, id, "ignored.md", "one", Some(""))
+        .await
+        .unwrap();
+    let cur = eng.note(WS, id, "ignored.md").await.unwrap();
+    eng.write_note(WS, id, "ignored.md", "two", Some(&cur.meta.hash))
+        .await
+        .unwrap();
+    std::fs::create_dir_all(td.path().join(".trash")).unwrap();
+    std::fs::write(td.path().join(".trash/.gitignore"), "mine\n").unwrap();
+    eng.delete_note(WS, id, "ignored.md").await.unwrap();
+    let history = std::fs::read_to_string(td.path().join(".otto-history/.gitignore")).unwrap();
+    assert!(
+        history.lines().any(|l| l.trim() == "*"),
+        "history ignores itself: {history:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(td.path().join(".trash/.gitignore")).unwrap(),
+        "mine\n",
+        "an existing .gitignore is left alone"
+    );
+    // Neither shows up as a revision or a trash entry.
+    assert!(eng
+        .trash_entries(WS, id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|e| !e.stored_path.contains(".gitignore")));
+    assert!(!eng.revisions(WS, id, None).await.unwrap().is_empty());
+}

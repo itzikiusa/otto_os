@@ -313,7 +313,7 @@ const RUN_COLUMNS: &str="id,workflow_id,workspace_id,status,error,started_at,fin
 pub async fn progress(pool: &DbPool, id: &Id, after_rev: Option<i64>) -> Result<Value> {
     for attempt in 0..2 {
         let mut tx = pool
-            .begin()
+            .begin_read()
             .await
             .map_err(dberr("begin workflow progress"))?;
         let row = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -410,7 +410,10 @@ pub async fn checkpoint_page(
 ) -> Result<Value> {
     // Also repairs archive/direct rows before advertising incomplete summaries.
     let _ = progress(pool, &id.into(), None).await?;
-    let mut tx = pool.begin().await.map_err(dberr("begin checkpoint page"))?;
+    let mut tx = pool
+        .begin_read()
+        .await
+        .map_err(dberr("begin checkpoint page"))?;
     let row =
         sqlx::query("SELECT checkpoint_generation,checkpoint_rev FROM workflow_runs WHERE id=?")
             .bind(id)
@@ -444,7 +447,10 @@ pub async fn checkpoint_page(
 }
 
 pub async fn detail(pool: &DbPool, id: &str, node: &str, checkpoint: bool) -> Result<Value> {
-    let mut tx = pool.begin().await.map_err(dberr("begin workflow detail"))?;
+    let mut tx = pool
+        .begin_read()
+        .await
+        .map_err(dberr("begin workflow detail"))?;
     let rev: i64 = sqlx::query_scalar("SELECT rev FROM workflow_runs WHERE id=?")
         .bind(id)
         .fetch_one(&mut *tx)
