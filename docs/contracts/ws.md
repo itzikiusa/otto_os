@@ -1090,6 +1090,22 @@ blind timer.
 
 ---
 
+### `personal_agent_run_updated`
+
+```json
+{ "type": "personal_agent_run_updated", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "run_id": "<Id>", "status": "running|ok|error" }
+```
+
+- Emitted by `otto_server::personal_agents_engine` when a personal-agent run
+  starts, finishes (`ok`) or errors.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Personal Agents page re-fetches the agent's run history on a matching
+  tick instead of polling.
+- TypeScript type: `{ type: 'personal_agent_run_updated'; workspace_id: Id; agent_id: Id; run_id: Id; status: string }`.
+
+---
+
 ### `personal_agent_activity`
 
 ```json
