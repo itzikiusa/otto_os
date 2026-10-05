@@ -1074,7 +1074,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "workbench_get",
-                "description": "Read-only: one Workbench scratch file by `doc_id` or exact `name` — metadata + current `content`. Pass `revision` (a seq from the file's history) to read an older version instead; `history: true` adds one bounded revision page (default 100, maximum 200). Pass before_seq from next_before_seq to continue; a cursor hints at continuation, not proof of another row.",
+                "description": "Read-only: get a Workbench file by doc_id or exact name, with metadata and current content. Set revision to read an older version. history adds newest-first metadata (history_limit: default 100, max 200). Continue with before_seq = next_before_seq; a full page may be followed by an empty page.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
