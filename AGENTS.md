@@ -46,6 +46,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-connections` | SSH / MySQL / Redis / MongoDB / ClickHouse sessions |
 | `otto-ssh` | Shared SSH-tunnel helper (`-L`/SOCKS5 `-D`, SFTP, Kafka-aware proxy) |
 | `otto-dbviewer` | Database Explorer engine |
+| `otto-apiclient` | HTTP API-client engines split out of `otto-server`: dynamic gRPC describe/reflect/invoke (tonic + protox + prost-reflect) and server-side `pm` request scripts (boa_engine); thin axum handlers stay in `otto-server` |
 | `otto-brokers` | Message Brokers (Kafka viewer) |
 | `otto-browser` | In-app browser — reader/live tabs, DOM annotations, Lightpanda-sidecar-or-plain-fetch fetch engine |
 | `otto-orchestrator` | Claude-PTY agent runner + ⌘K plan parsing (summaries, PR/commit drafts) |

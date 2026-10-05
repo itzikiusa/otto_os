@@ -3704,6 +3704,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-apiclient"
+version = "0.2.0"
+dependencies = [
+ "boa_engine",
+ "futures-util",
+ "h2",
+ "hex",
+ "http",
+ "otto-core",
+ "otto-netguard",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "protox",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "otto-aws"
 version = "0.2.0"
 dependencies = [
@@ -4195,12 +4219,10 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "boa_engine",
  "chrono",
  "chrono-tz",
  "dirs 7.0.0",
  "futures-util",
- "h2",
  "hex",
  "hmac",
  "http-body-util",
@@ -4208,6 +4230,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-vision",
+ "otto-apiclient",
  "otto-aws",
  "otto-brokers",
  "otto-browser",
@@ -4242,16 +4265,11 @@ dependencies = [
  "otto-usage",
  "otto-vault",
  "otto-workgraph",
- "prost",
- "prost-reflect",
- "prost-types",
- "protox",
  "rand 0.10.3",
  "regex",
  "reqwest",
  "reqwest_cookie_store",
  "rustix",
- "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4262,7 +4280,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
- "tonic",
  "tower",
  "tower-http 0.7.1",
  "tracing",

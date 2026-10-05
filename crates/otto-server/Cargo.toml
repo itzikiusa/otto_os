@@ -83,11 +83,9 @@ chrono.workspace = true
 chrono-tz = "0.10.4"
 base64.workspace = true
 tokio-tungstenite.workspace = true
-protox.workspace = true
-prost.workspace = true
-prost-reflect.workspace = true
-prost-types.workspace = true
-tonic.workspace = true
+# API-client engines: gRPC (tonic/protox/prost-reflect) + boa_engine scripts,
+# split out so server edits don't re-check those dependency trees.
+otto-apiclient.workspace = true
 uuid.workspace = true
 rand.workspace = true
 reqwest_cookie_store.workspace = true
@@ -95,9 +93,6 @@ sha2.workspace = true
 # TURN REST credentials: ephemeral HMAC-SHA1, never return the shared secret.
 hmac = "0.13.0"
 sha1 = "0.11.0"
-# Server-side pre/post request scripts for API-client automations: pure-Rust JS
-# engine (no native build deps) running the same `pm` API the UI runner defines.
-boa_engine = "0.22.0"
 
 # Secrets store status + the confirmed "Secure secrets" migration
 # (`/admin/secrets/*`); browser-credential route tests also use its FileStore.
@@ -115,12 +110,6 @@ wiremock = "0.6.5"
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true
-# The gRPC endpoint test builds a TLS config, which needs the process-level
-# rustls provider `ottod` installs at startup. Same version/feature ottod pins.
-rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
-# The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
-# version tonic/hyper already resolve.
-h2 = "0.4.19"
 
 # Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
 [target.'cfg(target_os = "macos")'.dependencies]
