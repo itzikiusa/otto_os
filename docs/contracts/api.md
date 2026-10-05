@@ -4142,6 +4142,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 135 | GET /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks view + ws viewer | — | `ScheduledTask[]` |
 | 136 | POST /api/v1/workspaces/{id}/scheduled-tasks | scheduled_tasks edit + ws editor | `{name, prompt?, kind?, provider?, model?, cwd?, skill?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 137 | GET /api/v1/scheduled-tasks/presets | scheduled_tasks view | — | `ScheduledTaskPreset[]` |
+| 137a | POST /api/v1/scheduled-tasks/preview | scheduled_tasks edit | `{schedule, timezone?}` | `{next_fire_times: string[]}` — the next five fires (RFC 3339 UTC) of an UNSAVED schedule via the scheduler's cadence evaluator; 400 on an invalid schedule/timezone (same checks as create); empty for a spent `once`; saves nothing |
 | 138 | GET /api/v1/scheduled-tasks/{id} | scheduled_tasks view + ws viewer | — | ScheduledTask |
 | 139 | PATCH /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | `{name?, prompt?, skill?, provider?, model?, cwd?, schedule?, destination?, enabled?, timezone?, workflow_id?, sandbox?, max_retries?, notify_on_change?, attach_proof?}` | ScheduledTask |
 | 140 | DELETE /api/v1/scheduled-tasks/{id} | scheduled_tasks edit + ws editor | — | `{ok:true}` |

@@ -37,6 +37,7 @@ pub fn routes() -> Router<ServerCtx> {
     Router::new()
         .route("/workspaces/{id}/scheduled-tasks", get(list).post(create))
         .route("/scheduled-tasks/presets", get(presets))
+        .route("/scheduled-tasks/preview", post(preview))
         .route(
             "/scheduled-tasks/{id}",
             get(get_one).patch(update).delete(remove),
@@ -621,6 +622,59 @@ async fn presets(
     Ok(Json(builtin_presets()))
 }
 
+/// `POST /scheduled-tasks/preview` body: the form's schedule + timezone.
+#[derive(Debug, Deserialize)]
+struct PreviewReq {
+    #[serde(default)]
+    schedule: Value,
+    #[serde(default)]
+    timezone: Option<String>,
+}
+
+/// How many upcoming fires a preview lists (mirrors the workflow trigger preview).
+const PREVIEW_FIRES: usize = 5;
+
+/// `POST /scheduled-tasks/preview` — the next fire times of an UNSAVED schedule,
+/// so a task form can say "Next fires …" before Save (a `0 9 * * 0` typed for
+/// Monday shows Sunday up front). Validates exactly like create/update, runs the
+/// scheduler's own cadence evaluator, and touches no task or cursor.
+async fn preview(
+    State(_ctx): State<ServerCtx>,
+    CurrentUser(_user): CurrentUser,
+    Json(req): Json<PreviewReq>,
+) -> ApiResult<Json<Value>> {
+    let timezone = req.timezone.unwrap_or_default();
+    check_timezone(&timezone)?;
+    validate_schedule(&req.schedule)?;
+    let tz = cadence::task_tz(if timezone.trim().is_empty() {
+        "UTC"
+    } else {
+        timezone.trim()
+    });
+    let next = preview_fire_times(&req.schedule, tz, chrono::Utc::now(), PREVIEW_FIRES);
+    Ok(Json(json!({ "next_fire_times": next })))
+}
+
+/// Up to `n` successive fire instants after `from` (RFC 3339, UTC), stepping the
+/// same `cadence::next_run` the scheduler stamps into `next_run_at`.
+fn preview_fire_times(
+    schedule: &Value,
+    tz: chrono_tz::Tz,
+    from: chrono::DateTime<chrono::Utc>,
+    n: usize,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(n);
+    let mut cursor = from;
+    for _ in 0..n {
+        let Some(at) = cadence::next_run(schedule, cursor, tz) else {
+            break;
+        };
+        out.push(at.to_rfc3339());
+        cursor = at;
+    }
+    out
+}
+
 /// The built-in preset list. `ticket-followup-review` makes the motivating example
 /// work out of the box (the agent uses the daemon's available Jira/Atlassian MCP
 /// tools — see docs/features/scheduled-tasks.md for the prerequisite).
@@ -731,6 +785,33 @@ mod tests {
         assert!(check_timezone("Europe/London").is_ok());
         assert!(check_timezone("").is_ok());
         assert!(check_timezone("Mars/Phobos").is_err());
+    }
+
+    #[test]
+    fn preview_lists_the_cron_weekday_actually_typed() {
+        use chrono::{Datelike, TimeZone};
+        // 2026-10-05 is a Monday. `0 9 * * 0` is SUNDAY 09:00 — the preview must
+        // say so before Save (S20-17), not "Next in 5 days" after it.
+        let from = chrono::Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+        let spec = json!({ "cadence": "cron", "expr": "0 9 * * 0" });
+        let fires = preview_fire_times(&spec, chrono_tz::UTC, from, PREVIEW_FIRES);
+        assert_eq!(fires.len(), PREVIEW_FIRES);
+        let first = chrono::DateTime::parse_from_rfc3339(&fires[0]).unwrap();
+        assert_eq!(first.weekday(), chrono::Weekday::Sun);
+        assert_eq!(fires[0], "2026-10-11T09:00:00+00:00");
+        assert_eq!(fires[1], "2026-10-18T09:00:00+00:00");
+    }
+
+    #[test]
+    fn preview_respects_timezone_and_spent_once() {
+        use chrono::TimeZone;
+        let from = chrono::Utc.with_ymd_and_hms(2026, 10, 5, 12, 0, 0).unwrap();
+        let daily = json!({ "cadence": "daily", "at": "09:00" });
+        let fires = preview_fire_times(&daily, chrono_tz::Asia::Jerusalem, from, 2);
+        // 09:00 in Jerusalem (UTC+3 in October) is 06:00 UTC, the next day.
+        assert_eq!(fires[0], "2026-10-06T06:00:00+00:00");
+        let spent = json!({ "cadence": "once", "run_at": "2026-01-01T00:00:00Z" });
+        assert!(preview_fire_times(&spent, chrono_tz::UTC, from, 5).is_empty());
     }
 
     #[test]

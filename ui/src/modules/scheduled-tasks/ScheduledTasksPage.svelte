@@ -399,6 +399,49 @@
     return { cadence: 'weekly', at: fAt, weekday: fWeekday };
   }
 
+  // ── "Next fires" preview (S20-17) ─────────────────────────────────────────
+  // The form asks the daemon's own cadence evaluator (the one that stamps
+  // `next_run_at`) for the next fires of the UNSAVED schedule, so `0 9 * * 0`
+  // typed for Monday reads "Sun …" before Save — same idea as the workflow
+  // trigger preview, but live (debounced) instead of behind a button.
+  let firePreview = $state<{ key: string; times: string[]; tz: string; error: string } | null>(null);
+  const previewKey = $derived.by(() => {
+    if (!(creating || editId) || fCadence === 'interval' || !tzOk) return '';
+    if (fCadence === 'cron' && cronFieldCount !== 5) return '';
+    if (fCadence === 'once' && !fRunAt) return '';
+    return JSON.stringify([buildSchedule(), fTimezone.trim() || 'UTC']);
+  });
+  $effect(() => {
+    const key = previewKey;
+    if (!key) {
+      firePreview = null;
+      return;
+    }
+    const [schedule, timezone] = JSON.parse(key) as [Record<string, unknown>, string];
+    const timer = setTimeout(() => {
+      scheduledTasksApi
+        .preview(schedule, timezone)
+        .then((r) => {
+          if (alive && previewKey === key) firePreview = { key, times: r.next_fire_times, tz: timezone, error: '' };
+        })
+        .catch((e: unknown) => {
+          if (alive && previewKey === key) {
+            firePreview = { key, times: [], tz: timezone, error: e instanceof Error ? e.message : 'The daemon couldn’t check this schedule.' };
+          }
+        });
+    }, 350);
+    return () => clearTimeout(timer);
+  });
+  /** Only a preview for the CURRENT form is shown (never a stale one). */
+  const shownPreview = $derived(firePreview && firePreview.key === previewKey ? firePreview : null);
+  function fireLabel(at: string, tz: string): string {
+    try {
+      return new Date(at).toLocaleString(undefined, { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return new Date(at).toLocaleString();
+    }
+  }
+
   function buildDestination(): Record<string, unknown> {
     switch (fDestType) {
       case 'slack':
@@ -918,6 +961,20 @@
           </label>
         {/if}
       </div>
+      {#if shownPreview}
+        <div class="fire-preview" class:bad={!!shownPreview.error} role="status" aria-live="polite" data-testid="sched-next-fires">
+          {#if shownPreview.error}
+            <Icon name="warning" size={12} /> {shownPreview.error}
+          {:else if shownPreview.times.length}
+            <span class="fp-h">Next fires ({shownPreview.tz}):</span>
+            <ul>
+              {#each shownPreview.times.slice(0, 3) as at (at)}<li>{fireLabel(at, shownPreview.tz)}</li>{/each}
+            </ul>
+          {:else}
+            <span class="fp-h">This schedule has no upcoming run.</span>
+          {/if}
+        </div>
+      {/if}
 
       <div class="frow">
         <label class="field">
@@ -1221,6 +1278,11 @@
   .field :global(.mono) { font-family: var(--font-mono); }
   .field .field-hint { color: var(--text-dim); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .field .field-hint.bad { color: var(--danger); }
+  .fire-preview { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-dim); }
+  .fire-preview.bad { color: var(--danger); align-items: center; }
+  .fire-preview .fp-h { font-weight: 600; }
+  .fire-preview ul { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; list-style: none; }
+  .fire-preview li { font-variant-numeric: tabular-nums; }
   .toggles { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; }
   .adv { border-block-start: 1px solid var(--border); padding-block-start: 10px; }
   .adv-toggle {

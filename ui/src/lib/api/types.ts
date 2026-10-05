@@ -7658,6 +7658,12 @@ export interface ScheduledTaskRun {
 }
 
 /** A built-in template the create form can pre-fill from. */
+/** `POST /scheduled-tasks/preview` response (#137a): the next fires of an
+ *  unsaved schedule, RFC 3339 UTC — empty when it has none (a spent `once`). */
+export interface ScheduledTaskPreview {
+  next_fire_times: string[];
+}
+
 export interface ScheduledTaskPreset {
   id: string;
   name: string;
