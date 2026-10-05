@@ -238,7 +238,7 @@ textarea.input {
   line-height: 1.5;
 }
 .input:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .input:focus {
