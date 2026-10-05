@@ -38,6 +38,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(90);
 /// has waited this long (or RETAIN_MAX fills), when the writer does one
 /// bounded `wake_background` (same policy as telemetry's MAX_DEFER).
 const MAX_DEFER: Duration = Duration::from_secs(30 * 60);
+/// How long stopping the engine waits for the writer's final flush.
+const WRITER_DRAIN: Duration = Duration::from_secs(15);
 
 /// How long a `session_totals` rollup is reused (see `totals_cache`). Shorter
 /// than the writer's flush interval, so it never hides a flush for long.
@@ -117,6 +119,9 @@ const RETAIN_MAX: usize = 20_000;
 struct Inner {
     ch: Option<Arc<ClickHouse>>,
     tx: Option<mpsc::UnboundedSender<UsageEvent>>,
+    /// The writer task fed by `tx` — awaited (bounded) after `tx` drops so
+    /// its final flush lands before the server stops.
+    writer: Option<tokio::task::JoinHandle<()>>,
     bin_path: Option<PathBuf>,
 }
 
@@ -286,20 +291,20 @@ impl UsageEngine {
     pub async fn reinit(&self, config: UsageConfig) {
         let _g = self.reinit_lock.lock().await;
         let ch_dir = self.data_dir.join("clickhouse");
-        let bin_path = ClickHouse::locate(config.clickhouse_path.as_deref());
+        // `locate` may run a `which` subprocess: off the async workers (S9-11).
+        let configured = config.clickhouse_path.clone();
+        let bin_path =
+            tokio::task::spawn_blocking(move || ClickHouse::locate(configured.as_deref()))
+                .await
+                .unwrap_or(None);
 
         // Stop the previous server FIRST (outside the new-server start) so the
         // dir lock is released before we bind a new one.
-        let prev = {
-            let mut inner = self.inner.write().expect("usage inner lock");
-            inner.tx = None; // dropping the sender ends the writer task
-            inner.ch.take()
-        };
-        if let Some(old) = prev {
+        if let Some(old) = self.stop_writer().await {
             old.shutdown().await;
         }
 
-        let (ch, tx) = if config.enabled {
+        let (ch, tx, writer) = if config.enabled {
             match &bin_path {
                 Some(bin) => match ClickHouse::start(bin.clone(), ch_dir.clone()).await {
                     Ok(server) => {
@@ -334,7 +339,7 @@ impl UsageEngine {
                                 }
                                 ch.set_wake_hook(Arc::clone(&self.ch_woke));
                                 let (tx, rx) = mpsc::unbounded_channel();
-                                spawn_writer(
+                                let writer = spawn_writer(
                                     Arc::clone(&ch),
                                     rx,
                                     Arc::clone(&self.heal),
@@ -351,33 +356,38 @@ impl UsageEngine {
                                     ch.data_dir().display(),
                                     bin.display()
                                 );
-                                (Some(ch), Some(tx))
+                                (Some(ch), Some(tx), Some(writer))
                             }
                             Err(e) => {
                                 tracing::warn!("usage: clickhouse schema init failed: {e}");
                                 ch.shutdown().await;
-                                (None, None)
+                                (None, None, None)
                             }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("usage: clickhouse server start failed: {e}");
-                        (None, None)
+                        (None, None, None)
                     }
                 },
                 None => {
                     tracing::info!("usage: clickhouse binary not found — usage tracking disabled");
-                    (None, None)
+                    (None, None, None)
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         let became_available = ch.is_some();
         let ch_for_compact = ch.clone();
         *self.config.write().expect("usage config lock") = config.clone();
-        *self.inner.write().expect("usage inner lock") = Inner { ch, tx, bin_path };
+        *self.inner.write().expect("usage inner lock") = Inner {
+            ch,
+            tx,
+            writer,
+            bin_path,
+        };
 
         // One-time compaction + retention enforcement of a pre-existing bloated
         // dataset (e.g. the 25k-part, 1.4 GB dir from the old per-query model).
@@ -407,14 +417,28 @@ impl UsageEngine {
         if let Err(e) = self.flush_metrics_with(true).await {
             tracing::debug!("usage: final metrics flush failed: {e}");
         }
-        let ch = {
-            let mut inner = self.inner.write().expect("usage inner lock");
-            inner.tx = None;
-            inner.ch.take()
-        };
-        if let Some(ch) = ch {
+        if let Some(ch) = self.stop_writer().await {
             ch.shutdown().await;
         }
+    }
+
+    /// Detach the live handle and end its writer: dropping the sender makes
+    /// the writer do its final flush (which may wake a parked server), and
+    /// that flush is awaited — bounded — so up to FLUSH_INTERVAL of buffered
+    /// usage is not lost to the server stopping under it. Returns the handle
+    /// for the caller to shut down.
+    async fn stop_writer(&self) -> Option<Arc<ClickHouse>> {
+        let (ch, writer) = {
+            let mut inner = self.inner.write().expect("usage inner lock");
+            inner.tx = None;
+            (inner.ch.take(), inner.writer.take())
+        };
+        if let Some(w) = writer {
+            if tokio::time::timeout(WRITER_DRAIN, w).await.is_err() {
+                tracing::warn!("usage: final usage flush timed out — stopping the server anyway");
+            }
+        }
+        ch
     }
 
     /// True when usage tracking is live (server up + schema created).
@@ -1742,7 +1766,7 @@ fn spawn_writer(
     heal: Arc<HealSignal>,
     usage_gen: Arc<AtomicU64>,
     flush_req: Arc<tokio::sync::Notify>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut w = WriterBuf::default();
         // The flush timer is armed only while events are buffered (from the
@@ -1782,7 +1806,7 @@ fn spawn_writer(
                 (false, _) => Some(tokio::time::Instant::now() + FLUSH_INTERVAL),
             };
         }
-    });
+    })
 }
 
 /// The writer's buffered events plus when the oldest arrived (the MAX_DEFER
