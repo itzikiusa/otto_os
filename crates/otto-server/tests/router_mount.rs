@@ -58,7 +58,7 @@ fn concrete(path: &str) -> String {
 /// What the router answered for one request, reduced to "did a route match".
 #[derive(Debug)]
 enum Outcome {
-    Matched(u16),
+    Matched,
     Unmatched(String),
 }
 
@@ -100,7 +100,7 @@ async fn probe(
         if body.contains("no such route") {
             return Outcome::Unmatched(format!("404 fallback: {body}"));
         }
-        return Outcome::Matched(status);
+        return Outcome::Matched;
     }
     if status == 200 && ctype.starts_with("text/html") {
         let body = resp.text().await.unwrap_or_default();
@@ -108,7 +108,7 @@ async fn probe(
             return Outcome::Unmatched("SPA placeholder fallback".into());
         }
     }
-    Outcome::Matched(status)
+    Outcome::Matched
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -166,7 +166,7 @@ async fn every_inventoried_route_is_mounted_on_the_daemon_router() {
             &placeholder,
         )
         .await;
-        if matches!(api, Outcome::Matched(_)) {
+        if matches!(api, Outcome::Matched) {
             continue;
         }
         let root = probe(&http, &base, method, &path, &placeholder).await;

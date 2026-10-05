@@ -2,8 +2,6 @@
 //! use these live in otto-server; kept here so they're unit-testable and the
 //! output contracts are co-located with the DTOs.
 
-use serde_json::Value;
-
 use crate::types::{PresetAgent, RecruitedAgent};
 
 /// Maximum number of skills injected into the recruiter prompt. Injecting the
