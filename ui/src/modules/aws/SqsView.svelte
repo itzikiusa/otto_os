@@ -43,7 +43,7 @@
   const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
   // Peek is a receive: it bumps each message's receive count (and can
   // dead-letter it), so the daemon gates it like Send — Edit on SQS.
-  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_send', 'aws_sqs', 'edit'));
+  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'edit'));
   // A-1: queues live per region; the picker restores the last one used.
   // svelte-ignore state_referenced_locally
   let region = $state(account.region);

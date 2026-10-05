@@ -13,9 +13,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use axum::Extension;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::Extension;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use otto_aws::AwsCtx;
@@ -683,10 +683,12 @@ async fn s3_list_and_streamed_download() {
     assert_eq!(o["objects"][0]["key"], "logs/app.log");
     assert_eq!(o["is_truncated"], false);
     // Region override reached the CLI env.
-    assert!(calls_log()
-        .lines()
-        .any(|l| l.contains("PROFILE=s3-profile REGION=ap-southeast-2")
-            && l.contains("list-objects-v2")));
+    assert!(
+        calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=s3-profile REGION=ap-southeast-2")
+                && l.contains("list-objects-v2"))
+    );
 
     let (st, body, h) = call(
         &ctx,
@@ -772,9 +774,10 @@ async fn import_kubeconfig_requires_root_and_creates_cluster_row() {
     assert_eq!(row.1, "prod-eu-otto");
     assert_eq!(row.2.as_deref(), Some(id.as_str()));
     assert!(row.3.contains("\"eks_cluster\":\"prod-eu\""));
-    assert!(calls_log().lines().any(|l| l
-        .contains("ARGS=eks update-kubeconfig --name prod-eu --kubeconfig")
-        && l.contains("--alias prod-eu-otto")));
+    assert!(calls_log().lines().any(|l| {
+        l.contains("ARGS=eks update-kubeconfig --name prod-eu --kubeconfig")
+            && l.contains("--alias prod-eu-otto")
+    }));
 
     // Audit row written.
     let n: (i64,) =
@@ -813,10 +816,12 @@ async fn rds_list_and_describe_are_read_only() {
     assert_eq!(b["instances"][0]["port"], 5432);
     assert_eq!(b["instances"][0]["multi_az"], true);
     assert_eq!(b["instances"][0]["tags"]["env"], "prod");
-    assert!(calls_log()
-        .lines()
-        .any(|l| l.contains("PROFILE=rds-profile REGION=us-east-1")
-            && l.contains("ARGS=rds describe-db-instances")));
+    assert!(
+        calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=rds-profile REGION=us-east-1")
+                && l.contains("ARGS=rds describe-db-instances"))
+    );
 
     let (st, d, _) = call(
         &ctx,
@@ -880,11 +885,13 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
         .find(|s| s["id"] == "messages_delayed")
         .unwrap();
     assert!(delayed["current"].is_null());
-    assert!(delayed["points"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|p| p["v"].is_null()));
+    assert!(
+        delayed["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["v"].is_null())
+    );
 
     // Exactly one get-metric-data call, with the whole catalog in ONE
     // file:// document keyed on the queue name.
@@ -977,7 +984,9 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
 
 /// A peek is a `receive-message`: it never hides messages (visibility timeout
 /// pinned to 0 whatever the body asks) but bumps their receive count, so it is
-/// gated like Send — the old View-level `sqs_receive` grant is not enough.
+/// gated at Edit tier on its own `sqs_receive` operation (S6-12) — a View-tier
+/// user holding `sqs_receive` is refused, and `sqs_send` (publishing) is
+/// neither needed nor sufficient.
 #[tokio::test]
 async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
     let ctx = TestCtx::new().await;
@@ -1013,7 +1022,22 @@ async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
         "a refused peek must not reach the CLI"
     );
 
-    allow_account(&ctx, &root, &viewer, &id, "sqs_send").await;
+    // `sqs_send` does not stand in for `sqs_receive`, even at Edit tier.
+    let sender = seed_user(&ctx.pool, "sqs-sender", false).await;
+    grant(&ctx.pool, &sender, "aws", "view").await;
+    grant(&ctx.pool, &sender, "aws_sqs", "edit").await;
+    allow_account(&ctx, &root, &sender, &id, "discover").await;
+    allow_account(&ctx, &root, &sender, &id, "sqs_view").await;
+    allow_account(&ctx, &root, &sender, &id, "sqs_send").await;
+    let (st, e, _) = call(&ctx, &sender, "POST", &uri, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+
+    // Edit tier + the `sqs_receive` grant peeks — no publish right needed.
+    sqlx::query("UPDATE user_feature_grants SET capability = 'edit' WHERE user_id = ? AND feature = 'aws_sqs'")
+        .bind(&viewer.id)
+        .execute(&ctx.pool)
+        .await
+        .expect("raise grant");
     let (st, r, _) = call(&ctx, &viewer, "POST", &uri, Some(body)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["messages"][0]["message_id"], "m-1");
@@ -1298,11 +1322,13 @@ async fn all_regions_spawn_counts_cold_and_cached() {
         "creds exported at most once"
     );
     // Exported creds reach the region calls.
-    assert!(calls_log()
-        .lines()
-        .any(|l| l.contains("PROFILE=regions-spawn ")
-            && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
-            && l.contains("ARGS=ec2 describe-instances")));
+    assert!(
+        calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=regions-spawn ")
+                && l.contains("AKID=ASIAEXPORTEDEXAMPLE")
+                && l.contains("ARGS=ec2 describe-instances"))
+    );
 
     // Within the TTL: zero new children.
     let before = calls_log().lines().count();
@@ -1681,9 +1707,11 @@ async fn logs_tail_and_ec2_list_are_native_with_static_creds() {
         Some(1),
         "{ath}"
     );
-    assert!(calls_log()
-        .lines()
-        .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query")))));
+    assert!(
+        calls_log()
+            .lines()
+            .all(|l| !(l.contains("AKID=AKIANATIVEEXAMPLE001") && (l.contains("get-query"))))
+    );
 
     // A CLI-minted token cannot be resumed natively: it stays on the CLI path.
     let (st, _, _) = call(
