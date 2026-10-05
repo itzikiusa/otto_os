@@ -10,7 +10,7 @@
   // row is read through the path route (`transcriptPath` mode); every other row
   // through its session. "Resume in Otto" imports an on_disk transcript as a
   // reconnectable session and then rides the existing restart/resume path.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../../lib/paneResizer';
@@ -64,6 +64,19 @@
   });
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let alive = true;
+  let actionGeneration = 0;
+  // A resumed process may finish starting after this History visit has ended.
+  // Its completion must never replace a newer route or workspace decision.
+  $effect(() => {
+    void wsId; void scope; void router.parts;
+    return () => { ++actionGeneration; };
+  });
+  onDestroy(() => {
+    alive = false;
+    ++actionGeneration;
+    if (searchTimer) clearTimeout(searchTimer);
+  });
   function onSearchInput(): void {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => void history.refresh(), 250);
@@ -78,6 +91,7 @@
   });
 
   function pick(e: HistoryEntry): void {
+    ++actionGeneration;
     history.select(e);
     rememberSelection('history', entryKey(e));
     if (e.session_id) router.replace(`history/${e.session_id}`);
@@ -85,6 +99,7 @@
   }
 
   function clearSelection(): void {
+    ++actionGeneration;
     history.select(null);
     rememberSelection('history', null);
     if (router.parts[1]) router.replace('history');
@@ -157,19 +172,24 @@
   async function resume(e: HistoryEntry): Promise<void> {
     if (!wsId || busy) return;
     busy = true;
+    const generation = actionGeneration, workspace = wsId, originScope = scope;
+    const current = () => alive && generation === actionGeneration && wsId === workspace && scope === originScope;
     try {
       let sid = e.session_id;
       if (e.status === 'on_disk' || !sid) {
-        sid = (await history.importEntry(wsId, e)).id;
+        sid = (await history.importEntry(workspace, e)).id;
+        if (!current()) return;
         await ws.refreshSessions();
+        if (!current()) return;
       }
       // The row may be stale in either direction. The server checks the live
       // PTY under its resume lock and never replaces an already-live process.
       const resumed = await ws.resumeSession(sid);
+      if (!current()) return;
       history.patchSession(sid, { status: resumed.status });
       openInChat(sid);
     } catch (err) {
-      toastError('Couldn’t resume', err);
+      if (current()) toastError('Couldn’t resume', err);
     } finally {
       busy = false;
     }

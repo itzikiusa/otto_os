@@ -91,7 +91,7 @@ test('mixed session batch retains submitted settings and retries only its failed
     return route.continue();
   });
   await page.goto(`/#/agents/${sessionId}`);
-  await page.getByTitle('New session (⌘T)').click();
+  await page.getByRole('button', {name: 'New session', exact: true}).click();
   const dialog = page.getByRole('dialog', {name: 'New session', exact: true});
   await dialog.locator('.provider-card', {hasText: 'shell'}).locator('.card-main').click();
   await dialog.getByLabel('One more shell session').click();
@@ -167,6 +167,35 @@ test('History stale live row resumes an isolated shell that exited after listing
   expect((await (await ctx.get(`${base}/api/v1/sessions/${sessionId}`)).json()).live).toBe(true);
 });
 
+test('History resume completion preserves navigation made while the response was pending', async ({page}) => {
+  await historyFixture(page, () => historyRow('working'));
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let requested = false;
+  await page.route(`**/sessions/${sessionId}/resume`, async route => {
+    const response = await route.fetch();
+    requested = true;
+    await held;
+    await route.fulfill({response});
+  });
+  try {
+    await page.goto('/#/history');
+    await page.getByTestId('history-resume').click();
+    await expect.poll(() => requested).toBe(true);
+    // Stay in the same document: a full navigation would abort the request
+    // and conceal a destroyed component's late follow-up navigation.
+    await page.evaluate(() => { location.hash = '#/settings/insights'; });
+    await expect(page).toHaveURL(/#\/settings\/insights$/);
+    await expect(page.getByTestId('history-resume')).toHaveCount(0);
+    const completed = page.waitForResponse(response => response.url().endsWith(`/sessions/${sessionId}/resume`));
+    release();
+    await (await completed).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(page).toHaveURL(/#\/settings\/insights$/);
+    expect((await (await ctx.get(`${base}/api/v1/sessions/${sessionId}`)).json()).live).toBe(true);
+  } finally { release(); }
+});
+
 test('History import keeps a failed resume on screen and retries without importing twice', async ({page}) => {
   await historyFixture(page, () => historyRow('on_disk'));
   const calls: string[] = [];
@@ -184,7 +213,7 @@ test('History import keeps a failed resume on screen and retries without importi
   });
   await page.goto('/#/history');
   await page.getByTestId('history-resume').click();
-  await expect(page.getByText('Could not resume', {exact: true})).toBeVisible();
+  await expect(page.getByText('Couldn’t resume', {exact: true})).toBeVisible();
   await expect(page).toHaveURL(/#\/history/);
   await expect(page.getByTestId('history-resume')).toBeEnabled();
   expect(calls).toEqual(['import', 'resume']);
