@@ -341,7 +341,7 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     };
     let ctx_root = otto_context::materialize::default_context_root();
     let _ = otto_context::materialize::provision(
-        &ctx.context_library(),
+        ctx.context_library(),
         &cfg,
         &cwd,
         &agent.provider,
