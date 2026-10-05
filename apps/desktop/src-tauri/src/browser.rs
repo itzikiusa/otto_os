@@ -56,7 +56,10 @@ fn allowed_tab_url(u: &tauri::Url) -> bool {
 fn parse_url(url: &str) -> Result<tauri::Url, String> {
     let u: tauri::Url = url.parse().map_err(|e| format!("bad url '{url}': {e}"))?;
     if !allowed_tab_url(&u) {
-        return Err(format!("unsupported url scheme '{}:' (http/https only)", u.scheme()));
+        return Err(format!(
+            "unsupported url scheme '{}:' (http/https only)",
+            u.scheme()
+        ));
     }
     Ok(u)
 }
@@ -307,7 +310,11 @@ mod tests {
 
     #[test]
     fn tabs_accept_only_web_urls() {
-        for ok in ["https://example.com/", "http://127.0.0.1:3000/x", "about:blank"] {
+        for ok in [
+            "https://example.com/",
+            "http://127.0.0.1:3000/x",
+            "about:blank",
+        ] {
             assert!(parse_url(ok).is_ok(), "{ok}");
         }
         for bad in [
