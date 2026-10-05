@@ -574,4 +574,6 @@ fn failed_held_resize_keeps_the_mirror_at_the_old_size() {
     h.simulate_holder_reconnecting();
     h.resize(90, 30).expect_err("no connection to send the resize on");
     assert_eq!(h.size(), (80, 24), "mirror reverted");
+    h.kill().expect("kill");
+    wait_until("ended", Duration::from_secs(15), || h.has_exited());
 }
