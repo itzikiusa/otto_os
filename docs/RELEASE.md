@@ -177,3 +177,8 @@ on port `7700`. Both it and the plist the app's supervisor installs set
 and I/O for the daemon and every PTY child it spawns, which shows up as
 keystroke-echo lag. Verify with
 `launchctl print gui/$UID/com.otto.daemon | grep -i 'process type'`.
+Both also set `ExitTimeOut=30` (ottod caps its HTTP drain at ~3 s and bounds
+each teardown step, so launchd never has to SIGKILL a stopping daemon) and send
+stdout/stderr to `~/Library/Logs/Otto/ottod.{stdout,stderr}.log` — panics land
+there (and in `ottod.log`, with a backtrace). Under launchd only warnings and
+errors are mirrored to stderr; `ottod.log.*` keeps the newest 30 daily files.

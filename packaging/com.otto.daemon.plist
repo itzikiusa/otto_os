@@ -2,7 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- launchd user-agent template for the Otto daemon.
      The installer replaces __OTTOD_PATH__ with the absolute path of the
-     installed ottod binary before `launchctl bootstrap gui/$UID <plist>`. -->
+     installed ottod binary and __LOG_DIR__ with ~/Library/Logs/Otto (absolute)
+     before `launchctl bootstrap gui/$UID <plist>`. Keep in sync with the
+     plist apps/desktop/src-tauri/src/supervisor.rs installs. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -21,9 +23,14 @@
          with the plist apps/desktop/src-tauri/src/supervisor.rs installs. -->
     <key>ProcessType</key>
     <string>Interactive</string>
+    <!-- SIGKILL this long after SIGTERM. ottod caps its HTTP drain at ~3 s
+         and bounds each teardown step; 30 s is headroom. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+    <!-- Panics/aborts land on stderr before the tracing file sees them. -->
     <key>StandardOutPath</key>
-    <string>/tmp/com.otto.daemon.stdout.log</string>
+    <string>__LOG_DIR__/ottod.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.otto.daemon.stderr.log</string>
+    <string>__LOG_DIR__/ottod.stderr.log</string>
 </dict>
 </plist>

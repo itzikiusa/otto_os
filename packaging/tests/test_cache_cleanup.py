@@ -73,21 +73,18 @@ class CacheCleanup(unittest.TestCase):
 
     def deploy_cleanup(self, path, **env):
         source = (REPO / path).read_text()
-        if path == "deploy.sh":
-            block = source.split("\n# sweep stale build artifacts:", 1)[1].split("\nDEPLOY_DONE=1", 1)[0]
-            block = "# sweep stale build artifacts:" + block
-        else:
-            block = source.split('echo "==> 5/7 ', 1)[1].split('\n[[ "$(git rev-parse HEAD)"', 1)[0]
-            block = 'echo "==> 5/7 ' + block
+        block = source.split('echo "==> 5/7 ', 1)[1].split('\n[[ "$(git rev-parse HEAD)"', 1)[0]
+        block = 'echo "==> 5/7 ' + block
         return self.run_script('ok() { :; }; warn() { :; };\n' + block + '\n:', **env)
 
     def assert_preserved(self, paths):
         for path in paths:
             self.assertTrue(path.is_file(), f"evicted usable artifact: {path.relative_to(self.root)}")
 
-    def test_root_deploy_preserves_old_live_artifacts_by_default(self):
-        self.deploy_cleanup("deploy.sh")
-        self.assert_preserved(self.old_artifacts + self.build_outputs + self.protected)
+    def test_root_deploy_is_a_wrapper_for_the_one_deploy_script(self):
+        source = (REPO / "deploy.sh").read_text()
+        self.assertIn('/packaging/deploy.sh" "$@"', source)
+        self.assertNotIn("cargo build", source)
 
     def test_packaging_deploy_preserves_old_live_artifacts_by_default(self):
         self.deploy_cleanup("packaging/deploy.sh")
@@ -110,14 +107,14 @@ class CacheCleanup(unittest.TestCase):
         self.run_script('bash "$HERE/prune-target.sh" --apply', TEST_BUILD_RUNNING="1")
         self.assert_preserved(self.old_artifacts + self.build_outputs + self.protected)
 
-    def test_prune_zero_override_preserves_cache_on_both_deploy_paths(self):
-        for path in ("deploy.sh", "packaging/deploy.sh"):
+    def test_prune_zero_override_preserves_cache(self):
+        for path in ("packaging/deploy.sh",):
             with self.subTest(path=path):
                 self.deploy_cleanup(path, PRUNE="0")
                 self.assert_preserved(self.old_artifacts + self.build_outputs + self.protected)
 
-    def test_prune_one_override_requests_explicit_cleanup_on_both_paths(self):
-        for path in ("deploy.sh", "packaging/deploy.sh"):
+    def test_prune_one_override_requests_explicit_cleanup(self):
+        for path in ("packaging/deploy.sh",):
             with self.subTest(path=path):
                 # Restore old dependencies before testing the second entrypoint.
                 for artifact in self.old_artifacts:

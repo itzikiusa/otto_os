@@ -7561,13 +7561,19 @@ async fn wait_session(
                 reached: true,
             }));
         }
-        if tokio::time::Instant::now() >= deadline {
+        // A daemon shutdown answers the long-poll now (callers loop on
+        // `reached: false`) instead of holding the HTTP drain open past
+        // launchd's exit timeout.
+        if tokio::time::Instant::now() >= deadline || crate::shutdown::is_shutting_down() {
             return Ok(Json(otto_core::api::WaitSessionResp {
                 session,
                 reached: false,
             }));
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+            _ = crate::shutdown::cancelled() => {}
+        }
         session = ctx.manager.get(&session_id).await.map_err(ApiError)?;
     }
 }

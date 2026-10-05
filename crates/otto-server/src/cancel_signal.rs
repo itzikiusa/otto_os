@@ -56,6 +56,11 @@ impl CancelSignal {
         }
     }
 
+    /// Resolves once the signal is cancelled (immediately if it already is).
+    pub async fn cancelled(&self) {
+        while !self.sleep(Duration::from_secs(3600)).await {}
+    }
+
     /// Two handles to the same signal (identity, like `Arc::ptr_eq`).
     pub fn same(&self, other: &CancelSignal) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
@@ -73,6 +78,24 @@ mod tests {
         let t0 = Instant::now();
         assert!(!sig.sleep(Duration::from_millis(60)).await, "not cancelled");
         assert!(t0.elapsed() >= Duration::from_millis(60));
+    }
+
+    #[tokio::test]
+    async fn cancelled_resolves_on_cancel_and_after_it() {
+        let sig = CancelSignal::new();
+        let s2 = sig.clone();
+        let h = tokio::spawn(async move { s2.cancelled().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!h.is_finished(), "waits while not cancelled");
+        sig.cancel();
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("woken by cancel")
+            .unwrap();
+        // Already cancelled → resolves immediately.
+        tokio::time::timeout(Duration::from_millis(100), sig.cancelled())
+            .await
+            .expect("immediate");
     }
 
     #[tokio::test]
