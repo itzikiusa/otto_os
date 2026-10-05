@@ -892,14 +892,16 @@
     return sel !== null && sel.path === path && sel.hunk === hi && sel.lines.has(li);
   }
 
-  /** Click = toggle one line; shift-click = the range from the last anchor. */
-  function selectLine(e: MouseEvent, path: string, hi: number, li: number, line: DiffLine): void {
+  /** Click = toggle one line; shift-click = the range from the last anchor.
+   *  A range picks only the CHANGED lines in it — context lines can't be staged,
+   *  and counting them made the button read "Stage 6 lines" for 3 changes. */
+  function selectLine(e: MouseEvent, path: string, hi: number, li: number, line: DiffLine, hunkLines?: DiffLine[]): void {
     if (!wip || line.origin === 'context') return;
     const cur = sel !== null && sel.path === path && sel.hunk === hi ? sel : null;
     if (e.shiftKey && cur) {
       const [a, b] = cur.anchor <= li ? [cur.anchor, li] : [li, cur.anchor];
       const lines = new Set(cur.lines);
-      for (let i = a; i <= b; i++) lines.add(i);
+      for (let i = a; i <= b; i++) if (!hunkLines || hunkLines[i]?.origin !== 'context') lines.add(i);
       selRaw = { for: diff, s: { path, hunk: hi, lines, anchor: cur.anchor } };
       return;
     }
@@ -917,17 +919,28 @@
 
   async function applyHunk(file: FileDiff, hi: number, hunk: Hunk, op: HunkOp): Promise<void> {
     if (!wip || !repoId || applying) return;
-    if (op === 'discard') {
-      const ok = await confirmer.ask(
-        'Discard these changes? This rewrites the working file and cannot be undone from the file — a backup stash `otto: backup before hunk discard` is kept.',
-        { title: 'Discard hunk', confirmLabel: 'Discard' },
-      );
-      if (!ok) return;
-    }
+    // Capture the line pick BEFORE any await: a re-fetch while the confirm is
+    // open swaps `diff`, which drops `sel` — reading it afterwards silently
+    // widened "Discard 2 lines" into a whole-hunk discard.
+    const shown = diff;
     const picked =
       sel !== null && sel.path === file.path && sel.hunk === hi && sel.lines.size > 0
         ? [...sel.lines].sort((a, b) => a - b)
         : undefined;
+    if (op === 'discard') {
+      const what = picked ? plural(picked.length, 'changed line') : 'this whole hunk';
+      const ok = await confirmer.ask(
+        `Discard ${what}? This rewrites the working file and cannot be undone from the file — a backup stash \`otto: backup before hunk discard\` is kept.`,
+        { title: picked ? 'Discard lines' : 'Discard hunk', confirmLabel: 'Discard' },
+      );
+      if (!ok) return;
+      // The diff changed under the dialog: the pick and the hunk index may no
+      // longer mean what the user confirmed. Re-pick instead of guessing.
+      if (diff !== shown) {
+        toasts.info('Diff changed', 'The file changed while you were confirming — nothing was discarded. Pick the lines again.');
+        return;
+      }
+    }
     applying = true;
     try {
       const r = await api.post<StageHunkResp>(`/repos/${repoId}/stage-hunk`, {
@@ -1163,7 +1176,7 @@
        staging) it is a real <button> with a spoken label; of a row's two gutters
        only one is a tab stop (the other stays mouse-clickable) so a diff does not
        double its tab order. A cell with no number is a plain, inert box. -->
-  {#snippet gut(side: 'old' | 'new', n: number | null, other: number | null, act: ((e: MouseEvent) => void) | null, kind: 'comment' | 'select')}
+  {#snippet gut(side: 'old' | 'new', n: number | null, other: number | null, act: ((e: MouseEvent) => void) | null, kind: 'comment' | 'select', pressed?: boolean)}
     {#if act && n != null}
       <button
         type="button"
@@ -1173,6 +1186,7 @@
         class:selectable={kind === 'select'}
         tabindex={side === 'new' || other == null ? 0 : -1}
         aria-label="{kind === 'comment' ? 'Comment on' : 'Select'} line {n}"
+        aria-pressed={kind === 'select' ? pressed === true : undefined}
         onclick={act}
       >{n}</button>
     {:else}
@@ -1365,15 +1379,16 @@
     {:else if r.kind === 'line'}
       {@const lang = langOf(r.file.path)}
       {@const pick = !!wip && r.line.origin !== 'context'}
-      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
+      {@const act = wip ? (pick ? (e: MouseEvent) => selectLine(e, r.file.path, r.hi, r.li, r.line, r.hunk.lines) : null) : prMode && onAddComment ? () => gutterClick(r.file.path, r.line) : null}
+      {@const picked = pick ? isSelected(r.file.path, r.hi, r.li) : undefined}
       <div
         class="vrow dline {r.line.origin}"
-        class:selected={isSelected(r.file.path, r.hi, r.li)}
+        class:selected={picked === true}
         data-rk={r.key}
         use:measure={[r.key, i]}
       >
-        {@render gut('old', r.line.old_line, r.line.new_line, act, wip ? 'select' : 'comment')}
-        {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment')}
+        {@render gut('old', r.line.old_line, r.line.new_line, act, wip ? 'select' : 'comment', picked)}
+        {@render gut('new', r.line.new_line, r.line.old_line, act, wip ? 'select' : 'comment', picked)}
         <span class="sign" data-find-skip>{sign(r.line)}</span>
         <span class="code mono">{@render codeText(r.line.content, lang, r.key)}</span>
       </div>

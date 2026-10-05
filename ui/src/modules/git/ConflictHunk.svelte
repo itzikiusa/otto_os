@@ -9,6 +9,7 @@
   // user hasn't touched the conflict yet).
   import Icon from '../../lib/components/Icon.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
+  import { editLines, editSeed, isCrlfBlock } from './conflictEdit';
 
   interface Props {
     ours: string[];
@@ -50,6 +51,13 @@
   let shown = $state(LINE_PAGE);
   let touched = $state(false);
   let editing = $state(false);
+  /** The applied hand edit ("Done editing"). While set it IS the resolution —
+   *  leaving edit mode used to fall back to the picks and drop the edit. A new
+   *  line/side pick replaces it (the user chose to pick again). */
+  let manual = $state.raw<string[] | null>(null);
+  /** An EMPTY side has no lines to tick, so its "take all" state lives here
+   *  (otherwise the native checkbox ticked while the bound value stayed false). */
+  let emptyTaken = $state({ ours: false, theirs: false });
   // (Re)seed the pick arrays whenever the conflict content itself changes —
   // a new file load replaces the segment arrays wholesale.
   $effect(() => {
@@ -57,6 +65,8 @@
     theirsSel = theirs.map(() => false);
     touched = false;
     editing = false;
+    manual = null;
+    emptyTaken = { ours: false, theirs: false };
     shown = LINE_PAGE;
   });
   const hiddenLines = $derived(Math.max(ours.length, theirs.length) - shown);
@@ -80,15 +90,16 @@
 
   const oursPicked = $derived(oursSel.filter(Boolean).length);
   const theirsPicked = $derived(theirsSel.filter(Boolean).length);
-  const oursAll = $derived(ours.length > 0 && oursPicked === ours.length);
-  const theirsAll = $derived(theirs.length > 0 && theirsPicked === theirs.length);
+  const oursAll = $derived(ours.length > 0 ? oursPicked === ours.length : emptyTaken.ours);
+  const theirsAll = $derived(theirs.length > 0 ? theirsPicked === theirs.length : emptyTaken.theirs);
+  // CodeMirror drops `\r`; a CRLF block gets it re-appended on the way out.
+  const crlf = $derived(isCrlfBlock(ours, theirs, base));
 
   // The resolved lines: A's picks in order, then B's picks in order.
   const resolved = $derived.by((): string[] | null => {
-    if (editing) {
-      // An empty editor still counts as a (deliberate) empty resolution.
-      return editText.length === 0 ? [] : editText.split('\n');
-    }
+    // An empty editor still counts as a (deliberate) empty resolution.
+    if (editing) return editLines(editText, crlf);
+    if (manual !== null) return manual;
     if (!touched) return null;
     return [
       ...ours.filter((_, i) => oursSel[i]),
@@ -103,6 +114,7 @@
 
   function toggleLine(side: 'ours' | 'theirs', i: number): void {
     touched = true;
+    manual = null;
     if (side === 'ours') {
       const next = [...oursSel];
       next[i] = !next[i];
@@ -118,6 +130,11 @@
    *  taking an empty side is a deliberate "delete this block". */
   function toggleSide(side: 'ours' | 'theirs'): void {
     touched = true;
+    manual = null;
+    if ((side === 'ours' ? ours : theirs).length === 0) {
+      emptyTaken = { ...emptyTaken, [side]: !emptyTaken[side] };
+      return;
+    }
     if (side === 'ours') oursSel = ours.map(() => !oursAll);
     else theirsSel = theirs.map(() => !theirsAll);
   }
@@ -126,18 +143,26 @@
     if (!editing) {
       // Seed the editor with the current picks (or the "both" merge when the
       // conflict is still untouched) so users start from something sensible.
-      const seed = touched
-        ? [...ours.filter((_, i) => oursSel[i]), ...theirs.filter((_, i) => theirsSel[i])]
-        : [...ours, ...theirs];
-      editText = seed.join('\n');
+      const seed =
+        manual ??
+        (touched
+          ? [...ours.filter((_, i) => oursSel[i]), ...theirs.filter((_, i) => theirsSel[i])]
+          : [...ours, ...theirs]);
+      editText = editSeed(seed);
     }
     editing = true;
   }
 
+  /** "Done editing" APPLIES the edit: it becomes the resolution. */
   function stopEdit(): void {
+    manual = editLines(editText, crlf);
+    touched = true;
     editing = false;
-    // Leaving edit keeps whatever picks were there before; if none, the hunk
-    // returns to undecided (resolved → null) which is the honest state.
+  }
+
+  /** Leave edit mode WITHOUT applying: back to the previous resolution. */
+  function cancelEdit(): void {
+    editing = false;
   }
 
 </script>
@@ -153,10 +178,16 @@
     {/if}
     <span class="grow"></span>
     {#if editing}
-      <button class="edit-done" onclick={stopEdit} title="Back to side-by-side picking">
-        <Icon name="check" size={12} /> Done editing
+      <button class="edit-btn" onclick={cancelEdit} title="Discard this edit and go back to picking">
+        Cancel edit
+      </button>
+      <button class="edit-done" onclick={stopEdit} title="Use the edited text as this conflict's resolution">
+        <Icon name="check" size={12} /> Apply edit
       </button>
     {:else}
+      {#if manual !== null}
+        <span class="side-partial" title="This conflict is resolved with your hand-edited text; picking a line replaces it">hand-edited</span>
+      {/if}
       <button class="edit-btn" onclick={startEdit} title="Edit the resolution by hand">
         Edit
       </button>
@@ -233,7 +264,7 @@
             <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
           {:else}
             {#each ours.slice(0, shown) as line, i (i)}
-              <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
+              <button class="pick-line ours" class:picked={oursSel[i]} aria-pressed={oursSel[i] === true} onclick={() => toggleLine('ours', i)}>
                 <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
@@ -256,7 +287,7 @@
             <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
           {:else}
             {#each theirs.slice(0, shown) as line, i (i)}
-              <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
+              <button class="pick-line theirs" class:picked={theirsSel[i]} aria-pressed={theirsSel[i] === true} onclick={() => toggleLine('theirs', i)}>
                 <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
@@ -271,7 +302,7 @@
             <div class="empty-side dim mono">(empty — taking A deletes the block)</div>
           {:else}
             {#each ours.slice(0, shown) as line, i (i)}
-              <button class="pick-line ours" class:picked={oursSel[i]} onclick={() => toggleLine('ours', i)}>
+              <button class="pick-line ours" class:picked={oursSel[i]} aria-pressed={oursSel[i] === true} onclick={() => toggleLine('ours', i)}>
                 <span class="pick-box">{#if oursSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
@@ -283,7 +314,7 @@
             <div class="empty-side dim mono">(empty — taking B deletes the block)</div>
           {:else}
             {#each theirs.slice(0, shown) as line, i (i)}
-              <button class="pick-line theirs" class:picked={theirsSel[i]} onclick={() => toggleLine('theirs', i)}>
+              <button class="pick-line theirs" class:picked={theirsSel[i]} aria-pressed={theirsSel[i] === true} onclick={() => toggleLine('theirs', i)}>
                 <span class="pick-box">{#if theirsSel[i]}<Icon name="check" size={12} />{/if}</span>
                 <span class="mono pick-code">{line}</span>
               </button>
