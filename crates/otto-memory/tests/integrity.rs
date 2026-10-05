@@ -435,3 +435,26 @@ async fn undo_tokens_are_random_and_expire() {
     ));
     assert!(!svc.get(&ws, &saved[1].id).await.unwrap().active);
 }
+
+/// S7-10: the boot warm-up builds + reconciles the FTS index up front, so a
+/// memory saved before it (e.g. by an older build) is searchable without a
+/// request paying the reconcile; repeated warm-ups are cached no-ops.
+#[tokio::test]
+async fn warm_fts_reconciles_before_the_first_request() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool.clone());
+    svc.save(&ws, &user, vec![nm("W", "warmup reconciles epsilon")])
+        .await
+        .unwrap();
+    // A fresh service over the same DB with its index wiped = a cold boot
+    // after rows landed without FTS.
+    sqlx::query("DELETE FROM memories_fts")
+        .execute(svc.pool())
+        .await
+        .unwrap();
+    let cold = MemoryService::with_defaults(pool);
+    let (a, b) = tokio::join!(cold.warm_fts(), cold.warm_fts());
+    assert!(a && b);
+    assert_eq!(fts_mids(&cold).await.len(), 1, "reconciled at warm-up");
+    assert_eq!(search_ids(&cold, &ws, "epsilon").await.len(), 1);
+}
