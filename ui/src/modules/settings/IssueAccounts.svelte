@@ -451,7 +451,7 @@
   .test-result.ok {
     color: var(--success);
   }
-  .warn-hint {
+  .hint.warn-hint {
     color: var(--danger);
   }
   .test-result.bad {
