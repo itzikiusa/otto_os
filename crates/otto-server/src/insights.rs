@@ -611,7 +611,7 @@ async fn run_alive(ctx: &ServerCtx, dir: &Path, run: &ActiveRun) -> bool {
     if Utc::now() - run.started_at > chrono::Duration::from_std(RUN_TIMEOUT).unwrap_or_default() {
         return false;
     }
-    let session_live = match ctx.manager.get(&run.run_id.clone().into()).await {
+    let session_live = match ctx.manager.get(&run.run_id).await {
         Ok(s) => s.status != otto_core::domain::SessionStatus::Exited && !s.archived,
         Err(_) => false,
     };
@@ -783,12 +783,12 @@ pub async fn run_insights(
         .find(|r| r.report_key == report_key)
     {
         info!(session = %run.run_id, key = %report_key, "insights: attaching to the run already in progress");
-        return Ok(Some(run.run_id.into()));
+        return Ok(Some(run.run_id));
     }
     let mut registry = ACTIVE_RUNS.lock().await;
     // Re-check under the lock (another request may have registered meanwhile).
     if let Some(run) = registry.live(&dir, &report_key, |_| true) {
-        return Ok(Some(run.run_id.into()));
+        return Ok(Some(run.run_id));
     }
     let report_revision = {
         let (d, k) = (dir.clone(), report_key.clone());
@@ -949,7 +949,7 @@ async fn cancel_run(
         .await
         .remove_run(&dir, &id)
         .ok_or_else(|| ApiError(otto_core::Error::NotFound("insights run".into())))?;
-    let sid: otto_core::Id = run.run_id.into();
+    let sid: otto_core::Id = run.run_id;
     let _ = ctx.manager.kill_session(&sid).await;
     let _ = ctx.manager.archive(&sid).await;
     info!(session = %sid, "insights: run cancelled");
