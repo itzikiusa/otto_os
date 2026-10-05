@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// Resolve the repository root from `CARGO_MANIFEST_DIR` (= crates/otto-server)
 /// by walking up until we find a dir that contains both `crates/` and
 /// `docs/contracts/api.md`.
-fn repo_root() -> PathBuf {
+pub(crate) fn repo_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     loop {
         if dir.join("crates").is_dir() && dir.join("docs/contracts/api.md").is_file() {
@@ -471,7 +471,7 @@ fn extract_routes(src: &str) -> Vec<(String, BTreeSet<String>)> {
 
 /// Collect the canonical registered `(METHOD, PATH)` set from the crates
 /// source tree, keyed back to the literal path for readable failures.
-fn registered_routes(root: &Path) -> BTreeMap<(String, String), String> {
+pub(crate) fn registered_routes(root: &Path) -> BTreeMap<(String, String), String> {
     let mut set = BTreeMap::new();
     for (f, src) in &daemon_sources(root) {
         if !src.contains(".route(") {
