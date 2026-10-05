@@ -511,6 +511,43 @@ mod tests {
         hay.windows(needle.len()).any(|w| w == needle.as_bytes())
     }
 
+    /// S7-11: the Keychain master key vanishing while `secrets.enc` exists
+    /// used to make `put` mint a NEW key — every later put then failed as
+    /// "tampered / wrong key", forever. Now put refuses (Conflict) without
+    /// minting, and the explicit set-aside recovers without deleting data.
+    #[test]
+    fn missing_master_key_with_a_sealed_file_refuses_then_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Arc::new(MemKey::default());
+        let store = EncryptedFileStore::new(dir.path(), cell(src.clone(), 2_000));
+        store.put("conn-1", "hunter2").unwrap();
+        let sealed = std::fs::read(store.path()).unwrap();
+
+        // The Keychain item disappears; a fresh process sees no key.
+        *src.key.lock().unwrap() = None;
+        let store = EncryptedFileStore::new(dir.path(), cell(src.clone(), 2_000));
+        let err = store.put("conn-2", "x").unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+        assert!(src.key.lock().unwrap().is_none(), "no key was minted");
+        assert_eq!(
+            std::fs::read(store.path()).unwrap(),
+            sealed,
+            "file untouched"
+        );
+
+        // Recovery: the unreadable file is moved aside (kept), then puts work.
+        let aside = store.set_aside_unreadable().unwrap().expect("moved aside");
+        assert_eq!(std::fs::read(&aside).unwrap(), sealed);
+        assert!(!store.path().exists());
+        store.put("conn-2", "x").unwrap();
+        assert_eq!(store.get("conn-2").unwrap().as_deref(), Some("x"));
+        // A readable store is never set aside.
+        assert!(matches!(
+            store.set_aside_unreadable().unwrap_err(),
+            Error::Conflict(_)
+        ));
+    }
+
     #[test]
     fn seal_open_round_trip() {
         let k = MasterKey::generate().unwrap();

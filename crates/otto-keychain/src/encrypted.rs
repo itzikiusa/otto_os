@@ -151,8 +151,10 @@ impl From<KeyError> for Error {
                  access prompt is waiting) — unlock it / approve the prompt and retry"
                     .into(),
             ),
-            KeyError::Missing => Error::Internal(
-                "secret store: secrets.enc exists but its master key is missing from the Keychain"
+            KeyError::Missing => Error::Conflict(
+                "secret store: secrets.enc exists but its master key is missing from the \
+                 Keychain — restore the \"Otto\" Keychain item, or reset the secret store \
+                 (the unreadable file is moved aside, not deleted)"
                     .into(),
             ),
             KeyError::Failed(m) => Error::Internal(format!("secret store: {m}")),
@@ -413,6 +415,42 @@ impl EncryptedFileStore {
     fn load(&self, key: &MasterKey) -> Result<BTreeMap<String, String>> {
         Ok(read_sealed(&self.path, key)?.unwrap_or_default())
     }
+
+    /// Recovery for an orphaned store: when `secrets.enc` can't be opened —
+    /// its Keychain master key is gone, or the file doesn't decrypt under the
+    /// current one — move it aside to `secrets.enc.orphaned-<unix secs>`
+    /// (never deleted: restoring the old key makes it readable again) so new
+    /// secrets can be stored. Refuses (`Conflict`) while the file is readable.
+    /// Returns the set-aside path, `None` when there was no file.
+    pub fn set_aside_unreadable(&self) -> Result<Option<PathBuf>> {
+        let readable = match self.key.fetch(false) {
+            Ok(mk) => {
+                let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+                read_sealed(&self.path, &mk).is_ok()
+            }
+            Err(KeyError::Missing) => false,
+            Err(e) => return Err(e.into()),
+        };
+        let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        if readable {
+            return Err(Error::Conflict(
+                "secrets.enc is readable with the current master key; nothing to reset".into(),
+            ));
+        }
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let aside = self
+            .path
+            .with_file_name(format!("{ENCRYPTED_FILE}.orphaned-{secs}"));
+        std::fs::rename(&self.path, &aside)
+            .map_err(|e| Error::Internal(format!("secrets.enc set aside: {e}")))?;
+        Ok(Some(aside))
+    }
 }
 
 impl SecretStore for EncryptedFileStore {
@@ -421,7 +459,12 @@ impl SecretStore for EncryptedFileStore {
     // callers would each wait their own full timeout in turn. Outside it they
     // all share the one in-flight `MasterKeyCell` load and its deadline.
     fn put(&self, key: &str, value: &str) -> Result<()> {
-        let mk = self.key.fetch(true)?;
+        // Mint a master key ONLY when there is no sealed file yet. With the
+        // file present a missing Keychain item is an orphaned store: minting
+        // a fresh key here used to make every later put fail as "tampered /
+        // wrong key" with no way back (S7-11). Refuse with `Missing` instead;
+        // [`Self::set_aside_unreadable`] is the explicit recovery.
+        let mk = self.key.fetch(!self.path.exists())?;
         let _g = self.lock.lock().unwrap_or_else(|p| p.into_inner());
         let mut map = self.load(&mk)?;
         map.insert(key.to_string(), value.to_string());
