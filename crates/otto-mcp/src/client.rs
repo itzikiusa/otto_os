@@ -327,7 +327,7 @@ async fn open_stdio(
     let stdout = child.stdout.take().ok_or("no child stdout")?;
     let mut reader = BufReader::new(stdout);
     write_line(&mut stdin, &init_request()).await?;
-    let _ = read_until_id(&mut reader, 1).await?;
+    let _ = read_until_id(&mut reader, Some(&mut stdin), 1).await?;
     write_line(
         &mut stdin,
         &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -372,8 +372,8 @@ async fn open_http(url: &str, headers: &BTreeMap<String, String>) -> Result<Live
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let _ = parse_http_message(resp).await?; // ensure initialize succeeded
-                                             // notifications/initialized (best-effort).
+    let _ = parse_http_message(resp, 1).await?; // ensure initialize succeeded
+                                                // notifications/initialized (best-effort).
     let _ = http_send(
         &client,
         url,
@@ -444,7 +444,9 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             write_line(stdin, &request)
                 .await
                 .map_err(OpError::NotDelivered)?;
-            read_until_id(reader, id).await.map_err(OpError::Failed)
+            read_until_id(reader, Some(stdin), id)
+                .await
+                .map_err(OpError::Failed)
         }
         Live::Http {
             client,
@@ -473,7 +475,9 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
             if resp.status() == reqwest::StatusCode::NOT_FOUND && session_id.is_some() {
                 return Err(OpError::NotDelivered("mcp session expired".into()));
             }
-            let msg = parse_http_message(resp).await.map_err(OpError::Failed)?;
+            let msg = parse_http_message(resp, id)
+                .await
+                .map_err(OpError::Failed)?;
             msg.get("result").cloned().ok_or_else(|| {
                 OpError::Failed(
                     msg.get("error")
@@ -485,10 +489,10 @@ async fn run_on(live: &mut Live, transport: &Transport, request: Value) -> Resul
     }
 }
 
-/// Read the JSON-RPC message from an HTTP response, honoring content negotiation
-/// (a JSON body, or an SSE `text/event-stream` whose `data:` lines carry it).
+/// Read the JSON-RPC response to request `want_id` from an HTTP response,
+/// honoring content negotiation (a JSON body, or an SSE `text/event-stream`).
 /// Body is size-capped.
-async fn parse_http_message(mut resp: reqwest::Response) -> Result<Value, String> {
+async fn parse_http_message(mut resp: reqwest::Response, want_id: i64) -> Result<Value, String> {
     let status = resp.status();
     let ct = resp
         .headers()
@@ -515,20 +519,82 @@ async fn parse_http_message(mut resp: reqwest::Response) -> Result<Value, String
         return Err(format!("http {status}: {snippet}"));
     }
     if ct.contains("text/event-stream") {
-        // Concatenate `data:` lines and parse the last complete JSON object.
-        let mut data = String::new();
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                data.push_str(rest.trim());
+        pick_sse_response(&text, want_id)
+    } else {
+        let v: Value = serde_json::from_str(&text).map_err(|e| format!("parse json: {e}"))?;
+        // A JSON-RPC batch body: pick our response out of it.
+        match v {
+            Value::Array(msgs) => pick_response(msgs, want_id)
+                .ok_or_else(|| "no response for this request in batch".to_string()),
+            v => Ok(v),
+        }
+    }
+}
+
+/// Split an SSE body into events (blank-line separated; an event's `data:`
+/// lines join with `\n` per the SSE spec), parse each event as one JSON-RPC
+/// message, and return the response to `want_id`. A Streamable-HTTP server may
+/// emit notifications (progress, logging) and server→client requests on the
+/// same stream BEFORE the result — those are skipped, not concatenated into
+/// the result (which used to make the whole body unparseable).
+fn pick_sse_response(text: &str, want_id: i64) -> Result<Value, String> {
+    let mut msgs = Vec::new();
+    let mut data: Option<String> = None;
+    let mut saw_data = false;
+    let flush = |data: &mut Option<String>, msgs: &mut Vec<Value>| {
+        if let Some(d) = data.take() {
+            if let Ok(v) = serde_json::from_str::<Value>(&d) {
+                msgs.push(v);
             }
         }
-        if data.is_empty() {
-            return Err("empty SSE stream".into());
+    };
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() {
+            flush(&mut data, &mut msgs);
+            continue;
         }
-        serde_json::from_str(&data).map_err(|e| format!("parse sse json: {e}"))
-    } else {
-        serde_json::from_str(&text).map_err(|e| format!("parse json: {e}"))
+        if let Some(rest) = line.strip_prefix("data:") {
+            saw_data = true;
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            match &mut data {
+                Some(d) => {
+                    d.push('\n');
+                    d.push_str(rest);
+                }
+                None => data = Some(rest.to_string()),
+            }
+        }
+        // `event:` / `id:` / `retry:` / `:comment` lines carry no payload.
     }
+    flush(&mut data, &mut msgs);
+    if !saw_data {
+        return Err("empty SSE stream".into());
+    }
+    pick_response(msgs, want_id).ok_or_else(|| "no response for this request in SSE stream".into())
+}
+
+/// Is `msg` a JSON-RPC *response* (not a notification / server request)?
+fn is_response(msg: &Value) -> bool {
+    msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some())
+}
+
+/// The response whose id is `want_id`; failing that, the first response at
+/// all (a server that echoes a different id type, e.g. a string).
+fn pick_response(msgs: Vec<Value>, want_id: i64) -> Option<Value> {
+    let mut fallback = None;
+    for m in msgs {
+        if !is_response(&m) {
+            continue;
+        }
+        if m.get("id").and_then(Value::as_i64) == Some(want_id) {
+            return Some(m);
+        }
+        if fallback.is_none() {
+            fallback = Some(m);
+        }
+    }
+    fallback
 }
 
 async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> Result<(), String> {
@@ -539,10 +605,15 @@ async fn write_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> Result<()
     Ok(())
 }
 
-/// Read newline-delimited JSON-RPC lines until one carries `id == want_id`, return
-/// its `result` (or surface its `error`). Notifications / other ids are skipped.
-async fn read_until_id<R: AsyncBufReadExt + Unpin>(
+/// Read newline-delimited JSON-RPC lines until the *response* with
+/// `id == want_id` arrives, return its `result` (or surface its `error`).
+/// Notifications and responses to other ids are skipped. A server→client
+/// request (it has a `method`) is never mistaken for our response even when
+/// its id collides with ours: a `ping` is answered with `{}`, anything else
+/// with "method not found", on `reply` when given (best-effort).
+async fn read_until_id<R: AsyncBufReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
+    mut reply: Option<&mut W>,
     want_id: i64,
 ) -> Result<Value, String> {
     let mut line = Vec::new();
@@ -581,8 +652,21 @@ async fn read_until_id<R: AsyncBufReadExt + Unpin>(
             Ok(v) => v,
             Err(_) => continue, // tolerate stray non-JSON noise on stdout
         };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            // Server→client request (has an id) or notification (no id).
+            if let (Some(id), Some(w)) = (msg.get("id"), reply.as_deref_mut()) {
+                let answer = if method == "ping" {
+                    json!({"jsonrpc":"2.0","id":id,"result":{}})
+                } else {
+                    json!({"jsonrpc":"2.0","id":id,
+                        "error":{"code":-32601,"message":"method not found"}})
+                };
+                let _ = write_line(w, &answer).await;
+            }
+            continue;
+        }
         let id_matches = msg.get("id").and_then(Value::as_i64) == Some(want_id);
-        if !id_matches {
+        if !id_matches || !is_response(&msg) {
             continue;
         }
         if let Some(err) = msg.get("error") {
@@ -608,8 +692,11 @@ mod tests {
             }
         });
         let mut reader = BufReader::new(reader);
-        let result =
-            tokio::time::timeout(Duration::from_secs(2), read_until_id(&mut reader, 1)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_until_id(&mut reader, None::<&mut tokio::io::Sink>, 1),
+        )
+        .await;
         drop(reader);
         producer.await.unwrap();
         assert!(result.unwrap().unwrap_err().contains("size cap"));
@@ -620,7 +707,7 @@ mod tests {
         let notification = b"{\"method\":\"progress\"}\n";
         let bytes = notification.repeat(MAX_BODY_BYTES / notification.len() + 1);
         let mut reader = BufReader::new(bytes.as_slice());
-        assert!(read_until_id(&mut reader, 1)
+        assert!(read_until_id(&mut reader, None::<&mut tokio::io::Sink>, 1)
             .await
             .unwrap_err()
             .contains("size cap"));
@@ -658,7 +745,7 @@ mod tests {
                     .send()
                     .await
                     .unwrap();
-                parse_http_message(response).await
+                parse_http_message(response, 1).await
             })
             .await;
             producer.abort();
@@ -668,6 +755,82 @@ mod tests {
                 .unwrap_err()
                 .contains("size cap"));
         }
+    }
+
+    #[test]
+    fn sse_notification_before_result_returns_the_result() {
+        // Streamable HTTP: progress/log notifications and a server request
+        // may precede the response on the same stream.
+        let body = "event: message\r\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\r\n\r\n\
+                    data: {\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}\n\n\
+                    : keep-alive\n\n\
+                    event: message\n\
+                    data: {\"jsonrpc\":\"2.0\",\n\
+                    data: \"id\":7,\"result\":{\"ok\":true}}\n\n";
+        let msg = pick_sse_response(body, 7).unwrap();
+        assert_eq!(msg["result"]["ok"], json!(true));
+        // A stream with only a notification has no response.
+        let only = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\n";
+        assert!(pick_sse_response(only, 7).is_err());
+        assert!(pick_sse_response("event: x\n\n", 7)
+            .unwrap_err()
+            .contains("empty"));
+    }
+
+    #[test]
+    fn pick_response_prefers_matching_id_then_any_response() {
+        let msgs = vec![
+            json!({"jsonrpc":"2.0","id":1,"result":{"n":1}}),
+            json!({"jsonrpc":"2.0","id":2,"error":{"code":1}}),
+        ];
+        assert_eq!(pick_response(msgs.clone(), 2).unwrap()["error"]["code"], 1);
+        assert_eq!(pick_response(msgs, 9).unwrap()["result"]["n"], 1);
+    }
+
+    #[tokio::test]
+    async fn stdio_server_request_with_colliding_id_is_answered_not_returned() {
+        // A server `ping` reusing our id must not be taken as our response.
+        let lines = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"real\":true}}\n",
+        );
+        let mut reader = BufReader::new(lines.as_bytes());
+        let mut out: Vec<u8> = Vec::new();
+        let v = read_until_id(&mut reader, Some(&mut out), 3).await.unwrap();
+        assert_eq!(v["real"], json!(true));
+        let answered: Value = serde_json::from_slice(out.trim_ascii()).unwrap();
+        assert_eq!(answered["id"], json!(3));
+        assert_eq!(answered["result"], json!({}), "ping answered with {{}}");
+    }
+
+    #[tokio::test]
+    async fn http_sse_response_after_notification_end_to_end() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n\
+                        data: {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"tools\":[]}}\n\n";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body.as_bytes()).await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/mcp"))
+            .send()
+            .await
+            .unwrap();
+        let msg = parse_http_message(response, 5).await.unwrap();
+        assert_eq!(msg["result"]["tools"], json!([]));
+        server.await.unwrap();
     }
 
     #[tokio::test]

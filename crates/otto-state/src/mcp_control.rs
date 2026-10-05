@@ -1092,6 +1092,23 @@ impl McpCallLogRepo {
         Ok(())
     }
 
+    /// Rewrite a pre-execution audit row's decision — the invoke pipeline's
+    /// pre-execution RE-CHECK denying a call that was inserted as
+    /// `allowed`/`approved` must leave ONE row saying `denied`, not a false
+    /// "allowed" row next to a second "denied" one.
+    pub async fn finalize_decision(&self, id: &str, decision: &str, reason: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE mcp_call_log SET decision = ?, decision_reason = ?, ok = 0 WHERE id = ?",
+        )
+        .bind(decision)
+        .bind(reason)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("finalize call log decision"))?;
+        Ok(())
+    }
+
     pub async fn list(&self, q: &CallLogQuery) -> Result<Vec<McpCallLogRow>> {
         // Build a parameterized query honoring the workspace restriction (so a
         // non-root caller only sees logs for workspaces they can access).

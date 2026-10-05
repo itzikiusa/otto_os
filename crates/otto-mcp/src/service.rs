@@ -680,311 +680,17 @@ impl McpService {
                 None => false,
             };
             if !permitted {
-                return self
-                    .terminal_deny(
-                        &server,
-                        tool_name,
-                        args,
-                        &risk_label,
-                        &injection_risk,
-                        ctx,
-                        "resource access denied",
-                    )
-                    .await;
-            }
-        }
-        // 0. server gate.
-        if !server.enabled
-            || (!server.managed && access_policy.mode == otto_core::access::AccessMode::Legacy)
-        {
-            return self
-                .terminal_deny(
-                    &server,
-                    tool_name,
-                    args,
-                    &risk_label,
-                    &injection_risk,
-                    ctx,
-                    "server is disabled or not managed",
-                )
-                .await;
-        }
-        // 1. allowlist (per workspace), deny wins.
-        if let Some(ws) = ctx.workspace_id.as_deref() {
-            match self
-                .allowlist()
-                .resolve(&ws.to_string(), &server.id, tool_name)
-                .await?
-            {
-                Some(mode) if mode == "deny" => {
-                    return self
-                        .terminal_deny(
-                            &server,
-                            tool_name,
-                            args,
-                            &risk_label,
-                            &injection_risk,
-                            ctx,
-                            "workspace allowlist denies this tool",
-                        )
-                        .await;
-                }
-                Some(_) => {} // explicit allow
-                None => {
-                    if server.default_tool_access == "deny" {
-                        return self
-                            .terminal_deny(
-                                &server,
-                                tool_name,
-                                args,
-                                &risk_label,
-                                &injection_risk,
-                                ctx,
-                                "not in workspace allowlist (server default = deny)",
-                            )
-                            .await;
-                    }
-                }
-            }
-        }
-        // 2. per-tool permission.
-        if !tool_enabled {
-            return self
-                .terminal_deny(
-                    &server,
-                    tool_name,
-                    args,
-                    &risk_label,
-                    &injection_risk,
-                    ctx,
-                    "tool is disabled (per-tool permission)",
-                )
-                .await;
-        }
-        // 3. policy-as-code (most-restrictive-wins).
-        let rules = self
-            .policies()
-            .list_applicable(ctx.workspace_id.as_deref().unwrap_or(""))
-            .await?;
-        let pctx = PolicyCtx {
-            server_id: &server.id,
-            server_name: &server.name,
-            tool: tool_name,
-            risk_label: &risk_label,
-            injection_risk: &injection_risk,
-            mutating,
-            direction: &ctx.direction,
-            caller_kind: &ctx.caller_kind,
-            workspace_id: ctx.workspace_id.as_deref(),
-        };
-        let effect = policy::evaluate(&rules, &pctx);
-        if let Effect::Deny(reason) = &effect {
-            return self
-                .terminal_deny(
-                    &server,
-                    tool_name,
-                    args,
-                    &risk_label,
-                    &injection_risk,
-                    ctx,
-                    &format!("policy denied: {reason}"),
-                )
-                .await;
-        }
-        let policy_dry_run = matches!(effect, Effect::RequireDryRun(_));
-        let policy_approval = matches!(effect, Effect::RequireApproval(_));
-
-        // 4. risk / approval gate. dry-run requests skip the approval *creation*
-        //    (a preview executes nothing), but a policy require_dry_run still applies.
-        let dangerous_default =
-            risk_label == "dangerous" && self.require_approval_dangerous().await;
-        let needs_approval = policy_approval || tool_require_approval || dangerous_default;
-        let args_hash = canonical_hash(args);
-
-        let mut approval_id_used: Option<String> = None;
-        if needs_approval && !ctx.dry_run {
-            match self
-                .approvals()
-                .find_usable(
-                    ctx.workspace_id.as_deref(),
-                    Some(&server.id),
-                    tool_name,
-                    &args_hash,
-                    ctx.caller_user_id.as_deref(),
-                )
-                .await?
-            {
-                Some(appr_id) => {
-                    let approval = self.approvals().get(&appr_id).await?;
-                    if approval.requested_by != ctx.caller_user_id {
-                        return self
-                            .terminal_deny(
-                                &server,
-                                tool_name,
-                                args,
-                                &risk_label,
-                                &injection_risk,
-                                ctx,
-                                "approval belongs to another caller",
-                            )
-                            .await;
-                    }
-                    // Single-use: consume atomically; a lost race => already used.
-                    if !self.approvals().consume(&appr_id).await? {
-                        return self
-                            .terminal_deny(
-                                &server,
-                                tool_name,
-                                args,
-                                &risk_label,
-                                &injection_risk,
-                                ctx,
-                                "approval was already used",
-                            )
-                            .await;
-                    }
-                    approval_id_used = Some(appr_id);
-                }
-                None => {
-                    // Create a pending approval bound to the EXACT args.
-                    let redacted = redact_json(args).value.to_string();
-                    let expires =
-                        (Utc::now() + ChronoDuration::minutes(APPROVAL_TTL_MINS)).to_rfc3339();
-                    let appr = self
-                        .approvals()
-                        .create(NewApproval {
-                            workspace_id: ctx.workspace_id.clone(),
-                            kind: "tool_call".into(),
-                            server_id: Some(server.id.clone()),
-                            server_name: Some(server.name.clone()),
-                            tool: Some(tool_name.to_string()),
-                            title: format!("{} → {}", server.name, tool_name),
-                            detail: Some(format!(
-                                "Approve {risk_label} MCP tool '{tool_name}' on server '{}'.",
-                                server.name
-                            )),
-                            args_redacted_json: redacted,
-                            args_hash: Some(args_hash.clone()),
-                            risk_label: Some(risk_label.clone()),
-                            requested_by: ctx.caller_user_id.clone(),
-                            requested_by_kind: Some(ctx.caller_kind.clone()),
-                            requested_by_session_id: None,
-                            expires_at: Some(expires),
-                        })
-                        .await?;
-                    self.audit_terminal(
-                        &server,
-                        tool_name,
-                        args,
-                        &risk_label,
-                        &injection_risk,
-                        ctx,
-                        "pending_approval",
-                        Some(&format!("awaiting approval for {risk_label} tool")),
-                        Some(&appr.id),
-                    )
+                // Finalize the pre-execution row AS the denial (one row, true
+                // decision) rather than inserting a second "denied" row and
+                // leaving the first claiming "allowed".
+                let reason = "resource access revoked before execution";
+                pending_row.disarm();
+                self.call_log()
+                    .finalize_decision(&audit_id, "denied", reason)
                     .await?;
-                    return Ok(InvokeOutcome::Pending {
-                        approval_id: appr.id,
-                        title: format!("{} → {}", server.name, tool_name),
-                    });
-                }
-            }
-        }
-
-        // 5. dry-run = pure simulation (never calls the tool). design §14 F4.
-        if ctx.dry_run || policy_dry_run {
-            let preview = json!({
-                "executed": false,
-                "mode": "preview",
-                "would_call": { "server": server.name, "tool": tool_name, "arguments": redact_json(args).value },
-                "note": "dry-run: arguments validated and target resolved; the tool was NOT executed",
-            });
-            self.audit_terminal(
-                &server,
-                tool_name,
-                args,
-                &risk_label,
-                &injection_risk,
-                ctx,
-                "dry_run",
-                None,
-                approval_id_used.as_deref(),
-            )
-            .await?;
-            return Ok(InvokeOutcome::DryRun { preview });
-        }
-
-        // 6. execute. Fail-closed audit: insert the row BEFORE running so an
-        //    audit failure aborts the call; finalize with the outcome after.
-        let decision = if approval_id_used.is_some() {
-            "approved"
-        } else {
-            "allowed"
-        };
-        let audit_id = self
-            .call_log()
-            .insert(NewCallLog {
-                workspace_id: ctx.workspace_id.clone(),
-                server_id: Some(server.id.clone()),
-                server_name: Some(server.name.clone()),
-                tool: tool_name.to_string(),
-                direction: ctx.direction.clone(),
-                caller_user_id: ctx.caller_user_id.clone(),
-                caller_kind: Some(ctx.caller_kind.clone()),
-                args_redacted_json: redact_json(args).value.to_string(),
-                decision: decision.into(),
-                decision_reason: None,
-                risk_label: Some(risk_label.clone()),
-                injection_risk: Some(injection_risk.clone()),
-                dry_run: false,
-                ok: false, // finalized below
-                error: None,
-                latency_ms: None,
-                bytes: None,
-                rows: None,
-                approval_id: approval_id_used.clone(),
-                caller_session_id: None,
-            })
-            .await?; // ← propagates: no audit row ⇒ no execution (fail-closed)
-
-        let client = self.client_for(&server).await;
-        let start = Instant::now();
-        // The pre-execution RE-CHECK (a security property: a policy tightened
-        // or a server deleted while the call waited must stop it). The live
-        // read re-proves the server exists (NotFound ⇒ error, as the separate
-        // `registry().get` that used to follow did) and reloads the policy.
-        let latest = otto_state::ResourceAccessRepo::new(self.pool.clone())
-            .get_live_policy(otto_core::access::ResourceKind::McpServer, &server.id)
-            .await?;
-        if latest.mode == otto_core::access::AccessMode::Enforced {
-            let permitted = match &ctx.caller_user_id {
-                Some(id) => match otto_state::UsersRepo::new(self.pool.clone()).get(id).await {
-                    Ok(user) => {
-                        self.resource_allowed_under(
-                            &latest,
-                            &server,
-                            &user,
-                            &[("invoke", Some(tool_name))],
-                        )
-                        .await?[0]
-                    }
-                    Err(_) => false,
-                },
-                None => false,
-            };
-            if !permitted {
-                return self
-                    .terminal_deny(
-                        &server,
-                        tool_name,
-                        args,
-                        &risk_label,
-                        &injection_risk,
-                        ctx,
-                        "resource access revoked before execution",
-                    )
-                    .await;
+                return Ok(InvokeOutcome::Denied {
+                    reason: reason.to_string(),
+                });
             }
         }
         let res = client.call_tool(tool_name, args).await;
@@ -998,6 +704,7 @@ impl McpService {
                 let mut rows = 0usize;
                 let capped = cap_rows(call.content, &mut rows);
                 let content = redact_json(&capped).value;
+                pending_row.disarm();
                 self.call_log()
                     .finalize(
                         &audit_id,
@@ -1015,6 +722,7 @@ impl McpService {
             }
             Err(e) => {
                 let err = redact_text(&e).value;
+                pending_row.disarm();
                 self.call_log()
                     .finalize(&audit_id, false, Some(&err), Some(latency), None, None)
                     .await?;
@@ -1162,6 +870,55 @@ pub fn canonical_hash(v: &Value) -> String {
     let mut hasher = Sha256::new();
     hasher.update(canonical_string(v).as_bytes());
     hex::encode(hasher.finalize())
+}
+
+/// Fail-closed audit row inserted before a tool runs, finalized on every exit.
+/// Dropped while still armed (an early `?` between insert and finalize, or the
+/// invoke future cancelled mid-call) it finalizes the row as failed off-thread.
+struct PendingAuditRow {
+    repo: McpCallLogRepo,
+    id: String,
+    armed: bool,
+}
+
+impl PendingAuditRow {
+    fn new(repo: McpCallLogRepo, id: String) -> Self {
+        Self {
+            repo,
+            id,
+            armed: true,
+        }
+    }
+
+    /// The caller finalizes the row itself.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingAuditRow {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let repo = self.repo.clone();
+        let id = std::mem::take(&mut self.id);
+        rt.spawn(async move {
+            let _ = repo
+                .finalize(
+                    &id,
+                    false,
+                    Some("call aborted before completion"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+        });
+    }
 }
 
 fn canonical_string(v: &Value) -> String {
@@ -1660,4 +1417,83 @@ done
     /// Measured 16: Legacy + user / capability / membership / groups at BOTH
     /// authorization points (deliberately live at the re-check).
     const ENFORCED_INVOKE_BUDGET: u64 = 18;
+
+    async fn audit_row(
+        svc: &McpService,
+        id: &str,
+    ) -> (String, Option<String>, i64, Option<String>) {
+        sqlx::query_as("SELECT decision, decision_reason, ok, error FROM mcp_call_log WHERE id = ?")
+            .bind(id)
+            .fetch_one(&svc.pool)
+            .await
+            .unwrap()
+    }
+
+    fn pre_exec_row() -> NewCallLog {
+        NewCallLog {
+            workspace_id: None,
+            server_id: None,
+            server_name: None,
+            tool: "echo".into(),
+            direction: "outbound".into(),
+            caller_user_id: Some("bob".into()),
+            caller_kind: Some("ui".into()),
+            args_redacted_json: "{}".into(),
+            decision: "allowed".into(),
+            decision_reason: None,
+            risk_label: None,
+            injection_risk: None,
+            dry_run: false,
+            ok: false,
+            error: None,
+            latency_ms: None,
+            bytes: None,
+            rows: None,
+            approval_id: None,
+            caller_session_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn recheck_deny_rewrites_the_pre_exec_row_not_a_second_row() {
+        let (svc, _, _) = setup(0).await;
+        let id = svc.call_log().insert(pre_exec_row()).await.unwrap();
+        // What the re-check deny path does: one row, decision "denied".
+        let mut guard = PendingAuditRow::new(svc.call_log(), id.clone());
+        guard.disarm();
+        svc.call_log()
+            .finalize_decision(&id, "denied", "resource access revoked before execution")
+            .await
+            .unwrap();
+        drop(guard);
+        let (decision, reason, ok, _) = audit_row(&svc, &id).await;
+        assert_eq!(decision, "denied");
+        assert_eq!(
+            reason.as_deref(),
+            Some("resource access revoked before execution")
+        );
+        assert_eq!(ok, 0);
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM mcp_call_log")
+            .fetch_one(&svc.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "no second audit row");
+    }
+
+    #[tokio::test]
+    async fn dropped_armed_audit_guard_finalizes_the_row_as_failed() {
+        let (svc, _, _) = setup(0).await;
+        let id = svc.call_log().insert(pre_exec_row()).await.unwrap();
+        // An early `?` / cancellation drops the guard still armed.
+        drop(PendingAuditRow::new(svc.call_log(), id.clone()));
+        let mut error = None;
+        for _ in 0..200 {
+            error = audit_row(&svc, &id).await.3;
+            if error.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(error.as_deref(), Some("call aborted before completion"));
+    }
 }
