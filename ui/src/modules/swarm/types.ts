@@ -450,8 +450,15 @@ export interface CreateGoalReq {
   order_idx?: number;
 }
 
-/** PATCH /swarm/goals/{gid} — every field optional (partial update). */
-export type UpdateGoalReq = Partial<CreateGoalReq>;
+/** PATCH /swarm/goals/{gid} — every field optional (partial update). An
+ *  explicit `null` CLEARS a nullable field (absent leaves it unchanged). */
+export type UpdateGoalReq = Partial<Omit<CreateGoalReq, 'metric' | 'comparator' | 'target_value' | 'block_value' | 'verify_cmd'>> & {
+  metric?: string | null;
+  comparator?: string | null;
+  target_value?: number | null;
+  block_value?: number | null;
+  verify_cmd?: string | null;
+};
 
 /** GET /swarm/tasks/{tid}/verification. */
 export interface TaskVerification {
@@ -495,7 +502,8 @@ export interface CreateTriggerReq {
 }
 
 /** PATCH /swarm/triggers/{id} — every field optional (partial update). */
-export type UpdateTriggerReq = Partial<CreateTriggerReq>;
+/** PATCH /swarm/triggers/{tid} — `repo_path: null` clears the repo. */
+export type UpdateTriggerReq = Partial<Omit<CreateTriggerReq, 'repo_path'>> & { repo_path?: string | null };
 
 /** Why a ready task isn't starting (12-mcp W1) — `waiting[task_id]` on
  *  `GET /swarm/swarms/{sid}/utilization`, rebuilt by every coordinator tick. */

@@ -1721,6 +1721,20 @@ async fn restore_base<C: DesignAssistCtx>(job: &TurnJob<C>) {
     }
 }
 
+/// Write `head` (the artifact's current head bytes) to the working copy and
+/// the agent's file — [`restore_base`] for a head that moved during the turn.
+async fn mirror_head<C: DesignAssistCtx>(job: &TurnJob<C>, head: &[u8]) {
+    if job.branch != Branch::Main {
+        return;
+    }
+    if let Some(wf) = &job.work_file {
+        let _ = tokio::fs::write(wf, head).await;
+    }
+    if job.adapter.canvas_inner.is_some() {
+        let _ = tokio::fs::write(&job.agent_path, job.adapter.agent_source(head)).await;
+    }
+}
+
 /// Run one turn to completion and return its final state (also stored in the
 /// registry and broadcast as `design_assist_updated`).
 async fn run_job<C: DesignAssistCtx>(mut job: TurnJob<C>) -> DesignAssistTurn {
@@ -2053,18 +2067,30 @@ async fn finalize<C: DesignAssistCtx>(
                          variant instead of replacing your edits"
                             .into(),
                     );
-                    svc.commit_variant(
-                        &fresh,
-                        doc,
-                        &job.turn_id,
-                        1,
-                        job.base_version_id.as_deref(),
-                        author.clone(),
-                        commit_msg,
-                        provenance,
-                    )
-                    .await
-                    .map(|v| (v, true))
+                    let variant = svc
+                        .commit_variant(
+                            &fresh,
+                            doc,
+                            &job.turn_id,
+                            1,
+                            job.base_version_id.as_deref(),
+                            author.clone(),
+                            commit_msg,
+                            provenance,
+                        )
+                        .await
+                        .map(|v| (v, true));
+                    // The working copy keeps mirroring the HEAD (S4-21): the
+                    // live poll left the agent's draft in the work/agent
+                    // files while the head is the human's save — put the
+                    // human's version back so the editor and the next turn
+                    // start from it, not from the side-lined draft.
+                    if variant.is_ok() {
+                        if let Ok((_, head)) = svc.head_content(&fresh).await {
+                            mirror_head(job, &head).await;
+                        }
+                    }
+                    variant
                 }
                 Err(e) => Err(e),
             }

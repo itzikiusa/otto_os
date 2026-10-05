@@ -64,6 +64,8 @@ mod share_api;
 mod share_otp;
 #[path = "share_scope_guard.rs"]
 mod share_scope_guard;
+#[path = "swarm_scope_api.rs"]
+mod swarm_scope_api;
 #[path = "ui_control.rs"]
 mod ui_control;
 #[path = "workbench_api.rs"]

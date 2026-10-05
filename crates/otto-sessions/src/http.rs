@@ -441,6 +441,20 @@ async fn get_session<S: SessionsCtx>(
 /// accepted and dropped): the agent-UI-control grant and the device stamp.
 pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id"];
 
+/// `session.meta` keys that bind a session to its swarm/project/task/run. The
+/// swarm ingest endpoints (`otto-post`, `otto-mockup`…) act on these ids with
+/// the session's token, so a PATCH may never repoint them at another
+/// workspace's swarm or project (S4-03). An unchanged round-trip is accepted
+/// and dropped, like the resource bindings.
+pub const SWARM_BINDING_META: &[&str] = &[
+    "swarm_id",
+    "agent_id",
+    "project_id",
+    "task_id",
+    "run_id",
+    "swarm_run_id",
+];
+
 /// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
     State(ctx): State<S>,
@@ -455,6 +469,7 @@ async fn patch_session<S: SessionsCtx>(
         // Ordinary metadata edits must not detach or replace that binding.
         if ["k8s", "aws", "connection_id", "source", "resource_node"]
             .iter()
+            .chain(SWARM_BINDING_META)
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
@@ -483,6 +498,7 @@ async fn patch_session<S: SessionsCtx>(
         for key in ["k8s", "aws", "connection_id", "source", "resource_node"]
             .iter()
             .chain(SERVER_OWNED_META)
+            .chain(SWARM_BINDING_META)
         {
             object.remove(*key);
         }

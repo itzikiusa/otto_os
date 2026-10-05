@@ -594,6 +594,40 @@ impl otto_product::ProductCtx for ServerCtx {
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         Some(&self.attachment_repo)
     }
+    fn workspace_root<'a>(
+        &'a self,
+        ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async move { self.workspaces.get(ws).await.ok().map(|w| w.root_path) })
+    }
+    fn stop_story_agents<'a>(
+        &'a self,
+        story_id: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let analyses = self
+                .product_repo
+                .list_analyses(story_id)
+                .await
+                .unwrap_or_default();
+            for a in analyses {
+                let agents = self
+                    .product_repo
+                    .list_analysis_agents(&a.id)
+                    .await
+                    .unwrap_or_default();
+                for ag in agents {
+                    if !matches!(ag.status.as_str(), "running" | "waiting" | "pending") {
+                        continue;
+                    }
+                    otto_product::run::signal_cancel(&self.product_agent_cancels, &ag.id);
+                    if let Some(sid) = ag.session_id.as_ref() {
+                        let _ = self.manager.kill_session(sid).await;
+                    }
+                }
+            }
+        })
+    }
 }
 
 impl otto_memory::MemoryCtx for ServerCtx {
@@ -698,7 +732,14 @@ impl otto_insights::InsightsCtx for ServerCtx {
             .input(sid, &crate::review_session::bracketed_paste(prompt))
             .await;
         tokio::time::sleep(crate::review_session::PASTE_TO_ENTER).await;
+        // Same swallowed-Enter guard as the assistant path (S4-19c): a TUI
+        // still digesting the paste can eat the first Enter, leaving the run
+        // idle behind a "generating" banner for the whole timeout.
+        let before = self.manager.live_handle(sid).map(|h| h.last_output_at());
         let _ = self.manager.input(sid, b"\r").await;
+        if !crate::review_session::dispatched(&self.manager, sid, before).await {
+            let _ = self.manager.input(sid, b"\r").await;
+        }
         true
     }
 }

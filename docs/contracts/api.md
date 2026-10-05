@@ -1493,7 +1493,7 @@ Live publish requires the matching successful persisted human-approval node in t
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns) |
+| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns). 400 above 4 providers per agent or 12 agents (lenses × providers) total; 409 while another analysis of the story is `running` |
 | POST /workspaces/{id}/product/stories/{sid}/rewrite | ws editor | RewriteReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/testcases/generate | ws editor | GenerateTestsReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/plan/generate | ws editor | GeneratePlanReq? | 202 (multi-agent: spawns N visible planning sessions + a summarizer when >1; emits `plan_run`) |
@@ -1501,7 +1501,7 @@ Live publish requires the matching successful persisted human-approval node in t
 | POST /product/stories/{sid}/to-swarm | ws editor | ToSwarmReq? | ToSwarmResp (create a swarm project from the story + seed tasks from its plan) |
 | POST /workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | inject story context into a session |
 | POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
-| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent) |
+| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent); 404 when `agent_id` is not an agent of `aid` |
 
 ### Product story attachments & the Design arena
 
@@ -2776,6 +2776,17 @@ them as four distinct routes. Each takes no body and returns the updated `Swarm`
 | POST /workspaces/{id}/swarm/swarms/{sid}/abort | ws editor | — | Swarm (cancel runs; kill swarm sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/resume | ws editor | — | Swarm (resume from paused) |
 
+A `{sid}` (or `{pid}` for `…/projects/{pid}/plan`, `swarm_id` in a recruit body) that
+belongs to a different workspace than the path `{id}` answers **404**, exactly like a
+missing row — the role check alone is on `{id}`. The same applies to
+`…/swarms/{sid}/agent-stop`.
+
+PATCH bodies (`UpdateTaskReq.assignee_agent_id`, `UpdateProjectReq.repo_path`,
+`UpdateGoalReq.metric|comparator|target_value|block_value|verify_cmd`,
+`UpdateTriggerReq.repo_path`): an absent key leaves the field unchanged, an explicit
+`null` clears it. A task's `assignee_agent_id` must name an agent of the task's own
+swarm (create or update) — otherwise **400** `invalid`.
+
 ## Swarm goals, verification & channel triggers (additive, continues #86)
 
 Additive to the frozen swarm block (#59–#86); these are NOT renumbered against the
@@ -3439,8 +3450,8 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0152). `format`/`size` are columns recorded at snapshot time (migration 0159) — listing never parses a document; `size` is the original doc's byte length. Excalidraw images (`files[*].dataURL`) are stored once per sha256 in `canvas_files` and referenced from versions, restored inline by #106b; pruning / scene delete garbage-collects unreferenced files |
 | 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
 | 106c | GET /api/v1/canvas/files/{sha} | ws viewer of any workspace holding a scene (live or in history) that references the file | — | `text/plain` — the file's `data:` URL (what Excalidraw's `addFiles` takes). `ETag: "<sha>"`, `Cache-Control: private, max-age=31536000, immutable`; `If-None-Match` → 304. 400 on a non-sha256 id; 404 when missing OR not visible to the caller (a hash never reveals another workspace's image) |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
-| 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a. **409** while another assist turn runs on the same scene |
+| 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas"). Runs a throwaway session in a per-call scratch dir under `<data>/canvas/preview/` (never the workspace repo); the session is killed and the dir removed afterwards, also when the request is dropped |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
 | 147 | DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id} | ws editor | — | 204 (detaches; the scene itself is untouched) |

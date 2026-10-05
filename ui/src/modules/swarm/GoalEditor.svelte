@@ -6,7 +6,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { swarm } from '../../lib/stores/swarm.svelte';
   import { toasts } from '../../lib/toast.svelte';
-  import type { CreateGoalReq, GoalComparator, SwarmGoal } from './types';
+  import type { CreateGoalReq, GoalComparator, SwarmGoal, UpdateGoalReq } from './types';
 
   interface Props {
     /** When set, edit this goal. Otherwise create a new one in `scope`. */
@@ -73,7 +73,16 @@
     busy = true;
     try {
       if (editing && goal) {
-        await swarm.updateGoal(goal.id, req);
+        // A field the user emptied must be sent as `null` (clear), not
+        // omitted — an absent key leaves the stored value unchanged.
+        const patch: UpdateGoalReq = {
+          metric: null,
+          target_value: null,
+          block_value: null,
+          verify_cmd: null,
+          ...req,
+        };
+        await swarm.updateGoal(goal.id, patch);
         toasts.success('Goal updated');
       } else if (scope) {
         await swarm.createGoal(scope, req);

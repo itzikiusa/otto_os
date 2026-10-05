@@ -4288,6 +4288,7 @@ dependencies = [
  "chrono",
  "otto-core",
  "otto-pty",
+ "otto-sandbox",
  "serde",
  "serde_json",
  "tokio",
