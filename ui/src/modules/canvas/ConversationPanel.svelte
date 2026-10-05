@@ -15,6 +15,7 @@
   import { agentProviders } from '../../lib/providers';
   import { confirmer, type ChoiceOption } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { interruptSession } from '../../lib/api/interrupt';
 
   interface Props {
     editor: { generate: (p: string) => Promise<boolean>; isGenerating: () => boolean } | undefined;
@@ -70,6 +71,23 @@
   }
 
   const working = $derived(busy || editor?.isGenerating());
+
+  // Stop: interrupt the canvas agent's turn (Esc into its PTY). The pending
+  // Ask Otto request then settles on its own; the board keeps what was saved.
+  let stopping = $state(false);
+  async function stop(): Promise<void> {
+    const sid = canvas.sessionId;
+    if (!sid || stopping) return;
+    stopping = true;
+    try {
+      await interruptSession(sid);
+      toasts.info('Stopped Ask Otto', 'The agent’s turn was interrupted.');
+    } catch (e) {
+      toastError('Couldn’t stop the agent', e);
+    } finally {
+      stopping = false;
+    }
+  }
 
   // Version history (C5): snapshots taken before each Ask Otto commit, before a
   // restore, and at most every 10 min across manual saves. Offer the newest few.
@@ -134,7 +152,12 @@
         {/each}
       </select>
     {/if}
-    {#if working}<span class="working" role="status"><LiveWorkingDot label="Working…" /></span>{/if}
+    {#if working}
+      <span class="working" role="status"><LiveWorkingDot label="Working…" /></span>
+      {#if canvas.sessionId}
+        <button class="hist-btn stop" onclick={() => void stop()} disabled={stopping} aria-busy={stopping} aria-label="Stop Ask Otto" title="Stop Ask Otto"><Icon name="stop" size={15} /></button>
+      {/if}
+    {/if}
     <button
       class="hist-btn history"
       onclick={restorePrevious}

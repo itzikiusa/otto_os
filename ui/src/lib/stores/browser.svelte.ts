@@ -366,8 +366,8 @@ class BrowserStore {
     if (ws === this.wsId && tab === this.activeId && page === this.pageSeq && request === this.annotationSeq && this.activeTab?.url === url) this.annotations = next;
   }
 
-  async summarize(url: string) {
-    return browserApi.summarize(this.wsId, url);
+  async summarize(url: string, signal?: AbortSignal) {
+    return browserApi.summarize(this.wsId, url, signal);
   }
 
   /** The summary panel's text (drafted by Otto) and whether one is running.
@@ -381,13 +381,23 @@ class BrowserStore {
    *  left is still returned but not shown. */
   async runSummarize(url: string): Promise<string> {
     this.summarizing = true;
+    const ctl = new AbortController();
+    this.summarizeCtl = ctl;
     try {
-      const resp = await this.summarize(url);
+      const resp = await this.summarize(url, ctl.signal);
       if (this.activeTab?.url === url) this.summary = resp.summary;
       return resp.summary;
     } finally {
+      if (this.summarizeCtl === ctl) this.summarizeCtl = null;
       this.summarizing = false;
     }
+  }
+
+  private summarizeCtl: AbortController | null = null;
+  /** Stop the running summarize: abort its request — the daemon kills the
+   *  backing agent session when the request goes away mid-turn. */
+  stopSummarize(): void {
+    this.summarizeCtl?.abort();
   }
 
   /** Create a DOM annotation (a "mark") against the active page's URL. Pushes
