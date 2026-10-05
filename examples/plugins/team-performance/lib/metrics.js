@@ -53,23 +53,125 @@ function prsByKey(prs) {
   return m;
 }
 
-/** Attach `phases` (lib/phases shape) to every non-feature record. */
-function attachPhases(records, { prMap, tags, config, people, canonical }) {
+/** [{at, author_id}] from a raw Jira issue's changelog + comments (when present). */
+function activityOfRaw(raw) {
+  const out = [];
+  if (!raw) return out;
+  const cl = raw.changelog;
+  const histories = Array.isArray(cl) ? cl : (cl && cl.histories) || [];
+  for (const h of histories) {
+    const at = toMs(h.created ?? h.at);
+    const who = (h.author && (h.author.accountId || h.author.id)) || h.author_id || null;
+    if (at != null && who) out.push({ at, author_id: who });
+  }
+  const cm = raw.comments || (raw.fields && raw.fields.comment && raw.fields.comment.comments) || [];
+  for (const c of Array.isArray(cm) ? cm : []) {
+    const at = toMs(c.created ?? c.at);
+    const who = (c.author && (c.author.accountId || c.author.id)) || c.author_id || null;
+    if (at != null && who) out.push({ at, author_id: who });
+  }
+  if (Array.isArray(raw.activity)) for (const a of raw.activity) { const at = toMs(a.at); if (at != null && a.author_id) out.push({ at, author_id: a.author_id }); }
+  return out.sort((x, y) => x.at - y.at);
+}
+
+/** A lead correction exists: manual actual days or an explicit effective window. */
+const isLeadCorrected = (r) => r.manual_days != null || r.eff_start_override != null || r.eff_done_override != null;
+
+/** Phase sum comparable to an actual: design + dev + review + QA wait (deploy is after done). */
+function phaseSum(ph) {
+  return [ph.design.days, ph.dev.days, ph.review.total, ph.qa.wait].reduce((s, v) => s + (Number.isFinite(v) ? v : 0), 0);
+}
+
+/**
+ * Attach `phases` (lib/phases shape) to every non-feature record.
+ * Optional `corpusIndex` (Map | object, key → raw corpus issue) supplies
+ * changelog/comment activity and linked-item timing; records in `records`
+ * are always indexed too.
+ */
+function attachPhases(records, { prMap, tags, config, people, canonical, corpusIndex } = {}) {
+  config = config || {};
+  canonical = canonical || ((x) => x);
+  people = people || {};
   const tz = config.timezone || 'UTC';
   const cfg = { weekend: weekendOf(config.workweek), qa_work_min_commit_days: config.qa_work_min_commit_days };
-  const phaseTags = (tags || []).map((t) => ({ name: t.name, at: t.ts }));
+  if (Array.isArray(config.deploy_tag_patterns)) cfg.deploy_tag_patterns = config.deploy_tag_patterns;
+  // Keep repo + sha: the fallback only matches a tag of the ticket's own repo.
+  const phaseTags = (tags || []).map((t) => ({ name: t.name, at: toMs(t.ts ?? t.at), repo: t.repo || null, sha: t.sha || null }));
   const offCache = new Map();
   const subsByParent = new Map();
   for (const r of records) if (r.subtask && r.parent_key) (subsByParent.get(r.parent_key) || subsByParent.set(r.parent_key, []).get(r.parent_key)).push(r);
+  const byKey = new Map(records.map((r) => [r.key, r]));
+  const rawOf = (k) => (corpusIndex ? (corpusIndex instanceof Map ? corpusIndex.get(k) : corpusIndex[k]) : null) || null;
+  const lookup = (k) => {
+    const x = byKey.get(k) || rawOf(k);
+    if (!x) return null;
+    return { started_at: toMs(x.eff_start_at ?? x.first_active_at), done_at: toMs(x.eff_done_at ?? x.done_at) };
+  };
   return records.map((r) => {
     if (r.feature) return r;
     const pid = r.assignee_id ? canonical(r.assignee_id) : null;
     if (pid && !offCache.has(pid)) offCache.set(pid, offDaySet(people[pid]));
-    const subs = (subsByParent.get(r.key) || []).map((s) => ({ key: s.key, type: s.type, summary: s.summary, started_at: s.eff_start_at ?? s.first_active_at, done_at: s.eff_done_at ?? s.done_at }));
-    const rec = { ...r, subtasks: subs, rework: { in_days: r.rework_in || 0, out_days: r.rework_out || 0 } };
-    const phases = P.phasesFor(rec, { prs: (prMap && prMap.get(r.key)) || [], tags: phaseTags, cfg, tz, offDays: pid ? offCache.get(pid) : undefined });
-    return { ...r, phases };
+    const allSubs = subsByParent.get(r.key) || [];
+    const subs = allSubs.map((s) => ({ key: s.key, type: s.type, summary: s.summary, started_at: s.eff_start_at ?? s.first_active_at, done_at: s.eff_done_at ?? s.done_at }));
+    const raw = rawOf(r.key);
+    const activity = r.activity || activityOfRaw(raw || r);
+    const hasBlame = r.rework_in != null || r.rework_out != null;
+    const rec = {
+      ...r,
+      subtasks: subs,
+      links: r.links || (raw && raw.links) || [],
+      activity,
+      repos: ((r.git_change && r.git_change.repos) || []).map((x) => x.name).filter(Boolean),
+      rework: hasBlame ? { in_days: r.rework_in || 0, out_days: r.rework_out || 0 } : null,
+    };
+    const corrected = isLeadCorrected(r);
+    if (corrected) {
+      // Lead override: phases live inside the corrected effective window.
+      const a = toMs(r.eff_start_at);
+      const b = toMs(r.eff_done_at);
+      if (a != null && b != null && b > a) {
+        rec.intervals = (r.intervals || []).map((iv) => ({ ...iv, from: Math.max(toMs(iv.from), a), to: Math.min(toMs(iv.to), b) })).filter((iv) => iv.to > iv.from);
+        rec.commit_ts = (r.commit_ts || []).filter((t) => t >= a && t < b);
+      }
+    }
+    const phases = P.phasesFor(rec, { prs: (prMap && prMap.get(r.key)) || [], tags: phaseTags, cfg, tz, offDays: pid ? offCache.get(pid) : undefined, lookup });
+    phases.mismatch = false;
+    if (corrected) {
+      phases.dev.label = 'lead-corrected';
+      const actual = r.manual_days ?? A.actualDays(r);
+      const sum = phaseSum(phases);
+      if (actual > 0 && Math.abs(sum - actual) / actual > 0.2) {
+        phases.mismatch = true;
+        phases.mismatch_detail = { phase_sum: round2(sum), corrected_actual: round2(actual) };
+      }
+    }
+    const out = { ...r, phases };
+    // Design sub-tasks are design, not dev: keep them out of the parent's child dev days.
+    if (r.child_dev_days > 0) {
+      const designDev = allSubs.filter((s) => P.RE_DESIGN.test(String(s.type || '')) || P.RE_DESIGN.test(String(s.summary || '')))
+        .reduce((x, s) => x + (Number(s.dev_days) || 0), 0);
+      if (designDev > 0) {
+        out.child_dev_days = round2(Math.max(0, r.child_dev_days - designDev));
+        out.child_dev_days_design_excluded = round2(designDev);
+      }
+    }
+    return out;
   });
+}
+
+const PHASE_GUARD_FIELDS = ['design', 'coding', 'dev', 'review_pickup', 'review_total', 'qa_wait', 'qa_rework', 'deploy', 'rework_in'];
+
+/** One guardrail per weak phase (n < 5 or coverage < 0.5), canonical id `phase_<name>_weak`. */
+function phaseGuardrails(summary, { minN = 5, minCoverage = 0.5 } = {}) {
+  const out = [];
+  for (const name of PHASE_GUARD_FIELDS) {
+    const s = summary && summary[name];
+    if (!s) continue;
+    if (s.n >= minN && s.coverage >= minCoverage) continue;
+    const why = s.n < minN ? `only ${s.n} ticket(s) carry ${name.replace(/_/g, ' ')} timing` : `${name.replace(/_/g, ' ')} is tracked on only ${Math.round(s.coverage * 100)}% of tickets`;
+    out.push({ code: `phase_${name}_weak`, metric: `phases.${name}`, severity: 'warning', reason: `Phase ${name.replace(/_/g, ' ')}: ${why}.`, action: 'Read this phase as indicative, not as a team figure.' });
+  }
+  return out;
 }
 
 /** Corpus record → the field names lib/flow.js reads. */
@@ -94,7 +196,7 @@ function flowRecord(r, estimates) {
     hotfix_linked: r.deployed_kind === 'hotfix',
     bucket: r.type,
     phases: ph
-      ? { design: ph.design.days, dev: ph.dev.days, review: ph.review.total, deployment: ph.deploy.days, rework: ph.rework.in_days || null }
+      ? { design: ph.design.days, dev: ph.dev.days, review: ph.review.total, deployment: ph.deploy.days, rework: ph.rework.in_days ?? null }
       : null,
   };
 }
@@ -138,13 +240,17 @@ function computeMetrics(scope, window, side = {}) {
 
   const phaseRecs = recs.filter((r) => r.phases && A.isDone(r) && !r.subtask && (() => { const t = toMs(r.eff_done_at ?? r.done_at); return t >= window.since && t < window.until; })());
   const phases = P.phaseSummary(phaseRecs);
+  const phaseGuards = phaseGuardrails(phases);
 
   const tags = side.tags || [];
-  const dora = D.doraMetrics({
-    records: recs.map((r) => ({ ...r, created: toMs(r.created), done_at: toMs(r.eff_done_at ?? r.done_at), deployed_at: toMs(r.deployed_at), first_commit_at: toMs(r.first_commit_at) })),
-    tags,
+  const doraRecs = recs.map((r) => ({ ...r, created: toMs(r.created), done_at: toMs(r.eff_done_at ?? r.done_at), deployed_at: toMs(r.deployed_at), first_commit_at: toMs(r.first_commit_at), reopened_at: toMs(r.reopened_at) }));
+  const dora = D.doraMetrics(doraRecs, tags, {
+    timezone: side.timezone,
+    failure_window_days: 7,
+    min_n: 3,
     window: { start: window.since, end: window.until },
-    cfg: { failure_window_days: 7, min_n: 5 },
+    prs: side.prs || [],
+    deploy_tag_patterns: side.deploy_tag_patterns,
   });
 
   const prsInWin = (side.prs || []).filter((p) => { const t = toMs(p.merged_at); return t != null && t >= window.since && t < window.until; });
@@ -177,7 +283,9 @@ function computeMetrics(scope, window, side = {}) {
     capacity: { capacity_days: capacity.capacity_days, business_days: capacity.business_days },
     deploy_tags: tagsInWin,
   });
-  for (const g of dora.guardrails || []) guardrails.push({ code: g.code, metric: `dora.${g.metric}`, severity: 'warning', reason: g.reason, action: 'Widen the period before comparing.' });
+  guardrails.push(...phaseGuards);
+  for (const g of dora.guardrails || []) guardrails.push({ id: g.id, code: g.code, metric: `dora.${g.metric}`, severity: 'warning', reason: g.reason, action: 'Widen the period before comparing.' });
+  if (typeof A.reworkGuardrails === 'function') for (const g of A.reworkGuardrails(recs) || []) guardrails.push({ severity: 'warning', ...g });
   if (pr_flow.approximated_times) {
     guardrails.push({ code: 'pr_times_approximated', metric: 'prPickup', severity: 'warning', reason: `${pr_flow.approximated_times} PR(s) have open/merge times approximated from commits or last update.`, action: 'Treat PR timings as indicative.' });
   }
@@ -207,7 +315,7 @@ function activityOf(records, scope, window) {
 
 /** Old-shape guardrails ([{id, level, msg}]) for the UI banner. */
 function bannerOf(list) {
-  return (list || []).map((g) => ({ id: `${g.code}:${g.metric}`, code: g.code, metric: g.metric, level: g.severity === 'danger' ? 'bad' : 'warn', msg: `${g.reason}${g.action ? ` ${g.action}` : ''}` }));
+  return (list || []).map((g) => ({ id: /^phase_.+_weak$/.test(g.code || '') ? g.code : `${g.code}:${g.metric}`, code: g.code, metric: g.metric, level: g.severity === 'danger' ? 'bad' : 'warn', msg: `${g.reason}${g.action ? ` ${g.action}` : ''}` }));
 }
 
-module.exports = { weekendOf, offDaySet, prsByKey, attachPhases, flowRecord, computeMetrics, activityOf, bannerOf, toMs, round2 };
+module.exports = { weekendOf, offDaySet, prsByKey, attachPhases, activityOfRaw, phaseGuardrails, phaseSum, flowRecord, computeMetrics, activityOf, bannerOf, toMs, round2 };

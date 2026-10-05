@@ -83,3 +83,43 @@ test('design sub-task feeds the design phase, never the dev rollup', () => {
 test('unionIntervals merges touching and nested ranges', () => {
   assert.deepEqual(S.unionIntervals([[5, 7], [1, 3], [3, 4], [2, 2.5]]), [[1, 4], [5, 7]]);
 });
+
+test('commit days are LOCAL days in the configured zone', () => {
+  // 21:30Z and 23:30Z on 06-02 are 06-03 00:30 / 02:30 in UTC+3 → one local day;
+  // with 06-02 10:00Z that is 2 local days in UTC+3, but 1 UTC day.
+  const s = sub({ key: 'ABC-5', assignee_id: 'u-b', commit_ts: [T('2026-06-02T10:00:00Z'), T('2026-06-02T21:30:00Z'), T('2026-06-02T23:30:00Z')] });
+  const utc = by(S.classifySubtasks([story(), s], { min_commit_days: 2 }));
+  assert.equal(utc['ABC-5'].rollup, true);
+  const local = by(S.classifySubtasks([story(), s], { min_commit_days: 2, timezone: 'Asia/Jerusalem' }));
+  assert.equal(local['ABC-5'].rollup, false);
+});
+
+test('creditedSubtasks lists real sub-task work per person; parent excludes it', () => {
+  const b = sub({
+    key: 'ABC-3', assignee_id: 'u-b', summary: 'Migrate cache', dev_days: 2,
+    commit_ts: [T('2026-06-08T10:00:00Z'), T('2026-06-09T10:00:00Z')],
+    intervals: [iv('2026-06-08T00:00:00Z', '2026-06-10T00:00:00Z')],
+    git_authors: [{ name: 'B', email: 'b@x', commits: 3 }],
+  });
+  const chk = sub({ key: 'ABC-2', summary: 'Checklist', dev_days: 0.1 });
+  const out = S.classifySubtasks([story(), b, chk]);
+  const parent = out.find((r) => r.key === 'ABC-1');
+  assert.equal(parent.dev_days, 3, "story keeps its own days; B's 2 days are not added");
+  assert.equal(parent.child_dev_days, 3, "rollup = story's own Mon–Wed union only; B's Mon–Tue next week never feeds it");
+  const c = S.creditedSubtasks(out);
+  assert.deepEqual(c, { 'u-b': [{ key: 'ABC-3', parent_key: 'ABC-1', summary: 'Migrate cache', dev_days: 2, commits: 3, reason: 'other_assignee', counted_in_parent: false }] });
+
+  // untimed parent adopting same-person timing is surfaced, flagged as counted once
+  const p = story({ dev_days: 0, intervals: [], git_authors: [] });
+  const s = sub({ key: 'ABC-6', dev_days: 2, commit_ts: [T('2026-06-02T10:00:00Z')] });
+  const c2 = S.creditedSubtasks(S.classifySubtasks([p, s]));
+  assert.equal(c2['u-a'][0].reason, 'parent_untimed');
+  assert.equal(c2['u-a'][0].counted_in_parent, true);
+  assert.deepEqual(S.creditedSubtasks([]), {});
+});
+
+test('design vocabulary matches phases.js', () => {
+  assert.ok(S.RE_DESIGN.test('Spike: queue options'));
+  assert.ok(S.RE_DESIGN.test('Investigate timeouts'));
+  assert.ok(!S.RE_DESIGN.test('Write unit tests'));
+});

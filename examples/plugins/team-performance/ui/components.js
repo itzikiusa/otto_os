@@ -134,14 +134,16 @@
 
   // ---- popovers (clamped into the viewport, Esc closes, focus restore) ---
   let openPop = null;
-  function closePopover() {
+  /** restoreFocus=false when focus is already moving elsewhere (Tab-out). */
+  function closePopover(restoreFocus = true) {
     if (!openPop) return;
     const { el, anchor, onClose } = openPop;
     openPop = null;
     el.remove();
     if (anchor) {
       anchor.setAttribute('aria-expanded', 'false');
-      anchor.focus();
+      if (anchor.getAttribute('aria-describedby') === el.id) anchor.removeAttribute('aria-describedby');
+      if (restoreFocus) anchor.focus();
     }
     if (onClose) onClose();
   }
@@ -162,10 +164,12 @@
     el.style.top = top + 'px';
   }
   /** Open a popover under `anchor`. content: html string. role: dialog|menu. */
-  function popover(anchor, content, { role = 'dialog', label = '', className = '', onClose, onOpen } = {}) {
+  let popSeq = 0;
+  function popover(anchor, content, { role = 'dialog', label = '', className = '', onClose, onOpen, describe = false } = {}) {
     if (openPop && openPop.anchor === anchor) return closePopover();
-    closePopover();
+    closePopover(false);
     const el = document.createElement('div');
+    el.id = 'tp-pop' + ++popSeq;
     el.className = `popover ${className}`;
     el.setAttribute('role', role);
     if (label) el.setAttribute('aria-label', label);
@@ -175,8 +179,28 @@
     anchor.setAttribute('aria-expanded', 'true');
     openPop = { el, anchor, onClose };
     if (onOpen) onOpen(el);
-    const first = el.querySelector('button, input, select, a[href], [tabindex]');
+    // Read-only popovers (describe) take focus themselves so a screen reader
+    // reads them; the anchor is described by them while open.
+    if (describe) {
+      const body = el.querySelector('[data-describe]') || el;
+      if (!body.id) body.id = el.id + 'd';
+      el.setAttribute('aria-describedby', body.id);
+      anchor.setAttribute('aria-describedby', el.id);
+    }
+    const first = describe ? null : el.querySelector('button, input, select, a[href], [tabindex]:not([tabindex="-1"])');
     if (first) first.focus();
+    else {
+      el.tabIndex = -1;
+      el.focus();
+    }
+    // Tab out of the popover (or focus leaving it any other way) closes it
+    // without stealing focus back.
+    el.addEventListener('focusout', (e) => {
+      if (!openPop || openPop.el !== el) return;
+      const to = e.relatedTarget;
+      if (to && (el.contains(to) || to === anchor)) return;
+      if (to) closePopover(false);
+    });
     return el;
   }
   document.addEventListener('keydown', (e) => {
@@ -196,10 +220,10 @@
     if (!def) return;
     popover(
       b,
-      `<dl><dt>${esc(def.title || 'Metric')}</dt><dd>${esc(def.definition || '')}</dd>
+      `<dl data-describe><dt>${esc(def.title || 'Metric')}</dt><dd>${esc(def.definition || '')}</dd>
         <dt>Formula</dt><dd class="mono small">${esc(def.formula || '—')}</dd>
         <dt>Input quality</dt><dd>${esc(qualityText(def.quality))}</dd></dl>`,
-      { label: def.title },
+      { label: def.title, describe: true },
     );
   });
 
@@ -267,20 +291,72 @@
   };
 
   // ---- toasts -------------------------------------------------------------
+  // Each toast is its own live region: errors use the assertive alert role and
+  // stay >= 8s; hover or focus pauses the dismissal timer.
+  const TOAST_MS = { danger: 9000, warning: 7000 };
+  function toastDuration(tone) {
+    return TOAST_MS[tone] || 4500;
+  }
   function toast(msg, tone = '') {
     let host = document.querySelector('.toasts');
     if (!host) {
       host = document.createElement('div');
       host.className = 'toasts';
-      host.setAttribute('role', 'status');
-      host.setAttribute('aria-live', 'polite');
       document.body.appendChild(host);
     }
     const t = document.createElement('div');
     t.className = `toast ${tone}`;
-    t.textContent = msg;
+    t.setAttribute('role', tone === 'danger' ? 'alert' : 'status');
+    if (tone !== 'danger') t.setAttribute('aria-live', 'polite');
+    t.innerHTML = `${tone ? icon(TONE_ICON[tone] || 'dot') : ''}<span class="msg"></span><button type="button" class="icon toast-x" aria-label="Dismiss" title="Dismiss">${icon('x')}</button>`;
+    t.querySelector('.msg').textContent = msg;
     host.appendChild(t);
-    setTimeout(() => t.remove(), 4500);
+    let left = toastDuration(tone);
+    let started = Date.now();
+    let timer = null;
+    const dismiss = () => {
+      clearTimeout(timer);
+      t.remove();
+    };
+    const resume = () => {
+      clearTimeout(timer);
+      started = Date.now();
+      timer = setTimeout(dismiss, left);
+    };
+    const pause = () => {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      left = Math.max(1500, left - (Date.now() - started));
+    };
+    t.addEventListener('mouseenter', pause);
+    t.addEventListener('mouseleave', () => !t.contains(document.activeElement) && resume());
+    t.addEventListener('focusin', pause);
+    t.addEventListener('focusout', (e) => !t.contains(e.relatedTarget) && !t.matches(':hover') && resume());
+    t.querySelector('.toast-x').onclick = dismiss;
+    resume();
+    return t;
+  }
+
+  // ---- polite announcer (one shared live region) --------------------------
+  let liveT = null;
+  const livePending = [];
+  function announce(msg) {
+    let el = document.getElementById('tp-live');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'tp-live';
+      el.className = 'sr-only';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
+      document.body.appendChild(el);
+    }
+    livePending.push(msg);
+    clearTimeout(liveT);
+    // Batch bursts (a view loads many sections at once) into one message.
+    liveT = setTimeout(() => {
+      el.textContent = livePending.splice(0).join('. ');
+    }, 400);
   }
 
   // ---- states -------------------------------------------------------------
@@ -322,8 +398,10 @@
           body.appendChild(out);
         }
         if (opts.after) opts.after(body, run);
+        announce(`${opts.title} loaded`);
       } catch (e) {
         body.removeAttribute('aria-busy');
+        announce(`${opts.title} failed to load`);
         body.innerHTML = `<div class="inline-error" role="alert">${icon('warn')}<span>Couldn’t load ${esc(opts.title.toLowerCase())}: ${esc(e.message)}</span><button type="button" class="compact retry">Retry</button></div>`;
         body.querySelector('.retry').onclick = run;
       }
@@ -358,6 +436,8 @@
   }
 
   // ---- charts (inline SVG, title+desc, always paired with a table) -------
+  /** Fixed phase → colour token map: every chart/legend/report uses these. */
+  const PHASE_COLORS = Object.freeze({ design: '--cat-4', dev: '--cat-1', review: '--cat-3', deploy: '--cat-6', rework: '--cat-5' });
   const SERIES = ['--cat-1', '--cat-3', '--cat-2', '--cat-4', '--cat-5', '--cat-6'];
   let svgSeq = 0;
   function svgOpen(w, h, title, desc) {
@@ -389,36 +469,63 @@
   /**
    * Horizontal stacked bars. rows: [{label, parts:{segKey: number|null}}];
    * segs: [{key, label, color}] — a null part = NOT TRACKED, drawn hatched.
+   * Segments wider than 28px carry a direct value label; every value is also
+   * in the SVG <desc>. Below 600px the SVG gives way to a list layout (CSS)
+   * so no text is ever scaled under 11px.
    */
+  const DIRECT_LABEL_MIN = 28;
   function stackedBars({ rows, segs, title, desc, unit = 'd' }) {
     const rowH = 26, labelW = 150, endW = 70, w = 760;
-    const totals = rows.map((r) => segs.reduce((a, s) => a + (isNum(r.parts[s.key]) ? r.parts[s.key] : 0), 0));
+    const val = (r, s) => r.parts[s.key];
+    const totals = rows.map((r) => segs.reduce((a, s) => a + (isNum(val(r, s)) ? val(r, s) : 0), 0));
     const max = Math.max(1, ...totals);
     const h = rows.length * rowH + 4;
     const plotW = w - labelW - endW;
-    const { id, open } = svgOpen(w, h, title, desc);
+    const partText = (r, s) => {
+      const v = val(r, s);
+      if (v === null && s.hatchWhenNull) return `${s.label} not tracked`;
+      return isNum(v) ? `${s.label} ${round(v, 1)}${unit}` : null;
+    };
+    const values = rows.map((r, i) => `${r.label}: ${segs.map((s) => partText(r, s)).filter(Boolean).join(', ') || 'no data'}; total ${round(totals[i], 1)}${unit}`).join('. ');
+    const { id, open } = svgOpen(w, h, title, [desc, values].filter(Boolean).join(' — '));
     let out = open + `<defs><pattern id="${id}hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--surface-2)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--text-dim)" stroke-width="1.6"/></pattern></defs>`;
     rows.forEach((r, i) => {
-      const y = i * rowH + 6;
+      const y = i * rowH + 4;
       const lab = r.label.length > 22 ? r.label.slice(0, 21) + '…' : r.label;
-      out += `<text x="${labelW - 8}" y="${y + 11}" text-anchor="end">${esc(lab)}</text>`;
+      out += `<text x="${labelW - 8}" y="${y + 13}" text-anchor="end">${esc(lab)}</text>`;
       let x = labelW;
       segs.forEach((s) => {
-        const v = r.parts[s.key];
+        const v = val(r, s);
         if (v === null && s.hatchWhenNull) {
-          out += `<rect x="${x}" y="${y}" width="18" height="14" rx="2" fill="url(#${id}hatch)"><title>${esc(s.label)}: not tracked</title></rect>`;
+          out += `<rect x="${x}" y="${y}" width="18" height="18" rx="2" fill="url(#${id}hatch)"><title>${esc(s.label)}: not tracked</title></rect>`;
           x += 20;
           return;
         }
         if (!isNum(v) || v <= 0) return;
         const bw = Math.max(1.5, (v / max) * plotW);
-        out += `<rect x="${x.toFixed(1)}" y="${y}" width="${Math.max(1, bw - 1.5).toFixed(1)}" height="14" rx="2" fill="var(${s.color})"><title>${esc(s.label)}: ${round(v, 1)}${unit}</title></rect>`;
+        const rw = Math.max(1, bw - 1.5);
+        out += `<rect x="${x.toFixed(1)}" y="${y}" width="${rw.toFixed(1)}" height="18" rx="2" fill="var(${s.color})"><title>${esc(s.label)}: ${round(v, 1)}${unit}</title></rect>`;
+        if (rw > DIRECT_LABEL_MIN) out += `<text class="on-bar" x="${(x + rw / 2).toFixed(1)}" y="${y + 13}" text-anchor="middle" aria-hidden="true">${round(v, 1)}</text>`;
         x += bw;
       });
-      out += `<text x="${(x + 6).toFixed(1)}" y="${y + 11}">${round(totals[i], 1)}${unit}</text>`;
+      out += `<text x="${(x + 6).toFixed(1)}" y="${y + 13}">${round(totals[i], 1)}${unit}</text>`;
     });
     out += '</svg>';
-    return out;
+    // Narrow-screen twin: same data as a list with proportional meters.
+    const list = `<ul class="sb-list" aria-label="${esc(title)}">${rows
+      .map(
+        (r, i) => `<li><div class="sb-head"><span>${esc(r.label)}</span><span class="num">${round(totals[i], 1)}${unit}</span></div>
+        <div class="sb-bar" aria-hidden="true">${segs
+          .map((s) => {
+            const v = val(r, s);
+            if (v === null && s.hatchWhenNull) return '<span class="hatch" style="inline-size:12px"></span>';
+            return isNum(v) && v > 0 ? `<span style="inline-size:${((v / max) * 100).toFixed(1)}%;background:var(${s.color})"></span>` : '';
+          })
+          .join('')}</div>
+        <p class="sb-parts">${segs.map((s) => partText(r, s)).filter(Boolean).map(esc).join(' · ') || 'no data'}</p></li>`,
+      )
+      .join('')}</ul>`;
+    return `<div class="sb">${out}${list}</div>`;
   }
 
   /** Vertical histogram. bins: [{label, n}]. */
@@ -482,8 +589,8 @@
   Object.assign(TP, {
     esc, isNum, round, fmtD, fmtPct, fmtNum, fmtX, fmtDate, fmtAgo, fmtSecs, M,
     api, put, post, icon, badge, bandBadge, jiraLink, info, qualityText,
-    popover, closePopover, modal, confirmer, toast,
+    popover, closePopover, modal, confirmer, toast, toastDuration, announce,
     skeleton, emptyState, notAvailable, section, table,
-    SERIES, chartBlock, legendHtml, sparkline, stackedBars, histogram, columns, meter, store,
+    PHASE_COLORS, DIRECT_LABEL_MIN, SERIES, chartBlock, legendHtml, sparkline, stackedBars, histogram, columns, meter, store,
   });
 })();

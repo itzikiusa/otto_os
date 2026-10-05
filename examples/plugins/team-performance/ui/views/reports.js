@@ -19,24 +19,69 @@
 
   let activeT = null;
 
+  /** One masking badge everywhere (list + viewer): names visible is a warning, never neutral. */
+  const maskBadge = (r) =>
+    r && (r.masked || r.mask)
+      ? badge('info', 'names masked', 'People’s names are replaced in this report')
+      : badge('warning', 'names visible', 'People’s names appear in this report — check who you share it with');
+  const reportTitle = (r) => `${['team', 'combined'].includes(r.report_scope || 'dev') ? 'Team' : r.assignee_name || 'Person'} — ${r.label}`;
+  const q = (app, id) => `account=${encodeURIComponent(app.account)}&id=${encodeURIComponent(id)}`;
+  const inlineError = (msg, cls = 'retry') =>
+    `<div class="inline-error" role="alert">${icon('warn')}<span>${esc(msg)}</span><button type="button" class="compact ${cls}">Retry</button></div>`;
+
+  function commentsHtml(list) {
+    if (!list.length) return '<p class="dim small">No comments yet. Notes here are saved with the report for everyone who can open it.</p>';
+    return `<ol class="rv-comments">${list
+      .map((c) => `<li><div class="small"><b>${esc(c.author || 'lead')}</b> <span class="dim">${esc(fmtDate(c.at))}${c.label ? ` · ${esc(c.label)}` : ''}</span></div><p>${esc(c.text)}</p></li>`)
+      .join('')}</ol>`;
+  }
+
+  /** Comment thread beside the report: GET/POST /report/comments via api(). */
+  function mountComments(app, id, aside) {
+    const list = aside.querySelector('.rv-list');
+    const load = async () => {
+      list.innerHTML = TP.skeleton(2, false);
+      try {
+        const c = await api(`/report/comments?${q(app, id)}`);
+        list.innerHTML = commentsHtml((c && c.comments) || []);
+      } catch (e) {
+        list.innerHTML = inlineError(`Couldn’t load comments: ${e.message}`, 'rv-c-retry');
+        list.querySelector('.rv-c-retry').onclick = load;
+      }
+    };
+    const form = aside.querySelector('form');
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const ta = form.querySelector('textarea');
+      const text = ta.value.trim();
+      if (!text) return ta.focus();
+      const btn = form.querySelector('button[type=submit]');
+      btn.disabled = true;
+      try {
+        await post(`/report/comments?${q(app, id)}`, { text, author: 'lead' });
+        ta.value = '';
+        toast('Comment added.', 'success');
+        await load();
+      } catch (err) {
+        toast(`Couldn’t post the comment: ${err.message}`, 'danger');
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    load();
+    return load;
+  }
+
   async function openReport(app, id) {
-    let r;
-    try {
-      r = await api(`/report/html?account=${encodeURIComponent(app.account)}&id=${encodeURIComponent(id)}`);
-    } catch (e) {
-      toast(`Couldn’t open the report: ${e.message}`, 'danger');
-      return;
-    }
-    const title = `${r.assignee_name || 'Team'} — ${r.label}`;
     const m = modal({
       wide: true,
       body: `<div style="display:flex;flex-wrap:wrap;gap:var(--sp-3);align-items:center;margin-block-end:var(--sp-4)">
-          <h2 id="rv-title" style="margin-inline-end:auto">${esc(title)}</h2>
-          ${r.masked ? badge('info', 'names masked') : badge('warning', 'names visible')}
-          <button type="button" class="compact" id="rv-dl">${icon('download')}Download</button>
+          <h2 id="rv-title" style="margin-inline-end:auto">Report</h2>
+          <span id="rv-badge"></span>
+          <button type="button" class="compact" id="rv-dl" disabled>${icon('download')}Download</button>
           <button type="button" class="compact icon" id="rv-close" aria-label="Close report" title="Close (Esc)">${icon('x')}</button>
         </div>
-        <iframe title="${esc(title)}" sandbox="allow-popups"></iframe>`,
+        <div id="rv-content" style="min-block-size:0;display:flex;flex-wrap:wrap;gap:var(--sp-4)"></div>`,
       labelledBy: 'rv-title',
     });
     m.el.style.gridTemplateRows = '1fr';
@@ -44,9 +89,38 @@
     body.style.display = 'grid';
     body.style.gridTemplateRows = 'auto 1fr';
     body.style.minBlockSize = '0';
-    m.el.querySelector('iframe').srcdoc = r.html;
+    const content = m.el.querySelector('#rv-content');
     m.el.querySelector('#rv-close').onclick = () => m.close();
+    let r = null;
+    const load = async () => {
+      content.innerHTML = TP.skeleton(8);
+      content.setAttribute('aria-busy', 'true');
+      try {
+        r = await api(`/report/html?${q(app, id)}`);
+      } catch (e) {
+        content.removeAttribute('aria-busy');
+        content.innerHTML = inlineError(`Couldn’t open the report: ${e.message}`);
+        content.querySelector('.retry').onclick = load;
+        return;
+      }
+      content.removeAttribute('aria-busy');
+      const title = reportTitle(r);
+      m.el.querySelector('#rv-title').textContent = title;
+      m.el.querySelector('#rv-badge').innerHTML = maskBadge(r);
+      m.el.querySelector('#rv-dl').disabled = false;
+      content.innerHTML = `<iframe title="${esc(title)}" sandbox="allow-popups" style="flex:3 1 420px;min-block-size:60vh"></iframe>
+        <aside class="rv-aside" aria-label="Comments" style="flex:1 1 240px;min-inline-size:0;display:flex;flex-direction:column;gap:var(--sp-3)">
+          <h3>Comments</h3>
+          <div class="rv-list"></div>
+          <form><label class="field"><span>Add a comment</span><textarea rows="3" maxlength="4000"></textarea></label>
+            <button type="submit" class="compact">Post comment</button></form>
+        </aside>`;
+      content.querySelector('iframe').srcdoc = r.html;
+      mountComments(app, id, content.querySelector('aside'));
+    };
     m.el.querySelector('#rv-dl').onclick = async () => {
+      if (!r) return;
+      const title = reportTitle(r);
       const ok = await confirmer.ask({
         title: 'Download this report?',
         message: `The file "${title}" will be saved to your computer. Anyone you forward it to can read every number in it${r.masked ? '; names are masked' : ', including people’s names'}. Ticket links point to your Jira and need Jira access to open.`,
@@ -59,6 +133,54 @@
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     };
+    await load();
+    return m;
+  }
+
+  /** Same scope/period/masking as the saved entry → a fresh report job. */
+  async function regenerate(app, r, onChange) {
+    const ok = await confirmer.ask({
+      title: 'Regenerate this report?',
+      message: `“${reportTitle(r)}” will be rebuilt from today’s data with the same scope, period and masking${r.masked ? ' (names masked)' : ' (names visible)'}. The new report is saved next to the old one for everyone with access to this Otto workspace.`,
+      confirmLabel: 'Regenerate',
+    });
+    if (!ok) return;
+    try {
+      const start = await post('/report', {
+        account: app.account,
+        scope: r.report_scope || 'dev',
+        assignee: r.report_scope === 'dev' || !r.report_scope ? r.assignee_id || undefined : undefined,
+        kind: r.kind,
+        year: r.year,
+        month: r.month || undefined,
+        quarter: r.quarter || undefined,
+        mask: Boolean(r.masked || r.mask),
+        mask_tasks: Boolean(r.mask_tasks),
+        sections: Array.isArray(r.sections) ? r.sections : undefined,
+      });
+      toast(start.already ? 'Already generating — following its progress.' : `Regenerating ${r.label}…`);
+      onChange();
+      pollJob(app, start.job, () => onChange());
+    } catch (e) {
+      toast(`Couldn’t regenerate: ${e.message}`, 'danger');
+    }
+  }
+
+  async function removeReport(app, r, onChange) {
+    const ok = await confirmer.ask({
+      title: 'Delete this report?',
+      message: `“${reportTitle(r)}” and its comments will be removed for everyone. This can’t be undone; you can generate the period again later.`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api(`/report?${q(app, r.id)}`, { method: 'DELETE' });
+      toast('Report deleted.', 'success');
+      onChange();
+    } catch (e) {
+      toast(`Couldn’t delete the report: ${e.message}`, 'danger');
+    }
   }
 
   function pollJob(app, job, onDone) {
@@ -172,8 +294,11 @@
   TP.views.reports = {
     newReport,
     openReport,
+    maskBadge,
+    commentsHtml,
     render(host, { app }) {
       clearInterval(activeT);
+      let lastList = [];
       section(host, {
         title: 'Reports',
         headerEnd: '<button type="button" class="compact" id="rp-new">New report</button>',
@@ -184,6 +309,7 @@
             api(`/reports/active?account=${encodeURIComponent(app.account)}`).catch(() => ({ active: [] })),
           ]);
           const reps = list.reports || [];
+          lastList = reps;
           const act = active.active || [];
           let html = '';
           if (act.length) {
@@ -195,18 +321,23 @@
           }
           return html + TP.table({
             caption: `${reps.length} saved reports, newest first`,
-            cols: [{ label: 'Report' }, { label: 'Scope' }, { label: 'Masking' }, { label: 'Created', num: true }, { label: '' }],
-            rows: reps.map((r) => [
-              esc(`${['team', 'combined'].includes(r.report_scope || 'dev') ? 'Team' : r.assignee_name} — ${r.label}`),
+            cols: [{ label: 'Report' }, { label: 'Scope' }, { label: 'Masking' }, { label: 'Created', num: true }, { label: 'Actions' }],
+            rows: reps.map((r, i) => [
+              esc(reportTitle(r)),
               esc(r.report_scope === 'combined' ? 'Team + people' : r.report_scope === 'team' ? 'Team' : 'Person'),
-              r.masked || r.mask ? badge('info', 'masked') : badge('', 'names visible'),
+              maskBadge(r),
               fmtDate(r.created_at),
-              `<button type="button" class="compact" data-rep="${esc(r.id)}">Open</button>`,
+              `<span class="chips"><button type="button" class="compact" data-rep="${esc(r.id)}">Open</button>
+                <button type="button" class="compact" data-regen="${i}" aria-label="Regenerate ${esc(reportTitle(r))}" title="Regenerate with today’s data">${icon('refresh')}Regenerate</button>
+                <button type="button" class="compact danger" data-del="${i}" aria-label="Delete ${esc(reportTitle(r))}" title="Delete report">${icon('x')}Delete</button></span>`,
             ]),
           });
         },
-        after(body) {
+        after(body, rerun) {
+          const reps = lastList;
           body.querySelectorAll('[data-rep]').forEach((b) => (b.onclick = () => openReport(app, b.dataset.rep)));
+          body.querySelectorAll('[data-regen]').forEach((b) => (b.onclick = () => regenerate(app, reps[+b.dataset.regen], rerun)));
+          body.querySelectorAll('[data-del]').forEach((b) => (b.onclick = () => removeReport(app, reps[+b.dataset.del], rerun)));
         },
       });
       host.querySelector('#rp-new').onclick = () => newReport(app);

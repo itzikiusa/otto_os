@@ -28,6 +28,19 @@ const RE_LINK_STRONG_REVERSE = /\b(causes|is fixed by|is reworked by)\b/i;
 const RE_LINK_WEAK = /\brelates?\b/i;
 const WEIGHT = { link: 3, bug_after_delivery: 3, title_ref: 2, link_weak: 1, blame: 1, title_keyword: 1 };
 const round2 = (v) => Math.round(v * 100) / 100;
+const DEFAULT_BUG_WINDOW_DAYS = 30;
+const WEAK_ONLY = new Set(['link_weak', 'title_keyword', 'blame']);
+
+/** Effective bug/relation window (days): opts.bug_window_days > opts.config > 30. */
+function bugWindowDays(opts = {}) {
+  const v = Number(opts.bug_window_days ?? (opts.config && opts.config.bug_window_days));
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_BUG_WINDOW_DAYS;
+}
+
+/** Glossary/meta block describing how Jira rework was detected. */
+function reworkMeta(opts = {}) {
+  return { bug_window_days: bugWindowDays(opts), signals: Object.keys(WEIGHT) };
+}
 
 /**
  * Normalize Jira `issuelinks` (raw API shape) or already-normalized links to
@@ -99,7 +112,7 @@ function classifyRework(record, byKey, opts = {}) {
     projects = new Set();
     for (const k of byKey instanceof Map ? byKey.keys() : Object.keys(byKey || {})) projects.add(projectOf(k));
   }
-  const windowMs = (opts.bug_window_days ?? 30) * DAY_MS;
+  const windowMs = bugWindowDays(opts) * DAY_MS;
   const self = record.key;
   const skip = new Set([self, record.parent_key].filter(Boolean));
   const cands = new Map(); // origin key -> Set(signal)
@@ -141,6 +154,14 @@ function classifyRework(record, byKey, opts = {}) {
     // Blame alone only means "touched recent code" — already charged by the
     // line-level charge-back; it never makes the whole ticket a redo.
     if (sig.size === 1 && sig.has('blame')) continue;
+    // Weak evidence only (relates-to / keyword / blame — no explicit link or
+    // key named in the title): an origin
+    // delivered long before this ticket was opened is ordinary follow-on work,
+    // not a redo of it.
+    if ([...sig].every((s) => WEAK_ONLY.has(s)) && record.created != null) {
+      const at = deliveredAt(get(k));
+      if (at != null && record.created - at > windowMs) continue;
+    }
     if (!best || score > best.score || (score === best.score && hasPair(opts.blamePairs, self, k))) best = { k, sig, score };
   }
 
@@ -163,7 +184,8 @@ function classifyRework(record, byKey, opts = {}) {
  *  - its remaining actual (net of any blame charge-back already applied) moves
  *    to the origin's rework_in and its own rework_out.
  * A reopened ticket is its own origin: flagged (rework_self) but not excluded.
- * opts: { blamePairs, bug_window_days, actualDays = analytics.actualDays }
+ * opts: { blamePairs, bug_window_days | config.bug_window_days (default 30),
+ *         actualDays = analytics.actualDays }
  */
 function applyRework(records, opts = {}) {
   const actual = opts.actualDays || A.actualDays;
@@ -172,7 +194,16 @@ function applyRework(records, opts = {}) {
   const reverse = reverseLinks(out);
   const projects = new Set([...byKey.keys()].map(projectOf));
   const pairsIdx = indexPairs(opts.blamePairs);
-  const verdicts = out.map((r) => (r.rollup ? null : classifyRework(r, byKey, { ...opts, reverse, projects, pairsIdx })));
+  const bug_window_days = bugWindowDays(opts);
+  const copts = { ...opts, bug_window_days, reverse, projects, pairsIdx };
+  const verdicts = out.map((r) => (r.rollup ? null : classifyRework(r, byKey, copts)));
+  // Snapshot every record's OWN remaining time BEFORE any Jira charge: actual
+  // minus what was charged IN to it (blame or Jira). Charging from the
+  // snapshot keeps a chain A←B←C order-independent — B's own time goes to A
+  // no matter whether C was already charged to B — and conserves the total.
+  const base = new Map(out.map((r) => [r.key, r.manual_days != null ? r.manual_days : Math.max(0, (actual(r) || 0) - (r.rework_in || 0))]));
+  const manual = (r) => r && r.manual_days != null;
+  for (const r of out) if (manual(r) && (r.rework_in > 0 || r.rework_out > 0)) r.rework_skipped_manual = true;
   for (let i = 0; i < out.length; i++) {
     const v = verdicts[i];
     if (!v || !v.is_rework) continue;
@@ -184,8 +215,15 @@ function applyRework(records, opts = {}) {
     r.rework_of = v.origin_key;
     r.scope_excluded = true;
     if (!origin) continue;
+    // A lead-entered manual time is authoritative and never adjusted: moving
+    // time into/out of it would double count (or lose) it — flag instead.
+    if (manual(r) || manual(origin)) {
+      if (manual(r)) r.rework_skipped_manual = true;
+      if (manual(origin)) origin.rework_skipped_manual = true;
+      continue;
+    }
     // Charge only what the blame pair did not already move for this ticket.
-    const t = actual(r) || 0;
+    const t = base.get(r.key) || 0;
     if (!(t > 0)) continue;
     origin.rework_in = round2((origin.rework_in || 0) + t);
     r.rework_out = round2((r.rework_out || 0) + t);
@@ -212,7 +250,9 @@ function reworkRate(records, opts = {}) {
   }
   dev = Math.max(0, dev);
   const total = dev + rework;
-  return { rate: total > 0 ? round2(rework / total) : null, rework_days: round2(rework), dev_days: round2(dev) };
+  const res = { rate: total > 0 ? round2(rework / total) : null, rework_days: round2(rework), dev_days: round2(dev) };
+  if (opts.bug_window_days != null || opts.config) res.bug_window_days = bugWindowDays(opts);
+  return res;
 }
 
 /** Delivered scope (Σ estimate) that skips scope_excluded rework tickets. */
@@ -222,4 +262,4 @@ function deliveredScope(records, estimateOf) {
   return round2(s);
 }
 
-module.exports = { classifyRework, applyRework, reworkRate, deliveredScope, normalizeLinks, reverseLinks };
+module.exports = { DEFAULT_BUG_WINDOW_DAYS, bugWindowDays, reworkMeta, classifyRework, applyRework, reworkRate, deliveredScope, normalizeLinks, reverseLinks };

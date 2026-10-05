@@ -198,11 +198,17 @@ test('buildIndex: a stray commit long after delivery is NOT a fix (fix window)',
 // ---------------------------------------------------------------------------
 const { isDeployTag, tagKind, deployTags, deployTagPatterns, resolveTarget, targetRefAgeDays } = require('../lib/gitscan.js');
 
-test('isDeployTag: deployed substring, hf/hotfix on token boundaries only', () => {
-  const names = ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3', 'release-1.0', 'shf-build'];
-  assert.deepEqual(names.filter((n) => isDeployTag(n, ['deployed', 'hf', 'hotfix'])), ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3']);
-  assert.deepEqual(names.map(tagKind), ['regular', 'hotfix', 'hotfix', 'regular', 'regular']);
-  assert.equal(isDeployTag('hotfixes-x'), false, 'token must end at a non-letter');
+test('isDeployTag: case-insensitive CONTAINS of deployed / hf / hotfix; tagKind', () => {
+  const deploys = ['hotfixes-2026', 'prodHotfix1', 'v2hf', 'rel-HF2', 'v1-DEPLOYED'];
+  for (const n of deploys) assert.equal(isDeployTag(n), true, n);
+  assert.equal(isDeployTag('release-1.2'), false);
+  assert.equal(isDeployTag(''), false);
+  assert.deepEqual(deploys.map(tagKind), ['hotfix', 'hotfix', 'hotfix', 'hotfix', 'deploy']);
+  assert.equal(tagKind('release-1.2'), 'deploy');
+  // Config object or list both accepted; an override replaces the defaults.
+  assert.equal(isDeployTag('v1-PROD', { deploy_tag_patterns: ['prod'] }), true);
+  assert.equal(isDeployTag('v1-deployed', { deploy_tag_patterns: ['prod'] }), false);
+  assert.equal(isDeployTag('v1-deployed', ['deployed']), true);
 });
 
 test('deployTagPatterns: legacy single key merged, defaults when absent', () => {
@@ -232,13 +238,13 @@ test('deploy tags: exact matches in a fixture repo, hf tag sets deployed_at', ()
     c('ABC-3 more', '2026-06-04T09:00:00Z');
     g(['tag', 'prod_Hotfix_3'], at('2026-06-04T09:00:00Z')); // lightweight
     g(['tag', '-a', 'release-1.0', '-m', 'p'], at('2026-06-05T09:00:00Z'));
-    g(['tag', '-a', 'shf-build', '-m', 'p'], at('2026-06-05T09:00:00Z'));
+    g(['tag', '-a', 'nightly-build', '-m', 'p'], at('2026-06-05T09:00:00Z'));
     c('ABC-4 later', '2026-06-06T09:00:00Z');
     g(['tag', '-a', 'v2-deployed', '-m', 'p'], at('2026-06-07T09:00:00Z'));
 
     const tags = deployTags(dir, ['deployed', 'hf', 'hotfix']);
     assert.deepEqual(tags.map((t) => t.name), ['v1-DEPLOYED', 'rel-HF2', 'prod_Hotfix_3', 'v2-deployed']);
-    assert.deepEqual(tags.map((t) => t.kind), ['regular', 'hotfix', 'hotfix', 'regular']);
+    assert.deepEqual(tags.map((t) => t.kind), ['deploy', 'hotfix', 'hotfix', 'deploy']);
 
     const idx = buildIndex([{ name: 'r', path: dir }], { git_fetch: false });
     const e2 = idx.byKey.get('ABC-2');

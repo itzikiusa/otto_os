@@ -262,6 +262,7 @@
         role: 'presentation',
         className: 'menu',
         onOpen(el) {
+          rovingMenu(el.querySelector('[role=menu]'));
           el.querySelectorAll('[data-m]').forEach((b) => {
             b.onclick = async () => {
               const m = b.dataset.m;
@@ -284,6 +285,36 @@
       },
     );
   };
+
+  /**
+   * Menu keyboard model (WAI-ARIA menu): one tab stop, Arrow Up/Down move
+   * (wrapping), Home/End jump, Tab closes the menu and lets focus move on.
+   */
+  function rovingMenu(menu) {
+    if (!menu) return;
+    const items = () => [...menu.querySelectorAll('[role^=menuitem]')].filter((b) => !b.disabled && !b.hidden);
+    const focusAt = (i) => {
+      const list = items();
+      if (!list.length) return;
+      const n = (i + list.length) % list.length;
+      list.forEach((b, j) => (b.tabIndex = j === n ? 0 : -1));
+      list[n].focus();
+    };
+    items().forEach((b, j) => (b.tabIndex = j === 0 ? 0 : -1));
+    menu.addEventListener('keydown', (e) => {
+      const list = items();
+      const i = list.indexOf(document.activeElement);
+      if (e.key === 'ArrowDown') focusAt(i + 1);
+      else if (e.key === 'ArrowUp') focusAt(i < 0 ? list.length - 1 : i - 1);
+      else if (e.key === 'Home') focusAt(0);
+      else if (e.key === 'End') focusAt(list.length - 1);
+      else if (e.key === 'Tab') return closePopover(false);
+      else return;
+      e.preventDefault();
+    });
+    focusAt(0);
+  }
+  app.rovingMenu = rovingMenu;
 
   // ---- scan ----------------------------------------------------------------
   async function startScan(full) {
@@ -385,7 +416,20 @@
     ).join('');
     $('view').setAttribute('aria-labelledby', 'tab-' + app.tab);
     $('tabs').querySelectorAll('[role=tab]').forEach((b) => (b.onclick = () => goTab(b.dataset.tab)));
+    const sel = $('tab-' + app.tab);
+    if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    updateTabFades();
   }
+  // Edge-fade masks show there is more tab strip to scroll to (narrow widths).
+  function updateTabFades() {
+    const t = $('tabs');
+    const max = t.scrollWidth - t.clientWidth;
+    const pos = Math.abs(t.scrollLeft); // negative in RTL
+    t.classList.toggle('fade-start', max > 1 && pos > 1);
+    t.classList.toggle('fade-end', max > 1 && pos < max - 1);
+  }
+  $('tabs').addEventListener('scroll', updateTabFades, { passive: true });
+  window.addEventListener('resize', updateTabFades);
   $('tabs').addEventListener('keydown', (e) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
     const i = TABS.findIndex(([k]) => k === app.tab);

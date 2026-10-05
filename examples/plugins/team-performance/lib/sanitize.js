@@ -1,6 +1,8 @@
-// Report/prompt hardening. sanitizeReportHtml strips active content from a
-// generated report and pins a strict CSP; fenceUntrusted wraps data for an
-// agent prompt; maskDeep/leakCheck enforce name masking before anything leaves.
+// Report/prompt hardening. Reports are rendered by a fixed template
+// (lib/reportmodel escapes every value), so there is no HTML post-filter here:
+// fenceUntrusted wraps data for an agent prompt; maskDeep/leakCheck/
+// maskedLeaks enforce name masking before anything leaves (fail closed);
+// jiraOrigin/validAnchor/scrubComment harden links and report comments.
 'use strict';
 const crypto = require('crypto');
 
@@ -8,46 +10,13 @@ const newNonce = () => crypto.randomBytes(16).toString('base64').replace(/[^A-Za
 
 function escRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-function originOf(u) { try { return new URL(u).origin; } catch { return null; } }
-
-// opts: { jiraBase, keepScriptNonce } — a <script> tagged data-otto-template is the
-// template's own script and is kept (with the CSP nonce); every other script goes.
-function sanitizeReportHtml(html, opts = {}) {
-  let s = String(html ?? '');
-  const nonce = opts.nonce || newNonce();
-  const jiraOrigin = opts.jiraBase ? originOf(opts.jiraBase) : null;
-
-  // Remove dangerous elements with their content, then any stray open/close tags.
-  const kept = []; // template scripts, restored after every other pass
-  s = s.replace(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi, (m, attrs, body) => {
-    if (!/\bdata-otto-template\b/i.test(attrs) || /<\/?script/i.test(body)) return '';
-    kept.push(body); return `\u0000OTTOSCRIPT${kept.length - 1}\u0000`;
-  });
-  s = s.replace(/<(iframe|object|embed|form|noscript)\b[\s\S]*?<\/\1\s*>/gi, '');
-  s = s.replace(/<\/?(script|iframe|object|embed|form|base)\b[^>]*>/gi, '');
-  s = s.replace(/<meta\b[^>]*http-equiv[^>]*>/gi, '');
-  // Event-handler attributes (quoted or bare).
-  s = s.replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-  // URL attributes: drop javascript:/data-script/vbscript, drop external unless https Jira link.
-  s = s.replace(/\s+(href|src|action|formaction|xlink:href|srcset|poster)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi, (m, attr, _q, a, b, c) => {
-    const raw = (a ?? b ?? c ?? '');
-    const v = raw.replace(/[\u0000-\u0020]/g, '').replace(/&#x?0*(?:9|a|d|10|13);?/gi, '').toLowerCase();
-    if (/^(javascript|vbscript):/.test(v)) return '';
-    if (v.startsWith('data:')) return /^data:image\/(png|gif|jpe?g|webp);/.test(v) && attr.toLowerCase() !== 'href' ? m : '';
-    if (/^[a-z][a-z0-9+.-]*:/.test(v) || v.startsWith('//')) {
-      if (attr.toLowerCase() === 'href' && jiraOrigin && v.startsWith('https:') && originOf(raw.trim()) === jiraOrigin) return m;
-      return '';
-    }
-    return m; // relative / fragment
-  });
-  s = s.replace(/url\(\s*['"]?\s*(javascript|https?|\/\/)[^)]*\)/gi, 'none');
-
-  s = s.replace(/\u0000OTTOSCRIPT(\d+)\u0000/g, (m, i) => `<script nonce="${nonce}">${kept[Number(i)]}</script>`);
-  const csp = `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'`;
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
-  if (/<head\b[^>]*>/i.test(s)) s = s.replace(/<head\b[^>]*>/i, (h) => `${h}\n${meta}`);
-  else s = meta + '\n' + s;
-  return s;
+/** https-only Jira origin (no path/query), or null → reports render no Jira links. */
+function jiraOrigin(u) {
+  try {
+    const x = new URL(String(u || ''));
+    if (x.protocol !== 'https:' || x.username || x.password || !x.hostname) return null;
+    return x.origin;
+  } catch { return null; }
 }
 
 const FENCE_MAX = 200000;
@@ -82,20 +51,64 @@ function maskDeep(obj, nameMap) {
   return walk(obj);
 }
 
-function leakCheck(html, realNames = [], realKeys = []) {
-  const s = String(html ?? '');
+// Decode what a template may have escaped, so "O&#39;Brien" or "é" can't hide a name.
+function decodeForScan(s) {
+  return String(s ?? '')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#x([0-9a-f]+);?/gi, (m, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);?/g, (m, d) => String.fromCodePoint(Number(d)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+// Whole-word scan of names/keys; summaries match as a case-insensitive
+// substring (>= 16 chars — shorter titles are too generic to be identifying).
+// Scans the raw text AND its decoded form (inline JSON, HTML entities).
+function leakCheck(html, realNames = [], realKeys = [], realSummaries = []) {
+  const raw = String(html ?? '');
+  const texts = [raw];
+  const dec = decodeForScan(raw);
+  if (dec !== raw) texts.push(dec);
   const hits = [];
   const scan = (list, kind) => {
-    for (const w of list || []) {
+    for (const w of new Set(list || [])) {
       if (!w) continue;
       const re = new RegExp(`(?<![\\p{L}\\p{N}_])${escRe(w)}(?![\\p{L}\\p{N}_])`, 'giu');
-      const m = s.match(re);
-      if (m) hits.push({ kind, value: w, count: m.length });
+      const count = Math.max(...texts.map((t) => (t.match(re) || []).length));
+      if (count) hits.push({ kind, value: w, count });
     }
   };
   scan(realNames, 'name');
   scan(realKeys, 'key');
+  const lowered = texts.map((t) => t.toLowerCase());
+  for (const sm of new Set(realSummaries || [])) {
+    const v = String(sm || '').trim().toLowerCase();
+    if (v.length >= 16 && lowered.some((t) => t.includes(v))) hits.push({ kind: 'summary', value: sm, count: 1 });
+  }
   return hits;
 }
 
-module.exports = { sanitizeReportHtml, fenceUntrusted, maskDeep, leakCheck, newNonce };
+/**
+ * Fail-closed masked check: any thrown error counts as a leak, and a mask with
+ * an empty name list (masking can't be verified) is refused.
+ */
+function maskedLeaks(text, { names = [], keys = [], summaries = [] } = {}) {
+  try {
+    if (!names.filter(Boolean).length) return [{ kind: 'error', value: 'no identities to verify the mask against', count: 1 }];
+    return leakCheck(text, names, keys, summaries);
+  } catch (e) {
+    return [{ kind: 'error', value: String(e && e.message || e), count: 1 }];
+  }
+}
+
+const ANCHOR_RE = /^[a-z0-9_-]+$/;
+const validAnchor = (a) => typeof a === 'string' && a.length > 0 && a.length <= 120 && ANCHOR_RE.test(a);
+
+/** Comment text for a masked report: real names → aliases, keys → "ticket", control chars out. */
+function scrubComment(text, { nameMap = {}, keys = [] } = {}) {
+  let t = String(text ?? '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '');
+  t = maskDeep(t, nameMap);
+  for (const k of keys) if (k) t = t.replace(new RegExp(`(?<![\\p{L}\\p{N}_])${escRe(k)}(?![\\p{L}\\p{N}_])`, 'giu'), 'ticket');
+  return t;
+}
+
+module.exports = { fenceUntrusted, maskDeep, leakCheck, maskedLeaks, decodeForScan, jiraOrigin, validAnchor, scrubComment, newNonce };

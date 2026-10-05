@@ -6,26 +6,31 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-{{NONCE}}'; connect-src 'self'">
 <meta name="generator" content="team-performance report {{TEMPLATE_VERSION}}">
 <title>{{TITLE}}</title>
-<style>{{CSS}}</style>
+<style>{{PALETTE}}
+{{CSS}}</style>
 </head>
 <body>
-<div class="wrap">
+<a class="skip" href="#main">Skip to the report</a>
+<div class="wrap" id="wrap">
   <header class="top">
     <h1>{{TITLE}}</h1>
     <div class="sub">{{SUBTITLE}}</div>
   </header>
   <div class="toolbar no-print" role="toolbar" aria-label="Report tools">
-    <nav aria-label="Sections">{{NAV}}</nav>
-    <button type="button" class="btn" id="theme-btn" aria-label="Switch colour theme" title="Switch colour theme">Theme: auto</button>
-    <button type="button" class="btn" id="open-comments" aria-label="Open comments" title="Open comments">Comments (<span id="c-count">0</span>)</button>
+    <span class="tb-title" aria-hidden="true">{{TITLE}}</span>
+    <button type="button" class="btn js-only" id="theme-btn" aria-label="Switch colour theme" title="Switch colour theme">Theme: auto</button>
+    <button type="button" class="btn js-only" id="open-comments" aria-label="Open comments" title="Open comments" aria-haspopup="dialog" aria-controls="cpanel">Comments (<span id="c-count">{{COMMENT_COUNT}}</span>)</button>
   </div>
   {{GUARDRAILS}}
-  <main>{{BODY}}</main>
+  <div class="layout">
+    <nav class="toc no-print" aria-label="Contents">{{NAV}}</nav>
+    <main id="main" tabindex="-1">{{BODY}}</main>
+  </div>
   <footer class="meta">{{FOOTER}}</footer>
 </div>
-<aside class="cpanel" id="cpanel" aria-label="Comments" aria-hidden="true">
+<aside class="cpanel" id="cpanel" role="dialog" aria-modal="true" aria-labelledby="c-title" hidden>
   <header>
-    <h2>Comments</h2>
+    <h2 id="c-title">Comments</h2>
     <button type="button" class="btn" id="c-export" aria-label="Export comments as JSON" title="Export comments as JSON">Export</button>
     <button type="button" class="btn" id="c-close" aria-label="Close comments" title="Close comments">Close</button>
   </header>
@@ -36,7 +41,7 @@
       <textarea id="c-text" maxlength="4000"></textarea>
       <button type="submit" class="btn primary" id="c-save">Post comment</button>
     </form>
-    <div id="c-list"></div>
+    <div id="c-list">{{COMMENT_LIST}}</div>
   </div>
 </aside>
 <script nonce="{{NONCE}}">{{SCRIPT}}</script>

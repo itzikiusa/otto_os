@@ -17,11 +17,23 @@
   };
   const PH = [['design', 'Design'], ['dev', 'Dev'], ['review', 'Review'], ['deploy', 'Deploy'], ['rework', 'Rework']];
   const verdict = (v) => (!v ? '—' : badge(v === 'slow' ? 'warning' : 'success', { fast: 'fast', on_track: 'on track', slow: 'slow' }[v] || v));
-  const phaseCell = (t, k) => {
-    const p = t.phases && t.phases[k];
-    if (p === null || (p && p.tracked === false)) return '<span class="dim">not tracked</span>';
+  // Per-ticket phases arrive as numbers, {value}, or the lib/phases shape
+  // ({days} / review {total} / rework {in_days}); null days = not tracked.
+  const phaseNum = (k, p) => {
+    if (isNum(p)) return p;
+    if (!p || typeof p !== 'object') return undefined;
+    if (p.tracked === false) return null;
+    for (const f of k === 'review' ? ['total', 'days'] : k === 'rework' ? ['in_days', 'days'] : ['days']) if (f in p) return isNum(p[f]) ? p[f] : null;
     const m = M(p);
-    if (m && isNum(m.value)) return fmtD(m.value);
+    return m && isNum(m.value) ? m.value : undefined;
+  };
+  const NT = '<span class="dim">not tracked</span>';
+  const phaseCell = (t, k) => {
+    const p = t.phases && t.phases[k === 'deploy' && t.phases && !('deploy' in t.phases) ? 'deployment' : k];
+    if (p === null) return NT;
+    const v = phaseNum(k, p);
+    if (v === null) return NT;
+    if (isNum(v)) return fmtD(v);
     if (k === 'design') return fmtD(t.design_days);
     if (k === 'dev') return fmtD(t.impl_days_git ?? t.impl_days);
     if (k === 'deploy') return fmtD(t.deploy_wait_days);
@@ -112,6 +124,7 @@
   }
 
   TP.views.person = {
+    phaseCell,
     render(outer, { app, o }, id) {
       const host = document.createElement('div');
       outer.appendChild(host);
@@ -133,18 +146,20 @@
         load: async () => {
           const d = await load();
           const s = d.stats || {};
-          const cap = d.capacity || s.capacity || (o && o.capacity && o.capacity.people && o.capacity.people[id]) || null;
+          const row = ((o && o.assignees) || []).find((a) => a.assignee_id === id) || {};
+          const cap = d.capacity || s.capacity || (o && o.capacity && o.capacity.people && o.capacity.people[id]) || (isNum(row.capacity_days) ? { capacity_days: row.capacity_days, time_off_days: row.time_off_days, business_days: isNum(row.time_off_days) ? row.capacity_days + row.time_off_days : null } : null);
           const capDays = cap && isNum(cap.capacity_days) ? cap.capacity_days : null;
-          const perDay = capDays && isNum(s.weighted_done) ? s.weighted_done / capDays : null;
+          const perDay = isNum(row.weighted_per_capacity_day) ? row.weighted_per_capacity_day : capDays && isNum(s.weighted_done) ? s.weighted_done / capDays : null;
+          const guard = TP.views.people && TP.views.people.rowGuard ? TP.views.people.rowGuard(o || {}, { ...row, ...s, assignee_id: id, capacity: cap || undefined }) : null;
           const t = (title, val, ctx, def) => `<div class="tile"><div class="label">${esc(title)}${def ? ' ' + info({ title, ...def }) : ''}</div><div class="value">${val}</div>${ctx ? `<div class="context">${ctx}</div>` : ''}</div>`;
-          return `<div class="tiles">
-            ${t('Available days', capDays != null ? fmtNum(capDays, 0) : '<span class="na">not available yet</span>', cap ? `${fmtNum(cap.business_days, 0)} working days − ${fmtNum(cap.time_off_days || 0, 0)} off` : 'enter time off in Settings → People', { definition: 'Business days minus holidays and this person’s time off.', formula: 'business days − holidays − time off' })}
-            ${t('Delivered scope', isNum(s.weighted_done) ? `${fmtNum(s.weighted_done)}<small> est-d</small>` : '—', perDay != null ? `${fmtNum(perDay, 2)} per available day` : 'per-day rate needs capacity', { definition: 'Estimated days delivered, credited by commit share.', formula: 'Σ estimate × share' })}
-            ${t('Pace vs estimate', fmtX(s.pace_vs_est), 'actual days per estimated day', { definition: 'Above ×1 = slower than estimated.', formula: 'Σ actual ÷ Σ estimate' })}
-            ${t('Median cycle', fmtD(s.median_cycle), '')}
+          return `${guard ? `<div class="banner${guard.level === 'bad' ? ' danger' : ''}" role="note">${TP.icon('warn')}<span><b>Read with care:</b> ${esc(guard.msg)}</span></div>` : ''}<div class="tiles">
+            ${t('Capacity days', capDays != null ? fmtNum(capDays, 0) : '<span class="na">not available yet</span>', cap && isNum(cap.business_days) ? `${fmtNum(cap.business_days, 0)} working days − ${fmtNum(cap.time_off_days || 0, 0)} off = ${fmtNum(capDays, 0)}` : 'enter time off in Settings → People', { definition: 'Business days minus holidays and this person’s time off. Every rate here is divided by it.', formula: 'business days − time off = capacity' })}
+            ${t('Delivered scope', isNum(s.weighted_done) ? `${fmtNum(s.weighted_done)}<small> est-d</small>` : '—', perDay != null ? `${fmtNum(perDay, 2)} est-d per capacity day (over ${fmtNum(capDays, 0)} d)` : 'per-day rate needs capacity', { definition: 'Estimated days delivered, credited by commit share. Not a productivity score: reviews, support, mentoring and design are not in it.', formula: 'Σ estimate × share; ÷ capacity days for the rate' })}
+            ${t('Pace vs estimate', fmtX(s.pace_vs_est), 'actual dev-days ÷ estimated days', { definition: 'Above ×1 = slower than estimated. Independent of capacity.', formula: 'Σ actual dev-days ÷ Σ estimated days' })}
+            ${t('Median cycle', fmtD(s.median_cycle), 'business days, first work → done')}
             ${t('Estimate error', fmtPct(s.mape), 'median absolute % error', { definition: 'How far estimates were from actuals on this person’s tickets.', formula: 'median(|actual − est| ÷ est)' })}
             ${t('Avg parallel tickets', isNum(s.avg_wip) ? fmtNum(s.avg_wip) : '—', '')}
-          </div>`;
+          </div><p class="dim small">Not a productivity score — compare only with the capacity beside each rate, and never rank people on it.</p>`;
         },
         after() {
           const b = host.querySelector('#ps-report');
@@ -216,18 +231,31 @@
       });
 
       section(host, {
+        title: 'Credited sub-tasks',
+        sub: 'Sub-tasks with real work (own commits or dev time, under someone else’s story, or under a story with no timing) credited to this person.',
+        load: async () => {
+          const d = await load();
+          const all = d.subtasks || (o && o.subtasks);
+          if (!all) return notAvailable('Sub-task attribution');
+          const mine = all.filter((x) => (x.credited_to || x.assignee_id) === id);
+          if (!mine.length) return '<p class="dim">No sub-tasks with real work credited to this person in this period.</p>';
+          return TP.creditedSubtasks ? TP.creditedSubtasks(o || {}, mine, { caption: `${mine.length} credited sub-tasks`, openable: false }) : '';
+        },
+      });
+
+      section(host, {
         title: 'Rework',
         sub: 'Time charged back to this person’s tickets, and rework they did on others’.',
         load: async () => {
           const d = await load();
           const r = d.rework;
           if (!r) return notAvailable('Rework for this person');
-          const list = r.charged || r.tickets || [];
+          const list = r.charged || r.tickets || r.items || [];
           if (!list.length) return '<p class="dim">No rework linked to this person’s tickets.</p>';
           return table({
             caption: 'Rework links',
             cols: [{ label: 'Original' }, { label: 'Rework ticket' }, { label: 'Signal' }, { label: 'Days', num: true }],
-            rows: list.map((x) => [jiraLink(x.original_key || x.key), x.rework_key ? jiraLink(x.rework_key) : '—', esc(x.reason || x.source || ''), fmtD(x.days)]),
+            rows: list.map((x) => [jiraLink(x.original_key || x.rework_of || x.key), x.rework_key ? jiraLink(x.rework_key) : x.rework_of ? jiraLink(x.key) : '—', esc(x.reason || x.source || (x.signals || []).map((g) => (typeof g === 'string' ? g : g.reason || g.kind)).join(', ')), fmtD(x.days)]),
           });
         },
       });

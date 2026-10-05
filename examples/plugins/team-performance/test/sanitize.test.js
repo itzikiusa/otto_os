@@ -2,16 +2,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const S = require('../lib/sanitize.js');
 
-test('sanitizer removes script, onerror and javascript: URL; keeps Jira https link and CSP', () => {
-  const html = `<html><head><title>r</title></head><body>
-<script>alert(1)</script><img src="x.png" onerror="alert(2)"><a href="javascript:alert(3)">x</a>
-<a href="https://jira.example.com/browse/ABC-1">ABC-1</a><a href="https://evil.example.net/">e</a>
-<iframe src="https://evil.example.net"></iframe><script data-otto-template>init()</script></body></html>`;
-  const out = S.sanitizeReportHtml(html, { jiraBase: 'https://jira.example.com', nonce: 'N1' });
-  assert.ok(!out.includes('alert(1)')); assert.ok(!/onerror/i.test(out)); assert.ok(!/javascript:/i.test(out));
-  assert.ok(!out.includes('evil.example.net'));
-  assert.ok(out.includes('https://jira.example.com/browse/ABC-1'));
-  assert.ok(out.includes(`script-src 'nonce-N1'`)); assert.ok(out.includes('<script nonce="N1">init()</script>'));
+test('the dead HTML post-filter is gone (reports are rendered by the escaping template)', () => {
+  assert.equal(S.sanitizeReportHtml, undefined);
 });
 
 test('fenceUntrusted neutralizes lookalikes and caps length', () => {
@@ -31,4 +23,31 @@ test('maskDeep replaces every name, nested arrays included, whole-word only', ()
 test('leakCheck finds a planted name and key', () => {
   const hits = S.leakCheck('<p>Dev A and Carol worked on ABC-9</p>', ['Carol', 'Dave'], ['ABC']);
   assert.deepEqual(hits.map((h) => h.value), ['Carol', 'ABC']);
+});
+
+test('leakCheck scans inline JSON / entity-escaped text and summaries', () => {
+  const html = '<script type="application/json">{"who":"Zo\\u00eb Quill"}</script><p>O&#39;Brien &amp; co</p><p>Rebuild the payment retry queue</p>';
+  const hits = S.leakCheck(html, ['Zoë Quill', "O'Brien"], [], ['Rebuild the payment retry queue', 'short']);
+  assert.deepEqual(hits.map((h) => h.kind + ':' + h.value), ["name:Zoë Quill", "name:O'Brien", 'summary:Rebuild the payment retry queue']);
+});
+
+test('maskedLeaks fails closed', () => {
+  assert.equal(S.maskedLeaks('<p>fine</p>', { names: [] })[0].kind, 'error');
+  assert.deepEqual(S.maskedLeaks('<p>Person A</p>', { names: ['Carol Ames'], keys: ['ABC-1'] }), []);
+  assert.equal(S.maskedLeaks('ABC-1 done', { names: ['Carol Ames'], keys: ['ABC-1'] })[0].kind, 'key');
+});
+
+test('jiraOrigin: https origins only', () => {
+  assert.equal(S.jiraOrigin('https://jira.example.com/some/path?q=1'), 'https://jira.example.com');
+  assert.equal(S.jiraOrigin('http://jira.example.com'), null);
+  assert.equal(S.jiraOrigin('javascript:alert(1)'), null);
+  assert.equal(S.jiraOrigin('https://user:pw@jira.example.com'), null);
+  assert.equal(S.jiraOrigin(''), null);
+});
+
+test('validAnchor allowlist and scrubComment', () => {
+  for (const ok of ['dora', 'phase_dev', 'kpi-1']) assert.ok(S.validAnchor(ok));
+  for (const bad of ['', 'Dora', 'a b', '<x>', 'x"onload', 'a'.repeat(121), null]) assert.ok(!S.validAnchor(bad));
+  const t = S.scrubComment('Carol Ames slipped on ABC-12\u0007', { nameMap: { 'Carol Ames': 'a person', Carol: 'a person' }, keys: ['ABC-12'] });
+  assert.equal(t, 'a person slipped on ticket');
 });

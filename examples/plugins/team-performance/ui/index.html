@@ -4,6 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Team Performance</title>
+    <script>
+      // Pick the theme before first paint (no light/dark flash): ?theme= or
+      // ?scheme= from the host wins, else the OS preference. otto:init/otto:theme
+      // later refine it with Otto's live token values.
+      (function () {
+        var t = '';
+        try {
+          var q = new URLSearchParams(location.search);
+          t = q.get('theme') || q.get('scheme') || '';
+        } catch (e) {
+          /* no query */
+        }
+        if (t !== 'light' && t !== 'dark') t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
     <link rel="stylesheet" href="app.css" />
   </head>
   <body>
@@ -18,7 +34,7 @@
         <button type="button" id="proj-btn" aria-haspopup="dialog" aria-expanded="false" title="Projects in scope">
           <span id="proj-label">Projects</span><svg class="svg-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.5 6.2 3.5 3.5 3.5-3.5" /></svg>
         </button>
-        <label class="sr-only" for="period">Period</label>
+        <label class="scope-label" for="period">Period</label>
         <select id="period" title="Completed-work window — every metric is computed on this period">
           <option value="">All time</option>
           <option value="1">Last month</option>

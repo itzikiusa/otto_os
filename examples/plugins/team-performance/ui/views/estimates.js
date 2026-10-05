@@ -3,7 +3,9 @@
 'use strict';
 (function () {
   const TP = window.TP;
-  const { esc, M, fmtD, fmtPct, fmtX, isNum, put, section, table, chartBlock, histogram, jiraLink, badge, modal, toast, notAvailable } = TP;
+  const { esc, M, fmtD, fmtPct, fmtX, isNum, put, section, table, histogram, jiraLink, badge, modal, toast, notAvailable } = TP;
+  // Below 600px the data table opens by default (see TP.openTablesOnNarrow).
+  const chartBlock = (o) => (TP.openTablesOnNarrow ? TP.openTablesOnNarrow(TP.chartBlock(o)) : TP.chartBlock(o));
 
   function correct(app, t) {
     const m = modal({
@@ -38,13 +40,15 @@
   TP.views.estimates = {
     render(host, { o, app }) {
       const acc = o.estimate_accuracy || (o.estimates && o.estimates.accuracy);
+      const accGuard = TP.guardFor ? TP.guardFor(o, ['estimateAccuracy']) : null;
       section(host, {
         title: 'Estimate accuracy',
+        headerEnd: accGuard && TP.guardBadge ? TP.guardBadge(accGuard) : '',
         infoDef: {
           title: 'Accuracy',
           definition: 'Distribution of actual ÷ estimate per completed, estimated ticket. ×1 = spot on. Consensus median of several estimators, versioned by ruler.',
           formula: 'actual working days ÷ estimate',
-          quality: acc && acc.quality,
+          quality: accGuard || (acc && acc.quality),
         },
         load: async () => {
           if (!acc || !Array.isArray(acc.bins)) return notAvailable('The accuracy distribution');

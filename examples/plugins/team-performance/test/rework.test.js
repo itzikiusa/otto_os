@@ -106,3 +106,38 @@ test('rework: resolveOptions precedence argv > input > config > default', () => 
   assert.equal(R.resolveOptions({ recent_days: 30, config: { rework: { recent_days: 60 } } }).recentDays, 30);
   assert.equal(R.resolveOptions({ recent_days: 30 }, ['--recent-days=7']).recentDays, 7);
 });
+
+test('rework: charge survives git mv + edit, per-author lines and by_key lists', async () => {
+  const r = makeRepo();
+  const as = (email, msg, at) => {
+    r.g(['add', '-A']);
+    execFileSync('git', ['commit', '-q', '-m', msg], { cwd: r.dir, stdio: 'pipe', env: { ...process.env,
+      GIT_AUTHOR_NAME: 'X', GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: 'X', GIT_COMMITTER_EMAIL: email,
+      GIT_AUTHOR_DATE: `@${at} +0000`, GIT_COMMITTER_DATE: `@${at} +0000` } });
+  };
+  const a = Array.from({ length: 10 }, (_, i) => `line ${i + 1} of the original feature`);
+  r.write('a.txt', a);
+  as('one@example.com', 'ABC-1 new feature', NOW - 40 * DAY);
+  // ABC-4 moves the file AND rewrites 3 of ABC-1's lines in the same commit.
+  r.g(['mv', 'a.txt', 'b.txt']);
+  r.write('b.txt', ['x1', 'x2', 'x3', ...a.slice(3)]);
+  as('two@example.com', 'ABC-4 move and adjust', NOW - 30 * DAY);
+  // ABC-5 later edits 2 more ABC-1 lines in the renamed file.
+  r.write('b.txt', ['x1', 'x2', 'x3', 'y4', 'y5', ...a.slice(5)]);
+  as('two@example.com', 'ABC-5 tweak', NOW - 20 * DAY);
+  r.g(['update-ref', 'refs/remotes/origin/develop', 'HEAD']);
+  const out = await R.run({ repos: [r.dir], since: SINCE, recent_days: 120 });
+  assert.equal(out.pairs['ABC-4>ABC-1'].lines, 3, 'rename+edit blames the old path');
+  assert.equal(out.pairs['ABC-5>ABC-1'].lines, 2, 'blame follows the earlier rename');
+  assert.equal(out.perKey['ABC-1'].reworkedBy, 5);
+  assert.deepEqual(out.perAuthor['two@example.com'], { rework_out_lines: 5, rework_in_lines: 0, self_lines: 0 });
+  assert.deepEqual(out.perAuthor['one@example.com'], { rework_out_lines: 0, rework_in_lines: 5, self_lines: 0 });
+  assert.deepEqual(out.byKey['ABC-1'], { reworked: [], reworked_by: [{ key: 'ABC-4', lines: 3 }, { key: 'ABC-5', lines: 2 }] });
+  assert.deepEqual(out.byKey['ABC-4'], { reworked: [{ key: 'ABC-1', lines: 3 }], reworked_by: [] });
+});
+
+test('rework: byKeyLists builds both directions', () => {
+  const m = R.byKeyLists({ 'ABC-2>ABC-1': { lines: 4 }, 'ABC-3>ABC-1': { lines: 6 } });
+  assert.deepEqual(m['ABC-1'].reworked_by.map((x) => x.key), ['ABC-3', 'ABC-2']);
+  assert.deepEqual(m['ABC-3'].reworked, [{ key: 'ABC-1', lines: 6 }]);
+});

@@ -130,6 +130,15 @@
             <p style="margin-block-start:var(--sp-5)"><button type="button" class="primary" id="save-config">Save settings</button></p>`;
         },
         after(body, rerun) {
+          // Deep link from another view (e.g. DORA "not available" → deploy tags).
+          if (app.settingsFocus) {
+            const target = body.querySelector('#' + app.settingsFocus);
+            app.settingsFocus = null;
+            if (target) {
+              if (target.scrollIntoView) target.scrollIntoView({ block: 'center' });
+              target.focus();
+            }
+          }
           const q = (s) => body.querySelector(s);
           const paintChips = (pid) => {
             const box = body.querySelector(`[data-chips="${CSS.escape(pid)}"]`);

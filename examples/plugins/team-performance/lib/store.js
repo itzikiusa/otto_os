@@ -26,6 +26,30 @@ function writeJsonAtomic(file, obj) {
   fs.renameSync(tmp, file);
 }
 
+async function readJsonAsync(file, fallback) {
+  try {
+    const obj = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+    if (obj && typeof obj === 'object' && obj.schema !== undefined && obj.schema !== SCHEMA) return fallback;
+    return obj;
+  } catch {
+    return fallback;
+  }
+}
+
+let tmpSeq = 0;
+/** Async atomic write (unique tmp per call, so concurrent writers never share a tmp file). */
+async function writeJsonAtomicAsync(file, obj) {
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}`;
+  try {
+    await fs.promises.writeFile(tmp, JSON.stringify({ schema: SCHEMA, ...obj }));
+    await fs.promises.rename(tmp, file);
+  } catch (e) {
+    await fs.promises.unlink(tmp).catch(() => {});
+    throw e;
+  }
+}
+
 function safe(s) {
   return String(s).replace(/[^a-zA-Z0-9_-]/g, '_');
 }
@@ -70,6 +94,8 @@ function listProjects(dataDir, account) {
 module.exports = {
   readJson,
   writeJsonAtomic,
+  readJsonAsync,
+  writeJsonAtomicAsync,
   configPath,
   corpusPath,
   goalsPath,

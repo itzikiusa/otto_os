@@ -89,13 +89,15 @@ function releaseBranches(repoPath) {
   return refs;
 }
 
-// Deploy-tag rule: a tag is a production deployment when its name contains
-// (case-insensitive) one of `deploy_tag_patterns`. 'deployed' (and any custom
-// pattern) is a plain substring; the short hotfix markers 'hf'/'hotfix' must
-// sit on token boundaries so e.g. 'shf-build' is NOT a deploy.
+// Deploy-tag rule (the ONE rule — phases.js and dora.js import it): a tag is a
+// production deployment when its name CONTAINS (case-insensitive substring) one
+// of the patterns — by default 'deployed', 'hf' or 'hotfix'. Hotfix tags are
+// deployments too. Substring on purpose (the lead's rule is "contains"), so
+// 'hotfixes-2026', 'prodHotfix1' and 'v2hf' all count. `config.deploy_tag_patterns`
+// (or the legacy single `deploy_tag_pattern`) replaces the default list.
+// tagKind: 'hotfix' when the name contains hf/hotfix, else 'deploy'.
 const DEFAULT_DEPLOY_TAG_PATTERNS = ['deployed', 'hf', 'hotfix'];
-const HOTFIX_TOKEN_RE = /(^|[^a-z])(hf|hotfix)([^a-z]|$)/i;
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const RE_HOTFIX_MARK = /hf|hotfix/i;
 
 /** Normalize config → lower-cased pattern list (legacy `deploy_tag_pattern` string merged in). */
 function deployTagPatterns(config = {}) {
@@ -104,34 +106,33 @@ function deployTagPatterns(config = {}) {
   return [...new Set(list.map((p) => String(p).trim().toLowerCase()).filter(Boolean))];
 }
 
-/** Does tag `name` count as a deployment under `patterns`? (pure) */
-function isDeployTag(name, patterns = DEFAULT_DEPLOY_TAG_PATTERNS) {
-  const n = String(name || '');
-  if (!n) return false;
-  const lower = n.toLowerCase();
-  for (const raw of patterns || []) {
-    const p = String(raw).toLowerCase();
-    if (!p) continue;
-    if (p === 'hf' || p === 'hotfix') {
-      if (new RegExp(`(^|[^a-z])${escapeRe(p)}([^a-z]|$)`, 'i').test(n)) return true;
-    } else if (lower.includes(p)) return true;
-  }
-  return false;
+/** Pattern list from either a ready list or a config object (null → defaults). */
+function patternsOf(config) {
+  if (Array.isArray(config)) return config.map((p) => String(p).trim().toLowerCase()).filter(Boolean);
+  if (config && typeof config === 'object') return deployTagPatterns(config);
+  return DEFAULT_DEPLOY_TAG_PATTERNS;
 }
 
-/** 'hotfix' when the name carries an hf/hotfix token, else 'regular'. (pure) */
+/** Does tag `name` count as a deployment? `config` = config object or pattern list. (pure) */
+function isDeployTag(name, config) {
+  const lower = String(name || '').toLowerCase();
+  if (!lower) return false;
+  return patternsOf(config).some((p) => lower.includes(p));
+}
+
+/** 'hotfix' when the name contains hf/hotfix (any case), else 'deploy'. (pure) */
 function tagKind(name) {
-  return HOTFIX_TOKEN_RE.test(String(name || '')) ? 'hotfix' : 'regular';
+  return RE_HOTFIX_MARK.test(String(name || '')) ? 'hotfix' : 'deploy';
 }
 
 /**
  * Deploy tags of a repo, ascending by the commit date of the tagged object
  * (peeled for annotated tags). `ts` = creatordate (when the deploy was tagged),
- * `commit_ts` = tagged commit's date, `sha` = tagged commit, `kind` = hotfix|regular.
+ * `commit_ts` = tagged commit's date, `sha` = tagged commit, `kind` = hotfix|deploy.
  * `patterns` may be an array or a legacy single string.
  */
 function deployTags(repoPath, patterns) {
-  const pats = Array.isArray(patterns) ? patterns.map((p) => String(p).toLowerCase()) : patterns ? deployTagPatterns({ deploy_tag_pattern: patterns, deploy_tag_patterns: [] }) : DEFAULT_DEPLOY_TAG_PATTERNS;
+  const pats = typeof patterns === 'string' ? deployTagPatterns({ deploy_tag_pattern: patterns, deploy_tag_patterns: [] }) : patternsOf(patterns);
   const out = git(repoPath, [
     'for-each-ref', 'refs/tags',
     `--format=%(creatordate:unix)${US}%(objectname)${US}%(*objectname)${US}%(committerdate:unix)${US}%(*committerdate:unix)${US}%(refname:short)`,
@@ -333,7 +334,7 @@ function buildIndex(repos, config = {}) {
         fix_count: 0,
         deployed_at: null,
         deployed_tag: null, // name of the earliest deploy tag reaching the key
-        deployed_kind: null, // 'hotfix' | 'regular'
+        deployed_kind: null, // 'hotfix' | 'deploy'
         commit_ts: [], // sampled commit timestamps (capped) — the QA-rework check
         authors: new Map(), // "name\x1femail" -> count (converted to array at the end)
       };

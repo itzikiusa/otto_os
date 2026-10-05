@@ -887,3 +887,43 @@ test('estimateBasis: inflation index adjusts the pace trend', () => {
   assert.equal(b.n, 3);
   assert.equal(b.n_ref, 3);
 });
+
+// ---- P3: rework on every actual branch, manual skip, shared dev-days basis ----
+
+test('rework charge-back applies on the git and legacy branches too', () => {
+  const git = rec({ key: 'RW-2', dev_days: undefined, impl_days_git: 5, rework_in: 1, rework_out: 2 });
+  delete git.dev_days;
+  assert.equal(A.actualDays(git), 4);
+  const legacy = rec({ key: 'RW-3', active_days: 3, rework_in: 2 });
+  delete legacy.dev_days;
+  assert.equal(A.actualDays(legacy), 5);
+  const kidsOnly = rec({ key: 'RW-4', dev_days: 0, child_dev_days: 4, rework_out: 1 });
+  assert.equal(A.actualDays(kidsOnly), 3);
+});
+
+test('manual time is never adjusted by rework; guardrail rework_manual_skip emitted', () => {
+  const m = rec({ key: 'RW-5', dev_days: 3, manual_days: 7, rework_in: 2 });
+  assert.equal(A.actualDays(m), 7);
+  const marked = A.markReworkManualSkips([m, rec({ key: 'RW-6', dev_days: 1 })]);
+  assert.equal(marked[0].rework_skipped_manual, true);
+  assert.equal(marked[1].rework_skipped_manual, undefined);
+  const g = A.reworkGuardrails(marked);
+  assert.equal(g.length, 1);
+  assert.equal(g[0].code, 'rework_manual_skip');
+  assert.deepEqual(g[0].keys, ['RW-5']);
+  assert.deepEqual(A.reworkGuardrails([rec({ key: 'RW-7', dev_days: 2, rework_in: 1 })]), []);
+});
+
+test('devDaysBasis: one denominator for rework rate and investment', () => {
+  const recs = [
+    rec({ key: 'DB-1', dev_days: 5, rework_in: 2 }), // origin: own 5
+    rec({ key: 'DB-2', dev_days: 2, rework_out: 2, rework_of: 'DB-1', scope_excluded: true }), // redo
+    rec({ key: 'DB-3', dev_days: 3 }),
+    rec({ key: 'DB-4', dev_days: 1, parent_key: 'DB-3' }), // substantive sub-task
+    rec({ key: 'DB-5', dev_days: 4, parent_key: 'DB-3', rollup: true }), // rolled up: skipped
+  ];
+  const b = A.devDaysBasis(recs);
+  assert.equal(b.delivered, 8);
+  assert.equal(b.incl_subtasks_rework, 11);
+  assert.ok(b.labels.delivered && b.labels.incl_subtasks_rework);
+});

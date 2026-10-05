@@ -17,12 +17,24 @@
 // `git patch-id --stable`. Each commit's blame result is cached per SHA in
 // rework-cache.json (independent of recent_days, so a window change needs no
 // re-blame); re-runs only blame new SHAs. Read-only on every repo.
+//
+// Renames: the diff uses rename detection (-M40%) so a `git mv` + edit blames
+// the OLD path on the parent, and blame runs with -C (lines moved/copied from
+// other files in the same commit keep their origin) and follows the file's
+// history across earlier renames — the charge survives a file move.
+//
+// Output also carries, for reports:
+//   perAuthor  email → { rework_out_lines (others' recent code this person
+//              rewrote), rework_in_lines (this person's recent code others
+//              rewrote), self_lines }
+//   byKey      key → { reworked: [{key, lines}] (tickets this one rewrote),
+//              reworked_by: [{key, lines}] (tickets that rewrote this one) }
 'use strict';
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
 
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3; // v3: author on commits/origins, rename-aware blame
 const DEFAULT_RECENT_DAYS = 120;
 const DEFAULT_SINCE_DAYS = 365;
 const BLAME_CONCURRENCY = 4;
@@ -83,13 +95,14 @@ async function patchIds(repo, shas) {
 
 /** Blame one commit's rewritten lines → cached per-SHA result (window-independent). */
 async function analyzeCommit(repo, c, blame) {
-  const res = { at: c.at, ks: c.ks, added: 0, deleted: 0, bulk: 0, origins: [] };
-  const diff = await git(repo, ['diff', '-U0', '--no-color', '-M', `${c.h}^`, c.h]);
+  const res = { at: c.at, ks: c.ks, author: c.author || null, added: 0, deleted: 0, bulk: 0, origins: [] };
+  const diff = await git(repo, ['diff', '-U0', '--no-color', '-M40%', `${c.h}^`, c.h]);
   if (diff == null) return res; // root commit / unreadable: nothing rewritten
   let oldPath = null;
   let newPath = null;
   const ranges = new Map(); // oldPath -> [[a,b]]
   for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) { oldPath = null; newPath = null; continue; }
     if (l.startsWith('--- ')) { oldPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
     if (l.startsWith('+++ ')) { newPath = l.slice(4) === '/dev/null' ? null : l.slice(6); continue; }
     const m = l.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
@@ -109,7 +122,7 @@ async function analyzeCommit(repo, c, blame) {
   await Promise.all([...ranges].map(([file, rs]) => {
     const total = rs.reduce((x, [a, b]) => x + b - a + 1, 0);
     if (total > MAX_BLAME_LINES) { res.bulk += total; return null; }
-    const args = ['blame', '--porcelain'];
+    const args = ['blame', '--porcelain', '-C'];
     for (const [a, b] of rs) args.push('-L', `${a},${b}`);
     args.push(`${c.h}^`, '--', file);
     return blame(() => git(repo, args)).then((out) => {
@@ -120,17 +133,19 @@ async function analyzeCommit(repo, c, blame) {
         const hm = l.match(/^([0-9a-f]{40}) \d+ \d+/);
         if (hm) {
           cur = hm[1];
-          info[cur] ||= { at: null, keys: [], n: 0 };
+          info[cur] ||= { at: null, keys: [], n: 0, author: null };
           info[cur].n++;
           continue;
         }
         if (!cur) continue;
         if (l.startsWith('author-time ')) info[cur].at = +l.slice(12);
         else if (l.startsWith('summary ')) info[cur].keys = keysOf(l.slice(8));
+        else if (l.startsWith('author-mail ')) info[cur].author = l.slice(12).replace(/^<|>$/g, '').toLowerCase() || null;
       }
       for (const [sha, o] of Object.entries(info)) {
-        const e = byOrigin.get(sha) || { at: o.at, keys: o.keys, n: 0 };
+        const e = byOrigin.get(sha) || { at: o.at, keys: o.keys, n: 0, author: o.author };
         e.at ??= o.at;
+        e.author ??= o.author;
         if (!e.keys.length) e.keys = o.keys;
         e.n += o.n;
         byOrigin.set(sha, e);
@@ -145,6 +160,8 @@ async function analyzeCommit(repo, c, blame) {
 function aggregate(results, recentS) {
   const perKey = {};
   const pairs = {};
+  const perAuthor = {};
+  const P = (a) => (perAuthor[a] ||= { rework_out_lines: 0, rework_in_lines: 0, self_lines: 0 });
   const K = (k) => (perKey[k] ||= { commits: 0, added: 0, deleted: 0, self: 0, reworkOther: 0, recentNoKey: 0, older: 0, bulk: 0, reworkedBy: 0, reworkedBy90: 0 });
   for (const c of results) {
     const w = 1 / c.ks.length;
@@ -160,9 +177,13 @@ function aggregate(results, recentS) {
       for (const k of c.ks) {
         const s = K(k);
         const lw = o.n * w;
-        if (o.keys.some((x) => c.ks.includes(x))) s.self += lw;
-        else if (recent && o.keys.length) {
+        if (o.keys.some((x) => c.ks.includes(x))) {
+          s.self += lw;
+          if (c.author) P(c.author).self_lines += lw;
+        } else if (recent && o.keys.length) {
           s.reworkOther += lw;
+          if (c.author) P(c.author).rework_out_lines += lw;
+          if (o.author) P(o.author).rework_in_lines += lw;
           for (const a of o.keys) {
             const share = lw / o.keys.length;
             const pr = (pairs[`${k}>${a}`] ||= { lines: 0, at: c.at, originAt: o.at });
@@ -181,7 +202,24 @@ function aggregate(results, recentS) {
   const r2 = (v) => Math.round(v * 10) / 10;
   for (const st of Object.values(perKey)) for (const f of Object.keys(st)) if (f !== 'commits') st[f] = r2(st[f]);
   for (const p of Object.values(pairs)) p.lines = r2(p.lines);
-  return { perKey, pairs };
+  for (const st of Object.values(perAuthor)) for (const f of Object.keys(st)) st[f] = r2(st[f]);
+  return { perKey, pairs, perAuthor, byKey: byKeyLists(pairs) };
+}
+
+/** key → {reworked, reworked_by} pair lists (both directions), largest first. */
+function byKeyLists(pairs) {
+  const out = {};
+  const E = (k) => (out[k] ||= { reworked: [], reworked_by: [] });
+  for (const [pk, p] of Object.entries(pairs)) {
+    const i = pk.indexOf('>');
+    const b = pk.slice(0, i);
+    const a = pk.slice(i + 1);
+    E(b).reworked.push({ key: a, lines: p.lines });
+    E(a).reworked_by.push({ key: b, lines: p.lines });
+  }
+  const sort = (xs) => xs.sort((x, y) => y.lines - x.lines || x.key.localeCompare(y.key));
+  for (const e of Object.values(out)) { sort(e.reworked); sort(e.reworked_by); }
+  return out;
 }
 
 function readCache(p) {
@@ -230,15 +268,15 @@ async function scanRepo(repo, opts, cache, blame, stats) {
   if (!fs.existsSync(path.join(repo, '.git'))) return [];
   const refs = await scanRefs(repo);
   if (!refs.length) return [];
-  const log = await git(repo, ['log', '--no-merges', `--since=${opts.since}`, '--format=%H%x1f%at%x1f%s', ...refs]);
+  const log = await git(repo, ['log', '--no-merges', `--since=${opts.since}`, '--format=%H%x1f%at%x1f%ae%x1f%s', ...refs]);
   if (!log) return [];
   const commits = [];
   for (const line of log.split('\n')) {
     if (!line) continue;
-    const [h, at, subj] = line.split('\x1f');
+    const [h, at, ae, subj] = line.split('\x1f');
     const ks = keysOf(subj);
     if (!ks.length || +at < opts.from) continue;
-    commits.push({ h, at: +at, ks });
+    commits.push({ h, at: +at, ks, author: String(ae || '').toLowerCase() || null });
   }
   const prev = cache.repos[repo] || {};
   const next = {};
@@ -275,11 +313,11 @@ async function run(input = {}, argv = []) {
     try { results.push(...(await scanRepo(repo, opts, cache, blame, stats))); } catch { /* skip repo */ }
   }
   writeCache(opts.cachePath, cache);
-  const { perKey, pairs } = aggregate(results, opts.recentDays * 86400);
-  return { generated_at: new Date().toISOString(), since: opts.since, recent_days: opts.recentDays, stats, perKey, pairs };
+  const { perKey, pairs, perAuthor, byKey } = aggregate(results, opts.recentDays * 86400);
+  return { generated_at: new Date().toISOString(), since: opts.since, recent_days: opts.recentDays, stats, perKey, pairs, perAuthor, byKey };
 }
 
-module.exports = { run, resolveOptions, aggregate, keysOf };
+module.exports = { run, resolveOptions, aggregate, byKeyLists, keysOf };
 if (require.main === module) {
   let buf = '';
   process.stdin.on('data', (d) => (buf += d));

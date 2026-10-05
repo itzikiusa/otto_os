@@ -366,6 +366,12 @@ const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 // resolved upstream (explicit per-task override, else auto by fix-commit
 // count) so a stray one-off touch never inflates a task but a genuine 10-commit
 // fixing effort does.
+// Rework charge-back (blame + Jira) applies to EVERY measured branch: time a
+// later ticket spent redoing this one moves IN (+rework_in), time this ticket
+// spent redoing another moves OUT (−rework_out). A lead-entered manual time is
+// authoritative and is never adjusted (it would double count) — those records
+// are reported via reworkGuardrails() as 'rework_manual_skip'.
+const withRework = (v, r) => round2(Math.max(0, v + (r.rework_in ?? 0) - (r.rework_out ?? 0)));
 const rCycle = (r) => {
   if (r.manual_days != null) return r.manual_days;
   // DEV actual (v0.7): In Progress / Code Review time only — stops at QA, no
@@ -376,12 +382,67 @@ const rCycle = (r) => {
   const own = r.dev_days ?? null;
   const kids = r.child_dev_days ?? 0;
   const dev = own !== null ? Math.max(own, kids) : null;
-  if (dev !== null && dev > 0) return round2(Math.max(0, dev + (r.rework_in ?? 0) - (r.rework_out ?? 0)) + (r.fix_days_override ?? 0));
-  if (r.impl_days_git != null && r.impl_days_git > 0) return r.impl_days_git;
-  if (own !== null) return kids > 0 ? kids : null;
+  if (dev !== null && dev > 0) return round2(withRework(dev, r) + (r.fix_days_override ?? 0));
+  if (r.impl_days_git != null && r.impl_days_git > 0) return withRework(r.impl_days_git, r);
+  if (own !== null) return kids > 0 ? withRework(kids, r) : null;
   const active = r.active_days ?? null;
-  return active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
+  const legacy = active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
+  return legacy === null ? null : withRework(legacy, r);
 };
+const isReworkCharged = (r) => (r.rework_in ?? 0) > 0 || (r.rework_out ?? 0) > 0;
+/**
+ * Guardrails for rework charge-back that could not be applied: a record with
+ * a manual (lead-entered) time that blame/Jira rework tried to charge. Its
+ * manual value stands as-is; the charge is skipped rather than double counted.
+ */
+function reworkGuardrails(records) {
+  const keys = records.filter((r) => r.manual_days != null && (r.rework_skipped_manual === true || isReworkCharged(r))).map((r) => r.key);
+  if (!keys.length) return [];
+  return [{
+    code: 'rework_manual_skip',
+    metric: 'rework',
+    severity: 'info',
+    reason: `${keys.length} ticket(s) with a manual time had rework charged to/from them; the manual time stands and the charge was skipped.`,
+    action: 'Review the manual time if it should include (or exclude) the rework.',
+    keys: keys.slice(0, 50),
+  }];
+}
+/** Mark records whose manual time blocked a rework charge (new array). */
+const markReworkManualSkips = (records) =>
+  records.map((r) => (r.manual_days != null && isReworkCharged(r) && !r.rework_skipped_manual ? { ...r, rework_skipped_manual: true } : r));
+/**
+ * The one dev-days denominator shared by rework rate and investment mix, so
+ * the two never disagree. Both are "own" time: actual minus rework charged IN
+ * (an origin's actual carries time spent by others).
+ *  delivered              done, non-excluded, non-rework tickets (new scope)
+ *  incl_subtasks_rework   everything worked: + rework tickets' time
+ *                         (rework_out) + substantive (non-rollup) sub-tasks
+ * Roll-up sub-tasks are skipped in both (their time lives in the story).
+ */
+function devDaysBasis(records) {
+  let delivered = 0;
+  let all = 0;
+  let n = 0;
+  for (const r of records) {
+    if (r.rollup === true || String(r.type || '').toLowerCase() === 'epic') continue;
+    const a = rCycle(r);
+    if (a == null) continue;
+    const ownT = r.manual_days != null ? a : Math.max(0, a - (r.rework_in ?? 0));
+    const t = ownT + (r.manual_days != null ? 0 : r.rework_out ?? 0);
+    all += t;
+    n++;
+    if (!r.scope_excluded && !r.rework_of && !isExcluded(r) && !r.parent_key) delivered += ownT;
+  }
+  return {
+    delivered: round2(delivered),
+    incl_subtasks_rework: round2(all),
+    n,
+    labels: {
+      delivered: 'Dev days on delivered scope (excl. rework tickets and sub-tasks)',
+      incl_subtasks_rework: 'All dev days worked (incl. rework and substantive sub-tasks)',
+    },
+  };
+}
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;
 const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || []).includes('zero_time');
 // Excluded from every median/baseline/throughput: a lead-excluded story
@@ -1412,6 +1473,9 @@ module.exports = {
   isExcluded,
   isTimingSample,
   actualDays: rCycle, // the canonical actual (manual > cycle + folded fixes)
+  devDaysBasis,
+  reworkGuardrails,
+  markReworkManualSkips,
   enrichHierarchy,
   makeCanonical,
   effDoneAt,

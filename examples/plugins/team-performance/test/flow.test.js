@@ -79,10 +79,15 @@ test('estimateAccuracy histogram and ±25%', () => {
 test('cycleTimeByPhase: medians, design not tracked is null not 0', () => {
   const m = F.cycleTimeByPhase(R, W);
   assert.equal(m.n, 3);
-  assert.deepEqual(m.value.dev, { median: 2, p75: 3, n: 3 });
-  assert.deepEqual(m.value.design, { median: 1, p75: 1, n: 1 });
-  assert.deepEqual(m.value.review, { median: 0.5, p75: 0.75, n: 3 });
-  assert.equal(m.value.total.median, 4.5); // 4.5, 8, 1.5
+  assert.deepEqual(m.value.dev, { median: 2, p75: 3, n: 3, coverage: 1 });
+  assert.deepEqual(m.value.design, { median: 1, p75: 1, n: 1, coverage: 0.333 });
+  assert.deepEqual(m.value.review, { median: 0.5, p75: 0.75, n: 3, coverage: 1 });
+  // total = median per-ticket elapsed (start → done) over ALL 5 done items,
+  // not a sum of phases: 2, 4, 2, 2, 4 business days
+  assert.deepEqual(m.value.total, { median: 2, p75: 4, n: 5, coverage: 1 });
+  assert.equal(m.value.qa_wait.status, 'not_tracked');
+  assert.equal(m.value.qa_wait.median, null);
+  for (const ph of ['coding', 'review_pickup', 'qa_wait']) assert.ok(F.PHASES.includes(ph));
   assert.ok(m.weak_reasons.includes('design_not_tracked_share'));
   const empty = F.cycleTimeByPhase([{ key: 'ABC-9', done_at: T('2026-06-02T00:00:00Z'), phases: { dev: 1 } }], W);
   assert.equal(empty.value.design.median, null);
@@ -98,4 +103,130 @@ test('zero denominators give null', () => {
   assert.equal(F.unplannedShare([], W).value, null);
   assert.equal(F.estimateAccuracy([], W).value.pct_within_25, null);
   assert.equal(F.contextSwitching([]).value, null);
+});
+
+// ---- P5 expansion ---------------------------------------------------------
+
+// phasesFor()-shaped record: dev 4 includes 1 day of QA rework.
+const PF = (o) => ({
+  key: 'ABC-20', type: 'Story', assignee_id: 'a', started_at: T('2026-06-01T09:00:00Z'), done_at: T('2026-06-11T09:00:00Z'), dev_days: 4,
+  phases: {
+    design: { days: null, evidence: [], reason: 'not_tracked' }, dev: { days: 4, sources: ['status'] },
+    review: { pickup: 1, in_review: 1, total: 2, source: 'pr' }, qa: { wait: 2, rework: 1, counted: true },
+    deploy: { days: 1, tag: 'deployed-1' }, rework: { in_days: 0.5, out_days: 0 },
+  },
+  ...o,
+});
+
+test('phaseValues reads phasesFor() output; null stays null', () => {
+  const v = F.phaseValues(PF());
+  assert.deepEqual(v, { design: null, coding: 3, dev: 4, review_pickup: 1, in_review: 1, review: 2, qa_wait: 2, qa_rework: 1, deployment: 1, rework: 0.5 });
+  assert.equal(F.phaseValues({}), null);
+});
+
+test('cycleTimeByPhase: deployed_at ends elapsed; unknown start is uncovered, never 0', () => {
+  const recs = [
+    PF({ deployed_at: T('2026-06-12T09:00:00Z') }), // 6/1→6/12 = 9 bdays
+    PF({ key: 'ABC-21', started_at: null }),
+  ];
+  const m = F.cycleTimeByPhase(recs, W);
+  assert.deepEqual(m.value.total, { median: 9, p75: 9, n: 1, coverage: 0.5 });
+  assert.equal(m.value.coding.median, 3);
+  assert.equal(m.value.review_pickup.median, 1);
+  assert.equal(m.value.design.status, 'not_tracked');
+  assert.ok(m.weak_reasons.includes('no_start_time'));
+  assert.deepEqual(m.guardrail.level, 'weak');
+});
+
+test('flowEfficiency = (coding + in_review + qa_rework) / elapsed', () => {
+  const m = F.flowEfficiency([PF()], W); // elapsed 6/1→6/11 = 8 bdays; active 3+1+1 = 5
+  assert.equal(m.value, 0.625);
+  assert.equal(m.active_days, 5);
+  assert.equal(m.elapsed_days, 8);
+  assert.equal(m.n, 1);
+  assert.ok(m.guardrail.reasons.includes('low_n'));
+  assert.equal(F.flowEfficiency([], W).value, null);
+});
+
+test('focusShare: days with <= 1 key over active days', () => {
+  const act = [
+    { person: 'a', day: '2026-06-01', key: 'ABC-1' }, { person: 'a', day: '2026-06-01', key: 'ABC-2' },
+    { person: 'a', day: '2026-06-02', key: 'ABC-2' }, { person: 'a', day: '2026-06-02', key: 'ABC-2' },
+    { person: 'b', day: '2026-06-01', key: 'ABC-3' },
+  ];
+  const m = F.focusShare(act);
+  assert.equal(m.value, 0.667);
+  assert.deepEqual(m.by_person.a, { active_days: 2, focused_days: 1, focus_share: 0.5 });
+  assert.equal(F.focusShare([]).value, null);
+});
+
+test('escapeRate: bugs pointing back at items delivered in the window', () => {
+  const recs = [
+    { key: 'ABC-30', type: 'Story', done_at: T('2026-06-02T00:00:00Z'), deployed_at: T('2026-06-03T00:00:00Z') },
+    { key: 'ABC-31', type: 'Story', done_at: T('2026-06-04T00:00:00Z') },
+    { key: 'ABC-32', type: 'Bug', rework_of: 'ABC-30', done_at: T('2026-06-20T00:00:00Z') },
+    { key: 'ABC-33', type: 'Task', rework_of: 'ABC-31' }, // not a bug → not an escape
+    { key: 'ABC-34', type: 'Bug', rework_of: 'ABC-99' }, // origin outside window
+  ];
+  const m = F.escapeRate(recs, W);
+  assert.equal(m.n, 2); // ABC-30, 31 (ABC-32 delivered outside W)
+  assert.equal(m.value, 0.5);
+  assert.deepEqual(m.items, [{ key: 'ABC-30', bugs: ['ABC-32'] }]);
+  assert.ok(F.escapeRate([{ key: 'ABC-1', done_at: T('2026-06-02T00:00:00Z') }], W).weak_reasons.includes('no_rework_links'));
+});
+
+test('sprintPlanning: planned at start vs done at end, mid-sprint adds = creep', () => {
+  const S1 = { name: 'Sprint 1', start: T('2026-06-01T08:00:00Z'), end: T('2026-06-12T18:00:00Z') };
+  const recs = [
+    { key: 'ABC-40', created_at: T('2026-05-20T00:00:00Z'), sprint_changes: [{ at: T('2026-05-28T00:00:00Z'), from: '', to: 'Sprint 1' }], done_at: T('2026-06-05T00:00:00Z') },
+    { key: 'ABC-41', created_at: T('2026-05-20T00:00:00Z'), sprint_changes: [{ at: T('2026-05-28T00:00:00Z'), from: '', to: 'Sprint 1' }, { at: T('2026-06-13T00:00:00Z'), from: 'Sprint 1', to: 'Sprint 1, Sprint 2' }] },
+    { key: 'ABC-42', created_at: T('2026-06-03T00:00:00Z'), sprint_changes: [{ at: T('2026-06-03T00:00:00Z'), from: '', to: 'Sprint 1' }], done_at: T('2026-06-10T00:00:00Z') },
+    { key: 'ABC-43', created_at: T('2026-05-20T00:00:00Z'), sprint_changes: [{ at: T('2026-06-08T00:00:00Z'), from: '', to: ['Sprint 1'] }] },
+    { key: 'ABC-44', created_at: T('2026-05-20T00:00:00Z'), sprints: ['Sprint 2'] },
+  ];
+  const m = F.sprintPlanning(recs, [S1]);
+  const row = m.value.sprints[0];
+  assert.equal(row.planned, 2);
+  assert.equal(row.planned_done, 1);
+  assert.equal(row.added, 2);
+  assert.equal(row.added_done, 1);
+  assert.deepEqual(row.added_keys, ['ABC-42', 'ABC-43']);
+  assert.deepEqual(row.carried_over, ['ABC-41']);
+  assert.equal(m.value.accuracy, 0.5);
+  assert.equal(m.value.scope_creep, 1);
+  assert.ok(F.sprintPlanning([], [S1]).weak_reasons.includes('no_sprint_history'));
+  assert.equal(F.sprintPlanning([], [S1]).value.accuracy, null);
+});
+
+test('reworkRateByPerson: share reworked + rework days per dev day', () => {
+  const recs = [
+    PF({ key: 'ABC-50' }), PF({ key: 'ABC-51' }),
+    { key: 'ABC-52', type: 'Bug', rework_of: 'ABC-50' },
+  ];
+  const m = F.reworkRateByPerson(recs, W);
+  assert.deepEqual(m.by_person.a, {
+    delivered: 2, reworked: 1, keys: ['ABC-50'], reworked_share: 0.5, rework_days: 1, dev_days: 8, rework_days_ratio: 0.125,
+    guardrail: { level: 'weak', reasons: ['low_n'] },
+  });
+  assert.equal(m.value, 0.5);
+});
+
+test('investmentByEpic rows with summaries, no_epic + top unlinked tickets', () => {
+  const m = F.investmentByEpic(R, W, { 'ABC-100': 'Payments revamp' });
+  // equal days → ordered by key
+  assert.deepEqual(m.value.rows[0], { epic_key: 'ABC-100', epic_summary: 'Payments revamp', dev_days: 6, share: 0.5 });
+  assert.deepEqual(m.value.rows[1], { epic_key: 'no_epic', epic_summary: null, dev_days: 6, share: 0.5 });
+  assert.deepEqual(m.value.no_epic.top_tickets.map((t) => t.key), ['ABC-4', 'ABC-5', 'ABC-3']);
+  assert.ok(m.weak_reasons.includes('high_unlinked_share'));
+});
+
+test('unplannedShare lists tickets; estimateAccuracy guardrail under 10 samples', () => {
+  const u = F.unplannedShare(R, W);
+  assert.deepEqual(u.tickets.map((t) => [t.key, t.reason]), [['ABC-4', 'highest_priority'], ['ABC-5', 'interrupt'], ['ABC-3', 'bug']]);
+  const e = F.estimateAccuracy(R, W);
+  assert.ok(e.weak_reasons.includes('low_sample'));
+  assert.deepEqual(e.guardrail.level, 'weak');
+  const many = Array.from({ length: 10 }, (_, i) => ({ key: `ABC-${60 + i}`, done_at: T('2026-06-02T00:00:00Z'), estimate_days: 1, actual_days: 1 }));
+  assert.ok(!F.estimateAccuracy(many, W).weak_reasons.includes('low_sample'));
+  assert.equal(F.estimateAccuracy(many, W).guardrail, null);
 });

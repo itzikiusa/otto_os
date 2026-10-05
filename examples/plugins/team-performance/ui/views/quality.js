@@ -8,33 +8,48 @@
   const reasonLabel = (r) =>
     ({ blame: 'rewrote recent code', caused_by: 'linked “caused by”', relates: 'linked “relates”', fixes: 'linked “fixes”', title_ref: 'title references ticket', follow_up: 'follow-up / fix-for title', reopened: 'reopened', bug_after: 'bug soon after delivery' })[r] || r;
 
+  /** Signal badges: git vs Jira source + each reason; signals[] carries several. */
+  function signalCell(r) {
+    const sigs = Array.isArray(r.signals) && r.signals.length ? r.signals : [{ source: r.source, reason: r.reason }];
+    return sigs
+      .map((x) => (typeof x === 'string' ? { reason: x } : x || {}))
+      .map((x) => {
+        const reason = x.reason || x.kind || x.type || '';
+        const jira = (x.source || (reason === 'blame' ? 'git' : 'jira')) === 'jira';
+        return `${badge(jira ? 'info' : 'accent', jira ? 'Jira' : 'git')} ${esc(reasonLabel(reason))}`;
+      })
+      .join(' ') + (r.confidence ? ` <span class="dim small">${esc(String(r.confidence))} confidence</span>` : '');
+  }
+
+  const share01 = (v) => (isNum(v) ? (v > 1 ? v / 100 : v) : null);
+
   function tiles(o) {
     const rw = o.rework || {};
     const d = o.dora || {};
     const cfr = M(d.change_failure_rate || d.cfr);
     const items = [
-      ['Rework rate', M(rw.rate), fmtPct, 'Share of delivered work that is rework of a recently delivered ticket.', 'rework est-days ÷ delivered est-days'],
+      ['Rework rate', M(rw.rate ?? rw.value), (v) => fmtPct(share01(v)), 'Share of delivered work that is rework of a recently delivered ticket.', 'rework est-days ÷ delivered est-days'],
       ['Time charged back', M(rw.charged_days), fmtD, 'Working days of later tickets charged back to the tickets whose recent code they rewrote.', 'Σ rework days (git blame + Jira-detected)'],
-      ['Change failure rate', cfr, fmtPct, 'Deployments followed by a hotfix or a bug on the same code.', 'failed deploys ÷ deploys'],
+      ['Change failure rate', cfr, (v) => fmtPct(share01(v)), 'Deployments followed by a hotfix or a bug on the same code.', 'failed deploys ÷ deploys'],
       ['Fix rate', M(o.scope && o.scope.fix_rate), fmtPct, 'Done tickets that needed fix commits within the fix window.', 'tickets with fixes ÷ done'],
     ];
     return `<div class="tiles">${items
-      .map(([t, m, f, def, fm]) => `<div class="tile"><div class="label">${esc(t)} ${info({ title: t, definition: def, formula: fm, quality: m && m.quality })}</div><div class="value">${m && isNum(m.value) ? f(m.value) : '<span class="na">not available yet</span>'}</div>${m && isNum(m.n) ? `<div class="context">n=${m.n}</div>` : ''}</div>`)
+      .map(([t, m, f, def, fm]) => `<div class="tile"><div class="label">${esc(t)} ${info({ title: t, definition: def, formula: fm, quality: m && m.quality })}</div><div class="value">${m && isNum(m.value) ? f(m.value) : '<span class="na">not available yet</span>'}</div>${m && isNum(m.failed) && isNum(m.total) ? `<div class="context">${m.failed} of ${m.total} deploys</div>` : m && isNum(m.n) ? `<div class="context">n=${m.n}</div>` : ''}</div>`)
       .join('')}</div>`;
   }
 
   function chargedHtml(o) {
     const rw = o.rework;
     if (!rw) return notAvailable('Rework attribution');
-    const list = rw.charged || rw.tickets || [];
+    const list = rw.charged || rw.tickets || rw.items || [];
     if (!list.length) return '<p class="dim">No rework detected in this period.</p>';
     return table({
       caption: `${list.length} rework links — the rework ticket’s estimate is not counted as new scope`,
       cols: [{ label: 'Original ticket' }, { label: 'Rework ticket' }, { label: 'Signal' }, { label: 'Days charged', num: true }, { label: 'Owner' }],
       rows: list.slice(0, 300).map((r) => [
-        `${jiraLink(r.original_key || r.of_key || r.key)} <span class="dim small">${esc((r.original_summary || '').slice(0, 50))}</span>`,
-        r.rework_key ? jiraLink(r.rework_key) : '—',
-        `${badge(r.source === 'jira' ? 'info' : 'accent', r.source === 'jira' ? 'Jira' : 'git')} ${esc(reasonLabel(r.reason || ''))}`,
+        `${jiraLink(r.original_key || r.of_key || r.rework_of || r.key)} <span class="dim small">${esc((r.original_summary || '').slice(0, 50))}</span>`,
+        r.rework_key ? jiraLink(r.rework_key) : r.rework_of && r.key ? jiraLink(r.key) : '—',
+        signalCell(r),
         fmtD(r.days),
         esc(r.assignee_name || '—'),
       ]),
@@ -48,6 +63,8 @@
   }
 
   TP.views.quality = {
+    tiles,
+    chargedHtml,
     render(host, { o }) {
       section(host, { title: 'Quality', load: async () => tiles(o) });
       section(host, {

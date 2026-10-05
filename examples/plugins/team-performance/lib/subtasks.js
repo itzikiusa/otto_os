@@ -15,12 +15,22 @@
 // the parent's design phase and never its dev rollup. Pure — no I/O.
 'use strict';
 const A = require('./analytics.js');
+const P = require('./phases.js');
+const TZ = require('./tz.js');
 
-const RE_DESIGN = /design|spike|\bpoc\b|proof of concept|research/i;
+// One design vocabulary for the whole plugin: phases.js owns it; the local
+// copy is byte-identical and only used while phases.js does not export it.
+const RE_DESIGN = P.RE_DESIGN || P.RE_DESIGN_WORK || /design|spike|poc|research|investigat/i;
 const DEV_PHASES = new Set(['implementation']);
 const round2 = (v) => Math.round(v * 100) / 100;
 
-const commitDays = (r) => new Set((r.commit_ts || []).map((t) => new Date(t).toISOString().slice(0, 10))).size;
+/** Distinct LOCAL commit days in the team's zone (a 23:30 UTC+3 commit is that local date). */
+const commitDays = (r, tz) => TZ.distinctDays(r.commit_ts || [], tz || 'UTC').length;
+const commitCount = (r) => {
+  const ts = (r.commit_ts || []).length;
+  const au = (r.git_authors || []).reduce((a, x) => a + (x.commits || 0), 0);
+  return Math.max(ts, au);
+};
 const hasOwnTiming = (r) => (r.dev_days || 0) > 0 || (r.commit_ts || []).length > 0 || r.first_commit_at != null || r.manual_days != null;
 const devIntervals = (r) => (r.intervals || []).filter((iv) => DEV_PHASES.has(iv.phase) && iv.to > iv.from).map((iv) => [iv.from, iv.to]);
 
@@ -49,7 +59,7 @@ function mergeAuthors(lists) {
 }
 
 /**
- * opts: { min_commit_days = 1, min_dev_days = 0.5, workweek }
+ * opts: { min_commit_days = 1, min_dev_days = 0.5, workweek, timezone }
  * Returns a new array; inputs untouched.
  */
 function classifySubtasks(records, opts = {}) {
@@ -67,15 +77,15 @@ function classifySubtasks(records, opts = {}) {
       g.design.push(r);
       return { ...r, rollup: true, design_subtask: true };
     }
-    const substance = commitDays(r) >= minCommitDays || (r.dev_days || 0) >= minDevDays;
+    const substance = commitDays(r, opts.timezone) >= minCommitDays || (r.dev_days || 0) >= minDevDays;
     const otherPerson = Boolean(r.assignee_id) && r.assignee_id !== p.assignee_id;
     const parentTimed = hasOwnTiming(p);
     if (substance && otherPerson) {
-      return { ...r, rollup: false, substantive_subtask: true, credited_to: r.assignee_id, credited_name: r.assignee_name ?? null };
+      return { ...r, rollup: false, substantive_subtask: true, credit_reason: 'other_assignee', credited_to: r.assignee_id, credited_name: r.assignee_name ?? null };
     }
     if (substance && !parentTimed) {
       g.adopt.push(r);
-      return { ...r, rollup: true, substantive_subtask: true, credited_to: r.assignee_id ?? p.assignee_id ?? null };
+      return { ...r, rollup: true, substantive_subtask: true, credit_reason: 'parent_untimed', credited_to: r.assignee_id ?? p.assignee_id ?? null };
     }
     g.dev.push(r);
     return { ...r, rollup: true };
@@ -121,4 +131,34 @@ function classifySubtasks(records, opts = {}) {
   return out;
 }
 
-module.exports = { classifySubtasks, unionIntervals };
+/**
+ * Substantive sub-tasks surfaced per person, from classifySubtasks() output:
+ *   { [person_id]: [{ key, parent_key, summary, dev_days, commits, reason, counted_in_parent }] }
+ * reason: 'other_assignee' — real work under someone else's story; credited
+ *           standalone, its days are NOT in the parent's dev_days/child_dev_days.
+ *         'parent_untimed' — the story had no timing of its own and adopted
+ *           this sub-task's (counted_in_parent=true: one unit, credited once).
+ * Sorted by dev_days desc, then key.
+ */
+function creditedSubtasks(records) {
+  const out = {};
+  for (const r of records || []) {
+    if (!r || !r.subtask || !r.substantive_subtask) continue;
+    const who = r.credited_to ?? r.assignee_id ?? null;
+    if (!who) continue;
+    const reason = r.credit_reason || (r.rollup === false ? 'other_assignee' : 'parent_untimed');
+    (out[who] ||= []).push({
+      key: r.key,
+      parent_key: r.parent_key ?? null,
+      summary: r.summary ?? null,
+      dev_days: round2(r.dev_days || 0),
+      commits: commitCount(r),
+      reason,
+      counted_in_parent: r.rollup !== false,
+    });
+  }
+  for (const list of Object.values(out)) list.sort((a, b) => b.dev_days - a.dev_days || String(a.key).localeCompare(String(b.key)));
+  return out;
+}
+
+module.exports = { classifySubtasks, creditedSubtasks, unionIntervals, RE_DESIGN };
