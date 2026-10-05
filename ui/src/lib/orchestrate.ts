@@ -60,7 +60,7 @@ export type EnglishOutcome =
 // "close <name>" command (verbs, fillers, nouns, providers, numbers).
 const CLOSE_SKIP = new Set([
   'please', 'pls', 'kindly', 'close', 'kill', 'end', 'stop', 'terminate',
-  'quit', 'remove', 'exit', 'shut', 'down', 'and', 'the', 'all', 'every',
+  'quit', 'remove', 'exit', 'shut', 'down', 'delete', 'destroy', 'and', 'the', 'all', 'every',
   'everything', 'everyone', 'them', 'session', 'sessions', 'pane', 'panes',
   'tab', 'tabs', 'terminal', 'terminals', 'window', 'windows', 'agent', 'agents',
   'claude', 'codex', 'agy', 'shell', 'gemini', 'antigravity', 'gpt', 'bash', 'zsh',
