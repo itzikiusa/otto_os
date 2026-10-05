@@ -24,6 +24,7 @@ pub mod provider;
 pub mod provider_accounts;
 pub mod redact;
 pub mod run;
+pub mod secret_paths;
 pub mod secrets;
 pub mod text;
 pub mod workflows;

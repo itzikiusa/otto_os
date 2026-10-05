@@ -21,98 +21,10 @@ pub(crate) mod sandbox {
     //! NON-root callers of `/fs/browse` and `/fs/read` (`non_root_fs_denied`).
     //! Input paths have already been canonicalized (symlinks + `..` resolved).
 
-    use std::path::{Path, PathBuf};
+    //! The lists themselves live in [`otto_core::secret_paths`] so the vault
+    //! root/asset guard refuses exactly the same set.
 
-    /// Directories (relative to `$HOME`) that hold credentials/secrets and must
-    /// never be served through the session artifact endpoint.
-    const HOME_DENY_DIRS: &[&str] = &[
-        ".ssh",
-        ".aws",
-        ".gnupg",
-        ".kube",
-        ".docker",
-        ".config/gcloud",
-        ".config/gh",
-        ".azure",
-        ".password-store",
-    ];
-
-    /// Absolute prefixes excluded from session artifacts (system secret stores).
-    const ABS_DENY_PREFIXES: &[&str] = &[
-        "/etc",
-        "/private/etc",
-        "/root",
-        "/var/root",
-        "/proc",
-        "/sys",
-    ];
-
-    /// Exact (case-insensitive) filenames that are known secret stores and are
-    /// never served as session artifacts, even outside the denied directories.
-    const DENY_FILE_NAMES: &[&str] = &[
-        "id_rsa",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "credentials",
-        ".env",
-        ".netrc",
-        ".pgpass",
-        ".npmrc",
-        ".pypirc",
-        ".dockercfg",
-    ];
-
-    /// Filename substrings whose presence marks a likely secret (private keys,
-    /// keystores). Matched case-insensitively against the file name only.
-    const DENY_FILE_SUFFIXES: &[&str] = &[".pem", ".key", ".pfx", ".p12", ".keystore"];
-
-    fn home() -> Option<PathBuf> {
-        std::env::var("HOME")
-            .ok()
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from)
-    }
-
-    /// True when `canonical` (an already-resolved path) is inside a denied
-    /// directory or under a denied absolute prefix for session artifacts.
-    pub(crate) fn is_denied_dir(canonical: &Path) -> bool {
-        // Home-relative secret dirs.
-        if let Some(home) = home() {
-            if let Ok(home_canon) = home.canonicalize() {
-                for rel in HOME_DENY_DIRS {
-                    let denied = home_canon.join(rel);
-                    if canonical == denied || canonical.starts_with(&denied) {
-                        return true;
-                    }
-                }
-            }
-        }
-        // Absolute system prefixes.
-        for prefix in ABS_DENY_PREFIXES {
-            let p = Path::new(prefix);
-            if canonical == p || canonical.starts_with(p) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// True when `canonical` names a known secret file (by exact name or
-    /// extension). Applied to session artifacts on top of [`is_denied_dir`].
-    pub(crate) fn is_denied_file(canonical: &Path) -> bool {
-        let name = match canonical.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_ascii_lowercase(),
-            None => return false,
-        };
-        if DENY_FILE_NAMES
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(&name))
-        {
-            return true;
-        }
-        DENY_FILE_SUFFIXES.iter().any(|s| name.ends_with(s))
-    }
+    pub(crate) use otto_core::secret_paths::{is_denied_dir, is_denied_file};
 }
 
 /// Keep OS errors actionable, rather than turning denied access into "not found".
