@@ -338,7 +338,7 @@ pub async fn retry_executor(
             Some(&handle.interrupted),
         )
         .await;
-        let operation = ctx2.goal_loops.operation(&loop_.id);
+        let operation = ctx2.goal_loops().operation(&loop_.id);
         let _guard = operation.lock().await;
         if is_current(&ctx2, &loop_.id, &handle) {
             if handle.cancel.load(Ordering::Relaxed) {

@@ -4,8 +4,9 @@
 
 #![allow(clippy::disallowed_methods)] // tests: plain sync fs / process / secret store is fine
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use otto_core::domain::ScheduledTask;
+use otto_state::{FinishRun, NewScheduledRun};
 use serde_json::json;
 
 use crate::cadence;
