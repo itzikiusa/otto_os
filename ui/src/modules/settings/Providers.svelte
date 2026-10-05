@@ -352,7 +352,7 @@
       skipPermissions &&
       !(await confirmer.ask(
         'New agent sessions will run tools, edit files and execute commands without asking you first.',
-        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: false },
+        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: true },
       ))
     ) {
       skipPermissions = false;
