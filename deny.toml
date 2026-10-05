@@ -18,13 +18,14 @@ ignore = []
 # older copy; the newest version is the one not listed), each waiting on an
 # upstream crate to move. When an upstream catches up, delete its entry — an
 # entry that no longer matches only warns. Prefer aligning a workspace pin to
-# the ecosystem's version (as base64 0.22 / dirs 6 / tokio-tungstenite 0.29
+# the ecosystem's version (as dirs 6 / tokio-tungstenite 0.29
 # were) over adding a skip; syn 1/2 and the windows-* families are ecosystem
 # transitions and stay skipped.
 multiple-versions = "deny"
 wildcards = "allow"
 highlight = "all"
 skip = [
+  { crate = "base64@0.22.1", reason = "reqwest/hyper-util/lettre/pem moved to 0.23 while 8 others stay on 0.22; a second copy either way" },
   { crate = "bitflags@1.3.2", reason = "ecosystem lag; newest is 2.13.2" },
   { crate = "block-buffer@0.10.4", reason = "ecosystem lag; newest is 0.12.1" },
   { crate = "cfg_aliases@0.1.1", reason = "ecosystem lag; newest is 0.2.2" },
