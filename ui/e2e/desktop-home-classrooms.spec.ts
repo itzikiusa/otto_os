@@ -12,6 +12,9 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 test.describe.configure({ mode: 'serial' });
 
 let wsId = '';
+// Every spec's default workspace is "E2E WS" on the shared daemon, and the box
+// shows one classroom per workspace — a unique name keeps ours addressable.
+const WS_NAME = `Classrooms E2E ${Date.now().toString(36)}`;
 let openId = '';
 let kickId = '';
 let base = '';
@@ -41,15 +44,24 @@ const list = (page: Page) => box(page).getByRole('region', { name: 'Classrooms l
 /** Show the visible list (List view) — a no-op without WebGL (already a list). */
 async function listView(page: Page): Promise<void> {
   const toggle = box(page).getByRole('button', { name: 'List', exact: true });
-  if (await toggle.count()) await toggle.click();
+  if (await toggle.count()) {
+    // Wait for the switch to TAKE: the 3D view keeps the same list as an
+    // sr-only companion (still "visible" to Playwright) under the box's bar,
+    // so a click lost to the first paint would leave every row unhoverable.
+    await expect(async () => {
+      if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 1_000 });
+    }).toPass({ timeout: 10_000 });
+  }
   await expect(list(page)).toBeVisible();
+  await expect(list(page)).not.toHaveClass(/sr-only/);
 }
 
 test.beforeAll(async () => {
   const c = await apiCtx();
   ctx = c.ctx;
   base = c.base;
-  wsId = await seedWorkspace(c.ctx, c.base);
+  wsId = await seedWorkspace(c.ctx, c.base, WS_NAME);
   openId = await seedShellSession(c.ctx, c.base, wsId);
   const r = await c.ctx.post(`${c.base}/api/v1/workspaces/${wsId}/sessions`, {
     data: { kind: 'agent', provider: 'shell', title: 'E2E Kick', cwd: '/tmp', meta: { origin: 'manual' } },
@@ -75,7 +87,7 @@ test('the box renders classrooms with the seeded students', async ({ page }) => 
   await expect(box(page).locator('.stage, .list:not(.sr-only)').first()).toBeVisible();
   await expect(box(page).locator('.sum')).toContainText(/classroom.*student/);
   await listView(page);
-  const room = list(page).getByRole('region', { name: 'Classroom E2E WS' });
+  const room = list(page).getByRole('region', { name: `Classroom ${WS_NAME}` });
   await expect(room).toBeVisible();
   await expect(room.getByRole('button', { name: /^Open E2E Shell/ })).toBeVisible();
   await expect(room.getByRole('button', { name: /^Open E2E Kick/ })).toBeVisible();
@@ -90,7 +102,7 @@ test('focus / hover shows a tooltip fully inside the viewport', async ({ page })
   const tip = page.getByRole('tooltip');
   await expect(tip).toContainText('E2E Shell');
   await expect(tip).toContainText('Shell');
-  await expect(tip).toContainText('E2E WS');
+  await expect(tip).toContainText(WS_NAME);
   await expectFullyInViewport(page, tip, 'classrooms tooltip');
   // A short window: the tooltip still clamps inside.
   await page.setViewportSize({ width: 820, height: 420 });
@@ -122,7 +134,7 @@ test('the headmaster kicks a student out: danger confirm, then the session is de
   await page.getByRole('menuitem', { name: /Kick out/ }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('E2E Kick');
-  await expect(dlg).toContainText('E2E WS');
+  await expect(dlg).toContainText(WS_NAME);
   await expect(dlg).toContainText('entire history');
   await dlg.getByRole('button', { name: 'Cancel' }).click();
   expect((await ctx.get(`${base}/api/v1/sessions?ids=${kickId}`)).ok()).toBe(true);
