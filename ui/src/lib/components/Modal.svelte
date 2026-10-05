@@ -18,9 +18,6 @@
     dismissable?: boolean;
   }
   let { title, width = 460, onclose, children, footer, dismissable = true }: Props = $props();
-  /** The dialog is named by its visible <h2> (aria-labelledby), so the
-   *  accessible name and the title can never drift. */
-  const titleId = $props.id();
 
   // A drag that starts inside the sheet (selecting text) and ends on the
   // backdrop fires `click` on the backdrop — only a press that BEGAN on the
@@ -157,11 +154,11 @@
     class="sheet"
     role="dialog"
     aria-modal="true"
-    aria-labelledby={titleId}
+    aria-label={title}
     style="width: min({width}px, calc(100vw - 24px))"
   >
     <header>
-      <h2 id={titleId}>{title}</h2>
+      <h2>{title}</h2>
       <button class="icon-btn" onclick={onclose} disabled={!dismissable} aria-label="Close" title="Close" aria-keyshortcuts="Escape">
         <Icon name="x" size={14} />
       </button>

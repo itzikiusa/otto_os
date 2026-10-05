@@ -129,7 +129,7 @@ test('Usage budget failed save preserves draft and delayed save preserves newer 
   const days = page.getByLabel('Compare spend over the last');
   await days.fill('7');
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
-  await expect(page.getByText('Could not save budgets', { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t save budgets', { exact: true })).toBeVisible();
   await expect(days).toHaveValue('7');
   fail = false;
   await page.getByRole('button', { name: 'Save budgets', exact: true }).click();
@@ -220,7 +220,7 @@ test('History real isolated transcript loads and synthetic import resumes after 
   await page.reload();
   await page.getByTestId('history-row').filter({ hasText: 'Synthetic import review' }).click();
   await page.getByRole('button', { name: 'Resume in Otto', exact: true }).click();
-  await expect(page.getByText('Could not resume', { exact: true })).toBeVisible();
+  await expect(page.getByText('Couldn’t resume', { exact: true })).toBeVisible();
   fail = false;
   await page.getByRole('button', { name: 'Resume in Otto', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${session.id}$`));

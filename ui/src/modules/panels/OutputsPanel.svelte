@@ -341,7 +341,7 @@
           <div class="pidentity mono" dir="ltr" role="region" aria-label="Output path" use:scrollableIdentity>{selected.path ?? selected.url}</div>
         {/if}
         {#if loading || error}
-          <div class="pbody">
+          <div class="pbody" class:err={!!error}>
             <LoadState what="the preview" variant="compact" {loading} {error} empty onretry={() => void select(selected!)} />
           </div>
         {:else if preview?.kind === 'link'}
