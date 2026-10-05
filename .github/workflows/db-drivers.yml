@@ -1,0 +1,128 @@
+name: DB & Kafka driver suites
+
+# The live-server suites of the DB Explorer drivers (crates/otto-dbviewer/
+# tests/{mysql,postgres,mongodb,clickhouse,redis}_e2e.rs) and the Message
+# Brokers REST surface (crates/otto-brokers/tests/kafka_e2e.rs). They are
+# #[ignore]d + env-gated in the everyday run because they need real servers;
+# here the seeded dev stacks (dev/dbviewer, dev/brokers — the same compose
+# files the suites document) provide them. Compose rather than `services:`
+# because the seeds are mounted from the checkout, which `services:` start
+# before.
+#
+# resource_access.rs's native-credential cases are NOT run: they need a
+# separately provisioned disposable fixture (otto_reader user, `shop` and
+# `hidden` schemas) that no seed in the repo creates yet.
+#
+# On PRs only when the drivers (or their seeds) change; nightly + on demand
+# otherwise.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/otto-dbviewer/**'
+      - 'crates/otto-brokers/**'
+      - 'dev/dbviewer/**'
+      - 'dev/brokers/**'
+      - 'Cargo.lock'
+      - '.github/workflows/db-drivers.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/otto-dbviewer/**'
+      - 'crates/otto-brokers/**'
+      - 'dev/dbviewer/**'
+      - 'dev/brokers/**'
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: db-drivers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  drivers:
+    name: DB + Kafka drivers (live servers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NEXTEST_VERSION: 0.9.146
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # Start the servers first: they seed while the workspace compiles.
+      - name: Start the seeded DB stack + Redpanda
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml up -d
+          docker compose -f dev/brokers/docker-compose.yml up -d
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: db-drivers
+
+      - name: Install librdkafka build deps
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y cmake libcurl4-openssl-dev
+
+      - name: Install nextest
+        run: |
+          archive="$RUNNER_TEMP/cargo-nextest.tar.gz"
+          tool_dir="$RUNNER_TEMP/otto-test-tools"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' '682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428' "$archive" | sha256sum --check
+          mkdir -p "$tool_dir"
+          tar -xzf "$archive" -C "$tool_dir" cargo-nextest
+          echo "$tool_dir" >> "$GITHUB_PATH"
+
+      - name: Build the driver test binaries
+        run: cargo nextest run -p otto-dbviewer -p otto-brokers --no-run
+
+      # Every service has a compose healthcheck; the seed scripts run before
+      # the server reports healthy. redis-seed is a one-shot that exits.
+      - name: Wait for healthy servers
+        run: |
+          for _ in $(seq 1 60); do
+            unhealthy=$(docker ps --filter name=otto- --format '{{.Names}} {{.Status}}' \
+              | grep -v 'redis-seed' | grep -vc '(healthy)' || true)
+            [ "$unhealthy" = "0" ] && break
+            sleep 5
+          done
+          docker ps --format '{{.Names}}  {{.Status}}'
+          if [ "$unhealthy" != "0" ]; then
+            echo "::error::DB/Kafka stack never became healthy"
+            docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
+            docker compose -f dev/brokers/docker-compose.yml logs --tail 80
+            exit 1
+          fi
+
+      - name: Driver suites (ignored live-server tests)
+        env:
+          OTTO_DBV_E2E: '1'
+          OTTO_BROKERS_E2E: '1'
+        run: >-
+          cargo nextest run -p otto-dbviewer -p otto-brokers --profile ci
+          --run-ignored only --no-fail-fast
+          -E 'not binary(resource_access)'
+
+      - name: Server logs
+        if: failure()
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
+          docker compose -f dev/brokers/docker-compose.yml logs --tail 200
