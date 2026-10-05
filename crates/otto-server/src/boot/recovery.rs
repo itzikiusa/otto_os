@@ -54,6 +54,8 @@ async fn restore_sessions(ctx: &ServerCtx) -> Result<(), String> {
         }
         Err(e) => tracing::warn!("session restore: {e}"),
     }
+    // Holders whose adoption hit a transient DB error: retry shortly.
+    ctx.manager.spawn_deferred_adoption_retries();
     Ok(())
 }
 

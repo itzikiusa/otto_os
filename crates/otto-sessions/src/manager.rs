@@ -194,13 +194,23 @@ struct OttoToolsInjection {
 /// One row of the live process table: (pid, ppid, cumulative CPU ms).
 type ProcRow = (u32, u32, u64);
 
-/// Snapshot the OS process table via one `ps -axo pid=,ppid=,time=` pass.
+/// `ps` flags for [`process_table`]. On macOS `-S` sums each process's
+/// EXITED (reaped) children into it, so a tree's total stays monotonic: without
+/// it a tree that churns short processes (test runners, `make`, a shell loop)
+/// lost each reaped child's CPU and read as non-increasing — busy background
+/// work looked idle to the working-but-quiet guard (review S1-16).
+#[cfg(target_os = "macos")]
+const PS_ARGS: [&str; 3] = ["-axS", "-o", "pid=,ppid=,time="];
+#[cfg(not(target_os = "macos"))]
+const PS_ARGS: [&str; 3] = ["-ax", "-o", "pid=,ppid=,time="];
+
+/// Snapshot the OS process table via one `ps` pass ([`PS_ARGS`]).
 /// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
 /// (the sweep then behaves exactly as before the guard existed).
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 fn process_table() -> Vec<ProcRow> {
     let out = match std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,time="])
+        .args(PS_ARGS)
         .output()
     {
         Ok(o) if o.status.success() => o.stdout,
@@ -267,6 +277,56 @@ fn parse_ps_time_ms(s: &str) -> Option<u64> {
         _ => return None,
     };
     Some((days * 86_400_000) + (h * 3_600_000) + (m * 60_000) + (sec * 1000.0) as u64)
+}
+
+/// The descendant-CPU guard's verdict for one session in one sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuVerdict {
+    /// The tree accrued more than [`CPU_GROWTH_MS`] since the last sample:
+    /// in-flight work (a quiet build/test run).
+    Growing { prev: u64, now: u64 },
+    /// No previous sample but descendants exist: decide on the next sweep.
+    Baselining,
+    /// Nothing accrued (or no descendants): the guard does not hold.
+    Idle,
+}
+
+/// CPU growth between two sweeps that counts as in-flight work.
+const CPU_GROWTH_MS: u64 = 200;
+
+/// Pure descendant-CPU decision for one sample against the previous one.
+fn cpu_verdict(prev: Option<u64>, now: u64) -> CpuVerdict {
+    match prev {
+        Some(prev) if now > prev.saturating_add(CPU_GROWTH_MS) => CpuVerdict::Growing { prev, now },
+        Some(_) => CpuVerdict::Idle,
+        None if now > 0 => CpuVerdict::Baselining,
+        None => CpuVerdict::Idle,
+    }
+}
+
+/// The CPU verdicts of ONE sweep, shared by the idle pass and the cap pass
+/// (review S1-07). Sampling a session updates its `suspend_cpu` baseline, so
+/// a second sample in the same sweep — the same lazily-cached process table
+/// — always read `prev == now` and voided the guard: the cap pass suspended
+/// exactly the sessions the idle pass had just held for "descendant CPU".
+#[derive(Default)]
+struct SweepCpu {
+    table: LazyProcTable,
+    verdicts: std::collections::HashMap<Id, CpuVerdict>,
+}
+
+impl SweepCpu {
+    /// This sweep's verdict for `id` — sampled (and the baseline advanced)
+    /// at most once per sweep.
+    async fn verdict(&mut self, baselines: &DashMap<Id, u64>, id: &Id, pid: u32) -> CpuVerdict {
+        if let Some(v) = self.verdicts.get(id) {
+            return *v;
+        }
+        let now = descendant_cpu_ms(pid, self.table.get().await);
+        let v = cpu_verdict(baselines.insert(id.clone(), now), now);
+        self.verdicts.insert(id.clone(), v);
+        v
+    }
 }
 
 /// Total cumulative CPU (ms) of every DESCENDANT of `root` — children,
@@ -1687,6 +1747,12 @@ struct TitleProbe {
 }
 
 pub struct SessionManager {
+    /// Holders [`Self::adopt_holders`] could not decide on (a transient DB
+    /// error on the session lookup), by session id → socket. Left running,
+    /// and kept out of the boot dormant pass and credential sweep; retried
+    /// by [`Self::retry_deferred_adoptions`] and by [`Self::ensure_live`]
+    /// before it would ever start a second CLI (review S1-09).
+    deferred_holders: Arc<DashMap<Id, std::path::PathBuf>>,
     /// Shared so the per-session status task can evict an exited handle
     /// (otherwise dead PtyHandles — and their emulator + ring buffer — leak).
     live: Arc<DashMap<Id, Arc<PtyHandle>>>,
@@ -1849,6 +1915,7 @@ impl SessionManager {
             size_owner: Arc::new(DashMap::new()),
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
+            deferred_holders: Arc::new(DashMap::new()),
             suspend_hold: Arc::new(DashMap::new()),
             passive_resume: Arc::new(DashMap::new()),
             retiring: Arc::new(DashMap::new()),
@@ -3568,6 +3635,18 @@ impl SessionManager {
         if self.is_live(id) {
             return Ok(());
         }
+        // A holder whose boot adoption was deferred may still run this
+        // session's agent: adopt it rather than resume a second CLI.
+        if let Some(path) = self.deferred_holders.get(id).map(|p| p.clone()) {
+            if self.adopt_deferred(id, path).await {
+                return Ok(());
+            }
+            if self.deferred_holders.contains_key(id) {
+                return Err(Error::Conflict(
+                    "this session's process is still running but could not be reattached yet — try again shortly".into(),
+                ));
+            }
+        }
         let mut session = self.repo.get(id).await?;
         if session.archived {
             return Err(Error::Conflict(
@@ -4710,8 +4789,9 @@ impl SessionManager {
         // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
         // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
         // servers) accrue ~none, so genuinely idle sessions still suspend.
-        // Taken only when a candidate passed the cheap checks below.
-        let mut proc_table = LazyProcTable::default();
+        // Taken only when a candidate passed the cheap checks below; the
+        // verdicts are shared with the cap pass.
+        let mut sweep_cpu = SweepCpu::default();
 
         let mut suspended = 0;
         for (id, last_output, pid) in candidates {
@@ -4732,26 +4812,23 @@ impl SessionManager {
             }
             // Working-but-quiet guard (see the sweep comment above).
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
-                let prev = self.suspend_cpu.insert(id.clone(), cpu);
-                match prev {
+                match sweep_cpu.verdict(&self.suspend_cpu, &id, pid).await {
                     // Tree accrued >200ms CPU since the last sweep → in-flight work.
-                    Some(prev_cpu) if cpu > prev_cpu.saturating_add(200) => {
+                    CpuVerdict::Growing { prev, now } => {
                         self.note_hold(
                             &id,
                             "descendant CPU",
-                            &format!(" (descendants accrued {prev_cpu}→{cpu}ms)"),
+                            &format!(" (descendants accrued {prev}→{now}ms)"),
                         );
                         continue;
                     }
-                    Some(_) => {}
                     // No baseline yet and descendants exist: measure this sweep,
                     // decide on the next one (60s later).
-                    None if cpu > 0 => {
+                    CpuVerdict::Baselining => {
                         self.note_hold(&id, "descendant CPU", " (baselining descendant CPU)");
                         continue;
                     }
-                    None => {}
+                    CpuVerdict::Idle => {}
                 }
             }
             let session = match self.repo.get(&id).await {
@@ -4836,7 +4913,7 @@ impl SessionManager {
         }
         suspended
             + self
-                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut proc_table)
+                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut sweep_cpu)
                 .await
     }
 
@@ -4853,7 +4930,7 @@ impl SessionManager {
         &self,
         cap: usize,
         min_quiet: Duration,
-        proc_table: &mut LazyProcTable,
+        sweep_cpu: &mut SweepCpu,
     ) -> usize {
         if cap == 0 || self.live.len() <= cap {
             return 0;
@@ -4892,14 +4969,11 @@ impl SessionManager {
             if last_output.elapsed() < min_quiet || self.is_watched(&id) {
                 continue;
             }
-            // Same descendant-CPU rule as the idle pass (its sample for this
-            // session, when it took one, is the baseline).
+            // Same descendant-CPU rule as the idle pass — and the SAME
+            // verdict when the idle pass already sampled this session.
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
-                match self.suspend_cpu.insert(id.clone(), cpu) {
-                    Some(prev) if cpu > prev.saturating_add(200) => continue,
-                    None if cpu > 0 => continue,
-                    _ => {}
+                if sweep_cpu.verdict(&self.suspend_cpu, &id, pid).await != CpuVerdict::Idle {
+                    continue;
                 }
             }
             let resumable = session.provider_session_id.is_some()
@@ -5577,96 +5651,183 @@ impl SessionManager {
                 tracing::warn!(session = %sid, "duplicate pty holder for one session — ending the older one");
                 drop(dup);
             }
-            if handle.has_exited() {
-                tracing::info!(session = %sid, "session's process exited while the daemon was down");
-                drop(handle);
-                continue;
+            if self.adopt_one(&sid, handle).await {
+                adopted.push(sid);
             }
-            // A transient DB error gets a couple of short retries before the
-            // holder is left alone (see below).
-            let mut lookup = self.repo.get(&sid).await;
-            for backoff_ms in [100, 500] {
-                if matches!(lookup, Ok(_) | Err(Error::NotFound(_))) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                lookup = self.repo.get(&sid).await;
-            }
-            let session = match lookup {
-                Ok(s) => s,
-                Err(Error::NotFound(_)) => {
-                    tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
-                    drop(handle);
-                    continue;
-                }
-                Err(e) => {
-                    // A transient DB failure (busy, I/O) is no proof the
-                    // session is gone: killing here would end a live agent
-                    // mid-turn. Leave the holder running (detached, not
-                    // killed on drop) for the next adoption pass / restart.
-                    tracing::warn!(session = %sid, "pty holder: session lookup failed ({e}) — leaving it running for a later adoption");
-                    handle.detach();
-                    drop(handle);
-                    continue;
-                }
-            };
-            if session.archived || !is_user_started(&session) || self.is_live(&sid) {
-                tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
-                drop(handle);
-                continue;
-            }
-            if let Some(token) = handle
-                .holder()
-                .and_then(|i| i.meta.get("ingest_token"))
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-            {
-                self.ingest_tokens.insert(sid.clone(), token.to_string());
-            }
-            let pid = handle.pid();
-            let handle = Arc::new(handle);
-            self.live.insert(sid.clone(), Arc::clone(&handle));
-            // Not activity: a restart must not reset the idle clock (A14).
-            if let Err(e) = self
-                .repo
-                .update_status_keep_activity(&sid, SessionStatus::Running)
-                .await
-            {
-                tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
-            }
-            let _ = self.events.send(Event::SessionStatus {
-                session_id: sid.clone(),
-                workspace_id: session.workspace_id.clone(),
-                status: SessionStatus::Running,
-            });
-            self.record_lifecycle(
-                &session,
-                "Reattached after a daemon restart (process kept running)",
-            );
-            self.start_status_task(
-                sid.clone(),
-                session.workspace_id.clone(),
-                session.provider.clone(),
-                handle,
-                true,
-            );
-            // A codex/agy id capture that was still pending died with the old
-            // daemon: re-arm it (it waits for the next input, as at spawn).
-            if session.kind == SessionKind::Agent
-                && session.provider_session_id.is_none()
-                && self.providers.captures_session_id(&session.provider)
-            {
-                self.spawn_session_id_capture(&session);
-            }
-            tracing::info!(
-                session = %sid,
-                provider = %session.provider,
-                pid = ?pid,
-                "re-adopted live session from its pty holder"
-            );
-            adopted.push(sid);
         }
         adopted
+    }
+
+    /// Decide on one adoptable holder handle for `sid` (the body of
+    /// [`Self::adopt_holders`]): re-register it as live (`true`), end it, or
+    /// — on a transient lookup error — detach it and record it in
+    /// `deferred_holders` for a retry.
+    async fn adopt_one(&self, sid: &Id, handle: PtyHandle) -> bool {
+        let sid = sid.clone();
+        if handle.has_exited() {
+            tracing::info!(session = %sid, "session's process exited while the daemon was down");
+            drop(handle);
+            return false;
+        }
+        // A transient DB error gets a couple of short retries before the
+        // holder is left alone (see below).
+        let mut lookup = self.repo.get(&sid).await;
+        for backoff_ms in [100, 500] {
+            if matches!(lookup, Ok(_) | Err(Error::NotFound(_))) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            lookup = self.repo.get(&sid).await;
+        }
+        let session = match lookup {
+            Ok(s) => s,
+            Err(Error::NotFound(_)) => {
+                tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                drop(handle);
+                return false;
+            }
+            Err(e) => {
+                // A transient DB failure (busy, I/O) is no proof the
+                // session is gone: killing here would end a live agent
+                // mid-turn. Leave the holder running (detached, not
+                // killed on drop) and record it: the boot dormant pass
+                // and credential sweep skip it, and a retry (or the
+                // first open) adopts it instead of forking a second CLI.
+                tracing::warn!(session = %sid, "pty holder: session lookup failed ({e}) — leaving it running for a later adoption");
+                if let Some(path) = handle.holder_socket().map(|p| p.to_path_buf()) {
+                    self.deferred_holders.insert(sid.clone(), path);
+                }
+                handle.detach();
+                drop(handle);
+                return false;
+            }
+        };
+        if session.archived || !is_user_started(&session) || self.is_live(&sid) {
+            tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
+            drop(handle);
+            return false;
+        }
+        if let Some(token) = handle
+            .holder()
+            .and_then(|i| i.meta.get("ingest_token"))
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+        {
+            self.ingest_tokens.insert(sid.clone(), token.to_string());
+        }
+        let pid = handle.pid();
+        let handle = Arc::new(handle);
+        self.live.insert(sid.clone(), Arc::clone(&handle));
+        // Not activity: a restart must not reset the idle clock (A14).
+        if let Err(e) = self
+            .repo
+            .update_status_keep_activity(&sid, SessionStatus::Running)
+            .await
+        {
+            tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
+        }
+        let _ = self.events.send(Event::SessionStatus {
+            session_id: sid.clone(),
+            workspace_id: session.workspace_id.clone(),
+            status: SessionStatus::Running,
+        });
+        self.record_lifecycle(
+            &session,
+            "Reattached after a daemon restart (process kept running)",
+        );
+        self.start_status_task(
+            sid.clone(),
+            session.workspace_id.clone(),
+            session.provider.clone(),
+            handle,
+            true,
+        );
+        // A codex/agy id capture that was still pending died with the old
+        // daemon: re-arm it (it waits for the next input, as at spawn).
+        if session.kind == SessionKind::Agent
+            && session.provider_session_id.is_none()
+            && self.providers.captures_session_id(&session.provider)
+        {
+            self.spawn_session_id_capture(&session);
+        }
+        tracing::info!(
+            session = %sid,
+            provider = %session.provider,
+            pid = ?pid,
+            "re-adopted live session from its pty holder"
+        );
+        self.deferred_holders.remove(&sid);
+        true
+    }
+
+    /// Retry the holders [`Self::adopt_holders`] deferred on a transient DB
+    /// error. Returns the ids adopted now. A holder that is gone (or ended)
+    /// is forgotten; one still undecidable stays deferred.
+    pub async fn retry_deferred_adoptions(&self) -> Vec<Id> {
+        let pending: Vec<(Id, std::path::PathBuf)> = self
+            .deferred_holders
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        let mut adopted = Vec::new();
+        for (sid, path) in pending {
+            if self.adopt_deferred(&sid, path).await {
+                adopted.push(sid);
+            }
+        }
+        adopted
+    }
+
+    /// One deferred holder: adopt it if its session can be decided now.
+    async fn adopt_deferred(&self, sid: &Id, path: std::path::PathBuf) -> bool {
+        if self.is_live(sid) {
+            self.deferred_holders.remove(sid);
+            return false;
+        }
+        let res = tokio::task::spawn_blocking(move || PtyHandle::adopt(&path)).await;
+        match res {
+            Ok(Ok(handle)) => {
+                if handle.has_exited() {
+                    self.deferred_holders.remove(sid);
+                    drop(handle);
+                    return false;
+                }
+                // Not deferred any more unless this lookup fails again
+                // (`adopt_one` re-records it then).
+                self.deferred_holders.remove(sid);
+                self.adopt_one(sid, handle).await
+            }
+            Ok(Err(otto_pty::AdoptError::Failed(e))) => {
+                tracing::debug!(session = %sid, "deferred pty holder still unreachable: {e}");
+                false
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Gone (stale socket) or incompatible: nothing to adopt.
+                self.deferred_holders.remove(sid);
+                false
+            }
+        }
+    }
+
+    /// Retry deferred adoptions in the background, 5 s and 30 s after boot.
+    pub fn spawn_deferred_adoption_retries(self: &Arc<Self>) {
+        if self.deferred_holders.is_empty() {
+            return;
+        }
+        let this = Arc::downgrade(self);
+        tokio::spawn(async move {
+            for wait in [Duration::from_secs(5), Duration::from_secs(25)] {
+                tokio::time::sleep(wait).await;
+                let Some(this) = this.upgrade() else { return };
+                let ids = this.retry_deferred_adoptions().await;
+                if !ids.is_empty() {
+                    tracing::info!(count = ids.len(), "re-adopted deferred pty holders");
+                }
+                if this.deferred_holders.is_empty() {
+                    return;
+                }
+            }
+        });
     }
 
     /// Daemon shutdown. With session persistence on
@@ -5723,9 +5884,14 @@ impl SessionManager {
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
     ) -> Result<RestoreSummary> {
         let adopted = self.adopt_holders().await;
-        self.expire_orphaned_session_credentials(&adopted).await;
+        // Deferred holders (transient lookup error) still run their agent:
+        // neither revoke its credential nor mark its row dormant (review
+        // S1-09) — a dormant row's next open would resume a SECOND CLI.
+        let mut keep = adopted.clone();
+        keep.extend(self.deferred_holders.iter().map(|e| e.key().clone()));
+        self.expire_orphaned_session_credentials(&keep).await;
         let at = chrono::Utc::now().to_rfc3339();
-        let pass = self.repo.mark_dormant_except(&adopted, &at).await?;
+        let pass = self.repo.mark_dormant_except(&keep, &at).await?;
         for (id, workspace_id, meta) in &pass.suspended {
             let _ = self.events.send(Event::SessionStatus {
                 session_id: id.clone(),
@@ -6153,6 +6319,57 @@ mod tests {
         assert!(t.taken());
         assert!(first > 0, "ps lists at least this test process");
         assert_eq!(t.get().await.len(), first, "same snapshot reused");
+    }
+
+    #[test]
+    fn cpu_verdict_is_the_pure_descendant_cpu_rule() {
+        assert_eq!(
+            cpu_verdict(Some(1_000), 1_500),
+            CpuVerdict::Growing {
+                prev: 1_000,
+                now: 1_500
+            }
+        );
+        assert_eq!(cpu_verdict(Some(1_000), 1_200), CpuVerdict::Idle);
+        assert_eq!(cpu_verdict(None, 5), CpuVerdict::Baselining);
+        assert_eq!(cpu_verdict(None, 0), CpuVerdict::Idle);
+    }
+
+    /// Review S1-07: the cap pass re-sampled the same cached table after the
+    /// idle pass had advanced the baseline, read `prev == now`, and suspended
+    /// a session the idle pass had just held for descendant CPU. A sweep's
+    /// verdict is now taken once and shared.
+    #[tokio::test]
+    async fn sweep_cpu_verdict_is_shared_between_the_idle_and_cap_passes() {
+        let root = std::process::id();
+        let id: Id = new_id();
+        let baselines: DashMap<Id, u64> = DashMap::new();
+        // A table where `root` has a busy child.
+        let mut sweep = SweepCpu {
+            table: LazyProcTable(Some(vec![(root, 1, 10), (root + 1, root, 5_000)])),
+            ..Default::default()
+        };
+        baselines.insert(id.clone(), 1_000);
+        let first = sweep.verdict(&baselines, &id, root).await;
+        assert_eq!(
+            first,
+            CpuVerdict::Growing {
+                prev: 1_000,
+                now: 5_000
+            }
+        );
+        // The baseline advanced, but the cap pass sees the SAME verdict.
+        assert_eq!(baselines.get(&id).map(|v| *v), Some(5_000));
+        assert_eq!(sweep.verdict(&baselines, &id, root).await, first);
+        // The next sweep compares against the advanced baseline.
+        let mut next = SweepCpu {
+            table: LazyProcTable(Some(vec![(root, 1, 10), (root + 1, root, 5_050)])),
+            ..Default::default()
+        };
+        assert_eq!(
+            next.verdict(&baselines, &id, root).await,
+            CpuVerdict::Idle
+        );
     }
 
     #[test]
