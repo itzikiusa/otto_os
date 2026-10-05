@@ -51,3 +51,16 @@ test('service worker serves only hashed /assets/* cache-first and prunes old bui
   assert.ok(devGate > 0 && devGate < sw.indexOf('const isNav'), 'dev-server modules pass through before any respondWith');
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v3'/, 'bump CACHE_NAME on a policy change');
 });
+
+test('service worker never caches the proxy, plugin UIs or credentialed URLs', () => {
+  const sw = read('public/sw.js');
+  const firstRespond = sw.indexOf('event.respondWith(');
+  for (const gate of ['(browser|plugins)', '(token|ticket|access_token)=', 'url.origin !== self.location.origin']) {
+    const at = sw.indexOf(gate);
+    assert.ok(at > 0 && at < firstRespond, `${gate} must bail out before any respondWith`);
+  }
+  // Navigations store only the shell, under '/', never the per-URL response.
+  assert.match(sw, /c\.put\('\/', clone\)/);
+  assert.doesNotMatch(sw, /c\.put\(event\.request, clone\)\);\n\s*const ct = resp\.headers/);
+  assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v4'/, 'bump CACHE_NAME on a policy change');
+});
