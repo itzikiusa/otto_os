@@ -269,9 +269,19 @@ Sidebar section labels, the Workspaces label and palette group text all use
 
 ## 3. Spacing and sizing
 
-There are no spacing tokens yet (**Proposed:** `--sp-1…8`). Until there are,
-use the **4 px grid**: 2, 4, 6, 8, 12, 16, 20, 24, 32. Values off the grid
-(5, 7, 9, 11, 13 px) are legacy.
+The scale is **2 px steps up to 24 px, 4 px steps above** (28, 32, 40, 48…).
+The named rungs are tokens in `tokens.css`:
+
+| Token | `--sp-1` | `--sp-2` | `--sp-3` | `--sp-4` | `--sp-5` | `--sp-6` | `--sp-7` | `--sp-8` | `--sp-9` |
+|---|---|---|---|---|---|---|---|---|---|
+| px | 2 | 4 | 6 | 8 | 12 | 16 | 20 | 24 | 32 |
+
+Prefer the tokens in new shared primitives; a literal px value on the scale is
+fine in module styles. The half-steps 10, 14, 18 and 22 px are allowed for
+control internals (button side padding, row padding) and must not be used for
+layout gaps between groups. Odd values (3, 5, 7, 9, 11, 13 px) are off the
+scale: `ui-guards` ratchets them (`off-grid-spacing`), and the remaining
+baseline is virtualized rows whose JS assumes a pixel height.
 
 Fixed dimensions to match, as used by the shared primitives:
 
@@ -280,7 +290,7 @@ Fixed dimensions to match, as used by the shared primitives:
 | `PageHeader` row | 46 px (`--ph-h`); horizontal padding 20/16 px (14/10 px on phone) |
 | `PageBody` padding | 18 px top, 20 px sides, 40 px bottom (12/14/32 px on phone) |
 | Readable column | `--page-readable: 1200px` (`PageBody width="readable"`) |
-| `.btn` | 26 px high, 11 px side padding, 6 px icon gap |
+| `.btn` | 26 px high, 10 px side padding, 6 px icon gap |
 | `.btn.small` | 22 px high, 8 px side padding |
 | `.icon-btn` | 24 × 24 px (`PageHeader`'s ⋯ is 28 px) |
 | `.input` | 27 px high |
