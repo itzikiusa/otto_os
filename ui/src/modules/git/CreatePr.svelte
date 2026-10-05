@@ -14,6 +14,8 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { git } from '../../lib/stores/git.svelte';
   import { loadErrorText } from '../../lib/loadError';
+  import { router } from '../../lib/router.svelte';
+  import { onDestroy } from 'svelte';
 
   interface Props {
     repoId: string;
@@ -24,6 +26,14 @@
     oncreated: (pr: PrSummary) => void;
   }
   let { repoId, initialSource, onclose, oncreated }: Props = $props();
+
+  /** False once the sheet unmounts: an in-flight draft or lookup must not
+   *  touch global UI (a ghost confirm supersedes whatever dialog is open). */
+  let alive = true;
+  onDestroy(() => {
+    alive = false;
+    clearTimeout(revTimer);
+  });
 
   let branches: BranchInfo[] = $state([]);
   /** Why the branch list failed to load — shown inline (the selects would
@@ -93,17 +103,26 @@
   let revQuery = $state('');
   let revSuggestions: Collaborator[] = $state([]);
   let revLookupFailed = $state(false);
+  /** Keyboard-highlighted suggestion (combobox active option). */
+  let revActive = $state(0);
   let revTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Lookup sequence: only the NEWEST query's reply may set the suggestions —
+   *  a slow earlier reply used to overwrite them for the newer text. */
+  let revSeq = 0;
   function queryCollaborators(q: string): void {
     clearTimeout(revTimer);
+    const seq = ++revSeq;
     if (revLookupFailed) return; // degraded to free text — stop hitting the API
     revTimer = setTimeout(() => {
       void api
         .get<Collaborator[]>(`/repos/${repoId}/collaborators?q=${encodeURIComponent(q)}`)
         .then((list) => {
+          if (!alive || seq !== revSeq) return;
           revSuggestions = list.filter((c) => !reviewers.includes(c.name)).slice(0, 8);
+          revActive = 0;
         })
         .catch(() => {
+          if (!alive || seq !== revSeq) return;
           revLookupFailed = true;
           revSuggestions = [];
         });
@@ -114,14 +133,26 @@
     if (n !== '' && !reviewers.includes(n)) reviewers = [...reviewers, n];
     revQuery = '';
     revSuggestions = [];
+    revActive = 0;
+    revSeq++; // drop any lookup still in flight for the old text
   }
   function removeReviewer(name: string): void {
     reviewers = reviewers.filter((r) => r !== name);
   }
+  const revOpen = $derived(revSuggestions.length > 0 && revQuery.trim() !== '');
   function onReviewerKey(e: KeyboardEvent): void {
-    if (e.key === 'Enter' && revQuery.trim() !== '') {
+    if (revOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
-      addReviewer(revSuggestions[0]?.name ?? revQuery);
+      const n = revSuggestions.length;
+      revActive = (revActive + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+    } else if (revOpen && e.key === 'Escape') {
+      // Close the list, not the sheet.
+      e.preventDefault();
+      e.stopPropagation();
+      revSuggestions = [];
+    } else if (e.key === 'Enter' && revQuery.trim() !== '') {
+      e.preventDefault();
+      addReviewer((revOpen ? revSuggestions[revActive]?.name : undefined) ?? revQuery);
     } else if (e.key === 'Backspace' && revQuery === '' && reviewers.length > 0) {
       reviewers = reviewers.slice(0, -1);
     }
@@ -161,6 +192,9 @@
       toasts.warn('Pick a target branch first');
       return;
     }
+    // The draft describes THIS head; the reply never re-points Source (the
+    // daemon used to diff the checked-out branch and the UI adopted it).
+    const head = source;
     drafting = true;
     draftSessionId = null;
     draftElapsed = 0;
@@ -168,15 +202,25 @@
     draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
-      const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target });
+      const d = await api.post<DraftPrResp>(`/repos/${repoId}/pr/draft`, { base: target, head: head || undefined });
+      if (!alive) return;
+      // A daemon that drafted another branch (or a Source changed mid-draft):
+      // say so instead of silently swapping the PR's head.
+      const draftedBranch = d.source_branch || head;
+      if (draftedBranch !== source) {
+        toasts.warn(
+          'Draft is for a different branch',
+          `The agent described ${draftedBranch}, but Source is ${source}. Check the text before opening the PR.`,
+        );
+      }
       // Never overwrite what the person already typed without asking.
       if (title.trim() || description.trim()) {
         const ok = await confirmer.ask(
           'The agent’s draft will replace the title and description you have typed.',
           { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
         );
+        if (!alive) return;
         if (!ok) {
-          if (d.source_branch) source = d.source_branch;
           draftSessionId = d.session_id ?? null;
           draftedAt = null;
           return;
@@ -185,11 +229,10 @@
       title = d.title;
       description = d.description;
       draftedAt = Date.now();
-      if (d.source_branch) source = d.source_branch;
       draftSessionId = d.session_id ?? null;
       toasts.info('Draft ready', 'Review and edit before creating.');
     } catch (e) {
-      toastError('Couldn’t draft the description', e);
+      if (alive) toastError('Couldn’t draft the description', e);
     } finally {
       clearInterval(tick);
       drafting = false;
@@ -220,7 +263,10 @@
         ...(openAsDraft ? { draft: true } : {}),
         ...(reviewers.length > 0 ? { reviewers } : {}),
       });
-      toasts.success('Pull request created', `#${pr.number} ${pr.title}`);
+      // Every entry point gets a way into Otto's PR detail (review / post).
+      toasts.push('success', 'Pull request created', `#${pr.number} ${pr.title}`, 8000, {
+        action: { label: 'Open PR', run: () => router.go(`git/${repoId}/pr/${pr.number}`) },
+      });
       if (pr.reviewer_warnings?.length) {
         toasts.warn('PR opened with warnings', pr.reviewer_warnings.join('; '));
       }
@@ -236,6 +282,18 @@
   /** Esc / backdrop / ✕: a stray key must not throw away a typed (or agent-
    *  drafted) title, description or reviewer list — ask first. */
   async function requestClose(): Promise<void> {
+    // Mid-push/create: closing would hide the outcome of an outward action.
+    if (busy) return;
+    if (drafting) {
+      const ok = await confirmer.ask('The agent is still drafting. Closing discards its draft and anything you entered.', {
+        title: 'Stop drafting and discard?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (ok) onclose();
+      return;
+    }
     const edited = title.trim() !== '' || description.trim() !== '' || reviewers.length > 0 || revQuery.trim() !== '';
     if (edited) {
       const ok = await confirmer.ask('The title, description and reviewers you entered will be lost.', {
@@ -289,16 +347,29 @@
         class="chips-text"
         placeholder={reviewers.length === 0 ? (revLookupFailed ? 'username, Enter to add' : 'Type to search…') : ''}
         bind:value={revQuery}
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={revOpen}
+        aria-controls="pr-reviewers-list"
+        aria-activedescendant={revOpen ? `pr-rev-opt-${revActive}` : undefined}
         oninput={() => queryCollaborators(revQuery)}
         onkeydown={onReviewerKey}
         autocomplete="off"
         spellcheck="false"
       />
     </div>
-    {#if revSuggestions.length > 0 && revQuery.trim() !== ''}
-      <div class="rev-suggest card">
-        {#each revSuggestions as c (c.name)}
-          <button class="rev-suggest-item" onclick={() => addReviewer(c.name)}>
+    {#if revOpen}
+      <div class="rev-suggest card" id="pr-reviewers-list" role="listbox" aria-label="Reviewer suggestions">
+        {#each revSuggestions as c, i (c.name)}
+          <button
+            class="rev-suggest-item"
+            class:active={i === revActive}
+            id="pr-rev-opt-{i}"
+            role="option"
+            aria-selected={i === revActive}
+            tabindex="-1"
+            onclick={() => addReviewer(c.name)}
+          >
             <span class="mono">{c.name}</span>
             {#if c.display_name && c.display_name !== c.name}<span class="dim">{c.display_name}</span>{/if}
           </button>
@@ -366,7 +437,7 @@
       <input type="checkbox" checked={openAsDraft} onchange={toggleDraft} />
       Open as draft
     </label>
-    <button class="btn" onclick={onclose}>Cancel</button>
+    <button class="btn" disabled={busy} onclick={requestClose}>Cancel</button>
     <button
       class="btn primary"
       disabled={busy || drafting || title.trim() === '' || source === '' || target === '' || source === target}
@@ -487,7 +558,8 @@
     font-size: var(--fs-s);
     color: var(--text);
   }
-  .rev-suggest-item:hover {
+  .rev-suggest-item:hover,
+  .rev-suggest-item.active {
     background: var(--hover);
   }
   /* Draft toggle sits at the start of the footer, before the buttons. */
