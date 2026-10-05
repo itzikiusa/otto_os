@@ -138,16 +138,59 @@ const DESIGN_BLOBS_DIR: &str = "design/blobs";
 /// entries match every path starting with that string.
 const DATA_DIR_DENY_READ_LITERAL: &[&str] = &["secrets.json"];
 const DATA_DIR_DENY_READ_PREFIX: &[&str] = &["otto.db", "state.db"];
-const DATA_DIR_DENY_READ_SUBPATH: &[&str] = &["tls", "kube"];
+const DATA_DIR_DENY_READ_SUBPATH: &[&str] = &["tls", "kube", "logs"];
+
+/// Where named provider accounts keep their CLI homes (`<data>/provider-accounts/<id>`,
+/// used as `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). Read-denied as a whole — other
+/// accounts' OAuth credentials live there — with only the session's own
+/// account home (an `extra_writable` entry inside the data dir) re-opened.
+const PROVIDER_ACCOUNTS_DIR: &str = "provider-accounts";
+
+/// Files / dirs of a provider CLI's config root that make the CLI (in EVERY
+/// later session, sandboxed or not) run code the agent chose: claude
+/// `settings*.json` (hooks), `.claude.json` (user-scope `mcpServers`), codex
+/// `config.toml` (`notify`, MCP servers), plus claude's plugins / hook scripts
+/// / subagents / slash commands. Applied to a named account's home, which IS
+/// such a root (`CLAUDE_CONFIG_DIR` = `CODEX_HOME` = the account home). The
+/// CLI's own state there (projects/, todos/, statsig/, sessions/…) stays
+/// writable.
+const PROVIDER_ROOT_DENY_WRITE_LITERAL: &[&str] = &[
+    "settings.json",
+    "settings.local.json",
+    ".claude.json",
+    "config.toml",
+];
+const PROVIDER_ROOT_DENY_WRITE_SUBPATH: &[&str] = &["plugins", "hooks", "agents", "commands"];
+
+/// A read-only session's own project folder: the project-scope claude config
+/// (hooks in `.claude/settings*.json`, project MCP servers in `.mcp.json`,
+/// subagents / slash commands) that the user's next unsandboxed `claude` in
+/// that folder runs without a prompt — Otto pre-trusts every session cwd.
+/// Only for `read_only` sessions: an ordinary agent session legitimately
+/// edits its repo's checked-in `.claude/` files.
+const PROJECT_DENY_WRITE_LITERAL: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".mcp.json",
+];
+const PROJECT_DENY_WRITE_SUBPATH: &[&str] =
+    &[".claude/hooks", ".claude/agents", ".claude/commands"];
 
 /// Files under `$HOME` that make UNsandboxed programs run code the agent
-/// chose: claude hooks (`settings*.json`), codex `notify` (`config.toml`) and
-/// git's XDG config (hooks path, aliases, credential helpers). Write-denied
-/// even though their parent dirs stay writable for the CLIs' own state.
+/// chose: claude hooks (`settings*.json`), claude's user/project-scope
+/// `mcpServers` (`~/.claude.json` — every later `claude` the user runs spawns
+/// them), codex `notify` (`config.toml`), gemini/agy `mcpServers`
+/// (`.gemini/settings.json`) and git's XDG config (hooks path, aliases,
+/// credential helpers). Write-denied even though their parent dirs stay
+/// writable for the CLIs' own state. (Claude Code tolerates a read-only
+/// `~/.claude.json`: it keeps running and only skips persisting its startup
+/// counters; Otto's trust pre-seeding is written by the daemon, unsandboxed.)
 const HOME_DENY_WRITE_LITERAL: &[&str] = &[
+    ".claude.json",
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".codex/config.toml",
+    ".gemini/settings.json",
 ];
 const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
     ".config/git",
@@ -178,13 +221,16 @@ const HOME_DENY_ALL_SUBPATH: &[&str] = &[
 /// Files of a repo's git dir that make the DAEMON's (unsandboxed) git run
 /// code: `config` (fsmonitor, sshCommand, credential helpers, filters, hooks
 /// path, aliases), `config.worktree`, `commondir` (re-points the whole repo at
-/// another config) and `hooks/`. The git dir itself is literal-denied too, so
+/// another config) and `hooks/` — and, in each linked worktree's admin dir,
+/// `gitdir` (re-points the worktree at an agent-built repo whose config the
+/// daemon's worktree probe would then run). The git dir itself is literal-denied too, so
 /// it can't be renamed away and replaced by one the agent wrote. Objects,
 /// refs, the index, logs — what `git commit`/`branch`/`stash` write — stay
 /// writable. (An agent's `git push -u` still pushes; only the upstream
 /// tracking line it would add to `config` is refused.)
 const GIT_DIR_DENY_WRITE_LITERAL: &[&str] = &["config", "config.worktree", "commondir"];
 const GIT_DIR_DENY_WRITE_SUBPATH: &[&str] = &["hooks"];
+const GIT_WORKTREE_ADMIN_DENY_WRITE_LITERAL: &[&str] = &["gitdir"];
 
 /// Programs that hand work to launchd (which runs it outside the sandbox).
 /// `launchctl` talks to launchd over the bootstrap port, which mach-lookup
@@ -240,13 +286,16 @@ impl SandboxPolicy {
         push(PathBuf::from("/private/var/folders"));
 
         // The agent CLIs persist transcripts / session ids / caches here; without
-        // these the CLIs can't resume and Otto's pre-trust writes fail.
+        // these the CLIs can't resume. (`~/.claude.json` is deliberately NOT a
+        // root — see [`HOME_DENY_WRITE_LITERAL`].)
         for rel in [
             ".claude",
-            ".claude.json",
             ".codex",
             ".gemini",
-            ".config",
+            // Not the whole `~/.config`: it holds code-loading configs of
+            // other tools (direnv, fish, nvim, zed tasks…). Only node CLIs'
+            // update-notifier state.
+            ".config/configstore",
             ".cache",
             ".npm",
             ".otto",
@@ -284,31 +333,6 @@ impl SandboxPolicy {
                 hidden.join(" ")
             ));
         }
-        // The repo's git dir(s): writable for commits, but never the files
-        // that pick programs for the daemon's own git to run.
-        let mut git_dirs: Vec<PathBuf> = Vec::new();
-        let dot_git = canonicalize_lenient(&cwd.join(".git"));
-        if dot_git.exists() {
-            git_dirs.push(dot_git);
-        }
-        for e in extra_writable {
-            let e = canonicalize_lenient(e);
-            // Only a git dir that exists now: a session that will `git init`
-            // its own repo must be able to create `.git`.
-            if e.exists()
-                && (e.file_name().is_some_and(|n| n == ".git") || e.join("HEAD").is_file())
-            {
-                git_dirs.push(e);
-            }
-        }
-        git_dirs.sort();
-        git_dirs.dedup();
-        for g in &git_dirs {
-            trailing.push(format!(
-                "(deny file-write* {})",
-                git_dir_filters(g).join(" ")
-            ));
-        }
         if data_dir_set {
             // 1. Otto's data dir is read-only for the agent…
             trailing.push(format!(
@@ -321,7 +345,7 @@ impl SandboxPolicy {
                 .iter()
                 .map(|d| data_dir.join(d))
                 .collect();
-            open.extend(reallow);
+            open.extend(reallow.iter().cloned());
             let mut open: Vec<String> = open.iter().map(|p| filter("subpath", p)).collect();
             open.extend(design_work_filters(&data_dir));
             trailing.push(format!("(allow file-write* {})", open.join(" ")));
@@ -347,7 +371,64 @@ impl SandboxPolicy {
                     .iter()
                     .map(|f| filter("subpath", &data_dir.join(f))),
             );
+            //    Other provider accounts' homes (their OAuth credentials) too.
+            hidden.push(filter("subpath", &data_dir.join(PROVIDER_ACCOUNTS_DIR)));
             trailing.push(format!("(deny file-read* {})", hidden.join(" ")));
+            let accounts = data_dir.join(PROVIDER_ACCOUNTS_DIR);
+            let own: Vec<&PathBuf> = reallow
+                .iter()
+                .filter(|p| p.starts_with(&accounts))
+                .collect();
+            if !own.is_empty() {
+                // 4. …but the session's own account home stays readable, and
+                //    the configs in it that make the CLI run code stay
+                //    write-denied (the `$HOME` carve-outs, re-rooted).
+                let read: Vec<String> = own.iter().map(|p| filter("subpath", p)).collect();
+                trailing.push(format!("(allow file-read* {})", read.join(" ")));
+                //    `stat` of the accounts dir itself (`mkdir -p` into the own
+                //    home walks it); listing it stays denied.
+                trailing.push(format!(
+                    "(allow file-read-metadata {})",
+                    filter("literal", &accounts)
+                ));
+                let filters: Vec<String> = own
+                    .iter()
+                    .flat_map(|root| provider_root_filters(root))
+                    .collect();
+                trailing.push(format!("(deny file-write* {})", filters.join(" ")));
+            }
+        }
+        // The repo's git dir(s): writable for commits, but never the files
+        // that pick programs for the daemon's own git to run. AFTER the
+        // data-dir block: a session repo under a re-opened work area
+        // (`workflow-runs/…`, `otto-runs/…`) must not get its config back.
+        let mut git_dirs: Vec<PathBuf> = Vec::new();
+        let dot_git = canonicalize_lenient(&cwd.join(".git"));
+        if dot_git.exists() {
+            git_dirs.push(dot_git);
+        }
+        for e in extra_writable {
+            let e = canonicalize_lenient(e);
+            // Only a git dir that exists now: a session that will `git init`
+            // its own repo must be able to create `.git` (git init writes
+            // `config` and `hooks/`). Residual: a repo the agent creates
+            // in-session has agent-written config/hooks until its next spawn
+            // or resume, which re-resolves the git dir and denies them; the
+            // daemon's own git neutralises hooks/fsmonitor for non-hook verbs
+            // (otto-git `GIT_CONFIG_PARAMETERS`) in the meantime.
+            if e.exists()
+                && (e.file_name().is_some_and(|n| n == ".git") || e.join("HEAD").is_file())
+            {
+                git_dirs.push(e);
+            }
+        }
+        git_dirs.sort();
+        git_dirs.dedup();
+        for g in &git_dirs {
+            trailing.push(format!(
+                "(deny file-write* {})",
+                git_dir_filters(g).join(" ")
+            ));
         }
         let exec: Vec<String> = AGENT_DENY_EXEC
             .iter()
@@ -362,6 +443,27 @@ impl SandboxPolicy {
             mach_services: Some(AGENT_MACH_SERVICES.iter().map(|s| s.to_string()).collect()),
             trailing_rules: trailing,
         }
+    }
+
+    /// Harden an agent policy for a **read-only** session (`meta.read_only`,
+    /// typically processing untrusted mail / chat input): its own project
+    /// folder stays writable, but not the project-scope claude config there
+    /// ([`PROJECT_DENY_WRITE_LITERAL`] / [`PROJECT_DENY_WRITE_SUBPATH`]) that
+    /// a later, unconfined `claude` in that folder would load. Appended last,
+    /// so it wins over the cwd grant.
+    pub fn deny_project_agent_config(mut self, cwd: &Path) -> Self {
+        let filters: Vec<String> = PROJECT_DENY_WRITE_LITERAL
+            .iter()
+            .map(|rel| filter("literal", &canonicalize_lenient(&cwd.join(rel))))
+            .chain(
+                PROJECT_DENY_WRITE_SUBPATH
+                    .iter()
+                    .map(|rel| filter("subpath", &canonicalize_lenient(&cwd.join(rel)))),
+            )
+            .collect();
+        self.trailing_rules
+            .push(format!("(deny file-write* {})", filters.join(" ")));
+        self
     }
 
     /// Build the policy for a **daemon-spawned tool** (today: a headless Blender
@@ -491,11 +593,44 @@ pub fn is_supported() -> bool {
     cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists()
 }
 
-/// Canonicalize a path, falling back to the input when it doesn't exist yet
-/// (a subpath rule still matches by prefix). On macOS this also resolves the
-/// `/tmp`→`/private/tmp` and `/var`→`/private/var` symlinks the sandbox sees.
+/// Canonicalize a path the way Seatbelt sees it. A path that doesn't exist
+/// yet is resolved through its deepest EXISTING ancestor and the missing tail
+/// re-appended — otherwise a deny for a not-yet-created `~/.claude/hooks`
+/// would name the unresolved path while its parent grant (`~/.claude`, often
+/// a dotfiles symlink) is resolved, and the deny would never match. On macOS
+/// this also resolves the `/tmp`→`/private/tmp` and `/var`→`/private/var`
+/// symlinks the sandbox sees.
 fn canonicalize_lenient(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cur = p;
+    while let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) {
+        tail.push(name);
+        if let Ok(mut c) = std::fs::canonicalize(parent) {
+            for n in tail.iter().rev() {
+                c.push(n);
+            }
+            return c;
+        }
+        cur = parent;
+    }
+    p.to_path_buf()
+}
+
+/// Write-deny filters for one provider CLI config root (a named account's
+/// home): [`PROVIDER_ROOT_DENY_WRITE_LITERAL`] / [`PROVIDER_ROOT_DENY_WRITE_SUBPATH`].
+fn provider_root_filters(root: &Path) -> Vec<String> {
+    PROVIDER_ROOT_DENY_WRITE_LITERAL
+        .iter()
+        .map(|f| filter("literal", &canonicalize_lenient(&root.join(f))))
+        .chain(
+            PROVIDER_ROOT_DENY_WRITE_SUBPATH
+                .iter()
+                .map(|f| filter("subpath", &canonicalize_lenient(&root.join(f)))),
+        )
+        .collect()
 }
 
 /// Escape a path for inclusion in an SBPL string literal.
@@ -553,6 +688,12 @@ fn git_dir_filters(g: &Path) -> Vec<String> {
         out.push(format!(
             "(regex #\"^{d}/(worktrees/[^/]+|modules/.+)/hooks(/|$)\")"
         ));
+        let admin = GIT_WORKTREE_ADMIN_DENY_WRITE_LITERAL
+            .iter()
+            .map(|f| regex_escape(f))
+            .collect::<Vec<_>>()
+            .join("|");
+        out.push(format!("(regex #\"^{d}/worktrees/[^/]+/({admin})$\")"));
     }
     out
 }
@@ -595,7 +736,7 @@ mod tests {
     fn agent_policy(data: &str) -> SandboxPolicy {
         SandboxPolicy::for_agent(
             Path::new("/work/project"),
-            Path::new("/home/u"),
+            Path::new("/nonexistent-otto-home/u"),
             Path::new(data),
             &[
                 PathBuf::from("/work/project/.git"),
@@ -637,7 +778,9 @@ mod tests {
         );
         // Never re-opened: the daemon binary, the DB, the secrets.
         assert!(!sbpl.contains(&format!("(subpath \"{data}/bin\")")));
-        assert!(!sbpl.contains(&format!("(subpath \"{data}/provider-accounts\")")));
+        assert!(!sbpl.contains(&format!(
+            "(allow file-write* (subpath \"{data}/provider-accounts\")"
+        )));
         // Not readable at all.
         let hidden = at(
             &sbpl,
@@ -702,14 +845,20 @@ mod tests {
     #[test]
     fn for_agent_protects_configs_that_run_unsandboxed_code() {
         let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
-        let grant = at(&sbpl, "(allow file-write* (subpath \"/home/u/.claude\"))");
-        let deny = at(&sbpl, "(literal \"/home/u/.claude/settings.json\")");
+        let grant = at(
+            &sbpl,
+            "(allow file-write* (subpath \"/nonexistent-otto-home/u/.claude\"))",
+        );
+        let deny = at(
+            &sbpl,
+            "(literal \"/nonexistent-otto-home/u/.claude/settings.json\")",
+        );
         assert!(
             deny > grant,
             "the settings deny must override the .claude grant"
         );
-        assert!(sbpl.contains("(literal \"/home/u/.codex/config.toml\")"));
-        assert!(sbpl.contains("(subpath \"/home/u/.config/git\")"));
+        assert!(sbpl.contains("(literal \"/nonexistent-otto-home/u/.codex/config.toml\")"));
+        assert!(sbpl.contains("(subpath \"/nonexistent-otto-home/u/.config/git\")"));
     }
 
     /// A sandboxed agent must not plant code the user's OTHER (unsandboxed)
@@ -717,7 +866,10 @@ mod tests {
     #[test]
     fn for_agent_denies_claude_extension_points_and_gh_config() {
         let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
-        let grant = at(&sbpl, "(allow file-write* (subpath \"/home/u/.claude\"))");
+        let grant = at(
+            &sbpl,
+            "(allow file-write* (subpath \"/nonexistent-otto-home/u/.claude\"))",
+        );
         for rel in [
             ".claude/plugins",
             ".claude/hooks",
@@ -725,12 +877,18 @@ mod tests {
             ".claude/commands",
             ".config/gh",
         ] {
-            let deny = at(&sbpl, &format!("(subpath \"/home/u/{rel}\")"));
+            let deny = at(
+                &sbpl,
+                &format!("(subpath \"/nonexistent-otto-home/u/{rel}\")"),
+            );
             assert!(deny > grant, "{rel} deny must follow the grant");
         }
         // The CLI's own state stays writable (no deny names it).
         for rel in [".claude/projects", ".claude/todos", ".claude/statsig"] {
-            assert!(!sbpl.contains(&format!("/home/u/{rel}")), "{rel}");
+            assert!(
+                !sbpl.contains(&format!("/nonexistent-otto-home/u/{rel}")),
+                "{rel}"
+            );
         }
     }
 
@@ -747,12 +905,17 @@ mod tests {
             "Library/Caches/com.otto.app",
         ] {
             assert!(
-                sbpl[deny..].contains(&format!("(subpath \"/home/u/{rel}\")")),
+                sbpl[deny..].contains(&format!("(subpath \"/nonexistent-otto-home/u/{rel}\")")),
                 "{rel} must be hidden"
             );
         }
         // …and that deny follows the `Library/Caches` write grant too.
-        assert!(deny > at(&sbpl, "(subpath \"/home/u/Library/Caches\")"));
+        assert!(
+            deny > at(
+                &sbpl,
+                "(subpath \"/nonexistent-otto-home/u/Library/Caches\")"
+            )
+        );
     }
 
     /// The daemon's unsandboxed git reads the repo's `.git/config` and runs
@@ -769,7 +932,7 @@ mod tests {
         let git = canonicalize_lenient(&git);
         let pol = SandboxPolicy::for_agent(
             &cwd,
-            Path::new("/home/u"),
+            Path::new("/nonexistent-otto-home/u"),
             Path::new("/nonexistent-otto-test/Otto"),
             std::slice::from_ref(&git),
             NetworkPolicy::Full,
@@ -808,6 +971,115 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// S11-04: `~/.claude.json` (user-scope `mcpServers`) and gemini's
+    /// settings are write-denied; `~/.config` is no longer granted wholesale.
+    #[test]
+    fn for_agent_denies_mcp_configs_and_narrows_dot_config() {
+        let pol = agent_policy("/nonexistent-otto-test/Otto");
+        assert!(!pol
+            .writable_roots
+            .iter()
+            .any(|r| r.ends_with(".claude.json")));
+        assert!(!pol
+            .writable_roots
+            .iter()
+            .any(|r| r == Path::new("/nonexistent-otto-home/u/.config")));
+        assert!(pol
+            .writable_roots
+            .iter()
+            .any(|r| r == Path::new("/nonexistent-otto-home/u/.config/configstore")));
+        let sbpl = pol.to_sbpl();
+        assert!(sbpl.contains("(literal \"/nonexistent-otto-home/u/.claude.json\")"));
+        assert!(sbpl.contains("(literal \"/nonexistent-otto-home/u/.gemini/settings.json\")"));
+    }
+
+    /// S1-03(b) / S11-09: the session's own account home gets the config
+    /// carve-outs re-rooted; every account home is read-denied, then the own
+    /// one re-opened; logs are hidden.
+    #[test]
+    fn for_agent_account_home_carve_outs_and_read_denies() {
+        let data = "/nonexistent-otto-test/Otto";
+        let sbpl = agent_policy(data).to_sbpl();
+        let acct = format!("{data}/provider-accounts/acct1");
+        let reopen_write = at(&sbpl, &format!("(subpath \"{acct}\")"));
+        let deny_read = at(&sbpl, &format!("(subpath \"{data}/provider-accounts\"))"));
+        let reopen_read = at(&sbpl, &format!("(allow file-read* (subpath \"{acct}\"))"));
+        let deny_cfg = at(&sbpl, &format!("(literal \"{acct}/settings.json\")"));
+        assert!(reopen_write < deny_read && deny_read < reopen_read && reopen_read < deny_cfg);
+        for f in [
+            format!("(literal \"{acct}/.claude.json\")"),
+            format!("(literal \"{acct}/config.toml\")"),
+            format!("(subpath \"{acct}/hooks\")"),
+            format!("(subpath \"{acct}/plugins\")"),
+        ] {
+            assert!(sbpl.contains(&f), "missing {f}");
+        }
+        assert!(sbpl.contains(&format!("(subpath \"{data}/logs\")")));
+    }
+
+    /// A session repo under a re-opened work area keeps its git carve-outs:
+    /// they now come after the data-dir re-allow.
+    #[test]
+    fn for_agent_git_denies_follow_the_work_area_reallow() {
+        let tmp = std::env::temp_dir().join(format!("otto-sbx-wr-{}", std::process::id()));
+        let data = tmp.join("Otto");
+        let cwd = data.join("workflow-runs/r1");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::write(cwd.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let pol = SandboxPolicy::for_agent(
+            &cwd,
+            Path::new("/nonexistent-otto-home/u"),
+            &data,
+            &[cwd.join(".git")],
+            NetworkPolicy::Full,
+        );
+        let sbpl = pol.to_sbpl();
+        let data = canonicalize_lenient(&data);
+        let reallow = at(
+            &sbpl,
+            &format!("(subpath \"{}/workflow-runs\")", data.display()),
+        );
+        let git_cfg = at(
+            &sbpl,
+            &format!(
+                "(literal \"{}/workflow-runs/r1/.git/config\")",
+                data.display()
+            ),
+        );
+        assert!(git_cfg > reallow);
+        assert!(sbpl.contains("/worktrees/[^/]+/(gitdir)$"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// S1-06: a missing path resolves through its deepest existing ancestor.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_lenient_resolves_existing_ancestors() {
+        let tmp = std::env::temp_dir().join(format!("otto-sbx-canon-{}", std::process::id()));
+        let real = tmp.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let got = canonicalize_lenient(&link.join("hooks/x.sh"));
+        assert_eq!(
+            got,
+            std::fs::canonicalize(&real).unwrap().join("hooks/x.sh")
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn deny_project_agent_config_appends_last() {
+        let pol = agent_policy("/nonexistent-otto-test/Otto")
+            .deny_project_agent_config(Path::new("/work/project"));
+        let last = pol.trailing_rules.last().unwrap();
+        assert!(last.starts_with("(deny file-write* "));
+        assert!(last.contains("(literal \"/work/project/.claude/settings.json\")"));
+        assert!(last.contains("(literal \"/work/project/.mcp.json\")"));
+        assert!(last.contains("(subpath \"/work/project/.claude/hooks\")"));
     }
 
     #[test]
@@ -890,8 +1162,8 @@ mod tests {
     #[test]
     fn for_agent_includes_cwd_git_and_agent_dirs() {
         let cwd = PathBuf::from("/work/project");
-        let home = PathBuf::from("/home/u");
-        let data = PathBuf::from("/home/u/.otto/data");
+        let home = PathBuf::from("/nonexistent-otto-home/u");
+        let data = PathBuf::from("/nonexistent-otto-home/u/.otto/data");
         let gitdir = PathBuf::from("/work/project/.git");
         let pol = SandboxPolicy::for_agent(
             &cwd,
