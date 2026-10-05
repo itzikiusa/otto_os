@@ -258,37 +258,47 @@ pub async fn attributes(
     Ok(normalize_attributes(&v))
 }
 
+/// The resource operation `/peek` checks: a receive bumps each message's
+/// receive count (on a queue with a redrive policy, enough peeks dead-letter
+/// it), so it needs the same Edit-level grant as Send.
+pub const PEEK_OPERATION: &str = "sqs_send";
+
+/// `receive-message` argv for a peek. The visibility timeout is ALWAYS 0 —
+/// whatever the request carries — so a peek never hides messages from the
+/// queue's consumers. It is still not read-only: SQS bumps each received
+/// message's `ApproximateReceiveCount`, so the route is Edit-gated.
+pub fn peek_args(req: &PeekReq) -> Result<Vec<String>> {
+    validate_url(&req.url)?;
+    let max = req.max.unwrap_or(10).clamp(1, 10).to_string();
+    Ok([
+        "sqs",
+        "receive-message",
+        "--queue-url",
+        &req.url,
+        "--max-number-of-messages",
+        &max,
+        "--visibility-timeout",
+        "0",
+        "--wait-time-seconds",
+        "1",
+        "--attribute-names",
+        "All",
+        "--message-attribute-names",
+        "All",
+    ]
+    .map(String::from)
+    .to_vec())
+}
+
 pub async fn peek(
     svc: &AwsService,
     a: &AwsAccountRow,
     req: &PeekReq,
     region: Option<&str>,
 ) -> Result<PeekResp> {
-    validate_url(&req.url)?;
-    let max = req.max.unwrap_or(10).clamp(1, 10).to_string();
-    let vis = req.visibility_timeout.unwrap_or(0).min(43200).to_string();
-    let v = svc
-        .run_json(
-            a,
-            region,
-            &[
-                "sqs",
-                "receive-message",
-                "--queue-url",
-                &req.url,
-                "--max-number-of-messages",
-                &max,
-                "--visibility-timeout",
-                &vis,
-                "--wait-time-seconds",
-                "1",
-                "--attribute-names",
-                "All",
-                "--message-attribute-names",
-                "All",
-            ],
-        )
-        .await?;
+    let args = peek_args(req)?;
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let v = svc.run_json(a, region, &argv).await?;
     Ok(PeekResp {
         messages: normalize_messages(&v),
     })
@@ -414,6 +424,21 @@ pub async fn redrive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peek_pins_visibility_timeout_to_zero() {
+        let req = PeekReq {
+            url: "https://sqs.eu-west-1.amazonaws.com/123456789012/orders".into(),
+            max: Some(99),
+            // A caller asking to hide the messages for 12 h is ignored.
+            visibility_timeout: Some(43_200),
+        };
+        let a = peek_args(&req).unwrap();
+        let at = |flag: &str| a[a.iter().position(|x| x == flag).unwrap() + 1].clone();
+        assert_eq!(at("--visibility-timeout"), "0");
+        assert_eq!(at("--max-number-of-messages"), "10");
+        assert_eq!(a.iter().filter(|x| *x == "--visibility-timeout").count(), 1);
+    }
 
     #[test]
     fn queues_normalize() {

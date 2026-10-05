@@ -68,12 +68,11 @@
 //!   write-guard; the other read POSTs are `…/memory/search`, the vault
 //!   `…/vault/vaults/{id}/search` / `…/okf/validate`, `…/browser/summarize`
 //!   (Editor-gated but doesn't persist anything — the summarize session is
-//!   ephemeral and never saved; see `routes/browser.rs`), and the SQS
-//!   `…/sqs/queues/peek` (a `receive-message` with visibility timeout 0 —
-//!   graded `aws_sqs:View` by the policy table because nothing is consumed).
+//!   ephemeral and never saved; see `routes/browser.rs`).
 //!   `canvas_create_scene`/`canvas_update_scene`, `otto_vault_write`/
 //!   `otto_vault_rename`/`otto_vault_delete`, `browser_navigate`, and the
-//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`k8s_action`, plus
+//!   cloud-console writers `aws_athena_query`/`aws_sqs_send`/`aws_sqs_peek`
+//!   (a receive bumps each message's receive count — it can dead-letter)/`k8s_action`, plus
 //!   `otto_api_execute` (ONE real HTTP request through a saved workspace request;
 //!   Editor-gated, SSRF-guarded, secrets resolved server-side and scrubbed from
 //!   the result), `otto_api_upsert_request` (persists a saved request), and
@@ -1543,7 +1542,7 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "aws_sqs_peek",
-                "description": "Read-only: peek up to `max` (1..10, default 10) messages on an SQS queue WITHOUT consuming them (receive with visibility timeout 0) — message_id, body, attributes, message_attributes. Use it to inspect a queue or a DLQ; the messages stay in the queue.",
+                "description": "MUTATING (aws_sqs Edit): peek up to `max` (1..10, default 10) messages on an SQS queue (receive-message with visibility timeout 0) — message_id, body, attributes, message_attributes. The messages stay visible, BUT every peek increments each message's receive count, so on a queue with a redrive policy repeated peeks can move messages to the dead-letter queue. Only peek when the user asked you to.",
                 "inputSchema": { "type": "object", "properties": { "account_id": { "type": "string" }, "url": { "type": "string", "description": "Queue URL from aws_sqs_list_queues." }, "max": { "type": "integer" }, "region": { "type": "string" } }, "required": ["account_id", "url"] }
             },
             {
@@ -2032,14 +2031,14 @@ const FEATURE_READ_TOOLS: &[&str] = &[
     "design_get",
     "design_links",
     "design_search",
-    // AWS console reads (`aws_sqs_peek` is the one read-only POST: a
-    // receive-message with visibility timeout 0, graded View by the policy table).
+    // AWS console reads. (`aws_sqs_peek` is NOT here: a receive-message bumps
+    // each message's receive count — it can dead-letter — so it is Edit-gated
+    // and dispatched by its own arm, like `aws_sqs_send`.)
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
     "aws_s3_preview",
     "aws_sqs_list_queues",
-    "aws_sqs_peek",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
@@ -2724,8 +2723,8 @@ fn read_route(name: &str, args: &Value, ws: Option<&str>) -> Result<ReadCall, St
             opt_query(args, &[("prefix", "prefix"), ("region", "region")]).trim_start_matches('&')
         )),
         "aws_sqs_peek" => {
-            // Read-only POST: `receive-message --visibility-timeout 0` — nothing
-            // is consumed or deleted (the policy table grades `/peek` as View).
+            // `receive-message --visibility-timeout 0`: nothing is hidden or
+            // deleted, but the receive count rises (Edit-gated server-side).
             let mut body = json!({ "url": arg_str(args, "url")?, "visibility_timeout": 0 });
             if let Some(max) = args.get("max").and_then(u64_lenient) {
                 body["max"] = json!(max.clamp(1, 10));
@@ -4132,6 +4131,14 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
             let lines = text.lines().count() as i64;
             let (v, _) = finalize(json!({ "text": text, "truncated": truncated }));
             Ok((v, Some(lines)))
+        }
+        "aws_sqs_peek" => {
+            // Edit-gated server-side: the receive bumps the receive count.
+            let call = read_route("aws_sqs_peek", args, None)?;
+            let raw = ctx
+                .post_json(&call.path, call.body.as_ref().unwrap_or(&json!({})))
+                .await?;
+            Ok(finalize(raw))
         }
         "aws_athena_query" => {
             let acc = arg_str(args, "account_id")?;
@@ -6438,7 +6445,7 @@ mod tests {
         }
         // The writers advertise themselves as mutating so an agent reads it
         // before calling.
-        for w in ["aws_athena_query", "aws_sqs_send"] {
+        for w in ["aws_athena_query", "aws_sqs_send", "aws_sqs_peek"] {
             let d = tools.iter().find(|x| x["name"] == w).unwrap()["description"]
                 .as_str()
                 .unwrap();
@@ -6540,7 +6547,7 @@ mod tests {
             .path,
             "/aws/accounts/a1/sqs/queues?prefix=orders"
         );
-        // Peek is the one read-only POST: visibility_timeout is pinned to 0 and
+        // Peek POSTs with visibility_timeout pinned to 0 and
         // `max` clamped into SQS's 1..10 window.
         let peek = read_route(
             "aws_sqs_peek",

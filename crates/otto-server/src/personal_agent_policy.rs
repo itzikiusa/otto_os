@@ -496,8 +496,9 @@ pub async fn evaluate_with(
 // ---------------------------------------------------------------------------
 
 /// Non-GET routes a read-only session's own token may still call, because they
-/// READ: searches, schema/object introspection, a read-only query, a queue
-/// peek, a browser summary. Templates without the `/api/v1` prefix; `{}`
+/// READ: searches, schema/object introspection, a read-only query, a browser
+/// summary. (Not the SQS peek: a receive bumps the receive count and can
+/// dead-letter a message, so it is an Edit-gated write.) Templates without the `/api/v1` prefix; `{}`
 /// matches any one path segment. The governed tool routes are listed too —
 /// they apply [`decide`] themselves.
 const READ_ONLY_POST_ALLOW: &[&str] = &[
@@ -508,7 +509,6 @@ const READ_ONLY_POST_ALLOW: &[&str] = &[
     "/workspaces/{}/memory/search",
     "/workspaces/{}/vault/vaults/{}/search",
     "/workspaces/{}/vault/vaults/{}/okf/validate",
-    "/aws/accounts/{}/sqs/queues/peek",
     "/connections/{}/db/schema/children",
     "/connections/{}/db/object",
     "/connections/{}/db/mcp-query",

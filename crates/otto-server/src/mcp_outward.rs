@@ -120,14 +120,13 @@ const DEFAULT_ENABLED: &[&str] = &[
     "get_improvement_run",
     "list_improvement_edits",
     // AWS console reads (docs/design/aws-k8s-consoles.md §6) — every one is a
-    // GET (or the read-only SQS peek POST) behind its per-service feature grant
+    // GET behind its per-service feature grant
     // (`aws_s3` / `aws_sqs` / `aws_ec2` / `aws_athena` / `aws_eks`: View).
     "aws_list_accounts",
     "aws_s3_list_buckets",
     "aws_s3_list_objects",
     "aws_s3_preview",
     "aws_sqs_list_queues",
-    "aws_sqs_peek",
     "aws_ec2_list_instances",
     "aws_athena_list_tables",
     "aws_athena_get_query",
@@ -201,10 +200,12 @@ const DANGEROUS: &[&str] = &[
     "design_assist",
     "design_link",
     // AWS / Kubernetes console writers — a billed Athena scan, a produced SQS
-    // message, and a kubectl rollout/scale/delete/Argo verb against a live
-    // cluster. Each is also Edit-gated per feature by the self-call's RBAC.
+    // message, an SQS peek (a receive bumps each message's receive count and
+    // can dead-letter it), and a kubectl rollout/scale/delete/Argo verb against
+    // a live cluster. Each is also Edit-gated per feature by the self-call's RBAC.
     "aws_athena_query",
     "aws_sqs_send",
+    "aws_sqs_peek",
     "k8s_action",
     // An HTTP request to a pod's port (actuator loggers / refresh / env…) —
     // approval-gated even for GET: an actuator GET can dump env/secrets.
@@ -937,8 +938,8 @@ pub fn otto_tool_specs() -> Vec<Value> {
             "description":"List an account's SQS queues (`url`, `name`, `fifo`); optional queue-name `prefix`. The `url` is the id the other SQS tools take. Read-only.",
             "inputSchema":{"type":"object","required":["account_id"],"properties":{
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"prefix":{"type":"string"},"region":{"type":"string"}}}}),
-        json!({"name":"otto.aws_sqs_peek","mutating":false,"category":"AWS",
-            "description":"Peek up to `max` (1..10) messages on an SQS queue WITHOUT consuming them (receive with visibility timeout 0). Read-only.",
+        json!({"name":"otto.aws_sqs_peek","mutating":true,"category":"AWS",
+            "description":"Peek up to `max` (1..10) messages on an SQS queue (receive-message with visibility timeout 0, so they stay visible). NOT read-only: every peek increments each message's receive count, so on a queue with a redrive policy repeated peeks can move messages to the dead-letter queue — approval-gated.",
             "inputSchema":{"type":"object","required":["account_id","url"],"properties":{
                 "account_id":{"type":"string","description":AWS_ACCOUNT_REF_DESC},"url":{"type":"string"},"max":{"type":"integer"},"region":{"type":"string"}}}}),
         json!({"name":"otto.aws_sqs_send","mutating":true,"category":"AWS",
@@ -1440,6 +1441,11 @@ fn dangerous_detail(tool: &str, args: &Value) -> String {
         }
         "aws_sqs_send" => format!(
             "Send a message to SQS queue '{}' on AWS account '{}'",
+            args.get("url").and_then(Value::as_str).unwrap_or("?"),
+            args.get("account_id").and_then(Value::as_str).unwrap_or("?")
+        ),
+        "aws_sqs_peek" => format!(
+            "Peek messages on SQS queue '{}' on AWS account '{}' (increments their receive count; can dead-letter)",
             args.get("url").and_then(Value::as_str).unwrap_or("?"),
             args.get("account_id").and_then(Value::as_str).unwrap_or("?")
         ),
@@ -4443,8 +4449,8 @@ pub(crate) fn route_for(tool: &str, args: &Value) -> Result<SelfCall, Error> {
             opt_query(args, &[("prefix", "prefix"), ("region", "region")])
         )),
         "aws_sqs_peek" => {
-            // Read-only POST: receive-message with visibility timeout pinned to
-            // 0 (nothing consumed); `max` clamped to SQS's 1..10 window.
+            // receive-message with visibility timeout pinned to 0 (nothing
+            // hidden; the receive count still rises); `max` clamped to 1..10.
             let mut body = json!({"url": arg_str(args, "url")?, "visibility_timeout": 0});
             if let Some(max) = args.get("max").and_then(u64_lenient) {
                 body["max"] = json!(max.clamp(1, 10));
@@ -6316,7 +6322,6 @@ mod tests {
         "aws_s3_list_objects",
         "aws_s3_preview",
         "aws_sqs_list_queues",
-        "aws_sqs_peek",
         "aws_ec2_list_instances",
         "aws_athena_list_tables",
         "aws_athena_get_query",
@@ -6338,6 +6343,7 @@ mod tests {
     const CONSOLE_WRITES: &[&str] = &[
         "aws_athena_query",
         "aws_sqs_send",
+        "aws_sqs_peek",
         "k8s_action",
         "k8s_pod_http",
     ];
@@ -6439,7 +6445,7 @@ mod tests {
             .path,
             "/api/v1/aws/accounts/a1/sqs/queues?prefix=orders"
         );
-        // Peek: read-only POST, visibility timeout pinned to 0, max clamped 1..10.
+        // Peek: POST, visibility timeout pinned to 0, max clamped 1..10.
         let c = route_for(
             "aws_sqs_peek",
             &json!({"account_id":"a1","url":"https://sqs/q","max":99}),

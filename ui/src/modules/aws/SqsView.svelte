@@ -39,7 +39,9 @@
   const canDelete = $derived(resourceAccess.can('aws_account', account.id, 'sqs_delete', 'aws_sqs', 'edit'));
   const canPurge = $derived(resourceAccess.can('aws_account', account.id, 'sqs_purge', 'aws_sqs', 'edit'));
   const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
-  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'view'));
+  // Peek is a receive: it bumps each message's receive count (and can
+  // dead-letter it), so the daemon gates it like Send — Edit on SQS.
+  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_send', 'aws_sqs', 'edit'));
   // A-1: queues live per region; the picker restores the last one used.
   // svelte-ignore state_referenced_locally
   let region = $state(account.region);
@@ -392,7 +394,7 @@
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
               <button class="btn primary small" onclick={() => void peek()} disabled={!canReceive || peeking} title={canReceive ? undefined : 'Needs Edit on SQS'}>{peeking ? 'Peeking…' : 'Peek'}</button>
-              <span class="dim">Non-destructive (visibility timeout 0). Messages may appear in any order.</span>
+              <span class="dim">Messages stay visible (visibility timeout 0), but each peek raises their receive count — on a queue with a redrive policy, repeated peeks can move them to the dead-letter queue. Order is not guaranteed.</span>
             </div>
             {#if messages.length === 0}
               <p class="dim pad">No messages loaded — press Peek.</p>

@@ -8769,6 +8769,7 @@ export interface SqsMessage {
 export interface SqsPeekReq {
   url: string;
   max?: number;
+  /** Ignored: the daemon always peeks with visibility timeout 0. */
   visibility_timeout?: number;
 }
 
