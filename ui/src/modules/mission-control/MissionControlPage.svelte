@@ -32,6 +32,7 @@
   import WorkItemList from './WorkItemList.svelte';
   import WorkGraphView from './WorkGraphView.svelte';
   import WorkItemDetail from './WorkItemDetail.svelte';
+  import NeedsYouLink from '../home/NeedsYouLink.svelte';
 
   let summary = $state<MissionSummary | null>(null);
   let items = $state<WorkItem[]>([]);
@@ -291,6 +292,8 @@
   subtitle="Every agentic activity as one traceable unit"
 >
   {#snippet actions()}
+    <!-- Work-item approvals are one source; the canonical inbox joins all — S20-07. -->
+    <NeedsYouLink />
     <button class="btn small" disabled={!ws.currentId || backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
       <Icon name="refresh" size={13} /> {backfilling ? 'Refreshing…' : 'Refresh'}
     </button>

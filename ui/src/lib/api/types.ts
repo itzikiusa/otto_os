@@ -6677,6 +6677,10 @@ export interface CreateShareResp {
   url: string;
   /** Metadata for the newly-minted share. */
   info: ShareInfo;
+  /** Whether another device can open `url`. False when the origin is loopback
+   *  or empty (no Public link domain and no network listener) — show the
+   *  "only works on this Mac" warning instead of the phone QR hint. */
+  reachable_remotely: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -7667,6 +7671,12 @@ export interface ScheduledTaskRun {
 }
 
 /** A built-in template the create form can pre-fill from. */
+/** `POST /scheduled-tasks/preview` response (#137a): the next fires of an
+ *  unsaved schedule, RFC 3339 UTC — empty when it has none (a spent `once`). */
+export interface ScheduledTaskPreview {
+  next_fire_times: string[];
+}
+
 export interface ScheduledTaskPreset {
   id: string;
   name: string;

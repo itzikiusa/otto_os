@@ -1128,6 +1128,11 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/scheduled-tasks/presets" {
         return Require(ScheduledTasks, View);
     }
+    // Schedule preview (pure computation, saves nothing) — gated like the
+    // workflow trigger preview: writes need Edit (the form's author).
+    if p == "/scheduled-tasks/preview" {
+        return Require(ScheduledTasks, if get { View } else { Edit });
+    }
     if p == "/scheduled-tasks/{id}" {
         return Require(ScheduledTasks, if get { View } else { Edit });
     }

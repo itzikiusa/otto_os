@@ -1,8 +1,8 @@
 // Scheduled Tasks API client — thin typed wrappers over the generic `api`
-// helper. Mirrors docs/contracts/api.md (#135–#143).
+// helper. Mirrors docs/contracts/api.md (#135–#144, incl. #137a preview).
 
 import { api } from './client';
-import type { ScheduledTask, ScheduledTaskPreset, ScheduledTaskRun } from './types';
+import type { ScheduledTask, ScheduledTaskPreset, ScheduledTaskPreview, ScheduledTaskRun } from './types';
 
 export interface ScheduledTaskInput {
   name: string;
@@ -37,6 +37,9 @@ export const scheduledTasksApi = {
   /** Stop a running run (its session / shell / workflow run is stopped; it settles `canceled`). */
   cancelRun: (runId: string) => api.post<{ ok: boolean }>(`/scheduled-tasks/runs/${runId}/cancel`, {}),
   presets: () => api.get<ScheduledTaskPreset[]>(`/scheduled-tasks/presets`),
+  /** Next fire times (RFC 3339 UTC) of an UNSAVED schedule — #137a. */
+  preview: (schedule: Record<string, unknown>, timezone?: string) =>
+    api.post<ScheduledTaskPreview>(`/scheduled-tasks/preview`, { schedule, timezone }),
   /** Materialize a scheduled task as a multi-step workflow (+ schedule trigger). */
   convertToWorkflow: (id: string, disable_task?: boolean) =>
     api.post<{ workflow_id: string; trigger_id?: string }>(

@@ -104,7 +104,7 @@ export const SIDEBAR_MODULES: SidebarModuleDef[] = [
   { id: 'scheduled-tasks', icon: 'calendar', label: 'Scheduled Tasks', group: 'automate', feature: 'scheduled_tasks', keywords: 'cron recurring job report cadence hourly daily' },
   // Personal Agents share the scheduled_tasks feature gate (same RBAC axis on
   // the daemon: View for GET, Edit for writes).
-  { id: 'personal-agents', icon: 'user', label: 'Personal Agents', group: 'automate', feature: 'scheduled_tasks', keywords: 'persona soul bot room chat schedule recap' },
+  { id: 'personal-agents', icon: 'user', label: 'Personal Agents', group: 'automate', feature: 'scheduled_tasks', keywords: 'persona soul bot agent channels chat schedule recap' },
   // ── Build ──
   { id: 'git', icon: 'branch', label: 'Git', group: 'build', feature: 'git', keywords: 'repos prs pull requests diff commit' },
   { id: 'proof', icon: 'check', label: 'Proof', group: 'build', feature: 'proof_pack', keywords: 'proof pack evidence badge verified tests ci approval audit' },

@@ -2,7 +2,7 @@
   // Agent Mode: tabbed split panes, tiled grid, or Mission Control work queue.
   import Splits from './Splits.svelte';
   import TiledView from './TiledView.svelte';
-  import MissionControl from './MissionControl.svelte';
+  import WorkQueue from './WorkQueue.svelte';
   import FirstRunCoach from './FirstRunCoach.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -63,7 +63,7 @@
       <Skeleton rows={3} height={48} />
     </div>
   {:else if mission}
-    <MissionControl />
+    <WorkQueue />
   {:else if tiled}
     <TiledView />
   {:else if ws.panes.length === 0}

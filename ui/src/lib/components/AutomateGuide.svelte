@@ -1,27 +1,46 @@
 <script lang="ts" module>
-  /** The five Automate modules, in the order the guide lists them. */
+  /** The five Automate modules (each renders the guide on its empty state). */
   export type AutomateModule = 'swarm' | 'loops' | 'workflows' | 'scheduled-tasks' | 'personal-agents';
+  /** Every entry the chooser lists: the Automate modules plus the two
+   *  overlapping automations that live elsewhere (S20-18) — Assistant tasks &
+   *  reminders (overlap Scheduled Tasks) and Run with Otto (overlaps Goal
+   *  Loops and Workflows' PR runs). */
+  export type AutomateGuideId = AutomateModule | 'assistant-tasks' | 'run-with-otto';
 
-  export const AUTOMATE_GUIDE: readonly { id: AutomateModule; label: string; when: string }[] = [
-    { id: 'workflows', label: 'Workflows', when: 'A fixed sequence of steps you can draw — run on demand, from a trigger, or on a schedule.' },
-    { id: 'scheduled-tasks', label: 'Scheduled Tasks', when: 'One prompt on a cadence that delivers a report (daily digest, weekly check).' },
-    { id: 'loops', label: 'Goal Loops', when: 'One measurable goal: an agent iterates on a branch until it is met or the budget runs out.' },
-    { id: 'swarm', label: 'Swarm', when: 'A team of role agents working a project board together — bigger, multi-task work.' },
-    { id: 'personal-agents', label: 'Personal Agents', when: 'A named persona with memory and its own schedules that you talk to over time.' },
+  export const AUTOMATE_GUIDE: readonly { id: AutomateGuideId; route: string; label: string; when: string }[] = [
+    { id: 'workflows', route: 'workflows', label: 'Workflows', when: 'A fixed sequence of steps you can draw — run on demand, from a trigger, or on a schedule.' },
+    { id: 'scheduled-tasks', route: 'scheduled-tasks', label: 'Scheduled Tasks', when: 'One prompt on a cadence that delivers a report (daily digest, weekly check).' },
+    { id: 'assistant-tasks', route: 'assistant/tasks', label: 'Assistant tasks & reminders', when: 'A quick “remind me” or one-off errand you ask for in the Assistant chat — no form, no cadence to set up.' },
+    { id: 'run-with-otto', route: 'run-with-otto', label: 'Run with Otto', when: 'One ticket, issue or finding: an agent works it on a branch, proves it, and waits for your approval before any PR.' },
+    { id: 'loops', route: 'loops', label: 'Goal Loops', when: 'One measurable goal: an agent iterates on a branch until it is met or the budget runs out.' },
+    { id: 'swarm', route: 'swarm', label: 'Swarm', when: 'A team of role agents working a project board together — bigger, multi-task work.' },
+    { id: 'personal-agents', route: 'personal-agents', label: 'Personal Agents', when: 'A named persona with memory and its own schedules that you talk to over time.' },
   ];
 </script>
 
 <script lang="ts">
-  // "Which one do I want?" — the five Automate modules overlap (each can run
-  // an agent on its own), so every one of their empty states carries the same
-  // one-line-each chooser with links to the others. Collapsed by default: a
-  // quiet secondary under the empty state's single primary CTA.
+  // "Which one do I want?" — the Automate modules (and the Assistant's tasks
+  // and Run with Otto) overlap: each can run an agent on its own. Every Automate
+  // empty state carries this one-line-each chooser, collapsed as a quiet
+  // secondary under the single primary CTA; each Automate page's ⋯ also opens
+  // it expanded in a sheet (AutomateGuideButton), so a user with one item
+  // still finds it.
   import { router } from '../router.svelte';
 
-  let { current }: { current: AutomateModule } = $props();
+  let {
+    current,
+    open = false,
+    onnavigate,
+  }: {
+    current: AutomateModule;
+    /** Start expanded (the ⋯ sheet) instead of collapsed (empty states). */
+    open?: boolean;
+    /** Called before navigating (the sheet closes itself). */
+    onnavigate?: () => void;
+  } = $props();
 </script>
 
-<details class="automate-guide" data-testid="automate-guide">
+<details class="automate-guide" data-testid="automate-guide" {open}>
   <summary>Which one do I want?</summary>
   <ul>
     {#each AUTOMATE_GUIDE as m (m.id)}
@@ -29,7 +48,7 @@
         {#if m.id === current}
           <strong>{m.label}</strong> <span class="here-tag">(this page)</span>
         {:else}
-          <button type="button" class="link" onclick={() => router.go(m.id)}>{m.label}</button>
+          <button type="button" class="link" onclick={() => { onnavigate?.(); router.go(m.route); }}>{m.label}</button>
         {/if}
         <span class="when">— {m.when}</span>
       </li>

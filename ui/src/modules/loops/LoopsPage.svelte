@@ -8,6 +8,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -127,6 +128,7 @@
       subtitle="Agents iterate toward a goal within a budget"
     >
       {#snippet actions()}
+        <AutomateGuideButton current="loops" />
         <!-- One primary per page: while the list is empty the empty state owns
              the "New goal loop" CTA. -->
         {#if ws.currentId && list.length > 0}

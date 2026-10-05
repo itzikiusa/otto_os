@@ -287,6 +287,11 @@ pub struct CreateShareResp {
     pub url: String,
     /// Metadata for the newly-minted share.
     pub info: ShareInfo,
+    /// Whether another device can open `url` — false when its origin is
+    /// loopback or empty (no Public link domain, no network listener). The UI
+    /// shows a "only works on this Mac" warning instead of the phone QR hint.
+    #[serde(default)]
+    pub reachable_remotely: bool,
 }
 
 /// `GET /api/v1/sessions/{id}/shares` response.

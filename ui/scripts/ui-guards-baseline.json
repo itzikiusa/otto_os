@@ -118,7 +118,7 @@
     "src/lib/components/ModelPicker.svelte": 3,
     "src/lib/components/Terminal.svelte": 1,
     "src/modules/agents/Handover.svelte": 1,
-    "src/modules/agents/MissionControl.svelte": 2,
+    "src/modules/agents/WorkQueue.svelte": 2,
     "src/modules/agents/NewSession.svelte": 1,
     "src/modules/agents/SessionView.svelte": 1,
     "src/modules/agents/TiledView.svelte": 3,
