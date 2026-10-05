@@ -162,13 +162,6 @@
     return s === 'user' ? 'you' : s === 'otto' ? 'otto' : 'agent';
   }
 
-  function onRowKeydown(e: KeyboardEvent, id: string): void {
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      toggle(id);
-    }
-  }
-
   function pretty(detail: unknown): string {
     try {
       return JSON.stringify(detail, null, 2);
@@ -345,27 +338,25 @@
             <li class="row src-{e.source} kind-{e.kind} lvl-{e.level}">
               {#snippet rowMain()}
                 <span class="row-icon"><Icon name={KIND_ICON[e.kind] ?? 'dot'} size={12} /></span>
-                <div class="row-body">
-                  <div class="row-summary">{e.summary}</div>
-                  <div class="row-meta">
+                <span class="row-body">
+                  <span class="row-summary">{e.summary}</span>
+                  <span class="row-meta">
                     <span class="row-src">{sourceLabel(e.source)}</span>
                     <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
                       <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
                     {/if}
-                  </div>
-                </div>
+                  </span>
+                </span>
               {/snippet}
               <!-- Only a row with detail is a control (it expands); the rest is plain text. -->
               {#if e.detail != null}
-                <div
+                <button
+                  type="button"
                   class="row-main clickable"
-                  role="button"
-                  tabindex="0"
                   aria-expanded={!!expanded[e.id]}
                   onclick={() => toggle(e.id)}
-                  onkeydown={(ev) => onRowKeydown(ev, e.id)}
-                >{@render rowMain()}</div>
+                >{@render rowMain()}</button>
               {:else}
                 <div class="row-main">{@render rowMain()}</div>
               {/if}
@@ -683,6 +674,13 @@
   }
   .row-main.clickable {
     cursor: pointer;
+    /* A real <button>: reset it to the row's look. */
+    inline-size: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
   }
   .row-main.clickable:focus-visible {
     outline: 2px solid var(--accent-text);
@@ -709,10 +707,12 @@
     color: var(--danger);
   }
   .row-body {
+    display: block;
     min-width: 0;
     flex: 1;
   }
   .row-summary {
+    display: block;
     font-size: var(--fs-s);
     line-height: 1.35;
     color: var(--text);

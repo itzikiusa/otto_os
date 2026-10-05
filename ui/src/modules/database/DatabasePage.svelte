@@ -1051,7 +1051,7 @@
         {:else}
           <!-- Not a dead end: hand the user the two ways forward. -->
           <div class="side-empty">
-            <div class="list-empty">Open a connection to browse its schema.</div>
+            <EmptyState icon="file" title="No connection open" body="Open a connection to browse its schema." />
             <div class="side-empty-actions">
               <button class="btn small" onclick={() => database.setSideTab('connections')}>Browse connections</button>
               <button class="btn small ghost" disabled={!auth.isRoot} onclick={newConnection} title={auth.isRoot ? undefined : 'Only the owner can create connections'}>New connection</button>
@@ -1509,7 +1509,7 @@
     </div>
   {:else if connFilter.trim()}
     {#if connMatches.length === 0 && clusterMatches.length === 0}
-      <div class="list-empty">No connections match “{connFilter.trim()}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No connections match “${connFilter.trim()}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (connFilter = '')} />
     {:else}
       {#each connMatches as c (c.id)}
         {@render connRow(c, 0)}
@@ -1580,9 +1580,9 @@
     {#if database.savedQueries.length === 0 && (database.savedQueriesLoading || database.savedQueriesError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
     {:else if database.savedQueries.length === 0}
-      <div class="list-empty">No saved queries. Save one from the Query tab.</div>
+      <EmptyState icon="file" title="No saved queries" body="Save one from the Query tab." />
     {:else if filteredSaved.length === 0}
-      <div class="list-empty">No saved queries match “{savedSearch}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No saved queries match “${savedSearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (savedSearch = '')} />
     {:else}
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
@@ -1636,9 +1636,9 @@
     {#if database.history.length === 0 && (database.historyLoading || database.historyError)}
       <!-- Loading and failed loads are rendered above, never as an empty list. -->
     {:else if database.history.length === 0}
-      <div class="list-empty">No query history yet.</div>
+      <EmptyState icon="clock" title="No query history yet" body="Queries you run show up here." />
     {:else if filteredHistory.length === 0}
-      <div class="list-empty">No history matches “{historySearch}”.</div>
+      <EmptyState icon="search" title="No matches" body={`No history matches “${historySearch}”.`} actionLabel="Clear filter" actionKind="secondary" onaction={() => (historySearch = '')} />
     {:else}
       {#each filteredHistory as h (h.id)}
         <!-- Bounded previews: a history row can hold a whole pasted script. -->
@@ -1815,12 +1815,6 @@
     color: var(--text);
   }
   .conn-empty,
-  .list-empty {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    padding: 8px 6px;
-    line-height: 1.5;
-  }
   /* Schema-tab empty state with its way-forward buttons. */
   .side-empty {
     display: flex;

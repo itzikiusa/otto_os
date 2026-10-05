@@ -3242,7 +3242,7 @@ class DatabaseStore {
             ? await this.confirmGuardedWrite(e, opts?.agentLabel)
             : await (opts?.confirmWrite?.() ?? Promise.resolve(false));
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;
@@ -3256,7 +3256,7 @@ class DatabaseStore {
           opts?.awaitingHuman?.('Waiting for the typed write confirm');
           const ok = await this.confirmGuardedWrite(e, opts?.agentLabel);
           if (!ok || accessEpoch!==this.accessEpoch || controller.signal.aborted) {
-            toasts.info('Write cancelled');
+            toasts.info('Write canceled');
             this.clearPending(t);
             if (outcome) Object.assign(outcome, { status: 'cancelled', error: 'the user declined the write' });
             return null;

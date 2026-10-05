@@ -113,14 +113,14 @@ test('Database saved and history failures offer retry; tabs follow keyboard focu
   const tabs = page.getByRole('tablist',{name:'Sidebar view'});
   await tabs.getByRole('tab',{name:'Saved',exact:true}).click();
   await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
-  await expect(page.getByText('No saved queries. Save one from the Query tab.')).toHaveCount(0);
+  await expect(page.getByText('No saved queries', { exact: true })).toHaveCount(0);
   fail = false;
   await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
-  await expect(page.getByText('No saved queries. Save one from the Query tab.')).toBeVisible();
+  await expect(page.getByText('No saved queries', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).click();
   await expect(page.locator('.side-body').getByRole('button',{name:'Retry',exact:true})).toBeVisible();
   await page.locator('.side-body').getByRole('button',{name:'Retry',exact:true}).click();
-  await expect(page.getByText('No query history yet.')).toBeVisible();
+  await expect(page.getByText('No query history yet', { exact: true })).toBeVisible();
   await tabs.getByRole('tab',{name:'History',exact:true}).press('Home');
   await expect(tabs.getByRole('tab',{name:'Connections',exact:true})).toBeFocused();
   await page.getByRole('button', {name:'New query tab',exact:true}).click();

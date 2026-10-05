@@ -535,7 +535,7 @@ for (const f of files) {
   // …or the raw exception as the TITLE (toasts.error(e.message)).
   for (const m of copy.matchAll(/toasts\.(?:error|warning)\(\s*(?:\w+ instanceof Error\b|String\((?:e|err|error|ex)\)|\((?:e|err|error|ex) as Error\)\.message|(?:e|err|error|ex)\.message)/g)) hit('raw-toast-body', f, m.index, m[0].slice(0, 60));
   for (const m of copy.matchAll(/\?\s*'s'\s*:\s*''|\?\s*''\s*:\s*'s'/g)) hit('hand-plural', f, m.index, m[0]);
-  for (const m of copy.matchAll(/\b(?:Cancell(?:ed|ing)|colours?|Colours?|analys(?:e|ed|ing)|Analys(?:e|ed|ing)|behaviour|organis(?:e|ation)|favourite|cancelled(?=[ .,!])(?<!['"]cancelled))\b/g)) hit('uk-spelling', f, m.index, m[0]);
+  for (const m of copy.matchAll(/\b(?:Cancell(?:ed|ing)|colours?|Colours?|analys(?:e|ed|ing)|Analys(?:e|ed|ing)|behaviour|organis(?:e|ation)|favourite|(?<=[A-Za-z] )cancelled)\b/g)) hit('uk-spelling', f, m.index, m[0]);
   {
     let at = 0;
     for (const l of copy.split('\n')) {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   // RefineChat — displays a single refinement thread transcript and handles
   // sending new messages to the agent.  Props: { tid } (the thread id).
   // Parent (RefineTab) controls which thread is active.
@@ -116,10 +117,7 @@
     {#if (loading || loadError) && messages.length === 0}
       <LoadState what="this thread" {loading} error={loadError} empty onretry={() => void loadThread(tid)} />
     {:else if messages.length === 0}
-      <div class="empty-state">
-        <p>No messages yet.</p>
-        <p>Type a message below to start the conversation with the agent.</p>
-      </div>
+      <EmptyState icon="comment" title="No messages yet" body="Type a message below to start the conversation with the agent." />
     {:else}
       {#each messages as m (m.id)}
         {@const meta = m.role === 'agent' ? parseMeta(m.meta_json) : {}}
@@ -212,16 +210,6 @@
     color: var(--text-dim);
     font-size: var(--fs-m);
     font-style: italic;
-  }
-  .empty-state {
-    padding: 32px 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.6;
-  }
-  .empty-state p {
-    margin: 4px 0;
   }
 
   /* ── Bubbles ────────────────────────────────────────────────────────────── */
