@@ -49,3 +49,27 @@ test('a failed re-boot of a running app keeps the shell up', async () => {
   await h.auth.boot(true);
   assert.equal(h.auth.phase, 'ready');
 });
+
+test('a stalled /meta moves boot to offline instead of spinning forever (S13-05)', async () => {
+  let aborted = false;
+  const api = {
+    get: (path: string, signal?: AbortSignal) => {
+      if (path !== '/meta') return Promise.resolve({});
+      signal?.addEventListener('abort', () => { aborted = true; });
+      return new Promise(() => {}); // accepted, never answers
+    },
+  };
+  const { auth } = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
+    '../api/client': {
+      api, ApiError, UNAUTHORIZED_EVENT: 'otto:unauthorized', setAltLoopbackBase() {},
+      getToken: () => null, setToken() {},
+    },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
+  }, {
+    // Compress the 5 s deadline so the test is instant.
+    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms === 5_000 ? 5 : ms),
+  });
+  await auth.boot();
+  assert.equal(auth.phase, 'offline');
+  assert.equal(aborted, true, 'the stalled request is aborted, not leaked');
+});

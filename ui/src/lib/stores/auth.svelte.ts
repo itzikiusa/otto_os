@@ -41,6 +41,26 @@ function capIndex(c: string): number {
   return i < 0 ? 0 : i;
 }
 
+
+/** Boot's `/meta` deadline (S13-05). A daemon that accepts the connection but
+ *  stalls used to hold boot on "Connecting to the Otto daemon…" forever: the
+ *  2 s offline retry only runs in 'offline', and `booting` blocked re-entry.
+ *  Past this, boot goes 'offline' and the retry loop takes over. */
+export const META_BOOT_TIMEOUT_MS = 5_000;
+
+/** `GET /meta`, aborted (and rejected) after `ms`. */
+function metaWithin(ms: number): Promise<MetaResp> {
+  const ctl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort();
+      reject(new Error('timeout'));
+    }, ms);
+  });
+  return Promise.race([api.get<MetaResp>('/meta', ctl.signal), expired]).finally(() => clearTimeout(timer));
+}
+
 class AuthStore {
   phase: BootPhase = $state('loading');
   meta: MetaResp | null = $state(null);
@@ -150,7 +170,7 @@ class AuthStore {
     early?.me.catch(() => {});
     early?.caps.catch(() => {});
     try {
-      this.meta = await api.get<MetaResp>('/meta');
+      this.meta = await metaWithin(META_BOOT_TIMEOUT_MS);
       // Background/slow calls move to the daemon's second loopback host
       // (a separate socket pool) when it advertises one.
       setAltLoopbackBase(this.meta.alt_loopback_base);
