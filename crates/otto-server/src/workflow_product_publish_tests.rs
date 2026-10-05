@@ -353,7 +353,7 @@ impl Fixture {
                 axum::routing::post(crate::routes::workflows::cancel_run),
             )
             .route(
-                "/workflow-runs/{id}/nodes/{node}",
+                "/workflow-runs/{id}/nodes/{node_id}",
                 axum::routing::get(crate::routes::workflow_progress::node_detail),
             )
             .with_state(self.ctx.clone())
