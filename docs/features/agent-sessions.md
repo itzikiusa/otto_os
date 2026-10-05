@@ -52,7 +52,7 @@ Svelte UI ──HTTP+WS──▶ ottod (127.0.0.1:7700) ──spawns──▶ cl
 | Activity trail + task tracker ingest endpoints | `crates/otto-server/src/routes/activity.rs` |
 | RBAC route → capability map | `crates/otto-server/src/policy.rs` |
 | Domain types (`Session`, `SessionStatus`, `TrailEvent`, `AgentTask`, …) | `crates/otto-core/src/domain.rs` |
-| Scratch workspace (`SCRATCH_WORKSPACE_ID`, `ensure_scratch`, implicit Editor, `GET /workspaces/scratch`, 409 guards) | `crates/otto-core/src/domain.rs`, `crates/otto-state/src/workspaces.rs`, `crates/otto-server/src/routes/workspaces.rs`, `crates/ottod/src/main.rs` (boot) |
+| Scratch workspace (`SCRATCH_WORKSPACE_ID`, `ensure_scratch`, implicit Editor, `GET /workspaces/scratch`, 409 guards) | `crates/otto-core/src/domain.rs`, `crates/otto-state/src/workspaces.rs`, `crates/otto-server/src/routes/workspaces.rs`, `crates/otto-server/src/boot/build.rs` (`ensure_scratch_workspace`, boot) |
 | Create / input DTOs | `crates/otto-core/src/api.rs` |
 | New-session modal | `ui/src/modules/agents/NewSession.svelte` |
 | Session pane (header, ⋯ menu, status, idle countdown) | `ui/src/modules/agents/SessionView.svelte` |

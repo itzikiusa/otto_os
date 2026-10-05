@@ -11,7 +11,6 @@ embed-ui = ["dep:rust-embed"]
 [dependencies]
 otto-core.workspace = true
 otto-state.workspace = true
-otto-rbac.workspace = true
 otto-keychain.workspace = true
 otto-server.workspace = true
 rust-embed = { workspace = true, optional = true, features = ["deterministic-timestamps"] }
@@ -23,22 +22,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 otto-sessions.workspace = true
-otto-connections.workspace = true
-otto-dbviewer.workspace = true
-otto-brokers.workspace = true
-otto-mcp.workspace = true
-otto-orchestrator.workspace = true
-otto-channels.workspace = true
-otto-improve.workspace = true
-otto-context.workspace = true
-otto-skills.workspace = true
 otto-usage.workspace = true
 otto-telemetry.workspace = true
-otto-product.workspace = true
-otto-swarm.workspace = true
-otto-workgraph.workspace = true
-otto-memory.workspace = true
-otto-vault.workspace = true
 # `ottod mcp-tools` (Task B2b): the first-party MCP tool server calls back into
 # the running daemon over loopback HTTP with a per-session read-only token.
 reqwest.workspace = true

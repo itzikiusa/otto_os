@@ -235,7 +235,7 @@ older reconcile bug (keeping the earliest per item, actor and payload).
 
 Implementation: `crates/otto-state/src/retention.rs` (policy + prune),
 `crates/otto-state/src/mcp_audit.rs` (`cap_args_json`), the hourly task in
-`crates/ottod/src/main.rs`.
+`crates/otto-server/src/boot/tasks.rs` (`spawn_data_retention`).
 
 Implementation: `crates/otto-server/src/state_archive.rs`,
 `state_archive/{schema,files}.rs`, and the backup/Git/connection export routes.

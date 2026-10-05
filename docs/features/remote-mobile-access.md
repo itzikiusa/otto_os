@@ -51,7 +51,7 @@ root.
 
 | Concern | Location |
 |---|---|
-| Loopback + optional `0.0.0.0` TLS listener | `crates/ottod/src/main.rs` (loopback bind ~L655; `network_listener` block ~L660-714; `load_or_make_tls_config` ~L806) |
+| Loopback + optional `0.0.0.0` TLS listener | `crates/ottod/src/main.rs` (loopback bind at the top of `run`; `serve_network_listener`; `load_or_make_tls_config`) |
 | SPA served same-origin (rust-embed) | `crates/ottod/src/ui_assets.rs` embeds `ui/dist` with the daemon's `embed-ui` feature; `crates/otto-server/src/spa.rs` serves the injected assets |
 | CORS allowlist (loopback / same-host LAN / `*.ts.net`) | `crates/otto-server/src/lib.rs::is_allowed_origin_for` |
 | `Host` allowlist (DNS-rebinding guard) | `crates/otto-server/src/host_guard.rs` |
