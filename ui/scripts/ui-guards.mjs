@@ -138,6 +138,15 @@
 //                     full-document style recalc per write (SF-02/SF-03);
 //                     use lib/dragCursor.ts (overlay) / a scoped custom prop.
 //
+// One ratcheted rule scans the E2E SPECS (ui/e2e/*.ts, top level):
+//
+//   e2e-wait-timeout  `page.waitForTimeout(…)` — a fixed sleep is either too
+//                     short on a slow runner (flake) or wasted time on a fast
+//                     one → wait for the condition: expect(…).toBeVisible(),
+//                     expect.poll(…), page.waitForResponse(…). A sleep that
+//                     proves ABSENCE ("nothing else fires within 1 s") is
+//                     legitimate — mark it `ui-guards: allow`.
+//
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
 // deterministic). Do it when you PAY DOWN debt (so the lower count sticks) —
@@ -281,6 +290,7 @@ const RULES = {
   'data-bar-transition': 'transition on width / inline-size / flex-basis / stroke-dasharray — data bars show the value, they don’t animate to it',
   'local-spinner': 'local spinning ring (animation: …spin…) — use the global .spinner (app.css)',
   'danger-menu-ellipsis': 'danger menu row whose label doesn’t end in “…” — a destructive row that opens a confirm ends in “…”',
+  'e2e-wait-timeout': 'waitForTimeout in an E2E spec — wait for the condition (expect…toBeVisible / expect.poll / waitForResponse); an absence-proving sleep carries `ui-guards: allow`',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -612,6 +622,17 @@ for (const f of files) {
   }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
+  }
+}
+
+// E2E specs: fixed sleeps (top-level ui/e2e/*.ts only — never the report dirs).
+const E2E = join(UI, 'e2e');
+if (existsSync(E2E)) {
+  for (const name of readdirSync(E2E).sort()) {
+    if (!/\.ts$/.test(name)) continue;
+    const p = join(E2E, name);
+    const f = { path: p, rel: relative(UI, p), text: readFileSync(p, 'utf8') };
+    for (const m of stripComments(f.text).matchAll(/\bwaitForTimeout\s*\(/g)) hit('e2e-wait-timeout', f, m.index, 'waitForTimeout(');
   }
 }
 

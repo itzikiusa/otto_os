@@ -1,0 +1,111 @@
+name: E2E (nightly, mobile/tablet)
+
+# The mobile/tablet Playwright projects that the per-PR `e2e-functional` job
+# (ci.yml) does not run: iPhone landscape, iPad portrait/landscape and iPhone
+# SE. Same isolated throwaway daemon as CI (ui/e2e/global-setup.ts); desktop-*
+# specs are excluded from these projects in playwright.config.ts. Nightly + on
+# demand — four device projects per PR would quadruple the E2E bill.
+
+on:
+  schedule:
+    - cron: '41 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+
+jobs:
+  build-ottod:
+    name: Build test daemon (ottod, debug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: perf-gates
+          save-if: false
+
+      - name: Install librdkafka build deps
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y cmake libcurl4-openssl-dev
+
+      - name: Build the test daemon
+        run: cargo build -p ottod
+
+      - name: Upload the test daemon
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ottod-debug
+          path: target/debug/ottod
+          retention-days: 2
+          if-no-files-found: error
+
+  e2e-mobile:
+    name: E2E ${{ matrix.project }}
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [iphone-landscape, ipad-portrait, ipad-landscape, iphone-se]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      # Every mobile/tablet device descriptor defaults to WebKit.
+      - name: Install Playwright WebKit
+        working-directory: ui
+        run: npx playwright install --with-deps webkit
+
+      - name: E2E (${{ matrix.project }})
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+        run: npx playwright test --project=${{ matrix.project }} --retries=0
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-${{ matrix.project }}-report
+          path: |
+            ui/e2e/.report-0
+            ui/test-results
+          retention-days: 7
