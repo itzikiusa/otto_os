@@ -269,3 +269,95 @@ async fn concurrent_saves_on_a_file_database_all_succeed() {
         .unwrap();
     assert_eq!(n, 60, "every save indexed in its own transaction");
 }
+
+/// S7-02: merged text equal to a source deduplicates onto that source. It
+/// used to be superseded by ITSELF (active=0, superseded_by=self) — the merged
+/// knowledge vanished from search. Now it survives as the merged row and only
+/// the other sources are retired.
+#[tokio::test]
+async fn merge_whose_text_equals_a_source_keeps_that_source_live() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let saved = svc
+        .save(
+            &ws,
+            &user,
+            vec![
+                nm("A", "release trains leave on tuesday"),
+                nm("B", "release trains leave tuesdays"),
+            ],
+        )
+        .await
+        .unwrap();
+    let (a, b) = (saved[0].id.clone(), saved[1].id.clone());
+    let merged = svc
+        .merge(
+            &ws,
+            &user,
+            otto_memory::MergeReq {
+                // The repeated id is one source, not two.
+                ids: vec![a.clone(), b.clone(), a.clone()],
+                title: "Release trains".into(),
+                body: "release trains leave on tuesday".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(merged.id, a, "deduplicated onto source A");
+    let a_row = svc.get(&ws, &a).await.unwrap();
+    assert!(a_row.active, "the merged row stays live");
+    assert_ne!(a_row.superseded_by.as_deref(), Some(a.as_str()));
+    let b_row = svc.get(&ws, &b).await.unwrap();
+    assert!(!b_row.active);
+    assert_eq!(b_row.superseded_by.as_deref(), Some(a.as_str()));
+    let hits = search_ids(&svc, &ws, "release trains").await;
+    assert!(hits.contains(&a), "merged knowledge is searchable: {hits:?}");
+    assert!(!hits.contains(&b), "retired source is not: {hits:?}");
+}
+
+/// S7-02: a split part equal to the parent (or to another part) used to
+/// resolve to the parent / one shared child — the parent then superseded
+/// itself. Both are refused before anything is written.
+#[tokio::test]
+async fn split_refuses_parts_equal_to_the_parent_or_each_other() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let parent = svc
+        .save(&ws, &user, vec![nm("P", "deploys need cmake and node")])
+        .await
+        .unwrap()
+        .remove(0);
+    let part = |t: &str, b: &str| otto_memory::SplitPart {
+        title: t.into(),
+        body: b.into(),
+    };
+    for parts in [
+        vec![part("1", "deploys need cmake and node"), part("2", "deploys need node")],
+        vec![part("1", "deploys need cmake"), part("2", "deploys need cmake")],
+    ] {
+        let err = svc
+            .split(&ws, &user, &parent.id, otto_memory::SplitReq { parts })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+    }
+    let p = svc.get(&ws, &parent.id).await.unwrap();
+    assert!(p.active, "a refused split leaves the parent untouched");
+    assert!(p.superseded_by.is_none());
+
+    let ok = svc
+        .split(
+            &ws,
+            &user,
+            &parent.id,
+            otto_memory::SplitReq {
+                parts: vec![part("1", "deploys need cmake"), part("2", "deploys need node")],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.memories.len(), 2);
+    let p = svc.get(&ws, &parent.id).await.unwrap();
+    assert!(!p.active);
+    assert_eq!(p.superseded_by.as_deref(), Some(ok.memories[0].id.as_str()));
+}

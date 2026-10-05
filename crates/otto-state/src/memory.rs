@@ -932,8 +932,11 @@ impl MemoriesRepo {
         self.get(ws, &id).await
     }
 
-    /// Record merge provenance on a memory (the newly created merged row). Also
-    /// marks all source memories as `contradicted` + sets their `superseded_by`.
+    /// Record merge provenance on a memory (the merged row). Also marks every
+    /// OTHER source memory `contradicted` + sets its `superseded_by`. A source
+    /// that IS the merged row (the merged text deduplicated onto it) keeps its
+    /// active state — deactivating it would make the merged knowledge vanish
+    /// (S7-02). One write transaction: provenance and sources move together.
     pub async fn record_merge(
         &self,
         ws: &str,
@@ -942,6 +945,11 @@ impl MemoriesRepo {
         provenance_json: &str,
     ) -> Result<()> {
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("memory.record_merge"))?;
         sqlx::query(
             "UPDATE memories SET provenance_json=?, updated_at=? WHERE id=? AND workspace_id=?",
         )
@@ -949,10 +957,10 @@ impl MemoriesRepo {
         .bind(&now)
         .bind(merged_id)
         .bind(ws)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("memory.record_merge.provenance"))?;
-        for src in source_ids {
+        for src in source_ids.iter().filter(|s| s.as_str() != merged_id) {
             sqlx::query(
                 "UPDATE memories SET active=0, state='contradicted', superseded_by=?, \
                  updated_at=? WHERE id=? AND workspace_id=?",
@@ -961,15 +969,17 @@ impl MemoriesRepo {
             .bind(&now)
             .bind(src)
             .bind(ws)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("memory.record_merge.source"))?;
         }
-        Ok(())
+        tx.commit().await.map_err(dberr("memory.record_merge"))
     }
 
     /// Record split provenance on a set of child memories and mark the parent
-    /// `contradicted` + point it at the first child (as `superseded_by`).
+    /// `contradicted` + point it at the first child (as `superseded_by`). The
+    /// parent never supersedes itself: a child id equal to the parent is
+    /// refused (S7-02). One write transaction.
     pub async fn record_split(
         &self,
         ws: &str,
@@ -977,7 +987,17 @@ impl MemoriesRepo {
         child_ids: &[String],
         provenance_json: &str,
     ) -> Result<()> {
+        if child_ids.is_empty() || child_ids.iter().any(|c| c == parent_id) {
+            return Err(Error::Invalid(
+                "a split part may not equal the parent memory".into(),
+            ));
+        }
         let now = fmt(Utc::now());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(dberr("memory.record_split"))?;
         for child in child_ids {
             sqlx::query(
                 "UPDATE memories SET provenance_json=?, updated_at=? \
@@ -987,23 +1007,22 @@ impl MemoriesRepo {
             .bind(&now)
             .bind(child)
             .bind(ws)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(dberr("memory.record_split.child"))?;
         }
-        let first_child = child_ids.first().map(String::as_str).unwrap_or("");
         sqlx::query(
             "UPDATE memories SET active=0, state='contradicted', superseded_by=?, \
              updated_at=? WHERE id=? AND workspace_id=?",
         )
-        .bind(first_child)
+        .bind(&child_ids[0])
         .bind(&now)
         .bind(parent_id)
         .bind(ws)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("memory.record_split.parent"))?;
-        Ok(())
+        tx.commit().await.map_err(dberr("memory.record_split"))
     }
 
     // -- governed import ---------------------------------------------------------
