@@ -21,9 +21,8 @@ use otto_state::{RunPatch, SwarmAgent, SwarmProject, SwarmRun, SwarmTask};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::agent_run::{run_with_recovery, watch_for_result, FailReason, RunOutcome};
-use crate::review_session::{bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER};
-use crate::state::ServerCtx;
+use crate::runtime::host::SwarmRt;
+use crate::runtime::host::{FailReason, RunOutcome};
 use serde::Serialize;
 
 /// run_id → cancel flag (the shared `otto_core::cancel` registry).
@@ -131,12 +130,12 @@ fn out_path(run_id: &str) -> PathBuf {
 /// Parse the agent's result file content into a `SwarmTurnResult` (tolerant of
 /// fences / surrounding prose). `None` if no JSON object is present.
 pub fn parse_turn_result(text: &str) -> Option<SwarmTurnResult> {
-    let v = otto_swarm::recruiter::extract_json(text)?;
+    let v = crate::recruiter::extract_json(text)?;
     serde_json::from_value(v).ok()
 }
 
 fn transcript_ok(t: &str) -> bool {
-    otto_swarm::recruiter::extract_json(t).is_some()
+    crate::recruiter::extract_json(t).is_some()
 }
 
 // --- Prompt ----------------------------------------------------------------
@@ -222,10 +221,10 @@ const RESULT_SCHEMA: &str = r#"{
 // --- The turn --------------------------------------------------------------
 
 /// Find a reusable live/resumable session for this agent, or `None`.
-async fn find_agent_session(ctx: &ServerCtx, ws: &Id, agent_id: &str) -> Option<Id> {
+async fn find_agent_session(ctx: &SwarmRt, ws: &Id, agent_id: &str) -> Option<Id> {
     // Targeted SQL lookup (perf §15 F7) — not the workspace's full history.
     let sessions = ctx
-        .manager
+        .manager()
         .list_live_by_meta(ws, Some("agent"), "agent_id", agent_id)
         .await
         .ok()?;
@@ -240,19 +239,19 @@ async fn find_agent_session(ctx: &ServerCtx, ws: &Id, agent_id: &str) -> Option<
 /// Run one turn for `run`. Updates the run row (running → done/error/stopped),
 /// persists the parsed result, emits events. Returns the parsed result on
 /// success so the Coordinator can route handoffs/subtasks/reviews.
-pub async fn run_turn(ctx: ServerCtx, run: SwarmRun) -> Option<SwarmTurnResult> {
-    let cancel = register_cancel(&ctx.swarm_run_cancels, &run.id);
+pub async fn run_turn(ctx: SwarmRt, run: SwarmRun) -> Option<SwarmTurnResult> {
+    let cancel = register_cancel(ctx.swarm_run_cancels(), &run.id);
     let res = run_turn_inner(&ctx, &run, &cancel).await;
-    unregister_cancel(&ctx.swarm_run_cancels, &run.id);
+    unregister_cancel(ctx.swarm_run_cancels(), &run.id);
     res
 }
 
 async fn run_turn_inner(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     run: &SwarmRun,
     cancel: &Arc<AtomicBool>,
 ) -> Option<SwarmTurnResult> {
-    let repo = &ctx.swarm_repo;
+    let repo = &ctx.swarm_repo();
     // Stopped (Stop / pause / board clear) while it sat queued: never start.
     if let Ok(cur) = repo.get_run(&run.id).await {
         if !matches!(cur.status.as_str(), "queued" | "running" | "waiting") {
@@ -291,27 +290,23 @@ async fn run_turn_inner(
     let ws = swarm.workspace_id.clone();
 
     // Prepare cwd + per-agent context (skills/soul/identity) + otto-post helper.
-    let cwd_info = match crate::swarm_workspace::ensure_cwd_info(
-        ctx,
-        &swarm,
-        &agent,
-        project.as_ref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            mark_run_error(ctx, run, &format!("prepare cwd: {e}")).await;
-            return None;
-        }
-    };
+    let cwd_info =
+        match crate::runtime::workspace::ensure_cwd_info(ctx, &swarm, &agent, project.as_ref())
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                mark_run_error(ctx, run, &format!("prepare cwd: {e}")).await;
+                return None;
+            }
+        };
     let cwd = cwd_info.path.clone();
     // Requirement 1: announce a freshly-created worktree on the shared board so the
     // team + user see who is working where (and the leader can coordinate merges).
     if cwd_info.created {
         if let (Some(branch), Some(task)) = (&cwd_info.branch, task.as_ref()) {
             let base = cwd_info.integration_branch.clone().unwrap_or_default();
-            crate::swarm_runtime::system_post_meta(
+            crate::runtime::engine::system_post_meta(
                 ctx,
                 &swarm.id,
                 Some(&task.project_id),
@@ -342,7 +337,7 @@ async fn run_turn_inner(
         .filter(|a| a.reports_to.as_deref() == Some(agent.id.as_str()))
         .map(|a| a.title)
         .collect();
-    let identity = crate::swarm_workspace::render_identity(
+    let identity = crate::runtime::workspace::render_identity(
         &swarm,
         &agent,
         manager_title.as_deref(),
@@ -361,7 +356,7 @@ async fn run_turn_inner(
             cwd.clone(),
         );
         let _ = tokio::task::spawn_blocking(move || {
-            crate::swarm_workspace::provision_agent(
+            crate::runtime::workspace::provision_agent(
                 &ctx2,
                 &swarm2,
                 project2.as_ref(),
@@ -438,76 +433,72 @@ async fn run_turn_inner(
 
     // Spawn/resume + inject + watch, with bounded recovery.
     let provider = agent.provider.clone();
-    let outcome = run_with_recovery(
-        &ctx.manager,
-        MAX_ATTEMPTS,
-        &[RETRY_BACKOFF],
-        Some(cancel),
-        |_attempt| {
-            let ctx = ctx.clone();
-            let ws = ws.clone();
-            // Stamp the work-graph ref so the usage layer can attribute cost to the
-            // originating swarm task. story_id is included when the project was created
-            // from a Product story (Plan → Swarm link; project.story_id is Some).
-            let work_ref = otto_core::workref::WorkRef {
-                swarm_task_id: task.as_ref().map(|t| t.id.clone()),
-                story_id: project.as_ref().and_then(|p| p.story_id.clone()),
-                origin: Some("swarm".into()),
-                ..Default::default()
-            };
-            let mut swarm_meta = json!({
-                "source": "swarm",
-                "swarm_id": swarm.id,
-                "agent_id": agent.id,
-                "project_id": project.as_ref().map(|p| p.id.clone()),
-                "task_id": task.as_ref().map(|t| t.id.clone()),
-                "run_id": run.id,
-                "work": serde_json::to_value(&work_ref).unwrap_or_default(),
-            });
-            // Carry the agent's model into meta so SessionManager can inject
-            // `--model <name>` for providers that support it (claude/codex); for others
-            // it is attribution-only. Mirrors otto-insights / product_run.rs.
-            if let Some(m) = agent
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                swarm_meta["model"] = json!(m);
-            }
-            let provider = provider.clone();
-            let cwd = cwd.clone();
-            let prompt = prompt.clone();
-            let out = out.clone();
-            let run_id = run.id.clone();
-            let agent_id = agent.id.clone();
-            let cancel = Arc::clone(cancel);
-            let title = format!(
-                "{} · {}",
-                agent.name,
-                task.as_ref()
-                    .map(|t| t.title.clone())
-                    .unwrap_or_else(|| agent.title.clone())
-            );
-            async move {
-                run_attempt(
-                    &ctx,
-                    &ws,
-                    &agent_id,
-                    &provider,
-                    &cwd,
-                    &title,
-                    &swarm_meta,
-                    &prompt,
-                    &out,
-                    &run_id,
-                    &cancel,
-                )
-                .await
-            }
-        },
-    )
-    .await;
+    let attempt: &mut crate::runtime::host::AttemptFn<'_> = &mut |_attempt| {
+        let ctx = ctx.clone();
+        let ws = ws.clone();
+        // Stamp the work-graph ref so the usage layer can attribute cost to the
+        // originating swarm task. story_id is included when the project was created
+        // from a Product story (Plan → Swarm link; project.story_id is Some).
+        let work_ref = otto_core::workref::WorkRef {
+            swarm_task_id: task.as_ref().map(|t| t.id.clone()),
+            story_id: project.as_ref().and_then(|p| p.story_id.clone()),
+            origin: Some("swarm".into()),
+            ..Default::default()
+        };
+        let mut swarm_meta = json!({
+            "source": "swarm",
+            "swarm_id": swarm.id,
+            "agent_id": agent.id,
+            "project_id": project.as_ref().map(|p| p.id.clone()),
+            "task_id": task.as_ref().map(|t| t.id.clone()),
+            "run_id": run.id,
+            "work": serde_json::to_value(&work_ref).unwrap_or_default(),
+        });
+        // Carry the agent's model into meta so SessionManager can inject
+        // `--model <name>` for providers that support it (claude/codex); for others
+        // it is attribution-only. Mirrors otto-insights / product_run.rs.
+        if let Some(m) = agent
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            swarm_meta["model"] = json!(m);
+        }
+        let provider = provider.clone();
+        let cwd = cwd.clone();
+        let prompt = prompt.clone();
+        let out = out.clone();
+        let run_id = run.id.clone();
+        let agent_id = agent.id.clone();
+        let cancel = Arc::clone(cancel);
+        let title = format!(
+            "{} · {}",
+            agent.name,
+            task.as_ref()
+                .map(|t| t.title.clone())
+                .unwrap_or_else(|| agent.title.clone())
+        );
+        Box::pin(async move {
+            run_attempt(
+                &ctx,
+                &ws,
+                &agent_id,
+                &provider,
+                &cwd,
+                &title,
+                &swarm_meta,
+                &prompt,
+                &out,
+                &run_id,
+                &cancel,
+            )
+            .await
+        })
+    };
+    let outcome = ctx
+        .run_with_recovery(MAX_ATTEMPTS, &[RETRY_BACKOFF], Some(cancel), attempt)
+        .await;
 
     // Best-effort token/cost backfill for this turn, keyed on the run's session.
     // otto-usage records per-session; the run is tagged with `session_id`/`run_id`
@@ -623,19 +614,17 @@ fn enrich_result(parsed: Option<serde_json::Value>, cwd: &str, brief: &str) -> s
 /// no session was created, or no events were recorded in the window yet — the
 /// `RunPatch` then writes nulls rather than misleading zeros.
 pub(crate) async fn session_usage(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     session_id: Option<&str>,
     since: chrono::DateTime<Utc>,
 ) -> (Option<i64>, Option<i64>, Option<f64>) {
     let Some(sid) = session_id else {
         return (None, None, None);
     };
-    match ctx.usage.session_totals_for(sid, Some(since)).await {
-        Some(t) => (
-            Some(t.input_tokens as i64),
-            Some(t.output_tokens as i64),
-            Some(t.cost_usd),
-        ),
+    match ctx.session_usage_totals(sid, since).await {
+        Some((input, output, cost_usd)) => {
+            (Some(input as i64), Some(output as i64), Some(cost_usd))
+        }
         None => (None, None, None),
     }
 }
@@ -643,7 +632,7 @@ pub(crate) async fn session_usage(
 /// One attempt: find-or-create the agent session, inject the brief, watch.
 #[allow(clippy::too_many_arguments)]
 async fn run_attempt(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     ws: &Id,
     agent_id: &str,
     provider: &str,
@@ -659,10 +648,10 @@ async fn run_attempt(
         .get("swarm_id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let operation = crate::swarm_runtime::operation_guard(swarm_id).await;
+    let operation = crate::runtime::engine::operation_guard(swarm_id).await;
     // Recheck under the lifecycle boundary, including a stop before this
     // attempt registered its cancellation handle or between retries.
-    let live = ctx.swarm_repo.get_run(&run_id.to_string()).await;
+    let live = ctx.swarm_repo().get_run(&run_id.to_string()).await;
     if !matches!(live, Ok(ref run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
     {
         return RunOutcome::failed(None, FailReason::Stopped);
@@ -677,14 +666,14 @@ async fn run_attempt(
     // actually works in the configured folder.
     let reuse = match find_agent_session(ctx, ws, agent_id).await {
         Some(existing) => {
-            let existing_cwd = ctx.manager.get(&existing).await.ok().map(|s| s.cwd);
+            let existing_cwd = ctx.manager().get(&existing).await.ok().map(|s| s.cwd);
             if existing_cwd.as_deref() == Some(cwd) {
-                let _ = ctx.manager.ensure_live(&existing).await;
+                let _ = ctx.manager().ensure_live(&existing).await;
                 // Re-tag the reused session with THIS turn's run/task/project ids
                 // (they were only set at creation). Without this, board posts from
                 // later turns carry the first run's id. `update_meta` shallow-merges,
                 // so the current `meta` overwrites the stale ids in place.
-                let _ = ctx.manager.update_meta(&existing, meta.clone()).await;
+                let _ = ctx.manager().update_meta(&existing, meta.clone()).await;
                 Some(existing)
             } else {
                 // cwd moved → retire the old session and create a fresh one below.
@@ -696,7 +685,7 @@ async fn run_attempt(
                     "swarm: agent {agent_id} cwd changed ({:?} → {cwd}); recreating session",
                     existing_cwd
                 );
-                let _ = ctx.manager.kill_session(&existing).await;
+                let _ = ctx.manager().kill_session(&existing).await;
                 None
             }
         }
@@ -715,7 +704,7 @@ async fn run_attempt(
                 model: None,
                 meta: Some(meta.clone()),
             };
-            let ws_row = match ctx.workspaces.get(ws).await {
+            let ws_row = match ctx.workspaces().get(ws).await {
                 Ok(w) => w,
                 Err(_) => return RunOutcome::failed(None, FailReason::CreateFailed),
             };
@@ -726,12 +715,12 @@ async fn run_attempt(
                 .unwrap_or_default()
                 .to_string();
             let creator = ctx
-                .swarm_repo
+                .swarm_repo()
                 .get_swarm(&swarm_id)
                 .await
                 .map(|s| s.created_by)
                 .unwrap_or_else(|_| "system".into());
-            match ctx.manager.create(&ws_row, &creator, req, None).await {
+            match ctx.manager().create(&ws_row, &creator, req, None).await {
                 Ok(s) => s.id,
                 Err(e) => {
                     tracing::warn!("swarm: create session ({provider}): {e}");
@@ -743,7 +732,7 @@ async fn run_attempt(
 
     // Persist session_id on the run immediately so the UI can Open it live.
     let _ = ctx
-        .swarm_repo
+        .swarm_repo()
         .update_run(
             &run_id.to_string(),
             RunPatch {
@@ -763,41 +752,37 @@ async fn run_attempt(
     // Transcript length BEFORE injection: claude_prompt_landed only scans what
     // this turn appends (a reused session has older user records).
     let transcript_offset = match ctx
-        .manager
+        .manager()
         .get(&sid)
         .await
         .ok()
         .and_then(|s| s.provider_session_id)
     {
-        Some(psid) => crate::review_session::transcript_len(cwd, &psid),
+        Some(psid) => ctx.transcript_len(cwd, &psid),
         None => 0,
     };
-    if crate::swarm_runtime::while_run_active(
-        &ctx.swarm_repo,
-        run_id,
-        wait_for_tui(&ctx.manager, &sid),
-    )
-    .await
+    if crate::runtime::engine::while_run_active(ctx.swarm_repo(), run_id, ctx.wait_for_tui(&sid))
+        .await
         == Some(true)
     {
-        if !crate::swarm_runtime::send_run_input(
+        if !crate::runtime::engine::send_run_input(
             ctx,
             swarm_id,
             run_id,
             &sid,
-            &bracketed_paste(prompt),
+            &ctx.bracketed_paste(prompt),
         )
         .await
         {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-        if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+        let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
-        if !dispatched(&ctx.manager, &sid, before).await
-            && !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await
+        if !ctx.dispatched(&sid, before).await
+            && !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await
         {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
@@ -810,45 +795,43 @@ async fn run_attempt(
     // paste. One re-injection round, then fail the attempt so recovery respawns
     // — a live-but-promptless session used to sit until someone stopped it by hand.
     if provider == "claude"
-        && !crate::swarm_runtime::while_run_active(
-            &ctx.swarm_repo,
+        && !crate::runtime::engine::while_run_active(
+            ctx.swarm_repo(),
             run_id,
-            crate::review_session::claude_prompt_landed(
-                &ctx.manager,
+            ctx.claude_prompt_landed(
                 &sid,
                 cwd,
                 transcript_offset,
-                crate::review_session::PROMPT_LAND_WAIT,
+                ctx.pty_timings().prompt_land_wait,
             ),
         )
         .await
         .unwrap_or(false)
     {
         tracing::warn!("swarm: brief didn't land in session {sid} — re-injecting once");
-        if !crate::swarm_runtime::send_run_input(
+        if !crate::runtime::engine::send_run_input(
             ctx,
             swarm_id,
             run_id,
             &sid,
-            &bracketed_paste(prompt),
+            &ctx.bracketed_paste(prompt),
         )
         .await
         {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
-        tokio::time::sleep(PASTE_TO_ENTER).await;
-        if !crate::swarm_runtime::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
+        tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+        if !crate::runtime::engine::send_run_input(ctx, swarm_id, run_id, &sid, b"\r").await {
             return RunOutcome::failed(Some(sid), FailReason::Stopped);
         }
-        if !crate::swarm_runtime::while_run_active(
-            &ctx.swarm_repo,
+        if !crate::runtime::engine::while_run_active(
+            ctx.swarm_repo(),
             run_id,
-            crate::review_session::claude_prompt_landed(
-                &ctx.manager,
+            ctx.claude_prompt_landed(
                 &sid,
                 cwd,
                 transcript_offset,
-                crate::review_session::PROMPT_LAND_WAIT,
+                ctx.pty_timings().prompt_land_wait,
             ),
         )
         .await
@@ -860,7 +843,7 @@ async fn run_attempt(
     }
 
     let provider_session_id = ctx
-        .manager
+        .manager()
         .get(&sid)
         .await
         .ok()
@@ -875,8 +858,13 @@ async fn run_attempt(
     // `None`: the reused watch never reads the transcript at all (it used to
     // read + discard it every second); the tail check below covers it.
     let watch_ok: Option<fn(&str) -> bool> = if reused { None } else { Some(transcript_ok) };
-    let watch = watch_for_result(
-        &ctx.manager,
+    let on_status: &mut crate::runtime::host::StatusFn<'_> = &mut |st| {
+        Box::pin(async move {
+            // Reflect waiting/resumed onto the run row.
+            let _ = st;
+        })
+    };
+    let watch = ctx.watch_for_result(
         &sid,
         provider,
         provider_session_id.as_deref(),
@@ -886,21 +874,19 @@ async fn run_attempt(
         WAITING_IDLE,
         STUCK_IDLE,
         watch_ok,
-        |st| async move {
-            // Reflect waiting/resumed onto the run row.
-            let _ = st;
-        },
+        on_status,
     );
     tokio::pin!(watch);
     let mut tick = tokio::time::interval(CANCEL_POLL);
     // The reused session's turn, read incrementally from the brief's offset
     // (only new bytes per tick) and off the runtime.
-    let mut since: Option<crate::turn_oracle::ClaudeTail> = match provider_session_id.as_deref() {
-        Some(psid) if reused && provider == "claude" => {
-            Some(turn_since(cwd, psid, transcript_offset))
-        }
-        _ => None,
-    };
+    let mut since: Option<Box<dyn crate::runtime::host::TurnTail>> =
+        match provider_session_id.as_deref() {
+            Some(psid) if reused && provider == "claude" => {
+                Some(turn_since(ctx, cwd, psid, transcript_offset))
+            }
+            _ => None,
+        };
     loop {
         tokio::select! {
             res = &mut watch => return res,
@@ -913,8 +899,8 @@ async fn run_attempt(
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Stopped);
                 }
                 if let Some(mut t) = since.take() {
-                    let (t, turn) = crate::offload::blocking(move || {
-                        let turn = t.poll().and_then(|s| s.last_turn_text);
+                    let (t, turn) = crate::runtime::host::blocking(move || {
+                        let turn = t.poll_last_turn_text();
                         (t, turn)
                     })
                     .await;
@@ -938,16 +924,21 @@ const CANCEL_POLL: Duration = Duration::from_secs(2);
 /// session's transcript — i.e. a turn that answered the brief injected at
 /// `offset`, never the previous turn's reply (`completed_turn_text` of the
 /// tail). Reads only the tail, and each poll only what was appended since.
-fn turn_since(cwd: &str, psid: &str, offset: u64) -> crate::turn_oracle::ClaudeTail {
-    crate::turn_oracle::ClaudeTail::from_offset(
+fn turn_since(
+    ctx: &SwarmRt,
+    cwd: &str,
+    psid: &str,
+    offset: u64,
+) -> Box<dyn crate::runtime::host::TurnTail> {
+    ctx.claude_turn_tail(
         otto_orchestrator::claude_pty::session_jsonl_path(cwd, psid),
         offset,
     )
 }
 
-async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {
+async fn mark_run_error(ctx: &SwarmRt, run: &SwarmRun, msg: &str) {
     let _ = ctx
-        .swarm_repo
+        .swarm_repo()
         .update_run(
             &run.id,
             RunPatch {
@@ -965,12 +956,12 @@ async fn mark_run_error(ctx: &ServerCtx, run: &SwarmRun, msg: &str) {
 /// the run list (perf §15 F8): `result` (~8 KB parsed turn JSON) is dropped
 /// except for `kind = 'recruit'` (the Runs list's Hire button reads it);
 /// the inspector fetches `GET /swarm/runs/{rid}` for one run's result.
-pub async fn emit_run(ctx: &ServerCtx, run_id: &str) {
-    if let Ok(mut run) = ctx.swarm_repo.get_run(&run_id.to_string()).await {
+pub async fn emit_run(ctx: &SwarmRt, run_id: &str) {
+    if let Ok(mut run) = ctx.swarm_repo().get_run(&run_id.to_string()).await {
         if run.kind != "recruit" {
             run.result = None;
         }
-        let _ = ctx.events.send(Event::SwarmRunUpdated {
+        let _ = ctx.events().send(Event::SwarmRunUpdated {
             workspace_id: run.workspace_id.clone(),
             swarm_id: run.swarm_id.clone(),
             run: serde_json::to_value(&run).unwrap_or_default(),
@@ -1006,11 +997,11 @@ fn shared_files() -> &'static Mutex<HashMap<String, SharedState>> {
 }
 
 async fn detect_shared_files(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &otto_state::Swarm,
     agent: &SwarmAgent,
     task: Option<&SwarmTask>,
-    cwd_info: &crate::swarm_workspace::CwdInfo,
+    cwd_info: &crate::runtime::workspace::CwdInfo,
 ) {
     let (Some(branch), Some(integration_branch)) = (&cwd_info.branch, &cwd_info.integration_branch)
     else {
@@ -1068,7 +1059,7 @@ async fn detect_shared_files(
     }
 
     for (body, overlap) in to_post {
-        crate::swarm_runtime::system_post_meta(
+        crate::runtime::engine::system_post_meta(
             ctx,
             &swarm.id,
             project_id.as_deref(),

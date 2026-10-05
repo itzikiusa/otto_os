@@ -11,7 +11,7 @@ use otto_core::domain::Channel;
 use otto_core::Result;
 use otto_state::{NewProject, ProjectPatch, Swarm, SwarmProject};
 
-use crate::state::ServerCtx;
+use crate::runtime::host::SwarmRt;
 
 /// Where a channel-launched swarm replies back to.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ pub struct LaunchOpts {
 /// origin, then (in the background) seed tasks via the planner and start the
 /// coordinator. Returns the new project id immediately. Agents run in worktrees
 /// by default (the cwd-mode default), so several can share the repo safely.
-pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<String> {
+pub async fn launch(ctx: &SwarmRt, swarm: &Swarm, opts: LaunchOpts) -> Result<String> {
     let name = opts.name.clone().unwrap_or_else(|| {
         opts.goal
             .lines()
@@ -61,7 +61,7 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
             .collect()
     });
     let project = ctx
-        .swarm_repo
+        .swarm_repo()
         .create_project(NewProject {
             swarm_id: swarm.id.clone(),
             workspace_id: swarm.workspace_id.clone(),
@@ -78,7 +78,7 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
     // Record the channel origin so the swarm can reply/escalate back.
     if let Some(origin) = &opts.origin {
         let _ = ctx
-            .swarm_repo
+            .swarm_repo()
             .update_project(
                 &project.id,
                 ProjectPatch {
@@ -97,7 +97,7 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
             continue;
         }
         let _ = ctx
-            .swarm_repo
+            .swarm_repo()
             .create_goal(otto_state::NewGoal {
                 swarm_id: swarm.id.clone(),
                 workspace_id: swarm.workspace_id.clone(),
@@ -128,12 +128,15 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
     let start = opts.start;
     let project2 = project.clone();
     tokio::spawn(async move {
-        let _ = otto_product::swarm::seed_tasks(&ctx2, &project2, &creator, &goal).await;
+        ctx2.seed_tasks(&project2, &creator, &goal).await;
         if start {
-            let _ = ctx2.swarm_repo.set_swarm_status(&swarm_id, "active").await;
-            crate::swarm_runtime::set_paused(&ctx2, &swarm_id, false);
-            crate::swarm_runtime::start_coordinator(ctx2.clone(), swarm_id.clone());
-            crate::swarm_runtime::emit_status(&ctx2, &workspace_id, &swarm_id, "active");
+            let _ = ctx2
+                .swarm_repo()
+                .set_swarm_status(&swarm_id, "active")
+                .await;
+            crate::runtime::engine::set_paused(&ctx2, &swarm_id, false);
+            crate::runtime::engine::start_coordinator(ctx2.clone(), swarm_id.clone());
+            crate::runtime::engine::emit_status(&ctx2, &workspace_id, &swarm_id, "active");
         }
     });
 
@@ -141,7 +144,7 @@ pub async fn launch(ctx: &ServerCtx, swarm: &Swarm, opts: LaunchOpts) -> Result<
 }
 
 /// Reply/escalate back to the channel that launched `project` (if any). Best-effort.
-pub async fn notify_origin(ctx: &ServerCtx, project: &SwarmProject, text: &str) {
+pub async fn notify_origin(ctx: &SwarmRt, project: &SwarmProject, text: &str) {
     let (Some(channel), Some(chat)) = (
         project.origin_channel.as_deref(),
         project.origin_chat.as_deref(),
@@ -161,9 +164,13 @@ pub async fn notify_origin(ctx: &ServerCtx, project: &SwarmProject, text: &str) 
             } else {
                 Channel::Telegram
             };
-            if let Ok(Some(integ)) = ctx.integrations_store.get(&project.workspace_id, ch).await {
+            if let Ok(Some(integ)) = ctx
+                .integrations_store()
+                .get(&project.workspace_id, ch)
+                .await
+            {
                 let _ = otto_channels::improve_notify::send_to(
-                    &ctx.secrets,
+                    ctx.secrets(),
                     &integ,
                     chat,
                     thread,
@@ -179,7 +186,7 @@ pub async fn notify_origin(ctx: &ServerCtx, project: &SwarmProject, text: &str) 
 /// The `SwarmTrigger` implementation injected into the channel `Bridge`: an inbound
 /// message on a swarm-bound channel launches that swarm.
 pub struct SwarmTriggerImpl {
-    pub ctx: ServerCtx,
+    pub ctx: SwarmRt,
 }
 
 #[async_trait]
@@ -195,7 +202,7 @@ impl SwarmTrigger for SwarmTriggerImpl {
     ) -> Option<LaunchAck> {
         let triggers = self
             .ctx
-            .swarm_repo
+            .swarm_repo()
             .find_triggers(&workspace_id.to_string(), channel)
             .await
             .unwrap_or_default();
@@ -218,7 +225,7 @@ impl SwarmTrigger for SwarmTriggerImpl {
             if body.is_empty() {
                 continue;
             }
-            let swarm = match self.ctx.swarm_repo.get_swarm(&t.swarm_id).await {
+            let swarm = match self.ctx.swarm_repo().get_swarm(&t.swarm_id).await {
                 Ok(s) => s,
                 Err(_) => continue,
             };

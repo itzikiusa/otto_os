@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use otto_core::api::LocalMergeStrategy;
 use otto_state::{Swarm, SwarmProject};
 
-use crate::state::ServerCtx;
+use crate::runtime::host::SwarmRt;
 
 #[derive(Debug, Clone)]
 pub struct MergeOutcome {
@@ -49,17 +49,17 @@ fn branch_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
 /// Merge `agent_branch` into the project's integration branch, in the integration
 /// worktree. Returns the outcome (merged / conflicts / up_to_date / error).
 pub async fn merge_task_branch(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     swarm: &Swarm,
     project: &SwarmProject,
     agent_branch: &str,
 ) -> MergeOutcome {
     let (int_wt, integration_branch) =
-        match crate::swarm_workspace::ensure_integration_worktree(ctx, swarm, project).await {
+        match crate::runtime::workspace::ensure_integration_worktree(ctx, swarm, project).await {
             Ok(v) => v,
             Err(e) => {
                 return MergeOutcome::err(
-                    crate::swarm_workspace::integration_branch_name(swarm, project),
+                    crate::runtime::workspace::integration_branch_name(swarm, project),
                     format!("integration worktree: {e}"),
                 )
             }
@@ -102,7 +102,7 @@ pub async fn merge_task_branch(
             if res.status == "merged" {
                 // The branch's work is integrated — stop tracking its files for the
                 // shared-files detector.
-                crate::swarm_run::forget_branch_files(&swarm.id, agent_branch);
+                crate::runtime::run::forget_branch_files(&swarm.id, agent_branch);
             }
             MergeOutcome {
                 status: res.status,

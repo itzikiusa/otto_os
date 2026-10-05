@@ -4009,6 +4009,7 @@ name = "otto-core"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "hex",
  "serde",
  "serde_json",
@@ -4546,9 +4547,15 @@ dependencies = [
  "axum",
  "chrono",
  "include_dir",
+ "otto-agent-run",
+ "otto-channels",
  "otto-context",
  "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-sessions",
  "otto-state",
+ "otto-telemetry",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -861,7 +861,7 @@ pub async fn discover_story<C: ProductStudioHost>(
 
     // 9. Auto-start the swarm so the discovery agents actually run. Unlike
     //    `to-swarm` (which leaves the swarm paused), discovery is fire-and-go.
-    //    Replicates the `start` handler in swarm_runtime.rs: point-of-action
+    //    Replicates the `start` handler in otto_swarm::runtime::engine: point-of-action
     //    budget gate first (same guard as `start`), then set status active,
     //    start the coordinator, emit the status event. (Starting the swarm runs
     //    ALL ready tasks, which now includes the discovery tasks — intended.)

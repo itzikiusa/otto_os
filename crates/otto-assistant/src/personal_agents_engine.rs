@@ -319,7 +319,7 @@ pub async fn ensure_agent_workspace<C: AssistantCtx>(
     let cwd = dir.to_string_lossy().to_string();
 
     // Persona → CLAUDE.md/AGENTS.md, same mechanism as swarm agents
-    // (swarm_workspace::provision_agent). include_memory=false: the agent's
+    // (otto_swarm::runtime::workspace::provision_agent). include_memory=false: the agent's
     // durable memory is its own memory/notes.md, driven from the run prompt.
     // Rooms ride along in the same file: membership only mattered if the user
     // also wrote "use room X" into the persona — otherwise an agent added to a

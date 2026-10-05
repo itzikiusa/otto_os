@@ -1,7 +1,7 @@
 //! Workflow trigger scheduler: fires `schedule`-kind triggers on their cadence
 //! (interval / daily / weekly) and starts a workflow run in the background.
 //!
-//! Modeled on [`crate::swarm_scheduler`]: 60-second tick (one timer, woken by `CancelSignal`),
+//! Modeled on [`otto_swarm::runtime::scheduler`]: 60-second tick (one timer, woken by `CancelSignal`),
 //! Cursor/eligibility claim and queued run are committed together; a captured
 //! tick cannot admit after retiming or disabling its trigger.
 //!

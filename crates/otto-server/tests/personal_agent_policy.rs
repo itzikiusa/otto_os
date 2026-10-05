@@ -621,7 +621,7 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     // with a budget: swarm + spend + active count + ready tasks.
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     probe.reset();
-    tokio::time::sleep(otto_server::swarm_wake::MIN_GAP + std::time::Duration::from_millis(1000))
+    tokio::time::sleep(otto_swarm::runtime::wake::MIN_GAP + std::time::Duration::from_millis(1000))
         .await;
     let tick: Vec<String> = probe
         .take()
@@ -634,7 +634,7 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     );
     // Then nothing: no event, and the safety tick is a minute away.
     tokio::time::sleep(
-        otto_server::swarm_wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
+        otto_swarm::runtime::wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
     )
     .await;
     let idle: Vec<String> = probe
@@ -645,10 +645,10 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     assert!(
         idle.is_empty(),
         "an idle coordinator parks until an event or the {:?} safety tick: {idle:?}",
-        otto_server::swarm_wake::SAFETY_TICK
+        otto_swarm::runtime::wake::SAFETY_TICK
     );
     assert!(
-        otto_server::swarm_wake::has_bell(&swarm.id),
+        otto_swarm::runtime::wake::has_bell(&swarm.id),
         "parked on its bell"
     );
 }

@@ -482,8 +482,8 @@ async fn start_channel_manager(
         Some(ctx.events.clone()),
     )
     // An inbound message on a swarm-bound channel launches that swarm.
-    .with_swarm_trigger(Arc::new(crate::swarm_channels::SwarmTriggerImpl {
-        ctx: ctx.clone(),
+    .with_swarm_trigger(Arc::new(otto_swarm::runtime::channels::SwarmTriggerImpl {
+        ctx: ctx.swarm_rt(),
     }))
     // An inbound `/run <ref>` (or `approve`/`reject` reply) drives a Run with
     // Otto run on the root user's behalf (the channel-trust model).
@@ -645,11 +645,11 @@ async fn start_swarm(ctx: &ServerCtx) -> impl Send + 'static {
         Ok(_) => {}
         Err(e) => tracing::warn!("swarm recovery: {e}"),
     }
-    let scheduler = crate::swarm_scheduler::start(ctx.clone());
+    let scheduler = otto_swarm::runtime::scheduler::start(ctx.swarm_rt());
     match ctx.swarm_repo.list_all_active_swarms().await {
         Ok(active) => {
             for s in active {
-                crate::swarm_runtime::start_coordinator(ctx.clone(), s.id.clone());
+                otto_swarm::runtime::engine::start_coordinator(ctx.swarm_rt(), s.id.clone());
             }
             tracing::info!("swarm scheduler started; coordinators restored");
         }

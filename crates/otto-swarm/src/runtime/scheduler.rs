@@ -12,20 +12,20 @@ use chrono::{DateTime, Utc};
 use otto_state::{NewRun, RunPatch, TaskPatch};
 use serde_json::{json, Value};
 
-use crate::cancel_signal::CancelSignal;
-use crate::state::ServerCtx;
-use crate::swarm_run;
+use crate::runtime::host::SwarmRt;
+use crate::runtime::run;
+use otto_core::cancel_signal::CancelSignal;
 
 const SCAN: Duration = Duration::from_secs(60);
 
 /// Start the scheduler supervisor. Returns its cancel signal.
-pub fn start(ctx: ServerCtx) -> CancelSignal {
+pub fn start(ctx: SwarmRt) -> CancelSignal {
     let cancel = CancelSignal::new();
     tokio::spawn(supervise(ctx, cancel.clone()));
     cancel
 }
 
-async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
+async fn supervise(ctx: SwarmRt, cancel: CancelSignal) {
     loop {
         if cancel.is_cancelled() {
             return;
@@ -40,11 +40,11 @@ async fn supervise(ctx: ServerCtx, cancel: CancelSignal) {
     }
 }
 
-async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
+async fn tick(ctx: &SwarmRt) -> otto_core::Result<()> {
     // Board-utilization watchdog rides the same 60s scan (its own 5-min gate).
     utilization_pass(ctx).await;
     let now = Utc::now();
-    for agent in ctx.swarm_repo.list_scheduled_agents().await? {
+    for agent in ctx.swarm_repo().list_scheduled_agents().await? {
         let Some(sched) = agent.schedule.clone() else {
             continue;
         };
@@ -58,9 +58,9 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         if !is_due(&sched, Some(agent.created_at), now) {
             continue;
         }
-        let _operation = crate::swarm_runtime::operation_guard(&agent.swarm_id).await;
+        let _operation = crate::runtime::engine::operation_guard(&agent.swarm_id).await;
         // Swarm must be active and under its parallel cap; one turn per agent.
-        let swarm = match ctx.swarm_repo.get_swarm(&agent.swarm_id).await {
+        let swarm = match ctx.swarm_repo().get_swarm(&agent.swarm_id).await {
             Ok(s) if s.status == "active" => s,
             _ => continue,
         };
@@ -71,7 +71,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             .unwrap_or(4)
             .max(1);
         if ctx
-            .swarm_repo
+            .swarm_repo()
             .active_run_count(&swarm.id)
             .await
             .unwrap_or(0)
@@ -80,7 +80,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
             continue;
         }
         if ctx
-            .swarm_repo
+            .swarm_repo()
             .agent_has_active_run(&agent.id)
             .await
             .unwrap_or(false)
@@ -91,7 +91,7 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         // Reservation + cursor advance commit together, guarded on the stored
         // schedule still being the one judged due (see reserve_scheduled_run).
         match ctx
-            .swarm_repo
+            .swarm_repo()
             .reserve_scheduled_run(
                 NewRun {
                     swarm_id: swarm.id.clone(),
@@ -109,10 +109,10 @@ async fn tick(ctx: &ServerCtx) -> otto_core::Result<()> {
         {
             Ok(None) => {}
             Ok(Some(run)) => {
-                swarm_run::emit_run(ctx, &run.id).await;
+                run::emit_run(ctx, &run.id).await;
                 let ctx2 = ctx.clone();
                 tokio::spawn(async move {
-                    let _ = swarm_run::run_turn(ctx2, run).await;
+                    let _ = run::run_turn(ctx2, run).await;
                 });
             }
             Err(e) => tracing::warn!("swarm scheduler: create run: {e}"),
@@ -144,9 +144,9 @@ fn util_cursor() -> &'static Mutex<UtilCursors> {
     CUR.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-async fn utilization_pass(ctx: &ServerCtx) {
+async fn utilization_pass(ctx: &SwarmRt) {
     // Active swarms = the ones with a live coordinator (start/resume register it).
-    let swarm_ids: Vec<String> = ctx.swarm_coords.lock().unwrap().keys().cloned().collect();
+    let swarm_ids: Vec<String> = ctx.swarm_coords().lock().unwrap().keys().cloned().collect();
     let now = Instant::now();
     for sid in swarm_ids {
         {
@@ -163,9 +163,9 @@ async fn utilization_pass(ctx: &ServerCtx) {
     }
 }
 
-async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> {
-    let _operation = crate::swarm_runtime::operation_guard(sid).await;
-    let repo = &ctx.swarm_repo;
+async fn check_utilization(ctx: &SwarmRt, sid: &str) -> otto_core::Result<()> {
+    let _operation = crate::runtime::engine::operation_guard(sid).await;
+    let repo = &ctx.swarm_repo();
     let swarm = repo.get_swarm(&sid.to_string()).await?;
     if swarm.status != "active" {
         return Ok(());
@@ -186,7 +186,7 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
     let busy = repo.busy_agents(&swarm.id).await.unwrap_or_default();
     let mut idle: Vec<otto_state::SwarmAgent> = Vec::new();
     for a in agents.iter().filter(|a| a.status == "active") {
-        if !busy.contains(&a.id) && !crate::swarm_verify::agent_under_verification(&a.id) {
+        if !busy.contains(&a.id) && !crate::runtime::verify::agent_under_verification(&a.id) {
             idle.push(a.clone());
         }
     }
@@ -215,7 +215,7 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
         let Some(pos) = idle
             .iter()
             .enumerate()
-            .max_by_key(|(_, a)| crate::swarm_runtime::agent_fit_score(a, &hay))
+            .max_by_key(|(_, a)| crate::runtime::engine::agent_fit_score(a, &hay))
             .map(|(i, _)| i)
         else {
             break;
@@ -230,12 +230,12 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
                 },
             )
             .await;
-        crate::swarm_runtime::emit_task_pub(ctx, &t.id).await;
+        crate::runtime::engine::emit_task_pub(ctx, &t.id).await;
         moved.push(format!("“{}” → {}", t.title, agent.name));
         slots -= 1;
     }
     if !moved.is_empty() {
-        crate::swarm_runtime::system_post_meta(
+        crate::runtime::engine::system_post_meta(
             ctx,
             &swarm.id,
             None,
@@ -326,8 +326,8 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
         )
         .await;
     run.result = Some(json!({ "directive": directive }));
-    swarm_run::emit_run(ctx, &run.id).await;
-    crate::swarm_runtime::system_post_meta(
+    run::emit_run(ctx, &run.id).await;
+    crate::runtime::engine::system_post_meta(
         ctx,
         &swarm.id,
         None,
@@ -343,7 +343,7 @@ async fn check_utilization(ctx: &ServerCtx, sid: &str) -> otto_core::Result<()> 
     .await;
     let ctx2 = ctx.clone();
     tokio::spawn(async move {
-        let _ = swarm_run::run_turn(ctx2, run).await;
+        let _ = run::run_turn(ctx2, run).await;
     });
     Ok(())
 }
@@ -355,7 +355,7 @@ fn parse_ts(v: Option<&Value>) -> Option<DateTime<Utc>> {
 }
 
 /// Is a scheduled agent due to fire? Delegates to the shared
-/// [`crate::cadence`] engine (Scheduled Tasks / workflow triggers), so agent
+/// [`otto_core::cadence`] engine (Scheduled Tasks / workflow triggers), so agent
 /// schedules get the same semantics: `at` in the schedule's IANA `timezone`
 /// (UTC when absent — every pre-existing agent behaves as before), `cron`, and
 /// an arm floor — the cursor is `max(last_run, armed_at)`, where `armed_at` is
@@ -372,13 +372,14 @@ pub fn is_due(sched: &Value, created: Option<DateTime<Utc>>, now: DateTime<Utc>)
             o.insert("weekday".into(), json!(1));
         }
     }
-    let last = crate::cadence::effective_cursor(
+    let last = otto_core::cadence::effective_cursor(
         &spec,
         parse_ts(spec.get("last_run")),
         parse_ts(spec.get("armed_at")),
     );
-    let tz = crate::cadence::task_tz(spec.get("timezone").and_then(Value::as_str).unwrap_or(""));
-    crate::cadence::is_due_since(&spec, last, created, now, tz)
+    let tz =
+        otto_core::cadence::task_tz(spec.get("timezone").and_then(Value::as_str).unwrap_or(""));
+    otto_core::cadence::is_due_since(&spec, last, created, now, tz)
 }
 
 #[cfg(test)]

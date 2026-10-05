@@ -485,9 +485,9 @@ impl otto_product::ProductStudioHost for ServerCtx {
         }
     }
     fn start_swarm_coordinator(&self, swarm_id: Id) {
-        crate::swarm_runtime::start_coordinator(self.clone(), swarm_id);
+        otto_swarm::runtime::engine::start_coordinator(self.swarm_rt(), swarm_id);
     }
     fn emit_swarm_status(&self, workspace_id: &Id, swarm_id: &str, status: &str) {
-        crate::swarm_runtime::emit_status(self, workspace_id, swarm_id, status);
+        otto_swarm::runtime::engine::emit_status(&self.swarm_rt(), workspace_id, swarm_id, status);
     }
 }

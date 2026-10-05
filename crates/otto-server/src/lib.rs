@@ -90,15 +90,7 @@ pub mod skill_eval;
 pub mod skill_review;
 pub mod spa;
 pub mod state;
-pub mod swarm_agent_run;
-pub mod swarm_channels;
-pub mod swarm_merge;
-pub mod swarm_run;
-pub mod swarm_runtime;
-pub mod swarm_scheduler;
-pub mod swarm_verify;
-pub mod swarm_wake;
-pub mod swarm_workspace;
+pub mod swarm_host;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;

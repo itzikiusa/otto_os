@@ -21,12 +21,9 @@ use otto_core::domain::{SessionKind, User, Workspace};
 use otto_core::Id;
 use otto_state::{NewRun, RunPatch};
 
-use crate::agent_run::{watch_for_result, FailReason, WatchStatus};
-use crate::review_session::{
-    bracketed_paste, dispatched, wait_for_tui, PASTE_TO_ENTER, WAITING_IDLE,
-};
-use crate::state::ServerCtx;
-use crate::swarm_run::emit_run;
+use crate::runtime::host::SwarmRt;
+use crate::runtime::host::{FailReason, WatchStatus};
+use crate::runtime::run::emit_run;
 
 /// No-progress (stuck) window before an attempt is retried.
 const SWARM_STUCK_IDLE: Duration = Duration::from_secs(240);
@@ -67,10 +64,10 @@ impl CancelState {
         self.flag.store(true, Ordering::Relaxed);
     }
     /// Kill every session this handle has tracked (mid-turn abort).
-    pub async fn kill_tracked(&self, ctx: &ServerCtx) {
+    pub async fn kill_tracked(&self, ctx: &SwarmRt) {
         let sids = self.sessions.lock().unwrap().clone();
         for sid in sids {
-            let _ = ctx.manager.kill_session(&sid).await;
+            let _ = ctx.manager().kill_session(&sid).await;
         }
     }
 }
@@ -101,13 +98,13 @@ pub fn end(swarm_id: &str) {
 
 /// Stop the in-flight plan/recruit for `swarm_id`: flag retries off + kill any
 /// live session(s). No-op if nothing is running.
-pub async fn stop(ctx: &ServerCtx, swarm_id: &str) {
+pub async fn stop(ctx: &SwarmRt, swarm_id: &str) {
     let cs = registry().lock().unwrap().get(swarm_id).cloned();
     if let Some(cs) = cs {
         cs.flag.store(true, Ordering::Relaxed);
         let sids = cs.sessions.lock().unwrap().clone();
         for sid in sids {
-            let _ = ctx.manager.kill_session(&sid).await;
+            let _ = ctx.manager().kill_session(&sid).await;
         }
     }
 }
@@ -120,7 +117,7 @@ pub async fn stop(ctx: &ServerCtx, swarm_id: &str) {
 /// retries / on stop. `transcript_ok` decides when the turn is complete.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_swarm_agent(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     ws: &Workspace,
     user: &User,
     swarm_id: &str,
@@ -148,9 +145,9 @@ pub async fn run_swarm_agent(
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| cwd.to_string());
     let cwd: &str = &cwd_canon;
-    let operation = crate::swarm_runtime::operation_guard(swarm_id).await;
+    let operation = crate::runtime::engine::operation_guard(swarm_id).await;
     let run = match ctx
-        .swarm_repo
+        .swarm_repo()
         .reserve_run(
             NewRun {
                 swarm_id: swarm_id.to_string(),
@@ -192,9 +189,9 @@ pub async fn run_swarm_agent(
             }
         }
 
-        let operation = crate::swarm_runtime::operation_guard(swarm_id).await;
+        let operation = crate::runtime::engine::operation_guard(swarm_id).await;
         if cancel.cancelled()
-            || !matches!(ctx.swarm_repo.get_run(&run_id).await,
+            || !matches!(ctx.swarm_repo().get_run(&run_id).await,
             Ok(ref run) if matches!(run.status.as_str(), "queued" | "running" | "waiting"))
         {
             last_reason = Some(FailReason::Stopped);
@@ -221,7 +218,7 @@ pub async fn run_swarm_agent(
             model: None,
             meta: Some(meta),
         };
-        let session = match ctx.manager.create(ws, &user.id, req, None).await {
+        let session = match ctx.manager().create(ws, &user.id, req, None).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("swarm_agent_run: create session: {e}");
@@ -233,7 +230,7 @@ pub async fn run_swarm_agent(
         cancel.track(&sid);
         // Link the session so the UI's Open button works while it runs.
         let _ = ctx
-            .swarm_repo
+            .swarm_repo()
             .update_run_if_status(
                 &run_id,
                 &["queued", "running", "waiting"],
@@ -250,34 +247,35 @@ pub async fn run_swarm_agent(
         // Inject the prompt once the TUI has settled, confirming dispatch. A
         // dead/exited PTY means the prompt was NEVER sent — kill and retry
         // instead of watching a promptless session until the stuck window.
-        if crate::swarm_runtime::while_run_active(
-            &ctx.swarm_repo,
+        if crate::runtime::engine::while_run_active(
+            ctx.swarm_repo(),
             &run_id,
-            wait_for_tui(&ctx.manager, &sid),
+            ctx.wait_for_tui(&sid),
         )
         .await
             == Some(true)
         {
-            if !crate::swarm_runtime::send_run_input(
+            if !crate::runtime::engine::send_run_input(
                 ctx,
                 swarm_id,
                 &run_id,
                 &sid,
-                &bracketed_paste(prompt),
+                &ctx.bracketed_paste(prompt),
             )
             .await
             {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-            tokio::time::sleep(PASTE_TO_ENTER).await;
-            let before = ctx.manager.live_handle(&sid).map(|h| h.last_output_at());
-            if !crate::swarm_runtime::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
+            tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+            let before = ctx.manager().live_handle(&sid).map(|h| h.last_output_at());
+            if !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-            if !dispatched(&ctx.manager, &sid, before).await
-                && !crate::swarm_runtime::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await
+            if !ctx.dispatched(&sid, before).await
+                && !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r")
+                    .await
             {
                 last_reason = Some(FailReason::Stopped);
                 break;
@@ -287,23 +285,17 @@ pub async fn run_swarm_agent(
                 "swarm_agent_run: TUI never settled for session {sid} — prompt not injected"
             );
             last_reason = Some(FailReason::Exited);
-            let _ = ctx.manager.kill_session(&sid).await;
+            let _ = ctx.manager().kill_session(&sid).await;
             continue;
         }
         // For claude, confirm the prompt LANDED (a "user" record in the fresh
         // session's transcript) — TUI echo can be redraw noise around a
         // swallowed paste. Re-inject once, else kill + retry this attempt.
         if provider == "claude"
-            && !crate::swarm_runtime::while_run_active(
-                &ctx.swarm_repo,
+            && !crate::runtime::engine::while_run_active(
+                ctx.swarm_repo(),
                 &run_id,
-                crate::review_session::claude_prompt_landed(
-                    &ctx.manager,
-                    &sid,
-                    cwd,
-                    0,
-                    crate::review_session::PROMPT_LAND_WAIT,
-                ),
+                ctx.claude_prompt_landed(&sid, cwd, 0, ctx.pty_timings().prompt_land_wait),
             )
             .await
             .unwrap_or(false)
@@ -311,33 +303,27 @@ pub async fn run_swarm_agent(
             tracing::warn!(
                 "swarm_agent_run: prompt didn't land in session {sid} — re-injecting once"
             );
-            if !crate::swarm_runtime::send_run_input(
+            if !crate::runtime::engine::send_run_input(
                 ctx,
                 swarm_id,
                 &run_id,
                 &sid,
-                &bracketed_paste(prompt),
+                &ctx.bracketed_paste(prompt),
             )
             .await
             {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-            tokio::time::sleep(PASTE_TO_ENTER).await;
-            if !crate::swarm_runtime::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
+            tokio::time::sleep(ctx.pty_timings().paste_to_enter).await;
+            if !crate::runtime::engine::send_run_input(ctx, swarm_id, &run_id, &sid, b"\r").await {
                 last_reason = Some(FailReason::Stopped);
                 break;
             }
-            if !crate::swarm_runtime::while_run_active(
-                &ctx.swarm_repo,
+            if !crate::runtime::engine::while_run_active(
+                ctx.swarm_repo(),
                 &run_id,
-                crate::review_session::claude_prompt_landed(
-                    &ctx.manager,
-                    &sid,
-                    cwd,
-                    0,
-                    crate::review_session::PROMPT_LAND_WAIT,
-                ),
+                ctx.claude_prompt_landed(&sid, cwd, 0, ctx.pty_timings().prompt_land_wait),
             )
             .await
             .unwrap_or(false)
@@ -346,54 +332,55 @@ pub async fn run_swarm_agent(
                     "swarm_agent_run: prompt never landed in session {sid} — retrying attempt"
                 );
                 last_reason = Some(FailReason::Stuck);
-                let _ = ctx.manager.kill_session(&sid).await;
+                let _ = ctx.manager().kill_session(&sid).await;
                 continue;
             }
         }
 
         let cb_run_id = run_id.clone();
-        let outcome = watch_for_result(
-            &ctx.manager,
-            &sid,
-            provider,
-            session.provider_session_id.as_deref(),
-            cwd,
-            out_path.as_path() as &Path,
-            SWARM_RUN_TIMEOUT,
-            WAITING_IDLE,
-            SWARM_STUCK_IDLE,
-            Some(transcript_ok),
-            move |st| {
-                let rid = cb_run_id.clone();
-                async move {
-                    let status = match st {
-                        WatchStatus::Waiting => "waiting",
-                        WatchStatus::Resumed => "running",
-                    };
-                    let _ = ctx
-                        .swarm_repo
-                        .update_run_if_status(
-                            &rid,
-                            &["queued", "running", "waiting"],
-                            RunPatch {
-                                status: Some(status.into()),
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                    emit_run(ctx, &rid).await;
-                }
-            },
-        )
-        .await;
+        let on_status: &mut crate::runtime::host::StatusFn<'_> = &mut move |st| {
+            let rid = cb_run_id.clone();
+            Box::pin(async move {
+                let status = match st {
+                    WatchStatus::Waiting => "waiting",
+                    WatchStatus::Resumed => "running",
+                };
+                let _ = ctx
+                    .swarm_repo()
+                    .update_run_if_status(
+                        &rid,
+                        &["queued", "running", "waiting"],
+                        RunPatch {
+                            status: Some(status.into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                emit_run(ctx, &rid).await;
+            })
+        };
+        let outcome = ctx
+            .watch_for_result(
+                &sid,
+                provider,
+                session.provider_session_id.as_deref(),
+                cwd,
+                out_path.as_path() as &Path,
+                SWARM_RUN_TIMEOUT,
+                ctx.pty_timings().waiting_idle,
+                SWARM_STUCK_IDLE,
+                Some(transcript_ok),
+                on_status,
+            )
+            .await;
 
         if let Some(raw) = outcome.raw {
             // Best-effort per-turn token/cost backfill so verify/fix spend counts
             // against the swarm budget (review M3). Bounded to this turn.
             let (toks_in, toks_out, cost) =
-                crate::swarm_run::session_usage(ctx, Some(&sid), turn_started_at).await;
+                crate::runtime::run::session_usage(ctx, Some(&sid), turn_started_at).await;
             let _ = ctx
-                .swarm_repo
+                .swarm_repo()
                 .update_run_if_status(
                     &run_id,
                     &["queued", "running", "waiting"],
@@ -414,7 +401,7 @@ pub async fn run_swarm_agent(
         last_reason = outcome.reason;
         // Kill the stuck/failed session before the next attempt.
         if let Some(s) = outcome.session_id {
-            let _ = ctx.manager.kill_session(&s).await;
+            let _ = ctx.manager().kill_session(&s).await;
         }
     }
 
@@ -430,7 +417,7 @@ pub async fn run_swarm_agent(
 
 /// Patch a run's status (+ optional error/finished_at) and emit the update.
 async fn set_run(
-    ctx: &ServerCtx,
+    ctx: &SwarmRt,
     run_id: &str,
     status: &str,
     error: Option<String>,
@@ -452,7 +439,7 @@ async fn set_run(
         ..Default::default()
     };
     let changed = matches!(
-        ctx.swarm_repo
+        ctx.swarm_repo()
             .update_run_if_status(
                 &run_id.to_string(),
                 &["queued", "running", "waiting"],
