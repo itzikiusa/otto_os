@@ -38,7 +38,7 @@ use otto_core::workflows::{NodeStatus, Workflow, WorkflowRun};
 use otto_state::{TriggersRepo, WorkflowTrigger, WorkflowsRepo};
 use serde_json::{json, Value};
 
-use crate::state::ServerCtx;
+use crate::WorkflowCtx;
 
 /// Our own acknowledgement replies always start with this. Defensive loop
 /// guard: the Slack/Telegram adapters already drop the bot's own inbound
@@ -674,11 +674,11 @@ fn binding_candidates<'a>(
 }
 
 /// otto-server's implementation of the channel workflow trigger.
-pub struct WorkflowChatTriggerImpl {
-    pub ctx: ServerCtx,
+pub struct WorkflowChatTriggerImpl<C: WorkflowCtx> {
+    pub ctx: C,
 }
 
-impl WorkflowChatTriggerImpl {
+impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
     /// Shared run-start body for all three resolution paths: create the run
     /// row, spawn the workflow engine in the background, and build the ack.
     /// `detail` overrides the default tail sentence (legacy path reports
@@ -693,7 +693,7 @@ impl WorkflowChatTriggerImpl {
         channel: &str,
         chat: &str,
     ) -> Option<WorkflowChatAck> {
-        let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+        let repo = WorkflowsRepo::new(self.ctx.pool().clone());
         tracing::info!(
             "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
             wf.name,
@@ -704,15 +704,13 @@ impl WorkflowChatTriggerImpl {
             .create_run(&wf.id, &wf.workspace_id, &input, None)
             .await
             .ok()?;
-        let ws = self.ctx.workspaces.get(&wf.workspace_id).await.ok()?;
-        crate::workflow_engine::spawn_run(
-            self.ctx.clone(),
+        let ws = self.ctx.workspaces().get(&wf.workspace_id).await.ok()?;
+        self.ctx.spawn_run(
             ws,
             wf.clone(),
             run.id.clone(),
             input.clone(),
             otto_core::workflows::RunScope::default(),
-            None,
         );
 
         let tail = detail.unwrap_or_else(|| "Working through the steps now.".to_string());
@@ -802,7 +800,7 @@ impl WorkflowChatTriggerImpl {
 }
 
 #[async_trait]
-impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
+impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
     async fn try_start(
         &self,
         workspace_id: &str,
@@ -812,7 +810,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         user: &str,
         text: &str,
     ) -> Option<WorkflowChatAck> {
-        let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+        let repo = WorkflowsRepo::new(self.ctx.pool().clone());
 
         // (1) Legacy structured `Action: Workflow` command.
         if let Some(cmd) = parse_workflow_command(text) {
@@ -933,7 +931,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
             return None;
         }
         let has_mention = text.contains("<@");
-        let triggers_repo = TriggersRepo::new(self.ctx.pool.clone());
+        let triggers_repo = TriggersRepo::new(self.ctx.pool().clone());
         let triggers = match triggers_repo.list_enabled_by_kind("chat").await {
             Ok(t) => t,
             Err(e) => {
@@ -1002,7 +1000,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         // unconditionally (no active run / workflow binding required), plus the
         // workspace's actual workflows so users see what `Name:` can be.
         if control == WfControl::Help {
-            let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+            let repo = WorkflowsRepo::new(self.ctx.pool().clone());
             let mut reply = wf_controls_help();
             if let Ok(wfs) = repo.list(&workspace_id.to_string()).await {
                 if !wfs.is_empty() {
@@ -1030,7 +1028,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
         }
 
         // status / skip / abort target the run active on THIS thread.
-        let repo = WorkflowsRepo::new(self.ctx.pool.clone());
+        let repo = WorkflowsRepo::new(self.ctx.pool().clone());
         let run = self
             .find_active_run_for_thread(&repo, workspace_id, channel, chat, thread)
             .await?;
@@ -1079,9 +1077,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                         ),
                     });
                 }
-                if let Ok(mut s) = self.ctx.wf_skip_current.lock() {
-                    s.insert(crate::workflow_engine::skip_marker_key(&run.id, &current));
-                }
+                self.ctx.request_skip_current(&run.id, &current);
                 Some(WorkflowChatAck {
                     reply: format!("⏭️ Skipping the current step of run `{short}`."),
                 })
@@ -1094,7 +1090,7 @@ impl WorkflowChatTrigger for WorkflowChatTriggerImpl {
                 match repo.request_cancel(&run.id).await {
                     Ok(None) => {}
                     Ok(Some(rev)) => {
-                        let _ = self.ctx.events.send(Event::WorkflowRunUpdated {
+                        let _ = self.ctx.events().send(Event::WorkflowRunUpdated {
                             workspace_id: run.workspace_id.clone(),
                             run_id: run.id.clone(),
                             status: "canceled".into(),

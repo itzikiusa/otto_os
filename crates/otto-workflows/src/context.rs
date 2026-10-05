@@ -30,19 +30,19 @@ use serde_json::Value;
 
 /// Auto-generated run brief (mission, repos, planned steps) — replaces the
 /// old `wf-<run_id>-instruction.md`.
-pub(crate) const RUN_BRIEF_FILE: &str = "run-brief.md";
+pub const RUN_BRIEF_FILE: &str = "run-brief.md";
 /// Standing instructions for the workflow (verbatim copy of
 /// `workflow.instructions`) — written only when non-empty.
-pub(crate) const INSTRUCTIONS_FILE: &str = "instructions.md";
+pub const INSTRUCTIONS_FILE: &str = "instructions.md";
 /// This run's ask, verbatim — written only when a prompt exists.
-pub(crate) const PROMPT_FILE: &str = "prompt.md";
+pub const PROMPT_FILE: &str = "prompt.md";
 /// Copy of the last content-bearing, error-free step's `.md` — the run's
 /// deliverable, written on run success.
-pub(crate) const FINAL_OUTPUT_FILE: &str = "final-output.md";
+pub const FINAL_OUTPUT_FILE: &str = "final-output.md";
 
 /// Kinds whose step `.md` is never the run deliverable — bookkeeping/control
 /// nodes that don't produce content worth surfacing as `final-output.md`.
-pub(crate) fn is_utility_kind(kind: &str) -> bool {
+pub fn is_utility_kind(kind: &str) -> bool {
     matches!(
         kind,
         "manual_trigger" | "log" | "delay" | "channel_notify" | "budget_gate" | "human_approval"
@@ -61,7 +61,7 @@ const OUTPUT_JSON_CAP: usize = 5 * 1024 * 1024;
 /// rest. `error` marks an entry that could not be resolved — kept visible in
 /// the file rather than dropped, so a failing declaration is diagnosable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RepoEntry {
+pub struct RepoEntry {
     /// As declared: a repo id, name, or path.
     pub repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,7 +94,7 @@ pub(crate) struct RepoEntry {
 /// Parse the run input's `repos` array (tolerant: non-object items and
 /// entries without `repo`+`name` are skipped — normalization later marks
 /// resolution problems on the entries that DID parse).
-pub(crate) fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
+pub fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
     let Some(arr) = v.as_array() else {
         return vec![];
     };
@@ -133,7 +133,7 @@ pub(crate) fn parse_repo_entries(v: &Value) -> Vec<RepoEntry> {
 /// checked out at the run cwd" would silently review/PR the wrong target
 /// (and an empty diff there reads as a false-green). `None` ⇒ no declaration
 /// at all (legacy fallback is fine) or at least one valid entry.
-pub(crate) fn all_declared_errored(declared: &[RepoEntry]) -> Option<String> {
+pub fn all_declared_errored(declared: &[RepoEntry]) -> Option<String> {
     if declared.is_empty() || declared.iter().any(|e| e.error.is_none()) {
         return None;
     }
@@ -148,7 +148,7 @@ pub(crate) fn all_declared_errored(declared: &[RepoEntry]) -> Option<String> {
 
 /// `{repo_id, worktree, base}` — the reference shape `collect_pr_targets`
 /// and the loop's ref harvest already consume; nulls omitted.
-pub(crate) fn entry_to_target(e: &RepoEntry) -> Value {
+pub fn entry_to_target(e: &RepoEntry) -> Value {
     let mut m = serde_json::Map::new();
     if let Some(r) = &e.repo_id {
         m.insert("repo_id".into(), Value::String(r.clone()));
@@ -163,7 +163,7 @@ pub(crate) fn entry_to_target(e: &RepoEntry) -> Value {
 }
 
 /// File-name slug for a step name: lowercase, `[a-z0-9-]`, ≤ 40 chars.
-pub(crate) fn slug(name: &str) -> String {
+pub fn slug(name: &str) -> String {
     let mut s: String = name
         .to_lowercase()
         .chars()
@@ -184,12 +184,7 @@ pub(crate) fn slug(name: &str) -> String {
 /// Base file name (no extension) for a step: `step{N}-{slug}`, with the loop
 /// inner index (only when the caller needs disambiguation) and the iteration
 /// suffix the user's convention mandates: `step3-review-iter2`.
-pub(crate) fn step_base_name(
-    n: usize,
-    name: &str,
-    iter: Option<u64>,
-    inner_idx: Option<usize>,
-) -> String {
+pub fn step_base_name(n: usize, name: &str, iter: Option<u64>, inner_idx: Option<usize>) -> String {
     let mut out = format!("step{n}-{}", slug(name));
     if let Some(k) = inner_idx {
         out.push_str(&format!("-{k}"));
@@ -207,7 +202,7 @@ pub(crate) fn step_base_name(
 /// `prompt.md` were written for this run — the "How to use this directory"
 /// section only points agents at files that actually exist.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_brief(
+pub fn render_brief(
     wf_name: &str,
     wf_desc: &str,
     run_id: &str,
@@ -337,7 +332,7 @@ pub(crate) fn render_brief(
 /// Engine-side rendering of a step's `.md` when the node didn't write its own:
 /// full fidelity — an agent `reply` lands verbatim (never truncated), other
 /// outputs as pretty JSON.
-pub(crate) fn render_step_md(
+pub fn render_step_md(
     kind: &str,
     name: &str,
     out: &Value,
@@ -383,7 +378,7 @@ pub(crate) fn render_step_md(
 
 /// The context block prepended to agent-backed step prompts: where the files
 /// are, what to read, and the exact handoff file this step must write.
-pub(crate) fn agent_preamble(
+pub fn agent_preamble(
     dir: &str,
     has_instructions: bool,
     has_prompt: bool,
@@ -428,7 +423,7 @@ pub(crate) fn agent_preamble(
 /// never branch. The repos registry lives here because the engine is the
 /// single writer (nodes run sequentially); a `std::sync::Mutex` (never held
 /// across an await) keeps it `Sync` for the shared `RunEnv`.
-pub(crate) struct RunContextFiles {
+pub struct RunContextFiles {
     dir: Option<PathBuf>,
     run_id: String,
     repos: Mutex<Vec<RepoEntry>>,

@@ -2249,7 +2249,7 @@ reviews every entry (aggregate: `score` = min, `passed` = all; per-repo detail
 under `reviews[]`) and `git_pr` drafts/opens one PR per entry.
 
 **Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`,
-the file-based step-handoff layer (`workflow_context.rs`). Every write here is
+the file-based step-handoff layer (`otto_workflows::context`). Every write here is
 best-effort — a failure logs and the run continues; context files never fail a
 node.
 
@@ -3254,7 +3254,7 @@ both `create_run` and the spawned `run_workflow` call — so a fixed instruction
 engine's prompt normalization exactly like a chat-started run.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
-`otto-server::workflow_chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
+`otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
 every inbound Slack/Telegram/webhook message *before* normal session routing. Resolution order:
 
 1. **Legacy structured command** — a message declaring `Action: Workflow` + `Name:` (see

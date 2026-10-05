@@ -60,6 +60,7 @@ Otto.app (Tauri / otto-desktop)
 | `otto-canvas` | Canvas scene CRUD (file-backed visual scenes; agent-assist endpoints live in `otto-server`) |
 | `otto-design` | Design Hall artifact graph — projects, artifacts, content-addressed versions, typed `otto://design` links, FTS search, design signals, idempotent legacy import |
 | `otto-mcp` | MCP Control Plane — outbound MCP client + the governance pipeline every governed tool call funnels through; `outward/` holds the outward `otto.*` tool catalog, policy lists, `route_for` self-call map and the MCP HTTP JSON-RPC framing (server glue: `otto-server`'s `mcp_outward` / `mcp_http`) |
+| `otto-workflows` | Workflow engine pieces with no server dependency — node catalog, graph validation, retry policy, loop checkpoints, run context files, `prepare_context` helpers, chat + event triggers — behind the `WorkflowCtx` trait (the executor itself is still `otto-server/src/workflow_engine.rs`) |
 | `otto-workgraph` | Mission Control work-graph service (persist + audit + broadcast; projection lives in `otto-server`) |
 | `otto-usage` | Embedded ClickHouse usage/metrics |
 | `otto-skills` | Bundled, versioned skill library |

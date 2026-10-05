@@ -4583,6 +4583,7 @@ async fn teardown_pr_worktree(repo_path: &str, wt: PrWorktree) {
     let _ = git.delete_branch(&wt.branch, true).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_pr_review_inner(
     ctx: &ServerCtx,
     user: &otto_core::domain::User,
