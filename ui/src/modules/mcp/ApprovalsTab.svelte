@@ -132,7 +132,7 @@
       ondecided?.();
       await load();
     } catch (e) {
-      toastError('Couldn’t decision', e);
+      toastError('Couldn’t record the decision', e);
     } finally {
       const n = { ...busy };
       delete n[a.id];
