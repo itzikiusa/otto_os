@@ -21,11 +21,12 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
   import RegionPicker from './RegionPicker.svelte';
-  import { prettyJson, awsErrorText, serviceTabKey } from './util';
+  import { prettyJson, awsErrorText } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -381,13 +382,15 @@
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
           <button class="icon-btn more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
-        <div class="tabs" role="tablist" aria-label="Queue details">
-          {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
-            <button role="tab" tabindex={tab === id ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive))} title={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive)) ? 'Needs Edit on SQS' : ''}>{label}</button>
-          {/each}
-        </div>
+        <Tabs
+          label="Queue details"
+          idBase="sqs"
+          value={tab}
+          onchange={(id) => (tab = id)}
+          tabs={([['messages', 'Messages', canReceive], ['send', 'Send', canSend], ['attributes', 'Attributes', true], ['metrics', 'Metrics', true], ['redrive', 'Redrive', canRedrive]] as const).map(([id, label, ok]) => ({ id, label, disabled: !ok, title: ok ? undefined : 'Needs Edit on SQS' }))}
+        />
 
-        <div class="tab-body">
+        <div class="tab-body" role="tabpanel" id="sqs-panel-{tab}" aria-labelledby="sqs-tab-{tab}">
           {#if tab === 'messages'}
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
@@ -616,29 +619,6 @@
   }
   .more {
     margin-inline-start: auto;
-  }
-  .tabs {
-    display: flex;
-    gap: 2px;
-    padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tabs button {
-    padding: 6px 10px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--fs-m);
-  }
-  .tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-  .tabs button:disabled {
-    opacity: var(--disabled-opacity);
-    cursor: not-allowed;
   }
   .tab-body {
     flex: 1;
