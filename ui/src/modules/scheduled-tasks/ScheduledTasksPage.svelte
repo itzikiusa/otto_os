@@ -9,6 +9,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import RelTime from '../../lib/components/RelTime.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
@@ -1006,7 +1007,9 @@
           actionLabel="New task"
           actionIcon="plus"
           onaction={startCreate}
-        />
+        >
+          <AutomateGuide current="scheduled-tasks" />
+        </EmptyState>
       {/snippet}
       <ul class="tasks">
         {#each list as t (t.id)}

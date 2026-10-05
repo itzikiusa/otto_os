@@ -7,6 +7,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -125,7 +126,9 @@
           actionLabel="New goal loop"
           actionIcon="plus"
           onaction={() => (creating = true)}
-        />
+        >
+          <AutomateGuide current="loops" />
+        </EmptyState>
       {/snippet}
       <ul class="cards">
         {#each list as l (l.id)}

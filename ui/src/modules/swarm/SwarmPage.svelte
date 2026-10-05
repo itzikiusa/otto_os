@@ -12,6 +12,7 @@
   import Icon, { type IconName } from '../../lib/components/Icon.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -659,6 +660,7 @@
               </button>
             {/if}
           </div>
+          <AutomateGuide current="swarm" />
         </EmptyState>
       {/if}
     {:else}

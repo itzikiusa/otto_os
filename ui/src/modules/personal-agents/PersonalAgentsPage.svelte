@@ -15,6 +15,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -189,7 +190,9 @@
             actionIcon="plus"
             variant="page"
             onaction={() => (creating = true)}
-          />
+          >
+            <AutomateGuide current="personal-agents" />
+          </EmptyState>
         {/snippet}
         {#if !primaryAgent && Object.keys(autonomyById).length > 0}
           <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as <strong>your agent</strong> (its Autonomy tab): your main assistant, routing specialist work to the others.</p>
