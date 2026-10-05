@@ -338,7 +338,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p == "/settings/skill-eval" {
         return Require(SkillEval, if put { Admin } else { View });
     }
-    if p.ends_with("/skill-evaluations/{id}/promote") || p.ends_with("/promote") {
+    // Exact template only (S8-13): a bare `ends_with("/promote")` would have
+    // silently put any future `…/promote` route (vault, design, memory) under
+    // SkillEval:Admin.
+    if p == "/skill-evaluations/{id}/promote" {
         return Require(SkillEval, Admin);
     }
     if p.starts_with("/workspaces/{id}/skill-evaluations")
@@ -2351,6 +2354,23 @@ mod tests {
             pol(Method::GET, "/api/v1/library/bundled"),
             Require(Skills, View)
         );
+    }
+
+    /// S8-13: only the exact skill-eval template is SkillEval:Admin — another
+    /// family's `…/promote` must not inherit it by suffix.
+    #[test]
+    fn promote_suffix_does_not_leak_into_other_families() {
+        for path in [
+            "/api/v1/vault/{id}/promote",
+            "/api/v1/design/artifacts/{id}/promote",
+            "/api/v1/memory/{id}/promote",
+        ] {
+            assert_ne!(
+                pol(Method::POST, path),
+                Require(SkillEval, Admin),
+                "{path} must not be governed by SkillEval by suffix"
+            );
+        }
     }
 
     #[test]
