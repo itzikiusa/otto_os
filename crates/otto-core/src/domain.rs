@@ -2524,6 +2524,9 @@ pub struct ScheduledTask {
     /// Internal dispatch/settlement ownership; never accepted from API clients.
     #[serde(skip)]
     pub schedule_generation: i64,
+    /// Internal eligibility epoch for pending dispatch; never supplied over HTTP.
+    #[serde(skip)]
+    pub admission_generation: i64,
     pub last_run_at: Option<String>,
     pub last_status: Option<String>,
     pub next_run_at: Option<String>,
