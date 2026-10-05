@@ -3,7 +3,7 @@
   import { api } from '../api/client';
   import type { Session, ProviderAccount } from '../api/types';
   import { ws } from '../stores/workspace.svelte';
-  import Terminal from './Terminal.svelte';
+  import LazyTerminal from './LazyTerminal.svelte';
   import { loadErrorText } from '../loadError';
   let { provider, value = '', workspaceId, onchange }: {
     provider: string; value?: string; workspaceId: string; onchange: (id: string) => void;
@@ -98,7 +98,7 @@
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if loginSession}
     <p>Complete the provider’s sign-in below, then check sign-in.</p>
-    <div class="login-terminal"><Terminal sessionId={loginSession.id} /></div>
+    <div class="login-terminal"><LazyTerminal sessionId={loginSession.id} /></div>
   {/if}
 </div>
 

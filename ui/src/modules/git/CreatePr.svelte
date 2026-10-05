@@ -4,7 +4,7 @@
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
@@ -321,7 +321,7 @@
     <!-- Live draft terminal, embedded right here in the git flow (the pr-draft
          session is a background source — it no longer appears under Agents). -->
     <div class="draft-term">
-      <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+      <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
     </div>
   {/if}
 

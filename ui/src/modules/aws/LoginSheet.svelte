@@ -5,7 +5,7 @@
   // permission probe and closes itself.
   import { onDestroy } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { awsApi } from '../../lib/api/aws';
   import { aws } from '../../lib/stores/aws.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -61,7 +61,7 @@
   </p>
   <div class="term">
     {#key sessionId}
-      <Terminal {sessionId} preferDom autoFocus showToolbar={false} />
+      <LazyTerminal {sessionId} preferDom autoFocus showToolbar={false} />
     {/key}
   </div>
   <p class="status" class:ok={done} aria-live="polite">{lastMsg}</p>

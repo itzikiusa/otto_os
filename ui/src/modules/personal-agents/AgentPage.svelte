@@ -10,7 +10,7 @@
   import { authedText } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
@@ -618,7 +618,7 @@
       <LoadState what="the chat session" error={chatError} empty onretry={() => { chatError = ''; chatSessionId = ''; chatAttempt += 1; }} />
     {:else if chatSessionId}
       <div class="chatwrap">
-        <Terminal sessionId={chatSessionId} autoFocus />
+        <LazyTerminal sessionId={chatSessionId} autoFocus />
       </div>
     {:else}
       <p class="muted" role="status">Opening {agent.name}’s chat session…</p>

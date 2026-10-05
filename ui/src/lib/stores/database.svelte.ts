@@ -65,6 +65,7 @@ import { clipHistory } from './clipHistory.svelte';
 import { loadErrorText } from '../loadError';
 import { announceModule } from '../lazyModule';
 import { toastError } from '../toastError';
+import { dbPrefs, loadFlag, saveFlag, type WarmMode } from './dbPrefs.svelte';
 
 /** Connection kinds the explorer can browse (the DB engines). */
 export const DB_KINDS = ['mysql', 'postgres', 'redis', 'mongodb', 'clickhouse'] as const;
@@ -109,30 +110,11 @@ function loadRowLimit(): number {
   return Number.isFinite(v) && v > 0 ? v : DEFAULT_ROW_LIMIT;
 }
 
-/** "Connect on click only" for restored tabs (see `warmRestored`). */
-const WARM_ON_CLICK_KEY = 'otto_db_warm_on_click';
-/** "Keep open connections alive" (see `keepAlive`). */
-const KEEP_ALIVE_KEY = 'otto_db_keep_alive';
 /** Restored tabs warmed at once (matches the bg lane's 3 app-wide sockets). */
 const WARM_CONCURRENCY = 3;
 /** Keep-alive period: under the daemon's 5-minute pool idle timeout. */
 const KEEP_ALIVE_MS = 4 * 60_000;
 
-/** Read a sticky boolean preference; missing/unreadable falls back to `def`. */
-function loadFlag(key: string, def: boolean): boolean {
-  if (typeof localStorage === 'undefined') return def;
-  const v = localStorage.getItem(key);
-  return v === null ? def : v === '1';
-}
-
-/** Persist a sticky boolean. Quota/private-mode failures are never fatal. */
-function saveFlag(key: string, on: boolean): void {
-  try {
-    localStorage.setItem(key, on ? '1' : '0');
-  } catch {
-    /* preference-only — losing it must not break the view */
-  }
-}
 
 /**
  * A fresh per-run id sent with a query so the server can register it and a later
@@ -2322,25 +2304,26 @@ class DatabaseStore {
     return this.warming.has(id);
   }
 
-  /**
-   * Restored tabs other than the active one: `background` (default) connects
-   * them 3 at a time behind the active tab; `on-click` leaves them "Not
-   * connected yet" until the user opens one. Persisted.
-   */
-  warmRestored: 'background' | 'on-click' = $state(
-    loadFlag(WARM_ON_CLICK_KEY, false) ? 'on-click' : 'background',
-  );
-  setWarmRestored(mode: 'background' | 'on-click'): void {
-    this.warmRestored = mode;
-    saveFlag(WARM_ON_CLICK_KEY, mode === 'on-click');
+  /** Restored-tab warming mode — lives in `dbPrefs` (Settings reads it without
+   *  loading this store); see `DbPrefs.warmRestored`. */
+  get warmRestored(): WarmMode {
+    return dbPrefs.warmRestored;
+  }
+  setWarmRestored(mode: WarmMode): void {
+    dbPrefs.setWarmRestored(mode);
   }
 
-  /** Ping open, ready connections every 4 min so pools/tunnels don't idle out
-   *  and a dropped one turns red BEFORE the next query. Persisted, default on. */
-  keepAlive = $state(loadFlag(KEEP_ALIVE_KEY, true));
+  /** Connection keep-alive toggle — lives in `dbPrefs`; flipping it there (from
+   *  here or Settings) starts/stops the poller via the subscription below the
+   *  class. */
+  get keepAlive(): boolean {
+    return dbPrefs.keepAlive;
+  }
   setKeepAlive(on: boolean): void {
-    this.keepAlive = on;
-    saveFlag(KEEP_ALIVE_KEY, on);
+    dbPrefs.setKeepAlive(on);
+  }
+  /** React to a keep-alive toggle (wired to `dbPrefs.onKeepAliveChange`). */
+  applyKeepAlive(on: boolean): void {
     if (on) this.ensureKeepAlive();
     else this.stopKeepAlive();
   }
@@ -4414,6 +4397,8 @@ export const database = new DatabaseStore();
 // Routed by `peek()` in lib/events.svelte.ts (perf G2): let it see this store
 // however it was first imported.
 announceModule('database', database);
+// Settings → Appearance flips the keep-alive pref without importing this store.
+dbPrefs.onKeepAliveChange((on) => database.applyKeepAlive(on));
 // Copies made while a masked tab is active never reach the clipboard ring.
 clipHistory.setGuard(() => database.tab?.mask === true);
 if (typeof window !== 'undefined') {

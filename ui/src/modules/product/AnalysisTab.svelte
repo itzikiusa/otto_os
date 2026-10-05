@@ -7,7 +7,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { runStatus, type StatusInfo } from '../../lib/status';
@@ -270,7 +270,7 @@
   }
 
   // Inline terminal state — multiple may be open at once, keyed by session id.
-  // NOTE: No ws.openSession() here — the inline <Terminal sessionId={...} />
+  // NOTE: No ws.openSession() here — the inline <LazyTerminal sessionId={...} />
   // connects directly by id. Calling openSession would push it into the Agents
   // grid sidebar which we don't want.
   let openTerminals = $state<Set<string>>(new Set());
@@ -505,7 +505,7 @@
           {#if summarizerAgent?.session_id && openTerminals.has(summarizerAgent.session_id)}
             <div class="rp-term">
               {#key summarizerAgent.session_id}
-                <Terminal sessionId={summarizerAgent.session_id} forceDark preferDom resumeOnOpen={false} />
+                <LazyTerminal sessionId={summarizerAgent.session_id} forceDark preferDom resumeOnOpen={false} />
               {/key}
             </div>
           {/if}
@@ -567,7 +567,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                    <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                   {/key}
                 </div>
               {/if}
@@ -614,7 +614,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                    <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                   {/key}
                 </div>
               {/if}
@@ -787,7 +787,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="rp-term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}

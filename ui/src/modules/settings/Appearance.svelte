@@ -14,7 +14,7 @@
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
-  import { database } from '../../lib/stores/database.svelte';
+  import { dbPrefs } from '../../lib/stores/dbPrefs.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -399,15 +399,15 @@
   <SettingToggle
     label="Connect restored tabs on click only"
     hint="After a reload only the active connection connects; the other tabs wait, marked “Not connected yet”, until you open one. Off: they connect in the background, three at a time."
-    checked={database.warmRestored === 'on-click'}
-    onchange={(on) => database.setWarmRestored(on ? 'on-click' : 'background')}
+    checked={dbPrefs.warmRestored === 'on-click'}
+    onchange={(on) => dbPrefs.setWarmRestored(on ? 'on-click' : 'background')}
     testid="db-warm-on-click"
   />
   <SettingToggle
     label="Keep open connections alive"
     hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don’t close from inactivity, and a dropped one shows red before your next query."
-    checked={database.keepAlive}
-    onchange={(on) => database.setKeepAlive(on)}
+    checked={dbPrefs.keepAlive}
+    onchange={(on) => dbPrefs.setKeepAlive(on)}
     testid="db-keep-alive"
   />
   <SettingToggle

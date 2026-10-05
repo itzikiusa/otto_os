@@ -28,7 +28,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import NamespacePicker from './NamespacePicker.svelte';
   import ResourceTable from './ResourceTable.svelte';
   import ResourceDrawer from './ResourceDrawer.svelte';
@@ -438,7 +438,7 @@
       </div>
       <div class="k9s-term">
         {#key k8s.k9sSessionId}
-          <Terminal sessionId={k8s.k9sSessionId} preferDom autoFocus forceDark />
+          <LazyTerminal sessionId={k8s.k9sSessionId} preferDom autoFocus forceDark />
         {/key}
       </div>
     </div>

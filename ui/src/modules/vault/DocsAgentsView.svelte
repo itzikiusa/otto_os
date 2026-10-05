@@ -16,7 +16,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import Switch from '../../lib/components/Switch.svelte';
   import Modal from '../../lib/components/Modal.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { api } from '../../lib/api/client';
   import { contextApi } from '../../lib/api/context';
   import type {
@@ -756,7 +756,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -802,7 +802,7 @@
             {#if run.summarizer.session_id && openTerminals.has(run.summarizer.session_id)}
               <div class="term">
                 {#key run.summarizer.session_id}
-                  <Terminal sessionId={run.summarizer.session_id} preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={run.summarizer.session_id} preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -922,7 +922,7 @@
                       {#if reviewer.session_id && openTerminals.has(reviewer.session_id)}
                         <div class="term">
                           {#key reviewer.session_id}
-                            <Terminal sessionId={reviewer.session_id} preferDom resumeOnOpen={false} />
+                            <LazyTerminal sessionId={reviewer.session_id} preferDom resumeOnOpen={false} />
                           {/key}
                         </div>
                       {/if}
@@ -974,7 +974,7 @@
                     {#if round.revision.session_id && openTerminals.has(round.revision.session_id)}
                       <div class="term">
                         {#key round.revision.session_id}
-                          <Terminal sessionId={round.revision.session_id} preferDom resumeOnOpen={false} />
+                          <LazyTerminal sessionId={round.revision.session_id} preferDom resumeOnOpen={false} />
                         {/key}
                       </div>
                     {/if}

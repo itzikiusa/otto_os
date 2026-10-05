@@ -26,7 +26,7 @@
   import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
 
@@ -961,7 +961,7 @@
     {/if}
     {#if liveDraftId && showDraftTerm}
       <div class="draft-term">
-        <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+        <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
       </div>
     {/if}
     <textarea

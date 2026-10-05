@@ -8,7 +8,7 @@
   import { toastError } from '../../lib/toastError';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
@@ -152,7 +152,7 @@
   <div class="shell">
     {#if canvas.sessionId}
       {#key canvas.sessionId}
-        <Terminal sessionId={canvas.sessionId} readOnly={false} forceDark preferDom />
+        <LazyTerminal sessionId={canvas.sessionId} readOnly={false} forceDark preferDom />
       {/key}
     {:else}
       <div class="empty">

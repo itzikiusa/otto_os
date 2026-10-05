@@ -9,7 +9,7 @@
   // to the global Agents panel. Nothing here is a general/all-workflows list.
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { WorkflowRun, Review, Session } from '../../lib/api/types';
   import { api } from '../../lib/api/client';
@@ -269,7 +269,7 @@
             {#if expanded[sid]}
               <div class="term">
                 {#key sid}
-                  <Terminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={sid} resumable preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
