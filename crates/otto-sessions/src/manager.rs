@@ -3939,9 +3939,7 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<()> {
-        if !(1..=500).contains(&cols) || !(1..=300).contains(&rows) {
-            return Err(Error::Invalid("terminal dimensions out of range".into()));
-        }
+        otto_pty::validate_resize(cols, rows)?;
         let permit = self.room_authority.entry(id).lock_owned().await;
         let handle = self
             .live_handle(id)
@@ -3984,6 +3982,9 @@ impl SessionManager {
         cols: u16,
         rows: u16,
     ) -> Result<()> {
+        // Reject a hostile/buggy grid up front (also enforced inside
+        // `PtyHandle::resize`, the choke point every path funnels through).
+        otto_pty::validate_resize(cols, rows)?;
         let mut permit = self.room_authority.entry(id).lock_owned().await;
         let handle = self
             .live_handle(id)
@@ -4110,6 +4111,7 @@ impl SessionManager {
 
     /// Trusted internal terminal resize; normal viewers use `human_resize`.
     pub async fn resize(&self, id: &Id, cols: u16, rows: u16) -> Result<()> {
+        otto_pty::validate_resize(cols, rows)?;
         let mut permit = self.room_authority.entry(id).lock_owned().await;
         let handle = self
             .live_handle(id)
@@ -6935,6 +6937,34 @@ mod tests {
             .insert(other.clone(), Arc::new(PtyHandle::spawn(&spec).unwrap()));
         mgr.input(&other, b"x").await.unwrap();
         assert!(mgr.capture_probes.get(&other).is_none());
+    }
+
+    /// A viewer's zero/huge grid is `Invalid` and never reaches the PTY (a
+    /// 65535² grid aborted the daemon; rows=0 froze the session's output).
+    #[tokio::test]
+    async fn human_resize_rejects_out_of_range_grids() {
+        let (mgr, repo, ws, owner) = test_manager().await;
+        let id = seed_session(&repo, &ws, &owner, None).await;
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: Some("/".into()),
+            env: vec![],
+        };
+        let handle = Arc::new(PtyHandle::spawn_sized(&spec, 100, 30).unwrap());
+        mgr.live.insert(id.clone(), Arc::clone(&handle));
+        for (c, r) in [(0, 24), (80, 0), (65535, 65535)] {
+            let err = mgr
+                .human_resize(&id, &owner, false, c, r)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{c}x{r}: {err:?}");
+            assert!(mgr.resize(&id, c, r).await.is_err());
+        }
+        assert_eq!(handle.size(), (100, 30));
+        mgr.human_resize(&id, &owner, false, 90, 25).await.unwrap();
+        assert_eq!(handle.size(), (90, 25));
+        let _ = handle.kill();
     }
 
     #[tokio::test]

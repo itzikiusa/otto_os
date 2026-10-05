@@ -59,6 +59,26 @@ pub fn resolve_grid(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
     };
     (c, r)
 }
+
+/// Hard bounds for a LIVE resize (WS viewers, rooms, the holder's RESIZE
+/// frame). Wider than the restore bounds above — a big monitor can exceed 200
+/// rows — but finite: the emulator allocates `cols × rows` cells eagerly, so
+/// 65535×65535 is a ~137 GB allocation abort, and a zero dimension underflows
+/// the grid math and panics the reader thread (frozen output).
+pub const RESIZE_MAX_COLS: u16 = 500;
+pub const RESIZE_MAX_ROWS: u16 = 300;
+
+/// Reject a live grid outside `1..=RESIZE_MAX_COLS × 1..=RESIZE_MAX_ROWS`.
+pub fn validate_resize(cols: u16, rows: u16) -> Result<()> {
+    if (1..=RESIZE_MAX_COLS).contains(&cols) && (1..=RESIZE_MAX_ROWS).contains(&rows) {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "terminal dimensions out of range: {cols}x{rows} (max {RESIZE_MAX_COLS}x{RESIZE_MAX_ROWS})"
+        )))
+    }
+}
+
 /// Capacity of the output broadcast channel (chunks).
 const BROADCAST_CAPACITY: usize = 1024;
 /// Largest single PTY read (and the smallest block remainder worth reading into).
@@ -435,6 +455,13 @@ impl PtyHandle {
         rows: u16,
         ring: RingBuffer,
     ) -> Result<PtyHandle> {
+        // Defensive: a zero/huge spawn grid has the same failure modes as a
+        // bad resize (callers normally pass `resolve_grid` output already).
+        let (cols, rows) = if validate_resize(cols, rows).is_ok() {
+            (cols, rows)
+        } else {
+            (DEFAULT_COLS, DEFAULT_ROWS)
+        };
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -749,7 +776,12 @@ impl PtyHandle {
     /// CPU work, so on a multi-threaded tokio runtime it runs inside
     /// `block_in_place`: the calling worker hands its other tasks to the pool
     /// instead of stalling them (r3-06-02).
+    ///
+    /// Out-of-range grids are rejected ([`validate_resize`]) before anything
+    /// is touched — this is the single choke point every resize path funnels
+    /// through (WS viewers, rooms, the holder's RESIZE frame).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        validate_resize(cols, rows)?;
         let mut parser = lock_unpoisoned(&self.mirror.parser);
         if parser.screen().size() == (rows, cols) {
             return Ok(());
@@ -1173,6 +1205,53 @@ mod tests {
         // Same size again: a no-op on every runtime flavour.
         handle.resize(90, 30).expect("same-size resize");
         assert_eq!(handle.size(), (90, 30));
+    }
+
+    /// A zero or huge grid is rejected before the emulator is touched: rows=0
+    /// used to underflow the grid math (reader-thread panic → frozen output)
+    /// and 65535×65535 was a ~137 GB eager allocation that aborted the daemon.
+    #[tokio::test]
+    async fn resize_rejects_zero_and_huge_grids() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 100, 30).expect("spawn");
+        for (c, r) in [
+            (0, 30),
+            (100, 0),
+            (0, 0),
+            (65535, 65535),
+            (501, 30),
+            (100, 301),
+        ] {
+            let err = handle.resize(c, r).expect_err("out-of-range resize");
+            assert!(matches!(err, Error::Invalid(_)), "{c}x{r}: {err:?}");
+            assert_eq!(handle.size(), (100, 30), "{c}x{r} must not touch the grid");
+        }
+        // The bounds themselves are accepted, and the PTY still works.
+        handle
+            .resize(RESIZE_MAX_COLS, RESIZE_MAX_ROWS)
+            .expect("max grid");
+        handle.resize(1, 1).expect("min grid");
+        assert_eq!(handle.size(), (1, 1));
+        let _ = handle.kill();
+    }
+
+    /// A bad spawn grid falls back to the default instead of panicking.
+    #[tokio::test]
+    async fn spawn_with_zero_grid_uses_default() {
+        let spec = CommandSpec {
+            program: "/bin/cat".into(),
+            args: vec![],
+            cwd: None,
+            env: vec![],
+        };
+        let handle = PtyHandle::spawn_sized(&spec, 0, 0).expect("spawn");
+        assert_eq!(handle.size(), (DEFAULT_COLS, DEFAULT_ROWS));
+        let _ = handle.kill();
     }
 
     #[tokio::test]
