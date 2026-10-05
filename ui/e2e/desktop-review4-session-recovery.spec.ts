@@ -2,6 +2,8 @@ import {test, expect, type APIRequestContext, type Page} from '@playwright/test'
 import type {HistoryEntry, HistoryStatus, Transcript, Turn} from '../src/lib/api/types';
 import {apiCtx, seedWorkspace} from './seed';
 import {withUsage} from './chat-fixture';
+import {heapAfterGC, watchLongTasks, longTasks, dist} from './perf';
+import {execFileSync} from 'node:child_process';
 
 test.use({serviceWorkers: 'block'});
 let ctx: APIRequestContext, base: string, wsId: string, sessionId: string;
@@ -196,6 +198,44 @@ test('History resume completion preserves navigation made while the response was
   } finally { release(); }
 });
 
+test('History resume preserves an accepted destination while its page readiness is pending', async ({page}) => {
+  await historyFixture(page, () => historyRow('working'));
+  let release!: () => void;
+  const held = new Promise<void>(resolve => {release = resolve;});
+  let requested = false;
+  await page.route(`**/sessions/${sessionId}/resume`, async route => {
+    const response = await route.fetch(); requested = true;
+    await held; await route.fulfill({response});
+  });
+  try {
+    await page.goto('/#/history');
+    await page.getByTestId('history-resume').click();
+    await expect.poll(() => requested).toBe(true);
+    // Control only the router's public page-readiness hook. The real router
+    // accepts the hash but keeps History mounted until this promise settles.
+    await page.evaluate(async () => {
+      const path = '/src/lib/router.svelte.ts';
+      const {router} = await import(path);
+      const host = window as unknown as {releaseReviewRoute?: () => void};
+      const ready = new Promise<void>(resolve => {host.releaseReviewRoute = resolve;});
+      router.setPrepare((parts: readonly string[]) => parts[0] === 'settings' ? ready : null);
+      router.go('settings/insights');
+    });
+    await expect.poll(() => page.evaluate(async () => {
+      const path = '/src/lib/router.svelte.ts';
+      return (await import(path)).router.pendingTarget?.[0];
+    })).toBe('settings');
+    await expect(page.getByTestId('history-resume')).toBeVisible();
+    const completed = page.waitForResponse(response => response.url().endsWith(`/sessions/${sessionId}/resume`));
+    release(); await (await completed).finished();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(page).toHaveURL(/#\/settings\/insights$/);
+  } finally {
+    release();
+    await page.evaluate(() => (window as unknown as {releaseReviewRoute?: () => void}).releaseReviewRoute?.()).catch(() => {});
+  }
+});
+
 test('History import keeps a failed resume on screen and retries without importing twice', async ({page}) => {
   await historyFixture(page, () => historyRow('on_disk'));
   const calls: string[] = [];
@@ -222,4 +262,83 @@ test('History import keeps a failed resume on screen and retries without importi
   await expect(page).toHaveURL(new RegExp(`#/agents/${sessionId}$`));
   await expect(page.locator('.conv[data-loaded="true"]')).toBeVisible();
   expect(calls).toEqual(['import', 'resume', 'resume']);
+});
+
+
+test('child history allocation recovers after 100 mounted inspections and 1200-turn paging', async ({page, browser}, info) => {
+  test.setTimeout(180_000);
+  let childReads = 0;
+  await page.route(`**/sessions/${sessionId}/transcript?*`, route => {
+    const params = new URL(route.request().url()).searchParams;
+    if (!params.has('sub')) {
+      const parent = turn(1);
+      parent.blocks = [{kind: 'subagent', agent_id: 'child', description: 'Measured child', agent_type: 'reviewer', status: 'done'}];
+      return route.fulfill({json: transcriptPage([parent])});
+    }
+    childReads++;
+    const end = Number(params.get('before') ?? 1200), start = Math.max(0, end - 60);
+    const turns = Array.from({length: end - start}, (_, i) => {
+      const row = turn(start + i);
+      row.blocks = [{kind: 'text', md: `Child checkpoint ${start + i}. ` + 'Bounded child content. '.repeat(100)}];
+      return row;
+    });
+    const response = transcriptPage(turns, String(start), start > 0);
+    response.stats.turns = 1200;
+    return route.fulfill({json: response});
+  });
+  await openChat(page);
+  const steps = page.locator('.conv .steps-head');
+  if (await steps.getAttribute('aria-expanded') === 'false') await steps.click();
+  const card = page.locator('.sub[data-agent="child"]'), toggle = card.locator('.sub-head');
+  const inspect = async () => {
+    await toggle.click(); await expect(card.locator('.sub-body .turn')).toHaveCount(60);
+    await toggle.click(); await expect(card.locator('.sub-body')).toHaveCount(0);
+  };
+  // Warm the actual render/module caches before comparing retained allocations.
+  for (let i = 0; i < 10; i++) await inspect();
+  const cdp = await browser.newBrowserCDPSession();
+  const samples: unknown[] = [];
+  const sample = async (phase: string) => {
+    const heapBytes = await heapAfterGC(page);
+    const {processInfo} = await cdp.send('SystemInfo.getProcessInfo');
+    const ids = processInfo.map(p => Number(p.id)).filter(Number.isSafeInteger);
+    const rss = execFileSync('ps', ['-p', ids.join(','), '-o', 'pid=,rss='], {encoding: 'utf8'});
+    const rssByPid = Object.fromEntries(rss.trim().split('\n').map(row => row.trim().split(/\s+/).map(Number)));
+    const retained = await page.evaluate(async id => {
+      const path = '/src/lib/stores/transcript.svelte.ts';
+      const {transcript} = await import(path);
+      return {bodies: Object.keys(transcript.peek(id)?.subagents ?? {}).length, domNodes: document.querySelectorAll('*').length};
+    }, sessionId);
+    samples.push({phase, wallMs: Date.now(), heapBytes, ...retained,
+      processes: processInfo.map(p => ({type: p.type, pid: p.id, cpuSeconds: p.cpuTime, rssKiB: rssByPid[p.id] ?? null}))});
+    expect(retained.bodies).toBe(0);
+  };
+  try {
+    await watchLongTasks(page);
+    await sample('warm');
+    const timings: number[] = [];
+    for (let i = 0; i < 100; i++) {
+      const start = performance.now(); await inspect(); timings.push(performance.now() - start);
+      if ((i + 1) % 20 === 0) await sample(`inspection-${i + 1}`);
+    }
+    await toggle.click();
+    await expect(card).toContainText('Child checkpoint 1199.');
+    for (let pageIndex = 0; pageIndex < 19; pageIndex++) {
+      await card.getByRole('button', {name: 'Load earlier', exact: true}).click();
+      await expect(card).toContainText(`Child checkpoint ${1140 - (pageIndex + 1) * 60}.`);
+      await expect(card.locator('.sub-body .turn')).toHaveCount(60);
+    }
+    await expect(card.getByRole('button', {name: 'Load earlier', exact: true})).toHaveCount(0);
+    for (let pageIndex = 0; pageIndex < 19; pageIndex++) {
+      await card.getByRole('button', {name: 'Load newer', exact: true}).click();
+      await expect(card).toContainText(`Child checkpoint ${(pageIndex + 1) * 60}.`);
+      await expect(card.locator('.sub-body .turn')).toHaveCount(60);
+    }
+    await toggle.click(); await expect(card.locator('.sub-body')).toHaveCount(0);
+    await sample('paging-recovered');
+    for (let i = 0; i < 100; i++) await inspect();
+    await sample('repeat-100-recovered');
+    const report = {scope: 'One mounted parent; 1200 synthetic child turns; browser processes only. Initial100 inspection timings; an additional100 inspections check recovery after paging. ForcedGC between checkpoints. Measured timings/RSS are observations, not a native-app guarantee.', childReads, inspectionMs: dist(timings), longTaskMs: dist(await longTasks(page)), samples};
+    await info.attach('child-allocation-measurements', {body: JSON.stringify(report, null, 2), contentType: 'application/json'});
+  } finally { await cdp.detach(); }
 });

@@ -90,11 +90,12 @@ for (const outcome of ['stopped', 'paused'] as const) test(`ending the room wait
   await expect.poll(() => actions.some(action => action.type === 'end')).toBeTruthy();
 });
 
-test('open room recap replaces archive identity and discards the old pending page', async ({page}) => {
+test('open room recap replaces archive identity and discards the old pending page after revision failure and retry', async ({page}) => {
   await page.clock.install();
   await page.clock.pauseAt(new Date());
   let membership: import('@playwright/test').WebSocketRoute;
   let oldPageRequested = false;
+  let failNextRevision = false;
   let releaseOld!: () => void;
   const heldOld = new Promise<void>(resolve => { releaseOld = resolve; });
   const room = {room_id: 'finalize', member_id: 'host', host_member_id: 'host', admission: 'admitted', session_title: 'Archive identity fixture', members: [], presentations: [], recap: {id: 'archive-A', state: 'stopped', epoch: 2, pending_jobs: 0, consented_member_ids: [], reason: null, started_at: null}};
@@ -105,6 +106,11 @@ test('open room recap replaces archive identity and discards the old pending pag
     const isOld = id === 'archive-A';
     const metadata = {...detail.metadata, id, room_id: 'finalize', speech_available: false, last_seq: isOld ? 101 : 1, session_title: isOld ? 'Original archive' : 'Replacement archive'};
     if (url.pathname.endsWith('/revision')) {
+      if (isOld && failNextRevision) {
+        failNextRevision = false;
+        await route.fulfill({status: 503, json: {code: 'unavailable', message: 'Synthetic revision failure'}});
+        return;
+      }
       await route.fulfill({json: {metadata, events_revision: `${id}-events`, draft_revision: null}});
       return;
     }
@@ -126,7 +132,10 @@ test('open room recap replaces archive identity and discards the old pending pag
     await page.getByRole('button', {name: 'Open recap', exact: true}).click();
     const modal = page.getByRole('dialog', {name: 'Room recap', exact: true});
     await expect(modal.getByText('Old archive event 1', {exact: true})).toBeVisible();
+    failNextRevision = true;
     await modal.getByRole('button', {name: 'Next events', exact: true}).click();
+    await expect(modal.getByRole('alert')).toContainText('Synthetic revision failure');
+    await modal.getByRole('button', {name: 'Retry', exact: true}).click();
     await expect.poll(() => oldPageRequested).toBe(true);
     membership!.send(JSON.stringify({type: 'snapshot', room: {...room, recap: {...room.recap, id: 'archive-B'}}}));
     // The clock is paused: switching identity must remount immediately, without

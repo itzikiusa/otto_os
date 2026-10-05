@@ -1,6 +1,8 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { apiCtx, seedWorkspace } from './seed';
 
+test.use({serviceWorkers: 'block'});
+
 // Route fixture bounds history deterministically; the Rust route regression
 // separately seeds 50k actual SQLite revisions. No user file/history is touched.
 let ctx: APIRequestContext, base: string, workspaceId: string;
@@ -18,7 +20,7 @@ test('history pages stay bounded while oldest revision remains selectable, compa
   });
   expect(created.ok()).toBe(true);
   const doc = await created.json();
-  let head = 305;
+  let head = 305, failOlder = true;
   const pages: { before: number | null; limit: number | null }[] = [];
   const details: number[] = [], restores: number[] = [];
   const revision = (seq: number) => ({ seq, kind: 'checkpoint', content_hash: 'a'.repeat(64), size: 10, created_at: '2026-10-05T00:00:00Z', updated_at: '2026-10-05T00:00:00Z', saves: 1, restored_from: null });
@@ -27,6 +29,10 @@ test('history pages stay bounded while oldest revision remains selectable, compa
     const limit = u.searchParams.has('limit') ? Number(u.searchParams.get('limit')) : null;
     const before = u.searchParams.has('before_seq') ? Number(u.searchParams.get('before_seq')) : null;
     pages.push({ limit, before });
+    if (before === 206 && failOlder) {
+      failOlder = false;
+      return route.fulfill({status: 503, json: {code: 'unavailable', message: 'Synthetic older history failure'}});
+    }
     // Model the old unbounded endpoint when a client does not request a page,
     // so the test independently requires the UI to request bounded metadata.
     const end = Math.min(head, (before ?? head + 1) - 1), count = Math.min(end, limit ?? head);
@@ -45,11 +51,23 @@ test('history pages stay bounded while oldest revision remains selectable, compa
   await page.getByTestId('wb-history-toggle').click();
   const history = page.getByTestId('wb-history'), rows = history.getByTestId('wb-rev-row');
   await expect(rows).toHaveCount(100);
-  for (const oldestVisible of [106, 6, 1]) {
+  head = 306; // A concurrent insertion must not shift an exclusive older cursor.
+  await history.getByRole('button', {name: 'Older revisions', exact: true}).click();
+  await expect(history).toContainText('Synthetic older history failure');
+  await expect(rows.first()).toHaveAttribute('data-seq', '305');
+  await expect(rows.last()).toHaveAttribute('data-seq', '206');
+  await history.getByRole('button', {name: 'Retry', exact: true}).click();
+  await expect(rows.first()).toHaveAttribute('data-seq', '205');
+  await expect(rows.last()).toHaveAttribute('data-seq', '106');
+  for (const oldestVisible of [6, 1]) {
     await history.getByRole('button', { name: 'Older revisions', exact: true }).click();
     await expect(rows.last()).toHaveAttribute('data-seq', String(oldestVisible));
     expect(await rows.count()).toBeLessThanOrEqual(100);
   }
+  await history.getByRole('button', {name: 'Newer revisions', exact: true}).click();
+  await expect(rows.last()).toHaveAttribute('data-seq', '6');
+  await history.getByRole('button', {name: 'Older revisions', exact: true}).click();
+  await expect(rows.last()).toHaveAttribute('data-seq', '1');
   await rows.filter({ hasText: '#1' }).last().click();
   await expect.poll(() => details.includes(1)).toBe(true);
   const compare = history.getByLabel('Compare revision', { exact: true });
@@ -59,7 +77,7 @@ test('history pages stay bounded while oldest revision remains selectable, compa
   await history.getByTestId('wb-rev-restore').click();
   await page.locator('.sheet[role="dialog"]').last().getByRole('button', { name: 'Restore', exact: true }).click();
   await expect.poll(() => restores).toEqual([1]);
-  await expect(rows.first()).toHaveAttribute('data-seq', '306');
+  await expect(rows.first()).toHaveAttribute('data-seq', '307');
   expect(await rows.count()).toBeLessThanOrEqual(100);
   expect(pages.every(p => p.limit !== null && p.limit >= 1 && p.limit <= 200)).toBe(true);
   expect(pages.some(p => p.before === 206)).toBe(true);
