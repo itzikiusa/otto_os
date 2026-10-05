@@ -639,7 +639,10 @@ mod tests {
         assert!(!sbpl.contains(&format!("(subpath \"{data}/bin\")")));
         assert!(!sbpl.contains(&format!("(subpath \"{data}/provider-accounts\")")));
         // Not readable at all.
-        let hidden = at(&sbpl, "(deny file-read*");
+        let hidden = at(
+            &sbpl,
+            &format!("(deny file-read* (literal \"{data}/secrets.json\")"),
+        );
         assert!(hidden > deny);
         assert!(sbpl.contains(&format!("(literal \"{data}/secrets.json\")")));
         assert!(sbpl.contains(&format!("(prefix \"{data}/otto.db\")")));
