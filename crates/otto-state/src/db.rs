@@ -681,7 +681,7 @@ mod tests {
             .await
             .expect("an older binary must boot on a newer additive schema");
         // Left in place — never un-applied or deleted.
-        assert!(versions(&pool).await.contains(&99999999999999));
+        assert!(versions(pool.writer()).await.contains(&99999999999999));
         // And a newer-only DB is not "pending": no snapshot was taken.
         assert!(!dir.path().join("backups").exists());
     }
