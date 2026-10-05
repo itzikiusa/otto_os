@@ -840,14 +840,21 @@ mod tests {
             .create_skill_file("editable", "SKILL.md", "")
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-        assert_eq!(lib.read_skill_file("editable", "SKILL.md").unwrap().0, before);
+        assert_eq!(
+            lib.read_skill_file("editable", "SKILL.md").unwrap().0,
+            before
+        );
         lib.create_skill_file("editable", "references/new.md", "")
             .unwrap();
         assert_eq!(
-            lib.read_skill_file("editable", "references/new.md").unwrap().0,
+            lib.read_skill_file("editable", "references/new.md")
+                .unwrap()
+                .0,
             ""
         );
-        assert!(lib.create_skill_file("editable", "../evil.md", "x").is_err());
+        assert!(lib
+            .create_skill_file("editable", "../evil.md", "x")
+            .is_err());
 
         // Unsafe paths rejected.
         assert!(lib.write_skill_file("editable", "../evil.md", "x").is_err());

@@ -179,10 +179,17 @@ mod tests {
     async fn ctx_with_user() -> (tempfile::TempDir, ServerCtx, User) {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
-            .connect_with(SqliteConnectOptions::new().in_memory(true).foreign_keys(true))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .in_memory(true)
+                    .foreign_keys(true),
+            )
             .await
             .unwrap();
-        sqlx::migrate!("../otto-state/migrations").run(&pool).await.unwrap();
+        sqlx::migrate!("../otto-state/migrations")
+            .run(&pool)
+            .await
+            .unwrap();
         let pool: otto_state::DbPool = pool.into();
         let user = User {
             id: "u1".into(),
@@ -224,6 +231,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err.0, Error::Invalid(_)), "{err:?}");
-        assert!(repo.get(&user.id).await.unwrap().unwrap().verified_at.is_none());
+        assert!(repo
+            .get(&user.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .verified_at
+            .is_none());
     }
 }
