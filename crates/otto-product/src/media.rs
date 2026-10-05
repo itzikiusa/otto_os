@@ -420,7 +420,8 @@ pub async fn serve_attachment<C: ProductStudioHost>(
 }
 
 /// CSP for an attachment that could run script when rendered inline.
-pub const ATTACHMENT_CSP: &str = "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+pub const ATTACHMENT_CSP: &str =
+    "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'";
 
 /// Passive media types (raster images, PDF, audio/video) render fine without a
 /// CSP — a sandboxed frame would even block the PDF viewer. Everything else
@@ -434,7 +435,12 @@ pub fn needs_csp_sandbox(mime: &str) -> bool {
         .to_ascii_lowercase();
     let passive = matches!(
         m.as_str(),
-        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp" | "image/avif"
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/avif"
             | "application/pdf"
     ) || m.starts_with("audio/")
         || m.starts_with("video/");
@@ -447,10 +453,23 @@ mod csp_tests {
 
     #[test]
     fn active_attachment_types_are_sandboxed() {
-        for m in ["text/html", "image/svg+xml", "text/html; charset=utf-8", "application/xml", "text/plain", ""] {
+        for m in [
+            "text/html",
+            "image/svg+xml",
+            "text/html; charset=utf-8",
+            "application/xml",
+            "text/plain",
+            "",
+        ] {
             assert!(needs_csp_sandbox(m), "{m}");
         }
-        for m in ["image/png", "IMAGE/JPEG", "application/pdf", "video/mp4", "audio/mpeg"] {
+        for m in [
+            "image/png",
+            "IMAGE/JPEG",
+            "application/pdf",
+            "video/mp4",
+            "audio/mpeg",
+        ] {
             assert!(!needs_csp_sandbox(m), "{m}");
         }
         assert!(ATTACHMENT_CSP.starts_with("sandbox"));

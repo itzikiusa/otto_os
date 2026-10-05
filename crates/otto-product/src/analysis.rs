@@ -149,11 +149,8 @@ pub async fn analyze<C: ProductStudioHost>(
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| default_provider.clone());
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Latest source version id for the analysis row.
     let source_version_id = ctx
@@ -191,6 +188,28 @@ pub async fn analyze<C: ProductStudioHost>(
     ));
 
     Ok(Json(analysis))
+}
+
+/// Resolve an agent cwd: the request's (400 when invalid) → the story's (a
+/// stale/invalid stored value falls back with a warning) → the temp dir. Every
+/// accepted path passed [`crate::service::validate_agent_cwd`] (S4-13).
+async fn resolve_agent_cwd<C: ProductStudioHost>(
+    ctx: &C,
+    ws_id: &Id,
+    req_cwd: Option<String>,
+    story_cwd: Option<String>,
+) -> ApiResult<String> {
+    let root = ctx.workspaces().get(ws_id).await.ok().map(|w| w.root_path);
+    if let Some(c) = req_cwd.filter(|c| !c.trim().is_empty()) {
+        return crate::service::validate_agent_cwd(&c, root.as_deref()).map_err(ApiError);
+    }
+    if let Some(c) = story_cwd.filter(|c| !c.trim().is_empty()) {
+        match crate::service::validate_agent_cwd(&c, root.as_deref()) {
+            Ok(c) => return Ok(c),
+            Err(e) => tracing::warn!("product: stored story cwd rejected ({e}); using a temp dir"),
+        }
+    }
+    Ok(std::env::temp_dir().to_string_lossy().to_string())
 }
 
 /// Most lens agents one analysis may request (sum of agents × providers).
@@ -264,11 +283,8 @@ pub async fn rewrite<C: ProductStudioHost>(
     ]);
     let provider = req.provider.clone().unwrap_or(default_provider);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_rewrite.
     tokio::spawn(crate::run::run_rewrite(
@@ -331,11 +347,8 @@ pub async fn generate_tests<C: ProductStudioHost>(
     ]);
     let provider = req.provider.clone().unwrap_or(default_provider);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_tests.
     tokio::spawn(crate::run::run_generate_tests(
@@ -431,11 +444,8 @@ pub async fn generate_plan<C: ProductStudioHost>(
     // when the UI explicitly turned the autonomy toggle OFF.
     let interactive = req.interactive.unwrap_or(false);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_plan.
     tokio::spawn(crate::run::run_generate_plan(
@@ -645,7 +655,9 @@ pub async fn stop_analysis_agent<C: ProductStudioHost>(
         .await
         .map_err(ApiError)?;
     if agent.analysis_id != aid {
-        return Err(ApiError(Error::NotFound(format!("analysis agent {agent_id}"))));
+        return Err(ApiError(Error::NotFound(format!(
+            "analysis agent {agent_id}"
+        ))));
     }
 
     // Signal the in-flight recovery loop FIRST so the kill below is seen as
@@ -687,10 +699,14 @@ mod tests {
             {"skill": "a", "providers": ["p1", "p2", "p3", "p4", "p5"]},
         ]));
         assert!(matches!(validate_fanout(&wide), Err(Error::Invalid(_))));
-        let many: Vec<_> = (0..13).map(|i| serde_json::json!({"skill": format!("s{i}")})).collect();
+        let many: Vec<_> = (0..13)
+            .map(|i| serde_json::json!({"skill": format!("s{i}")}))
+            .collect();
         let many = agents(serde_json::Value::Array(many));
         assert!(matches!(validate_fanout(&many), Err(Error::Invalid(_))));
-        let twelve: Vec<_> = (0..12).map(|i| serde_json::json!({"skill": format!("s{i}")})).collect();
+        let twelve: Vec<_> = (0..12)
+            .map(|i| serde_json::json!({"skill": format!("s{i}")}))
+            .collect();
         assert!(validate_fanout(&agents(serde_json::Value::Array(twelve))).is_ok());
     }
 }

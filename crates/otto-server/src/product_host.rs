@@ -526,7 +526,10 @@ mod cancel_registry_tests {
         let reg: CancelRegistry = Default::default();
         let old = register_cancel(&reg, "a1");
         let new = register_cancel(&reg, "a1"); // Retry re-registers
-        assert!(!unregister_cancel(&reg, "a1", &old), "old run is superseded");
+        assert!(
+            !unregister_cancel(&reg, "a1", &old),
+            "old run is superseded"
+        );
         assert!(Arc::ptr_eq(reg.lock().unwrap().get("a1").unwrap(), &new));
         assert!(unregister_cancel(&reg, "a1", &new));
         assert!(reg.lock().unwrap().get("a1").is_none());

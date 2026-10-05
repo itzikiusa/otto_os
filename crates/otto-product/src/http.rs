@@ -65,6 +65,14 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         None
     }
+    /// The workspace's root folder, for validating a story `cwd` on PATCH
+    /// (S4-13). Default `None` (then only temp dirs / git checkouts pass).
+    fn workspace_root<'a>(
+        &'a self,
+        _ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
     /// Stop every live analysis agent of `story_id` (trip its cancel flag so
     /// the recovery loop does not retry, then kill its session) — called by
     /// `DELETE /product/stories/{sid}` BEFORE the rows go (S4-23), so deleted
@@ -435,7 +443,17 @@ async fn patch_story<S: ProductCtx>(
                 url: None,
                 issue_type: None,
                 stage: req.stage,
-                cwd: req.cwd.map(Some),
+                cwd: match req.cwd {
+                    // Agents are spawned (and pre-trusted) here — validate (S4-13).
+                    Some(c) if !c.trim().is_empty() => {
+                        let root = ctx.workspace_root(&ws).await;
+                        Some(Some(crate::service::validate_agent_cwd(
+                            &c,
+                            root.as_deref(),
+                        )?))
+                    }
+                    other => other.map(Some),
+                },
                 watch_enabled: req.watch_enabled,
                 watch_cadence_min: req.watch_cadence_min,
                 confluence_tests_page_id: None,

@@ -594,6 +594,12 @@ impl otto_product::ProductCtx for ServerCtx {
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         Some(&self.attachment_repo)
     }
+    fn workspace_root<'a>(
+        &'a self,
+        ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async move { self.workspaces.get(ws).await.ok().map(|w| w.root_path) })
+    }
     fn stop_story_agents<'a>(
         &'a self,
         story_id: &'a Id,
