@@ -2526,7 +2526,7 @@ mod tests {
             (0..6).map(|_| repo.admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)),
         )
         .await;
-        let admitted: Vec<_> = admits.into_iter().map(|r| r.unwrap()).flatten().collect();
+        let admitted: Vec<_> = admits.into_iter().filter_map(|r| r.unwrap()).collect();
         assert_eq!(admitted.len(), 1, "exactly one concurrent admission");
         assert!(repo.has_active_run(&wf.id).await.unwrap());
         assert!(repo
