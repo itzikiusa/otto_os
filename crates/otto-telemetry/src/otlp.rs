@@ -9,13 +9,24 @@ fn attributes(s: &SpanRecord) -> Vec<Value> {
     out.extend(s.attributes.iter().map(|(k,v)|json!({"key":k,"value":if let Some(s)=v.as_str(){json!({"stringValue":s})}else{json!({"doubleValue":v.as_f64().unwrap_or(0.0)})}})));
     out
 }
+/// Suffix that files a client-cancelled span under its own operation name
+/// (S9-05), so an aborted slow request neither feeds the real operation's
+/// latency quantiles nor hides: it shows (and ranks) as its own row.
+pub(crate) const CANCELLED_SUFFIX: &str = " [cancelled]";
+/// OTLP has no "cancelled" code: cancelled and unset both export as code 0
+/// (Unset), so the Otto status also rides in `status.message` and the
+/// `otto.status` attribute, which the trace drill-down reads back.
 pub(crate) fn traces(spans: &[SpanRecord]) -> Value {
-    json!({"resourceSpans":[{"resource":resource(),"scopeSpans":[{"scope":{"name":"otto.telemetry","version":"1"},"spans":spans.iter().map(|s|json!({
-        "traceId":s.trace_id,"spanId":s.span_id,"parentSpanId":s.parent_span_id.as_deref().unwrap_or(""),"name":s.name,
+    json!({"resourceSpans":[{"resource":resource(),"scopeSpans":[{"scope":{"name":"otto.telemetry","version":"1"},"spans":spans.iter().map(|s|{
+        let mut attrs=attributes(s);
+        attrs.push(json!({"key":"otto.status","value":{"stringValue":s.status}}));
+        let name=if s.status=="cancelled"{format!("{}{CANCELLED_SUFFIX}",s.name)}else{s.name.clone()};
+        json!({
+        "traceId":s.trace_id,"spanId":s.span_id,"parentSpanId":s.parent_span_id.as_deref().unwrap_or(""),"name":name,
         "kind":match s.kind.as_str(){"server"=>2,"client"=>3,"producer"=>4,"consumer"=>5,_=>1},
         "startTimeUnixNano":s.start_unix_nano.to_string(),"endTimeUnixNano":s.start_unix_nano.saturating_add((s.duration_ms*1e6)as u64).to_string(),
-        "attributes":attributes(s),"status":{"code":if s.status=="error"{2}else if s.status=="ok"{1}else{0}}
-    })).collect::<Vec<_>>()}]}]})
+        "attributes":attrs,"status":{"code":if s.status=="error"{2}else if s.status=="ok"{1}else{0},"message":if matches!(s.status.as_str(),"ok"|"error"){""}else{s.status.as_str()}}
+    })}).collect::<Vec<_>>()}]}]})
 }
 pub(crate) fn errors(spans: &[SpanRecord]) -> Value {
     json!({"resourceLogs":[{"resource":resource(),"scopeLogs":[{"scope":{"name":"otto.telemetry"},"logRecords":spans.iter().filter(|s|s.status=="error").map(|s|json!({"timeUnixNano":s.start_unix_nano.to_string(),"severityNumber":17,"severityText":"ERROR","body":{"stringValue":"operation.error"},"traceId":s.trace_id,"spanId":s.span_id,"attributes":attributes(s)})).collect::<Vec<_>>()}]}]})

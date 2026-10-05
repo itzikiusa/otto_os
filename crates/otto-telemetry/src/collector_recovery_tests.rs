@@ -198,6 +198,7 @@ async fn live_owner_blocks_duplicate_start_without_overwriting_config() {
         &fixture.dir(),
         "http://127.0.0.1:1",
         &TelemetryConfig::default(),
+        true,
     )
     .await
     .err()
@@ -265,7 +266,7 @@ async fn relative_data_directory_launches_with_recoverable_absolute_config() {
     let identity = managed_identity(&absolute).unwrap().unwrap();
     let configuration = TelemetryConfig::default();
     {
-        let starting = Collector::start(&relative, "http://127.0.0.1:1", &configuration);
+        let starting = Collector::start(&relative, "http://127.0.0.1:1", &configuration, true);
         tokio::pin!(starting);
         let observed = async {
             let deadline = Instant::now() + Duration::from_secs(5);

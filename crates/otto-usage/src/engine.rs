@@ -24,11 +24,22 @@ use crate::types::{
 };
 
 /// Flush the usage buffer at least this often. Every non-empty flush is one
-/// INSERT = one new MergeTree part + a merge, so 2 s meant a part every 2 s and
-/// an active part re-merged ~10k times. 15 s (plus server-side async inserts)
-/// keeps parts few; the live dashboard lags by up to this much. Shutdown still
+/// INSERT = one new MergeTree part, and each part is later merged into the
+/// month's big part — at 15 s the October partition was rewritten 1345 times
+/// in three days (S9-01: ~200 rows merged per row inserted). 90 s cuts that
+/// ~6×; a dashboard READ asks the writer to flush right away (`flush_req`), so
+/// someone watching the Usage page still sees fresh numbers. Shutdown still
 /// flushes when the channel closes.
-const FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+const FLUSH_INTERVAL: Duration = Duration::from_secs(90);
+/// A usage flush is BACKGROUND work (S9-02): it never wakes a parked server
+/// nor resets its idle clock, or any always-on agent (workflows, bridges,
+/// scheduled tasks) kept ClickHouse up 24/7. While parked, events stay
+/// buffered until a foreground request wakes the server — or until the oldest
+/// has waited this long (or RETAIN_MAX fills), when the writer does one
+/// bounded `wake_background` (same policy as telemetry's MAX_DEFER).
+const MAX_DEFER: Duration = Duration::from_secs(30 * 60);
+/// How long stopping the engine waits for the writer's final flush.
+const WRITER_DRAIN: Duration = Duration::from_secs(15);
 
 /// How long a `session_totals` rollup is reused (see `totals_cache`). Shorter
 /// than the writer's flush interval, so it never hides a flush for long.
@@ -66,8 +77,9 @@ struct MetricsBuf {
     /// When the oldest buffered sample arrived (the flush clock).
     since: Option<std::time::Instant>,
 }
-/// …or sooner once this many events are buffered.
-const FLUSH_BATCH: usize = 200;
+/// …or sooner once this many events are buffered (size-based flush: a burst
+/// still becomes one part per ~2k rows, not one per 200).
+const FLUSH_BATCH: usize = 2_000;
 /// Default cap on the session leaderboard.
 const SESSION_LIMIT: u32 = 50;
 /// Self-heal signal (perf2/03 N5): an insert path that failed against a DEAD
@@ -107,6 +119,9 @@ const RETAIN_MAX: usize = 20_000;
 struct Inner {
     ch: Option<Arc<ClickHouse>>,
     tx: Option<mpsc::UnboundedSender<UsageEvent>>,
+    /// The writer task fed by `tx` — awaited (bounded) after `tx` drops so
+    /// its final flush lands before the server stops.
+    writer: Option<tokio::task::JoinHandle<()>>,
     bin_path: Option<PathBuf>,
 }
 
@@ -148,6 +163,10 @@ pub struct UsageEngine {
     /// skipped (see [`Self::usage_generation`]) and the totals memo never
     /// serves a rollup computed before a flush.
     usage_gen: Arc<AtomicU64>,
+    /// Asks the usage writer to flush its buffer now (S9-01): poked by every
+    /// dashboard read ([`Self::ch_read`]) and after a lazy restart, so the
+    /// 90 s flush interval never shows a watcher stale numbers for long.
+    flush_req: Arc<tokio::sync::Notify>,
 }
 
 fn unix_now() -> u64 {
@@ -219,6 +238,7 @@ impl UsageEngine {
             idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
             ch_woke: Arc::new(tokio::sync::Notify::new()),
             usage_gen: Arc::new(AtomicU64::new(0)),
+            flush_req: Arc::new(tokio::sync::Notify::new()),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -252,6 +272,8 @@ impl UsageEngine {
             loop {
                 woke.notified().await;
                 let Some(engine) = weak.upgrade() else { break };
+                // Usage events held while parked go in too.
+                engine.flush_req.notify_one();
                 match engine.flush_metrics().await {
                     Ok(0) => {}
                     Ok(n) => tracing::debug!("usage: wrote {n} metrics held while idle-stopped"),
@@ -269,20 +291,20 @@ impl UsageEngine {
     pub async fn reinit(&self, config: UsageConfig) {
         let _g = self.reinit_lock.lock().await;
         let ch_dir = self.data_dir.join("clickhouse");
-        let bin_path = ClickHouse::locate(config.clickhouse_path.as_deref());
+        // `locate` may run a `which` subprocess: off the async workers (S9-11).
+        let configured = config.clickhouse_path.clone();
+        let bin_path =
+            tokio::task::spawn_blocking(move || ClickHouse::locate(configured.as_deref()))
+                .await
+                .unwrap_or(None);
 
         // Stop the previous server FIRST (outside the new-server start) so the
         // dir lock is released before we bind a new one.
-        let prev = {
-            let mut inner = self.inner.write().expect("usage inner lock");
-            inner.tx = None; // dropping the sender ends the writer task
-            inner.ch.take()
-        };
-        if let Some(old) = prev {
+        if let Some(old) = self.stop_writer().await {
             old.shutdown().await;
         }
 
-        let (ch, tx) = if config.enabled {
+        let (ch, tx, writer) = if config.enabled {
             match &bin_path {
                 Some(bin) => match ClickHouse::start(bin.clone(), ch_dir.clone()).await {
                     Ok(server) => {
@@ -317,11 +339,12 @@ impl UsageEngine {
                                 }
                                 ch.set_wake_hook(Arc::clone(&self.ch_woke));
                                 let (tx, rx) = mpsc::unbounded_channel();
-                                spawn_writer(
+                                let writer = spawn_writer(
                                     Arc::clone(&ch),
                                     rx,
                                     Arc::clone(&self.heal),
                                     Arc::clone(&self.usage_gen),
+                                    Arc::clone(&self.flush_req),
                                 );
                                 spawn_idle_stopper(
                                     Arc::downgrade(&ch),
@@ -333,33 +356,38 @@ impl UsageEngine {
                                     ch.data_dir().display(),
                                     bin.display()
                                 );
-                                (Some(ch), Some(tx))
+                                (Some(ch), Some(tx), Some(writer))
                             }
                             Err(e) => {
                                 tracing::warn!("usage: clickhouse schema init failed: {e}");
                                 ch.shutdown().await;
-                                (None, None)
+                                (None, None, None)
                             }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("usage: clickhouse server start failed: {e}");
-                        (None, None)
+                        (None, None, None)
                     }
                 },
                 None => {
                     tracing::info!("usage: clickhouse binary not found — usage tracking disabled");
-                    (None, None)
+                    (None, None, None)
                 }
             }
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         let became_available = ch.is_some();
         let ch_for_compact = ch.clone();
         *self.config.write().expect("usage config lock") = config.clone();
-        *self.inner.write().expect("usage inner lock") = Inner { ch, tx, bin_path };
+        *self.inner.write().expect("usage inner lock") = Inner {
+            ch,
+            tx,
+            writer,
+            bin_path,
+        };
 
         // One-time compaction + retention enforcement of a pre-existing bloated
         // dataset (e.g. the 25k-part, 1.4 GB dir from the old per-query model).
@@ -389,14 +417,28 @@ impl UsageEngine {
         if let Err(e) = self.flush_metrics_with(true).await {
             tracing::debug!("usage: final metrics flush failed: {e}");
         }
-        let ch = {
-            let mut inner = self.inner.write().expect("usage inner lock");
-            inner.tx = None;
-            inner.ch.take()
-        };
-        if let Some(ch) = ch {
+        if let Some(ch) = self.stop_writer().await {
             ch.shutdown().await;
         }
+    }
+
+    /// Detach the live handle and end its writer: dropping the sender makes
+    /// the writer do its final flush (which may wake a parked server), and
+    /// that flush is awaited — bounded — so up to FLUSH_INTERVAL of buffered
+    /// usage is not lost to the server stopping under it. Returns the handle
+    /// for the caller to shut down.
+    async fn stop_writer(&self) -> Option<Arc<ClickHouse>> {
+        let (ch, writer) = {
+            let mut inner = self.inner.write().expect("usage inner lock");
+            inner.tx = None;
+            (inner.ch.take(), inner.writer.take())
+        };
+        if let Some(w) = writer {
+            if tokio::time::timeout(WRITER_DRAIN, w).await.is_err() {
+                tracing::warn!("usage: final usage flush timed out — stopping the server anyway");
+            }
+        }
+        ch
     }
 
     /// True when usage tracking is live (server up + schema created).
@@ -422,6 +464,14 @@ impl UsageEngine {
 
     fn ch(&self) -> Option<Arc<ClickHouse>> {
         self.inner.read().expect("usage inner lock").ch.clone()
+    }
+
+    /// [`Self::ch`] for a dashboard READ of `usage_events`: also asks the
+    /// writer to flush what it buffered, so a watcher (who keeps the server
+    /// awake anyway) sees fresh rows by the next poll.
+    fn ch_read(&self) -> Option<Arc<ClickHouse>> {
+        self.flush_req.notify_one();
+        self.ch()
     }
 
     fn config(&self) -> UsageConfig {
@@ -978,7 +1028,7 @@ impl UsageEngine {
     /// The model with the most events for `provider` over the last 30 days —
     /// `None` when the engine is down or has no history for it.
     async fn dominant_model(&self, provider: &str) -> Option<String> {
-        let ch = self.ch()?;
+        let ch = self.ch_read()?;
         let provider = ch_string(provider);
         let rows = ch
             .query_rows(&format!(
@@ -1031,7 +1081,7 @@ impl UsageEngine {
         // No explicit token count — derive from recent-run averages for this
         // feature + provider pair over the last 30 days. We query the per-session
         // totals and compute the average cost per session for matching sessions.
-        let Some(ch) = self.ch() else {
+        let Some(ch) = self.ch_read() else {
             return ForecastResp {
                 projected_cost_usd: 0.0,
                 basis: "usage engine not available".into(),
@@ -1196,7 +1246,7 @@ impl UsageEngine {
         otto_only: bool,
         scope: UsageScope<'_>,
     ) -> Result<UsageSummary> {
-        let Some(ch) = self.ch() else {
+        let Some(ch) = self.ch_read() else {
             return Ok(UsageSummary {
                 days,
                 by_kind: Vec::new(),
@@ -1340,7 +1390,7 @@ impl UsageEngine {
             otto_only,
             ..Default::default()
         };
-        let Some(ch) = self.ch() else {
+        let Some(ch) = self.ch_read() else {
             return Ok(report);
         };
         let since = since(days);
@@ -1447,7 +1497,7 @@ impl UsageEngine {
         since: &str,
         until: &str,
     ) -> Result<Vec<DailyModelUsage>> {
-        let Some(ch) = self.ch() else {
+        let Some(ch) = self.ch_read() else {
             return Err(otto_core::Error::Upstream("usage engine offline".into()));
         };
         let cond = format!(
@@ -1600,7 +1650,7 @@ impl UsageEngine {
 
     /// Run a query and deserialize each row into `T`.
     async fn rows<T: serde::de::DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
-        let Some(ch) = self.ch() else {
+        let Some(ch) = self.ch_read() else {
             return Ok(Vec::new());
         };
         let raw = ch.query_rows(sql).await?;
@@ -1715,11 +1765,12 @@ fn spawn_writer(
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
     heal: Arc<HealSignal>,
     usage_gen: Arc<AtomicU64>,
-) {
+    flush_req: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut buf: Vec<UsageEvent> = Vec::new();
+        let mut w = WriterBuf::default();
         // The flush timer is armed only while events are buffered (from the
-        // first one): an idle daemon has no 15 s wake-up at all.
+        // first one): an idle daemon has no periodic wake-up at all.
         let mut deadline: Option<tokio::time::Instant> = None;
         loop {
             let tick = async {
@@ -1731,45 +1782,116 @@ fn spawn_writer(
             tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Some(ev) => {
-                        buf.push(ev);
-                        if buf.len() >= FLUSH_BATCH {
-                            flush(&ch, &mut buf, &heal, &usage_gen).await;
+                        w.push(ev);
+                        if w.buf.len() >= FLUSH_BATCH {
+                            flush(&ch, &mut w, &heal, &usage_gen, false).await;
                         }
                     }
                     None => {
-                        flush(&ch, &mut buf, &heal, &usage_gen).await;
+                        // Final flush (reinit / shutdown): may wake a parked
+                        // server so nothing buffered is lost.
+                        flush(&ch, &mut w, &heal, &usage_gen, true).await;
                         break;
                     }
                 },
-                _ = tick => flush(&ch, &mut buf, &heal, &usage_gen).await,
+                // A dashboard read (or a lazy restart) wants fresh rows now.
+                _ = flush_req.notified() => flush(&ch, &mut w, &heal, &usage_gen, false).await,
+                _ = tick => flush(&ch, &mut w, &heal, &usage_gen, false).await,
             }
-            deadline = match (buf.is_empty(), deadline) {
+            deadline = match (w.buf.is_empty(), deadline) {
                 (true, _) => None,
-                // A failed flush keeps its events: retry a full interval later.
+                // A failed / deferred flush keeps its events: retry a full
+                // interval later.
                 (false, Some(d)) if d > tokio::time::Instant::now() => Some(d),
                 (false, _) => Some(tokio::time::Instant::now() + FLUSH_INTERVAL),
             };
         }
-    });
+    })
 }
 
+/// The writer's buffered events plus when the oldest arrived (the MAX_DEFER
+/// clock while the server is parked).
+#[derive(Default)]
+struct WriterBuf {
+    buf: Vec<UsageEvent>,
+    since: Option<std::time::Instant>,
+}
+
+impl WriterBuf {
+    fn push(&mut self, ev: UsageEvent) {
+        self.since.get_or_insert_with(std::time::Instant::now);
+        self.buf.push(ev);
+    }
+
+    /// Whether a parked server must be woken for these events: the oldest has
+    /// waited MAX_DEFER, or the retained buffer is full.
+    fn overdue(&self, max_defer: Duration) -> bool {
+        self.buf.len() >= RETAIN_MAX || self.since.is_some_and(|t| t.elapsed() >= max_defer)
+    }
+}
+
+/// What one writer flush should do with a parked server.
+#[derive(Debug, PartialEq, Eq)]
+enum ParkedAction {
+    /// Keep the events buffered for the next foreground wake.
+    Defer,
+    /// Wake the server (background: idle clock untouched) and insert.
+    Wake,
+}
+
+fn parked_action(w: &WriterBuf, final_flush: bool, max_defer: Duration) -> ParkedAction {
+    if final_flush || w.overdue(max_defer) {
+        ParkedAction::Wake
+    } else {
+        ParkedAction::Defer
+    }
+}
+
+/// Write the buffered events as ONE background insert (S9-02). A parked
+/// server is left parked unless [`parked_action`] says the events have waited
+/// long enough (or this is the final flush). Failures keep the events.
 async fn flush(
-    ch: &ClickHouse,
-    buf: &mut Vec<UsageEvent>,
+    ch: &Arc<ClickHouse>,
+    w: &mut WriterBuf,
     heal: &HealSignal,
     usage_gen: &AtomicU64,
+    final_flush: bool,
 ) {
-    if buf.is_empty() {
+    if w.buf.is_empty() {
         return;
     }
-    let payload = ndjson(buf);
-    if let Err(e) = ch.insert_ndjson("usage_events", &payload).await {
+    let payload = ndjson(&w.buf);
+    let res = match ch.insert_ndjson_background("usage_events", &payload).await {
+        Ok(true) => Ok(()),
+        Ok(false) => match parked_action(w, final_flush, MAX_DEFER) {
+            ParkedAction::Defer => return,
+            ParkedAction::Wake => match ch.wake_background().await {
+                // The lease holds parking off for the insert; dropping it
+                // does not reset the idle clock.
+                Ok(_lease) => ch
+                    .insert_ndjson_background("usage_events", &payload)
+                    .await
+                    .and_then(|sent| {
+                        if sent {
+                            Ok(())
+                        } else {
+                            Err(otto_core::Error::Upstream(
+                                "usage: clickhouse parked again mid-flush".into(),
+                            ))
+                        }
+                    }),
+                Err(e) => Err(e),
+            },
+        },
+        Err(e) => Err(e),
+    };
+    if let Err(e) = res {
         tracing::warn!("usage: flush failed: {e}");
         // Keep the events for the next attempt (bounded) instead of dropping
         // them — a transient failure or a self-heal restart then loses nothing.
-        if buf.len() > RETAIN_MAX {
-            let drop_n = buf.len() - RETAIN_MAX;
-            buf.drain(..drop_n);
+        if w.buf.len() > RETAIN_MAX {
+            let drop_n = w.buf.len() - RETAIN_MAX;
+            w.buf.drain(..drop_n);
             tracing::warn!("usage: retained buffer full — dropped {drop_n} oldest events");
         }
         if !ch.server_alive() {
@@ -1777,7 +1899,8 @@ async fn flush(
         }
         return;
     }
-    buf.clear();
+    w.buf.clear();
+    w.since = None;
     usage_gen.fetch_add(1, Ordering::SeqCst);
 }
 
@@ -2346,5 +2469,46 @@ mod rollup_tests {
             vec![("gpt", 1, 500), ("opus", 5, 150), ("sonnet", 1, 50)]
         );
         assert_eq!(dm.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod writer_policy_tests {
+    use super::*;
+
+    /// S9-02: a parked server is NOT woken for fresh usage events (they wait
+    /// for the next foreground wake) — only once the oldest has waited
+    /// MAX_DEFER, the retained buffer is full, or this is the final flush.
+    #[test]
+    fn parked_server_defers_until_overdue_or_final() {
+        let mut w = WriterBuf::default();
+        w.push(UsageEvent::default());
+        assert_eq!(
+            parked_action(&w, false, MAX_DEFER),
+            ParkedAction::Defer,
+            "fresh events must not wake an idle-stopped server"
+        );
+        assert_eq!(parked_action(&w, true, MAX_DEFER), ParkedAction::Wake);
+        // Oldest buffered event older than the defer window → wake.
+        w.since = Some(std::time::Instant::now() - Duration::from_millis(20));
+        assert_eq!(
+            parked_action(&w, false, Duration::from_millis(10)),
+            ParkedAction::Wake
+        );
+        // A full retained buffer wakes regardless of age.
+        let mut full = WriterBuf::default();
+        for _ in 0..RETAIN_MAX {
+            full.push(UsageEvent::default());
+        }
+        assert_eq!(parked_action(&full, false, MAX_DEFER), ParkedAction::Wake);
+    }
+
+    /// S9-01: the writer flushes at most every 90 s (or per 2k rows), not every
+    /// 15 s / 200 rows — each flush is a part that gets merged into the month.
+    #[test]
+    fn flush_cadence_is_coarse() {
+        assert!(FLUSH_INTERVAL >= Duration::from_secs(60));
+        assert!(FLUSH_BATCH >= 1_000);
+        assert!(MAX_DEFER <= Duration::from_secs(30 * 60));
     }
 }

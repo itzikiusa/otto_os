@@ -39,7 +39,10 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MAX_DEFER: Duration = Duration::from_secs(30 * 60);
 /// Retry a failed flush after this long instead of hot-looping.
 /// Minimum age of the last flush before a telemetry read requests another.
-const READ_REFRESH_AFTER: Duration = Duration::from_secs(30);
+/// Every flush spawns a collector (a 363 MB Go binary living ≥ DRAIN_WAIT),
+/// so a Telemetry page polling every 15 s must not pull one per ~45 s
+/// (S9-04): two minutes keeps the view reasonably fresh at a fraction of it.
+const READ_REFRESH_AFTER: Duration = Duration::from_secs(120);
 const FLUSH_BACKOFF: Duration = Duration::from_secs(60);
 /// A failed scheduled analysis is retried after this long.
 const ANALYSIS_BACKOFF: Duration = Duration::from_secs(15 * 60);
@@ -64,6 +67,73 @@ impl Drop for PendingExport<'_> {
         if !self.accepted {
             self.discarded.fetch_add(self.count, Ordering::Relaxed);
         }
+    }
+}
+/// Resource points taken out of the buffer for one export. Whatever was not
+/// acknowledged (`points[sent..]`) is merged back on drop — failure or
+/// cancellation alike (S9-08).
+struct PendingPoints<'a> {
+    buffer: &'a Mutex<BTreeMap<(i64, String), ResourcePoint>>,
+    dropped: &'a AtomicU64,
+    points: Vec<ResourcePoint>,
+    sent: usize,
+}
+impl Drop for PendingPoints<'_> {
+    fn drop(&mut self) {
+        if self.sent >= self.points.len() {
+            return;
+        }
+        if let Ok(mut buffer) = self.buffer.lock() {
+            for point in &self.points[self.sent..] {
+                merge_point(&mut buffer, point, self.dropped);
+            }
+        }
+    }
+}
+/// How one flush's records ended up, judged from the collector's exporter
+/// counters at the end of the drain (S9-03).
+#[derive(Debug, PartialEq)]
+struct Settlement {
+    /// Accepted spans confirmed written.
+    exported: u64,
+    /// Records the collector gave up on or still held when it was stopped.
+    failed: u64,
+    error: Option<String>,
+}
+/// A drain is only CONFIRMED when the exporter counters were readable and
+/// every sending queue was empty: records still queued at the deadline die
+/// with the collector's SIGKILL and never reach `send_failed`, and missing
+/// counters prove nothing. Either way nothing accepted counts as exported.
+fn settle(stats: Option<collector::ExporterStats>, accepted: u64) -> Settlement {
+    match stats {
+        None => Settlement {
+            exported: 0,
+            failed: accepted,
+            error: Some(
+                "Telemetry collector stopped before confirming its export; buffered records may be lost. See telemetry/collector.log.".into(),
+            ),
+        },
+        Some(s) if s.queue_size > 0 => Settlement {
+            exported: 0,
+            failed: s.send_failed + s.queue_size,
+            error: Some(format!(
+                "Collector stopped with {} telemetry records still queued for ClickHouse (slow or waking engine); see telemetry/collector.log.",
+                s.queue_size
+            )),
+        },
+        Some(s) if s.send_failed > 0 => Settlement {
+            exported: accepted.saturating_sub(s.send_failed),
+            failed: s.send_failed,
+            error: Some(format!(
+                "Collector could not write {} telemetry records to ClickHouse; see telemetry/collector.log.",
+                s.send_failed
+            )),
+        },
+        Some(_) => Settlement {
+            exported: accepted,
+            failed: 0,
+            error: None,
+        },
     }
 }
 #[derive(Default, Serialize, Deserialize)]
@@ -109,6 +179,9 @@ pub struct TelemetryService {
     flush_requested: AtomicBool,
     collector_failed: AtomicU64,
     collector_queue: AtomicU64,
+    /// Set once an orphan recovery succeeded (at start, or by the first
+    /// collector start after a failed one) — later starts skip the scans.
+    orphans_recovered: AtomicBool,
     dropped: AtomicU64,
     exported: AtomicU64,
     ready: AtomicBool,
@@ -167,6 +240,7 @@ impl TelemetryService {
             flush_requested: AtomicBool::new(false),
             collector_failed: AtomicU64::new(0),
             collector_queue: AtomicU64::new(0),
+            orphans_recovered: AtomicBool::new(recovery_error.is_none()),
             dropped: AtomicU64::new(0),
             exported: AtomicU64::new(0),
             ready: AtomicBool::new(false),
@@ -536,7 +610,9 @@ impl TelemetryService {
                     span_id: string(&r, "SpanId"),
                     parent_span_id: (!string(&r, "ParentSpanId").is_empty())
                         .then(|| string(&r, "ParentSpanId")),
-                    name: string(&r, "SpanName"),
+                    name: string(&r, "SpanName")
+                        .trim_end_matches(otlp::CANCELLED_SUFFIX)
+                        .to_owned(),
                     component: attrs
                         .and_then(|a| a.get("otto.component"))
                         .and_then(Value::as_str)
@@ -548,16 +624,19 @@ impl TelemetryService {
                         .or_else(|| r["started"].as_str().and_then(|s| s.parse().ok()))
                         .unwrap_or_default(),
                     duration_ms: number(&r, "Duration") / 1e6,
-                    status: if string(&r, "StatusCode") == "Error" {
-                        "error"
-                    } else {
-                        "ok"
-                    }
+                    status: span_status(
+                        &string(&r, "StatusCode"),
+                        attrs
+                            .and_then(|a| a.get("otto.status"))
+                            .and_then(Value::as_str),
+                    )
                     .into(),
                     attributes: attrs
                         .map(|a| {
                             a.iter()
-                                .filter(|(k, _)| k.as_str() != "otto.component")
+                                .filter(|(k, _)| {
+                                    !matches!(k.as_str(), "otto.component" | "otto.status")
+                                })
                                 .map(|(k, v)| (k.clone(), v.clone()))
                                 .collect()
                         })
@@ -793,7 +872,10 @@ impl TelemetryService {
         self.flush_requested.store(false, Ordering::SeqCst);
         let revision = self.revision.load(Ordering::SeqCst);
         self.ensure_private_dir().await?;
-        let mut collector = collector::Collector::start(&self.dir, &lease.endpoint, c).await?;
+        let recover = !self.orphans_recovered.load(Ordering::Relaxed);
+        let mut collector =
+            collector::Collector::start(&self.dir, &lease.endpoint, c, recover).await?;
+        self.orphans_recovered.store(true, Ordering::Relaxed);
         let fresh = self
             .runtime
             .lock()
@@ -801,36 +883,40 @@ impl TelemetryService {
             .schema
             .as_ref()
             .is_some_and(|(old, rev)| Arc::ptr_eq(old, &ch) && *rev == revision);
+        // Spans the collector ACCEPTED this run. They count as exported only
+        // once the drain confirms the collector wrote them (S9-03).
+        let mut accepted = 0u64;
         let result = async {
             if !fresh {
                 schema::ensure(&ch, c).await?;
                 self.runtime.lock().await.schema = Some((ch.clone(), revision));
             }
-            self.export(&collector.endpoint).await?;
+            self.export(&collector.endpoint, &mut accepted).await?;
             Ok::<_, anyhow::Error>(())
         }
         .await;
         let stats = self.drain(&mut collector).await;
         collector.stop().await;
         drop(lease);
+        let settled = settle(stats, accepted);
+        self.exported.fetch_add(settled.exported, Ordering::Relaxed);
+        self.collector_failed
+            .fetch_add(settled.failed, Ordering::Relaxed);
         result?;
         *self.last_flush.lock().unwrap() = Some(Instant::now());
         *self.last_flush_at.lock().unwrap() = Some(now_seconds());
-        self.ready.store(true, Ordering::Relaxed);
-        let failed = stats.map(|s| s.send_failed).unwrap_or_default();
-        if failed > 0 {
-            self.collector_failed.fetch_add(failed, Ordering::Relaxed);
-            *self.error.write().unwrap() = Some(format!(
-                "Collector could not write {failed} telemetry records to ClickHouse; see telemetry/collector.log."
-            ));
-        } else {
-            *self.error.write().unwrap() = None;
+        self.ready.store(settled.error.is_none(), Ordering::Relaxed);
+        match settled.error {
+            // A clean, confirmed run clears an earlier error; a partial one
+            // never does (it replaces it with its own).
+            None => *self.error.write().unwrap() = None,
+            Some(error) => *self.error.write().unwrap() = Some(error),
         }
         Ok(())
     }
     /// Hand every buffered signal to the collector. Undelivered data is put
     /// back so the next flush retries it.
-    async fn export(&self, endpoint: &str) -> Result<()> {
+    async fn export(&self, endpoint: &str, accepted: &mut u64) -> Result<()> {
         loop {
             let spans: Vec<_> = {
                 let mut queue = self.queue.lock().unwrap();
@@ -853,8 +939,7 @@ impl TelemetryService {
                 pending.accepted = true;
                 return Err(error);
             }
-            self.exported
-                .fetch_add(spans.len() as u64, Ordering::Relaxed);
+            *accepted += spans.len() as u64;
             pending.accepted = true;
             if spans.iter().any(|s| s.status == "error") {
                 // The spans are delivered; a lost error-log copy is not retried.
@@ -863,29 +948,39 @@ impl TelemetryService {
                     .await;
             }
         }
-        let points: Vec<_> = std::mem::take(&mut *self.points.lock().unwrap())
-            .into_values()
-            .collect();
-        for (index, chunk) in points.chunks(1024).enumerate() {
-            if let Err(error) = self
-                .send_retry(endpoint, "metrics", otlp::metrics(chunk))
-                .await
-            {
-                let mut buffer = self.points.lock().unwrap();
-                for point in &points[index * 1024..] {
-                    merge_point(&mut buffer, point, &self.dropped);
-                }
-                return Err(error);
-            }
+        // Points not yet acknowledged go back on failure AND on cancellation
+        // (a config change drops this future mid-send, S9-08). Re-sending a
+        // chunk is harmless: the rollup keeps per-minute maxima.
+        let mut points = PendingPoints {
+            buffer: &self.points,
+            dropped: &self.dropped,
+            points: std::mem::take(&mut *self.points.lock().unwrap())
+                .into_values()
+                .collect(),
+            sent: 0,
+        };
+        while points.sent < points.points.len() {
+            let end = (points.sent + 1024).min(points.points.len());
+            let body = otlp::metrics(&points.points[points.sent..end]);
+            self.send_retry(endpoint, "metrics", body).await?;
+            points.sent = end;
         }
         loop {
             let Some(body) = self.pending_logs.lock().unwrap().pop_front() else {
                 break;
             };
+            // A popped record lost to cancellation is counted, like a span.
+            let mut pending = PendingExport {
+                discarded: &self.dropped,
+                count: 1,
+                accepted: false,
+            };
             if let Err(error) = self.send_retry(endpoint, "logs", body.clone()).await {
                 self.pending_logs.lock().unwrap().push_front(body);
+                pending.accepted = true;
                 return Err(error);
             }
+            pending.accepted = true;
         }
         Ok(())
     }
@@ -995,6 +1090,21 @@ fn merge_point(
     while buffer.len() > POINT_LIMIT {
         buffer.pop_first();
         dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+/// Otto status of a stored span: the exported `otto.status` attribute when
+/// present, else the OTLP code (`Unset` is not "ok" — S9-05).
+fn span_status(code: &str, otto: Option<&str>) -> &'static str {
+    match otto {
+        Some("ok") => "ok",
+        Some("error") => "error",
+        Some("cancelled") => "cancelled",
+        Some("unset") => "unset",
+        _ => match code {
+            "Error" | "STATUS_CODE_ERROR" => "error",
+            "Ok" | "STATUS_CODE_OK" => "ok",
+            _ => "unset",
+        },
     }
 }
 fn number(row: &Value, key: &str) -> f64 {

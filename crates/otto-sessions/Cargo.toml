@@ -31,6 +31,8 @@ otto-rbac = { workspace = true }
 # `<cwd>/.grok/config.toml` (grok doesn't read the workspace `.mcp.json`).
 # Format-preserving so a hand-edited project config survives.
 toml_edit = "0.25.15"
+# Nested-agent capture: `proc_listchildpids` gates the whole-box `ps` (S9-10).
+libc = "0.2.190"
 
 [dev-dependencies]
 tempfile = { workspace = true }
