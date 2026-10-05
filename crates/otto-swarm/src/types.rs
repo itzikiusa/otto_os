@@ -171,8 +171,8 @@ pub struct UpdateProjectReq {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub repo_path: Option<Option<String>>,
     #[serde(default)]
     pub goal_md: Option<String>,
     /// Project-level skill set (`[{name, must_use?}]` or `["name", …]`), layered
@@ -183,6 +183,18 @@ pub struct UpdateProjectReq {
     pub status: Option<String>,
     #[serde(default)]
     pub order_idx: Option<i64>,
+}
+
+/// `Option<Option<T>>` for PATCH bodies: absent → `None` (leave unchanged),
+/// explicit `null` → `Some(None)` (clear), value → `Some(Some(v))`. Plain
+/// `#[serde(default)]` folds `null` into "absent", so a cleared field could
+/// never be removed (S4-17).
+pub(crate) fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
 }
 
 // --- Tasks -----------------------------------------------------------------
@@ -212,8 +224,8 @@ pub struct UpdateTaskReq {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
-    pub assignee_agent_id: Option<Id>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub assignee_agent_id: Option<Option<Id>>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]

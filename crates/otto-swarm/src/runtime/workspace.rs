@@ -560,6 +560,66 @@ pub fn provision_agent(
     install_helper(cwd, "otto-product", OTTO_PRODUCT);
     install_helper(cwd, "otto-mockup", OTTO_MOCKUP);
     install_helper(cwd, "otto-discovery-report", OTTO_DISCOVERY_REPORT);
+    exclude_helpers(cwd);
+}
+
+/// The helper executables `provision_agent` drops into the agent's cwd.
+pub const HELPER_NAMES: [&str; 4] = [
+    "otto-post",
+    "otto-product",
+    "otto-mockup",
+    "otto-discovery-report",
+];
+
+/// Keep the helpers out of git (S4-09): they sit untracked in the worktree
+/// root (the prompts invoke them as `./otto-post`), and the fix prompt tells
+/// the agent to COMMIT — a `git add -A` would carry them into the merge and
+/// the user's PR (or, in per-agent repo mode, straight into the checkout).
+/// Root-anchored lines go into the repo's `info/exclude` (shared by all its
+/// worktrees, never committed); a cwd that is not a git checkout is a no-op.
+pub fn exclude_helpers(cwd: &str) {
+    let Ok(out) = std::process::Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--git-path", "info/exclude"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if rel.is_empty() {
+        return;
+    }
+    let path = std::path::Path::new(cwd).join(&rel);
+    let _ = append_exclude_lines(&path);
+}
+
+/// Append each missing `/<helper>` line to an exclude file (idempotent).
+fn append_exclude_lines(path: &std::path::Path) -> std::io::Result<()> {
+    let cur = std::fs::read_to_string(path).unwrap_or_default();
+    let have: std::collections::HashSet<&str> = cur.lines().map(str::trim).collect();
+    let missing: Vec<String> = HELPER_NAMES
+        .iter()
+        .map(|n| format!("/{n}"))
+        .filter(|l| !have.contains(l.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut add = String::new();
+    if !cur.is_empty() && !cur.ends_with('\n') {
+        add.push('\n');
+    }
+    add.push_str("# Otto swarm agent helpers (never commit)\n");
+    for l in missing {
+        add.push_str(&l);
+        add.push('\n');
+    }
+    std::fs::write(path, format!("{cur}{add}"))
 }
 
 /// Write a helper script into `cwd` and mark it executable (best-effort).
@@ -578,6 +638,49 @@ pub fn install_helper(cwd: &str, name: &str, body: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.
+    #[test]
+    fn helpers_are_excluded_from_git_in_a_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return; // no git on PATH — nothing to assert
+        }
+        let cwd = repo.to_string_lossy().to_string();
+        for n in HELPER_NAMES {
+            install_helper(&cwd, n, "#!/bin/sh\n");
+        }
+        exclude_helpers(&cwd);
+        exclude_helpers(&cwd); // idempotent
+        let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        for n in HELPER_NAMES {
+            assert_eq!(ex.matches(&format!("/{n}\n")).count(), 1, "{n}: {ex}");
+        }
+        let st = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&st.stdout).trim().is_empty(),
+            "helpers must not show as untracked"
+        );
+    }
+
+    /// A non-git cwd (scratch fallback) is left alone.
+    #[test]
+    fn exclude_helpers_is_a_noop_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        exclude_helpers(&dir.path().to_string_lossy());
+        assert!(!dir.path().join(".git").exists());
+    }
 
     fn swarm(config: serde_json::Value) -> Swarm {
         let now = chrono::Utc::now();

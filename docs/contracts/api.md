@@ -2776,6 +2776,17 @@ them as four distinct routes. Each takes no body and returns the updated `Swarm`
 | POST /workspaces/{id}/swarm/swarms/{sid}/abort | ws editor | — | Swarm (cancel runs; kill swarm sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/resume | ws editor | — | Swarm (resume from paused) |
 
+A `{sid}` (or `{pid}` for `…/projects/{pid}/plan`, `swarm_id` in a recruit body) that
+belongs to a different workspace than the path `{id}` answers **404**, exactly like a
+missing row — the role check alone is on `{id}`. The same applies to
+`…/swarms/{sid}/agent-stop`.
+
+PATCH bodies (`UpdateTaskReq.assignee_agent_id`, `UpdateProjectReq.repo_path`,
+`UpdateGoalReq.metric|comparator|target_value|block_value|verify_cmd`,
+`UpdateTriggerReq.repo_path`): an absent key leaves the field unchanged, an explicit
+`null` clears it. A task's `assignee_agent_id` must name an agent of the task's own
+swarm (create or update) — otherwise **400** `invalid`.
+
 ## Swarm goals, verification & channel triggers (additive, continues #86)
 
 Additive to the frozen swarm block (#59–#86); these are NOT renumbered against the

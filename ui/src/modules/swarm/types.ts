@@ -450,8 +450,15 @@ export interface CreateGoalReq {
   order_idx?: number;
 }
 
-/** PATCH /swarm/goals/{gid} — every field optional (partial update). */
-export type UpdateGoalReq = Partial<CreateGoalReq>;
+/** PATCH /swarm/goals/{gid} — every field optional (partial update). An
+ *  explicit `null` CLEARS a nullable field (absent leaves it unchanged). */
+export type UpdateGoalReq = Partial<Omit<CreateGoalReq, 'metric' | 'comparator' | 'target_value' | 'block_value' | 'verify_cmd'>> & {
+  metric?: string | null;
+  comparator?: string | null;
+  target_value?: number | null;
+  block_value?: number | null;
+  verify_cmd?: string | null;
+};
 
 /** GET /swarm/tasks/{tid}/verification. */
 export interface TaskVerification {

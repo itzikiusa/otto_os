@@ -1361,6 +1361,37 @@ impl SwarmRepo {
         self.get_task(id).await
     }
 
+    /// Compare-and-set a task's status: flips it to `status` only while it is
+    /// one of `expected`; `false` = nothing written (someone moved it). A
+    /// verification controller finishing minutes later must not overwrite an
+    /// operator's cancel / back-to-todo with `done` (S4-07).
+    pub async fn set_task_status_if(
+        &self,
+        id: &Id,
+        expected: &[&str],
+        status: &str,
+    ) -> Result<bool> {
+        let placeholders = vec!["?"; expected.len().max(1)].join(",");
+        let sql = format!(
+            "UPDATE swarm_tasks SET status = ?, updated_at = ? WHERE id = ? AND status IN ({placeholders})"
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(status)
+            .bind(fmt(Utc::now()))
+            .bind(id);
+        if expected.is_empty() {
+            q = q.bind("");
+        }
+        for st in expected {
+            q = q.bind(*st);
+        }
+        let res = q
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set task status if"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Atomically claim a `todo` task for a turn: flip it to `in_progress` (and
     /// assign `assignee` when the task has no assignee yet) ONLY if it is still
     /// `todo`. Returns whether this caller won the claim — the coordinator's
@@ -2931,6 +2962,27 @@ mod tests {
         repo.refund_task_attempt(&task.id).await.unwrap();
         repo.refund_task_attempt(&task.id).await.unwrap();
         assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 0);
+    }
+
+    /// S4-07: the task-status CAS only writes from an expected status.
+    #[tokio::test]
+    async fn set_task_status_if_is_a_compare_and_set() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let task = repo
+            .create_task(new_task(&new_id(), "verifying"))
+            .await
+            .unwrap();
+        assert!(repo
+            .set_task_status_if(&task.id, &["verifying"], "blocked")
+            .await
+            .unwrap());
+        // The operator moved it on; a late controller write is a no-op.
+        assert!(!repo
+            .set_task_status_if(&task.id, &["verifying"], "done")
+            .await
+            .unwrap());
+        assert_eq!(repo.get_task(&task.id).await.unwrap().status, "blocked");
     }
 
     /// S1: a stop never clobbers a finished run, and a late finish never
