@@ -2500,6 +2500,7 @@ mod tests {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(dir.path().join("wf.db"))
             .create_if_missing(true)
+            .foreign_keys(false)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(std::time::Duration::from_secs(10));
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
