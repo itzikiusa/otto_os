@@ -40,6 +40,8 @@ export const BACKGROUND_SOURCES = new Set([
   'scheduled_task',
   'finding',
   'assistant',
+  'design_assist',
+  'browser_summarize',
 ]);
 
 /** A user-facing foreground session (sidebar-listable). */

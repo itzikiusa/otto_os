@@ -20,6 +20,7 @@ import { router } from '../router.svelte';
 import { parseNoticeRoute } from '../noticeRoute';
 import { isEmbedded } from '../desktop';
 import { toastError } from '../toastError';
+import { confirmer } from '../confirm.svelte';
 
 /** Most ids one bulk read / dismiss call may carry (daemon `BULK_MAX`). */
 const BULK_MAX = 500;
@@ -188,6 +189,22 @@ export function capNotices(list: Notice[], cap = NOTICE_CAP): Notice[] {
   return kept.length > cap ? kept.slice(0, cap) : kept;
 }
 
+/** Merge notices the event stream delivered while a `/notifications` GET was
+ *  in flight (`ingested`, oldest first) into its snapshot (`fetched`, newest
+ *  first). The snapshot may predate them: an ingested notice the snapshot
+ *  lacks — or carries an OLDER copy of (a re-fired `:waiting` keeps its id
+ *  with a newer `created_at`) — goes back on top; a snapshot copy at least as
+ *  new is the server's truth (read state included) and wins. */
+export function mergeInFlight(fetched: Notice[], ingested: Notice[]): Notice[] {
+  let out = fetched;
+  for (const n of ingested) {
+    const have = out.find((x) => x.id === n.id);
+    if (have && have.created_at >= n.created_at) continue;
+    out = [n, ...out.filter((x) => x.id !== n.id)];
+  }
+  return capNotices(out);
+}
+
 class NotificationStore {
   /** Raw: every write replaces the array (and edited notices) wholesale. */
   notices: Notice[] = $state.raw([]);
@@ -236,14 +253,24 @@ class NotificationStore {
     // false }` below would then re-trigger the effect after every fetch — an
     // infinite `GET /notifications` loop that pegs the webview + daemon. untrack
     // keeps the overlap guard working without leaking it as a dependency.
-    if (untrack(() => this.loading)) return;
+    // A load requested while one is in flight (a reconnect resync racing the
+    // bell's mount) may carry newer server state: queue ONE trailing reload
+    // instead of dropping it.
+    if (untrack(() => this.loading)) {
+      this.reloadQueued = true;
+      return;
+    }
     this.loading = true;
+    // Notices ingested from the event stream while the GET is in flight may
+    // be newer than its snapshot — merged back below, never overwritten.
+    const since = this.ingestSeq;
     try {
       const [notices, settings] = await Promise.all([
         api.get<Notice[]>('/notifications'),
         api.get<NotificationSettings>('/notifications/settings').catch(() => this.settings),
       ]);
-      this.notices = notices.filter((n) => !this.isChannelSessionNotice(n));
+      const fetched = notices.filter((n) => !this.isChannelSessionNotice(n));
+      this.notices = mergeInFlight(fetched, this.ingestedSince(since));
       this.settings = settings;
       this.loaded = true;
       try {
@@ -259,6 +286,19 @@ class NotificationStore {
     } finally {
       this.loading = false;
     }
+    if (this.reloadQueued) {
+      this.reloadQueued = false;
+      await this.load();
+    }
+  }
+
+  private reloadQueued = false;
+  /** Event-stream ingests, in order, for {@link load}'s in-flight merge. */
+  private ingestSeq = 0;
+  private ingestLog: { seq: number; notice: Notice }[] = [];
+
+  private ingestedSince(seq: number): Notice[] {
+    return this.ingestLog.filter((e) => e.seq > seq).map((e) => e.notice);
   }
 
   /** The live "needs you" flag is raised from the `:waiting` WS notice (see
@@ -308,6 +348,7 @@ class NotificationStore {
     const known = this.notices.find((n) => n.id === notice.id);
     if (known && known.created_at === notice.created_at) return;
     if (this.isChannelSessionNotice(notice)) return;
+    this.ingestLog = [...this.ingestLog.slice(-49), { seq: ++this.ingestSeq, notice }];
     this.notices = capNotices([notice, ...this.notices.filter((n) => n.id !== notice.id)]);
     if (this.wantsNative(notice)) void this.fireNative(notice);
   }
@@ -470,16 +511,9 @@ class NotificationStore {
       case 'open_url':
         await openExternal(action.url);
         break;
-      case 'open_session': {
-        // The main list carries only sidebar sessions — fetch others by id.
-        const found = ws.getSession(action.session_id) ?? (await ws.ensureSession(action.session_id));
-        if (!found || !ws.getSession(action.session_id)) {
-          toasts.warn('Session unavailable', 'It may have been closed or belongs to another workspace.');
-          return;
-        }
-        ws.navigateToSession(action.session_id);
+      case 'open_session':
+        await this.openSession(action.session_id);
         break;
-      }
       case 'reauth':
         this.guideReauth(action.target);
         break;
@@ -487,6 +521,39 @@ class NotificationStore {
         await this.openRoute(action.route, action.workspace_id ?? null);
         break;
     }
+  }
+
+  /** A session notice ("needs you", finished, …): open the session wherever it
+   *  is. The main list carries only this workspace's sidebar sessions, so
+   *  fetch others by id — then switch to ITS workspace, or (archived since
+   *  the notice fired) offer to bring it back. */
+  private async openSession(id: string): Promise<void> {
+    const row = ws.getSession(id) ?? (await ws.ensureSession(id));
+    if (!row) {
+      toasts.warn('Session unavailable', 'It may have been deleted, or you no longer have access.');
+      return;
+    }
+    const elsewhere = !ws.getSession(id) && row.workspace_id !== ws.currentId;
+    if (elsewhere && !ws.workspaces.some((w) => w.id === row.workspace_id)) {
+      toasts.warn('Workspace unavailable', 'It may have been removed, or you no longer have access.');
+      return;
+    }
+    if (row.archived) {
+      const name = row.title?.trim() || 'This session';
+      const ok = await confirmer.ask(
+        `“${name}” was archived. Unarchive it and open it? It resumes its saved conversation where it can.`,
+        { title: 'Session archived', confirmLabel: 'Unarchive and open' },
+      );
+      if (!ok) return;
+      try {
+        await ws.unarchiveSession(id);
+      } catch (e) {
+        toastError('Couldn’t unarchive the session', e);
+        return;
+      }
+    }
+    if (elsewhere) await ws.openInWorkspace(row.workspace_id, id);
+    else ws.navigateToSession(id);
   }
 
   /** Automation notices (failed task / workflow run / goal loop, workflow
