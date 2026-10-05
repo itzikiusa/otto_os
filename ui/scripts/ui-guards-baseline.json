@@ -68,6 +68,7 @@
     "src/shell/SplitDivider.svelte": 1
   },
   "accent-fill": {},
+  "accent-mix-literal": {},
   "accent-text": {},
   "bare-loading": {},
   "body-style": {},
@@ -241,7 +242,8 @@
   "straight-contraction": {
     "src/lib/stores/apiClient.svelte.ts": 1,
     "src/lib/stores/workspace.svelte.ts": 1,
-    "src/modules/database/EditFlow.svelte.ts": 4
+    "src/modules/database/EditFlow.svelte.ts": 4,
+    "src/modules/vault/vault.svelte.ts": 3
   },
   "straight-couldnt": {},
   "toast-failed-title": {},

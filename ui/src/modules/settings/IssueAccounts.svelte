@@ -335,7 +335,7 @@
     <div class="field">
       <label for="ia-expiry">Token expiry <span class="dim">(optional)</span></label>
       <input id="ia-expiry" class="input" type="date" bind:value={tokenExpiresAt} />
-      <span class="hint">Set the token's expiry date to get a reminder before it lapses.</span>
+      <span class="hint">Set the token’s expiry date to get a reminder before it lapses.</span>
     </div>
 
     {#snippet footer()}

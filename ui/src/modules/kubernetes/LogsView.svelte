@@ -374,7 +374,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search-in {
     border: none;
@@ -425,7 +425,7 @@
     opacity: 0.7;
   }
   .ln mark {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
     color: inherit;
     border-radius: 2px;
   }

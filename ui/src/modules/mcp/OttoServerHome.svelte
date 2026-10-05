@@ -319,7 +319,7 @@
   <section class="hero">
     <div class="hl-title">
       <Icon name="plug" size={16} />
-      <span>Otto's built-in MCP server</span>
+      <span>Otto’s built-in MCP server</span>
     </div>
 
     {#if wsId}
@@ -335,7 +335,7 @@
         <span class="switchcopy">
           <strong>Attach to sessions in {ws.current?.name ?? 'this workspace'}</strong>
           <span class="muted small">
-            Sessions started in this workspace get Otto's read-only tools (ottod mcp-tools). Applies to sessions started from now on.
+            Sessions started in this workspace get Otto’s read-only tools (ottod mcp-tools). Applies to sessions started from now on.
           </span>
         </span>
       </label>
@@ -501,7 +501,7 @@
       {/if}
     </div>
     <p class="small">
-      Built-in tools: {attached ? 'attached' : 'not attached'} — Otto's read-only tool server (<code>ottod mcp-tools</code>).
+      Built-in tools: {attached ? 'attached' : 'not attached'} — Otto’s read-only tool server (<code>ottod mcp-tools</code>).
     </p>
     {#if !wsId}
       <p class="muted small">Select a workspace to inspect its gateway tools.</p>

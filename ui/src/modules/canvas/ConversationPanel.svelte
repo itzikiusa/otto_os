@@ -153,8 +153,8 @@
     {:else}
       <div class="empty">
         <p class="lead">Describe a diagram and the agent draws it here.</p>
-        <p class="hint">It edits this canvas's file and the board updates — keep chatting to
-          refine it. The agent's live shell appears here once it starts.</p>
+        <p class="hint">It edits this canvas’s file and the board updates — keep chatting to
+          refine it. The agent’s live shell appears here once it starts.</p>
       </div>
     {/if}
   </div>
@@ -302,7 +302,7 @@
   }
   .composer textarea:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .send {
     display: inline-flex;

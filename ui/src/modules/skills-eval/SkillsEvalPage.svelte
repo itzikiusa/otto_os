@@ -457,7 +457,7 @@
   }
   .se-item.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .se-item-top {
     display: flex;

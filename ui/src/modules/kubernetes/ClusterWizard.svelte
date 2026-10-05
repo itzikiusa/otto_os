@@ -228,7 +228,7 @@
           <textarea id="k8s-yaml" class="input mono" rows="10" bind:value={yamlText} placeholder="apiVersion: v1&#10;kind: Config&#10;…" spellcheck="false"></textarea>
         </div>
         <div class="field">
-          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file's current-context)</span></label>
+          <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file’s current-context)</span></label>
           <input id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
         </div>
       {:else}
@@ -420,7 +420,7 @@
   }
   .env-chip.selected {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
     font-weight: 500;
   }

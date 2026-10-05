@@ -700,7 +700,7 @@
     color: var(--text);
     line-height: 1.45;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    background: var(--accent-faint);
     border-inline-start: 3px solid var(--accent);
     border-radius: 0 var(--radius-s) var(--radius-s) 0;
   }

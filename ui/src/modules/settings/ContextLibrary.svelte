@@ -316,7 +316,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>The single source of truth materialized into each workspace's CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions.</SectionIntro>
+  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions.</SectionIntro>
 
   <!-- Tabs (a real tablist: ←/→, Home/End) -->
   <div class="segmented lib-tabs" role="tablist" aria-label="Library">

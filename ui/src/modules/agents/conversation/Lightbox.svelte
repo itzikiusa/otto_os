@@ -50,7 +50,7 @@
     max-height: 100%;
     object-fit: contain;
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .lb-close {
     position: absolute;

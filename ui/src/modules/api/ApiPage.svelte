@@ -664,7 +664,7 @@
   }
   .resizer:hover,
   .resizer:focus-visible {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    background: var(--accent-line);
   }
 
   @media (max-width: 640px) {

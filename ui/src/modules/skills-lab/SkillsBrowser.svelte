@@ -546,7 +546,7 @@
   }
   .search:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* The focus ring is drawn on the .search wrapper (:focus-within above). */
   .search input {
@@ -583,7 +583,7 @@
   }
   .fchip.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .fchip.warn {
@@ -634,7 +634,7 @@
   }
   .row.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    border-color: var(--accent-soft-strong);
   }
   .row-main {
     flex: 1;

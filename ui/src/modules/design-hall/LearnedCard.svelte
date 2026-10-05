@@ -156,7 +156,7 @@
   }
   .new {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
   }
   .dim {
     color: var(--text-dim);

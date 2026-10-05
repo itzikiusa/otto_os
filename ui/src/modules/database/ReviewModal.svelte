@@ -208,7 +208,7 @@
     overflow: auto;
   }
   .review-sql:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .review-sql:disabled {
     opacity: 0.6;

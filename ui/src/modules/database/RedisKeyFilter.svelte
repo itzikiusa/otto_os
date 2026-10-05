@@ -67,7 +67,7 @@
     outline: none;
   }
   .kf-input:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .kf-clear {
     display: grid;

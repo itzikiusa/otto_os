@@ -539,7 +539,7 @@
   }
   .chip-toggle.on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   /* Visually hidden but still focusable (display:none dropped the chips out

@@ -4540,7 +4540,7 @@
   @keyframes row-pulse { /* ui-guards: allow */
     0%,
     55% {
-      background: color-mix(in srgb, var(--accent) 42%, transparent);
+      background: var(--accent-line);
     }
     100% {
       background: var(--accent-soft-strong);
@@ -4593,7 +4593,7 @@
     font-weight: 600;
     padding: 1px 6px;
     border-radius: var(--radius-s);
-    border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1px dashed var(--accent-line-strong);
     color: var(--accent-text);
     background: var(--accent-soft);
   }
@@ -4635,7 +4635,7 @@
        one solid accent fill in the row. */
     background: var(--accent-soft);
     color: var(--accent-text);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+    box-shadow: inset 0 0 0 1px var(--accent-line);
     white-space: nowrap;
   }
   .gutter {
@@ -4828,7 +4828,7 @@
     /* Active highlight: the accent tint every selection uses. */
     background: var(--accent-soft);
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   /* Full-screen click-catcher: any outside click closes the popover. */
   .ref-pop-backdrop {
@@ -4909,7 +4909,7 @@
   .ref-pop-row:focus-visible .ref-pop-tag {
     background: var(--surface);
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
   }
 
   /* ── Branch-line highlight (press a commit → see its branch) ───────────────

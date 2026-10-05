@@ -830,7 +830,7 @@
       title: `Replace the description of ${story.source_key}?`,
       where: jiraWhere(),
       what: descDraft.trim() || '(empty description)',
-      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira's history.`,
+      who: `Everyone with access to ${story.source_key} sees the new text; the previous description is only in Jira’s history.`,
     });
     if (!ok) return;
     descSaving = true;
@@ -2198,7 +2198,7 @@
     font-weight: 500;
     background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 1px solid var(--accent-line);
   }
   .tag-remove {
     display: inline-flex;
@@ -2232,7 +2232,7 @@
   }
   .tag-input:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
     color: var(--text);
     width: 100px;
   }
@@ -2296,7 +2296,7 @@
     border-radius: 999px;
     background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border: 1px solid var(--accent-soft-strong);
   }
 
   /* Story header */
@@ -2407,7 +2407,7 @@
   .title-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .source-link {
     display: inline-flex;
@@ -2500,8 +2500,8 @@
   .version-banner {
     font-size: var(--fs-xs);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 6px 12px;
     margin-bottom: 12px;
@@ -2788,7 +2788,7 @@
   .field-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .field-multiselect {
     display: flex;
@@ -2873,7 +2873,7 @@
   .desc-textarea:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .desc-editor-actions {
     display: flex;
@@ -2964,7 +2964,7 @@
     color: inherit;
   }
   .dev-row:hover {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
   .dev-pr-name,
   .dev-commit-msg {
@@ -3186,8 +3186,8 @@
   .draft-hint {
     font-size: var(--fs-s);
     color: var(--text-dim);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 12px;
     line-height: 1.5;
@@ -3225,7 +3225,7 @@
   }
   .textarea:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .draft-save-row {
     display: flex;

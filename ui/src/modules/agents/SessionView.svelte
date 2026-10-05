@@ -1114,7 +1114,7 @@
     container: pane / inline-size;
   }
   .pane.focused {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .pane-head {
     position: relative;
@@ -1295,7 +1295,7 @@
   }
   .handover-crumb:hover {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .handover-pending {
     display: inline-flex;

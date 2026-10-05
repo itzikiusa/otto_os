@@ -285,7 +285,7 @@
   .item { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 16ch; }
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
-  .pa-enf { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .pa-enf { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
   .field-row { display: flex; gap: 10px; flex-wrap: wrap; }
   .field-row > .field { flex: 1; min-width: 120px; margin-bottom: 0; }
   .chk { display: flex; align-items: center; gap: 6px; font-size: var(--fs-m); }

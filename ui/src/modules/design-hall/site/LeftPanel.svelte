@@ -504,7 +504,7 @@
   }
   .tile:hover {
     border-color: var(--accent);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .tile:focus-visible {
     outline: 2px solid var(--accent-text);

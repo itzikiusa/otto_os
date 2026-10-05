@@ -117,7 +117,7 @@
     inset-block: 0;
     inset-inline-start: -1px;
     width: 3px;
-    background: color-mix(in srgb, var(--accent) 70%, transparent);
+    background: var(--accent-line-strong);
     border-radius: var(--radius-s);
   }
 </style>

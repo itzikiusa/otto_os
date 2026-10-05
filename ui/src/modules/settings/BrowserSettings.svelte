@@ -68,7 +68,7 @@
   <PageHeader title={sectionLabel('browser')} subtitle="Live tabs and the browser engine that runs them" />
   <PageBody width="readable">
     <SectionIntro>
-      A live tab is a real browser. In the desktop app it can use this Mac's web view; everywhere
+      A live tab is a real browser. In the desktop app it can use this Mac’s web view; everywhere
       else (a remote session, your phone, and whenever an agent drives a page) it runs in a
       Chromium the Otto daemon manages and streams to you.
     </SectionIntro>
@@ -85,7 +85,7 @@
               onchange={() => browserLive.setPref('native')}
             />
             <span>
-              <span class="choice-title">This Mac's web view</span>
+              <span class="choice-title">This Mac’s web view</span>
               <span class="row-desc">Fastest. Only in the desktop app; agents can’t drive it.</span>
             </span>
           </label>
@@ -97,8 +97,8 @@
               onchange={() => browserLive.setPref('remote')}
             />
             <span>
-              <span class="choice-title">Otto's Chromium</span>
-              <span class="row-desc">Streams to any device, uses Otto's network guard, and agents can drive it while you watch.</span>
+              <span class="choice-title">Otto’s Chromium</span>
+              <span class="row-desc">Streams to any device, uses Otto’s network guard, and agents can drive it while you watch.</span>
             </span>
           </label>
         </div>
@@ -123,7 +123,7 @@
           <p class="row-desc">The live browser engine runs on Apple silicon Macs only for now.</p>
         {:else}
           <p class="row-desc">
-            Downloaded once into Otto's data folder and checked against a pinned checksum. It is never
+            Downloaded once into Otto’s data folder and checked against a pinned checksum. It is never
             bundled or updated silently.
           </p>
           <div class="choices" role="radiogroup" aria-labelledby="bs-engine">

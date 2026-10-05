@@ -143,7 +143,7 @@
       <EmptyState
         icon="lock"
         title="CloudWatch access denied"
-        body={`This account's IAM identity needs cloudwatch:GetMetricData. ${error}`}
+        body={`This account’s IAM identity needs cloudwatch:GetMetricData. ${error}`}
         actionLabel="Retry"
         onaction={() => void load()}
       />

@@ -563,7 +563,7 @@
   /* Selection is accent (same as the Runs list), not the success green. */
   .mx-item.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .mx-item-top {
     display: flex;
@@ -710,7 +710,7 @@
   }
   .chip-toggle.on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .chip-toggle input {

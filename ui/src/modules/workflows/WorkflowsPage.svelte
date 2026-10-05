@@ -2156,7 +2156,7 @@
             </button>
           </div>
           <p class="instructions-hint">
-            Standing rules every step follows by the letter — distinct from the workflow's description.
+            Standing rules every step follows by the letter — distinct from the workflow’s description.
           </p>
           <textarea
             class="ri-text mono"
@@ -2838,7 +2838,7 @@
             {:else if selectedNode.kind === 'review_run'}
               <p class="insp-note">
                 Leave Repository and Base on “inherit” to review exactly where the implementer worked
-                (the run's working folder + base). Set them only to override.
+                (the run’s working folder + base). Set them only to override.
               </p>
               <label for="np-repo">Repository (optional — inherits from the implementer)</label>
               {@render repoPicker('np-repo', 'Inherit from the working folder')}
@@ -3126,7 +3126,7 @@
             {:else if selectedNode.kind === 'git_pr'}
               <p class="insp-note">
                 Leave Repository and Base empty to <strong>inherit the reference</strong> the
-                implementer/reviewer used (the run's working folder and base, or the upstream
+                implementer/reviewer used (the run’s working folder and base, or the upstream
                 review). Set them only to override. A run that changed several repos opens
                 <strong>one PR per repo</strong> (from fanned-in reviews, or enable “detect changed”).
               </p>
@@ -3156,10 +3156,10 @@
               </label>
             {:else if selectedNode.kind === 'self_improve'}
               <p class="insp-note">
-                Reflects on the workspace's recent agent sessions and <strong>offers</strong>
+                Reflects on the workspace’s recent agent sessions and <strong>offers</strong>
                 skill/memory improvements. They are <strong>queued for approval</strong> in
                 Self-Improvement — never auto-applied — and the offered list is posted to the
-                trigger's chat thread.
+                trigger’s chat thread.
               </p>
               <span class="np-label">Providers — the agent(s) that reflect (override Self-Improvement settings)</span>
               <div class="rv-provs">
@@ -3552,7 +3552,7 @@
   textarea:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   /* Prompt-sized textareas (reviewer/summarizer instructions, goals, checks).
      `rows` alone loses to the inspector's own scroll: a 3-row box holding a
@@ -3913,7 +3913,7 @@
   .wf-title-edit:focus-visible,
   .row-rename:focus-visible {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .grow {
     flex: 1;
@@ -4024,7 +4024,7 @@
   .insp-grip:focus-visible {
     background: linear-gradient(
       to bottom,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4136,7 +4136,7 @@
   .inspector input[type='number']:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .inspector select {
     width: 100%;
@@ -4152,7 +4152,7 @@
   .inspector select:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .err {
     color: var(--danger);
@@ -4317,7 +4317,7 @@
     background: linear-gradient(
       to right,
       transparent,
-      color-mix(in srgb, var(--accent) 40%, transparent),
+      var(--accent-line),
       transparent
     );
   }
@@ -4431,7 +4431,7 @@
   }
   .json-zoom:focus {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* Runs history popover */

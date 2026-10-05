@@ -45,7 +45,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-s);
     pointer-events: none;
   }

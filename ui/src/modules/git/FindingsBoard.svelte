@@ -383,7 +383,7 @@
   .fb-pill.active {
     background: var(--accent-soft);
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     font-weight: 600;
   }
 

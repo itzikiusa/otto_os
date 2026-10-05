@@ -576,7 +576,7 @@
       />
       {#if editChannel === 'webhook'}
         <span class="hint">
-          Where the agent's reply is POSTed. A request may override it with <code>callback_url</code>.
+          Where the agent’s reply is POSTed. A request may override it with <code>callback_url</code>.
           Leave blank for fire-and-forget (trigger only, no reply delivered).
         </span>
       {/if}

@@ -1716,7 +1716,7 @@
   }
   .panel-resizer:hover,
   .panel.resizing .panel-resizer {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   /* Suspend hover affordances mid-drag so the pointer doesn't flicker. */
   .panel.resizing {
@@ -1908,7 +1908,7 @@
     background: color-mix(in srgb, var(--surface) 94%, transparent);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     pointer-events: none;
     white-space: nowrap;
     overflow: hidden;

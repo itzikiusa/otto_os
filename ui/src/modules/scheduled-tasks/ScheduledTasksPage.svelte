@@ -806,7 +806,7 @@
         </label>
       {:else}
         <label class="field">
-          <span>Prompt (the agent's instructions)</span>
+          <span>Prompt (the agent’s instructions)</span>
           <textarea class="input" bind:value={fPrompt} rows="6" placeholder="Go over every ticket updated in the last 24h…"></textarea>
         </label>
       {/if}

@@ -513,8 +513,8 @@
   $effect(() => {
     const r = selected;
     return registry.register('insights', [
-      { id: 'insights.run', title: "Run yesterday's insights report", group: 'Insights', keywords: 'generate usage report now', run: () => void runNow('day:1') },
-      { id: 'insights.run-week', title: "Run last week's insights report", group: 'Insights', keywords: 'generate weekly usage report', run: () => void runNow('week:1') },
+      { id: 'insights.run', title: "Run yesterday’s insights report", group: 'Insights', keywords: 'generate usage report now', run: () => void runNow('day:1') },
+      { id: 'insights.run-week', title: "Run last week’s insights report", group: 'Insights', keywords: 'generate weekly usage report', run: () => void runNow('week:1') },
       ...(r
         ? [
             { id: 'insights.export-md', title: 'Export insights summary as Markdown', group: 'Insights', keywords: 'download md report', run: () => exportMd(r) },
@@ -651,7 +651,7 @@
           icon="gauge"
           title="No insight reports yet"
           body="An agent reads your recent sessions and writes an action-first report: what’s working, what’s slowing you down, and five things to change. Scheduled reports are off until you turn them on."
-          actionLabel={running ? 'Starting…' : "Run yesterday's report"}
+          actionLabel={running ? 'Starting…' : "Run yesterday’s report"}
           actionIcon="play"
           onaction={() => runNow('day:1')}
         >
@@ -842,7 +842,7 @@
   }
   .filter-chip.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   .filter-chip .count {
@@ -881,7 +881,7 @@
   }
   .rep-row.active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+    border-color: var(--accent-soft-strong);
   }
   .row-top {
     display: flex;

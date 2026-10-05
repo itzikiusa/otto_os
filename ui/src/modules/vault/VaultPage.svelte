@@ -625,7 +625,7 @@
     font-size: var(--fs-xs);
     color: var(--accent-text);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     padding: 2px 8px;
     cursor: pointer;

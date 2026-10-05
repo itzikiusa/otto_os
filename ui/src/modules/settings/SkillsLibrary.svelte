@@ -174,7 +174,7 @@
 
   async function remove(s: BundledSkill): Promise<void> {
     if (
-      !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI's skills folder? You can install it again from this page.`, {
+      !(await confirmer.ask(`Remove “${s.name}” from your library and from each agent CLI’s skills folder? You can install it again from this page.`, {
         title: 'Remove skill',
         confirmLabel: 'Remove',
       }))
@@ -253,7 +253,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('skills')} subtitle="Skills that ship with Otto" />
   <PageBody width="readable">
-  <SectionIntro>Installing a skill adds it to your library and to each agent CLI's global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
+  <SectionIntro>Installing a skill adds it to your library and to each agent CLI’s global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
 
   <LoadState what="bundled skills" {loading} error={loadError} empty={skills.length === 0} rows={5} onretry={() => void load()}>
     {#snippet emptyView()}
@@ -379,7 +379,7 @@
   }
   .filter:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .filter-input {
     flex: 1;

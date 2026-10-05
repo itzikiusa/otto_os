@@ -319,14 +319,14 @@
   }
   .vv-tool:hover:not(:disabled) {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .vv-tool:disabled {
     opacity: 0.5;
     cursor: default;
   }
   .jrec.compare-pick {
-    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .jrec-tag {
     font-size: var(--fs-xs);

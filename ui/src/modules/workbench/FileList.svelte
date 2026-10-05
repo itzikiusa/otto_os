@@ -257,7 +257,7 @@
     outline: none;
   }
   .wb-search:focus-within {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .wb-files-body {
     flex: 1;

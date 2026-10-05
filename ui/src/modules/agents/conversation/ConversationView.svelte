@@ -1112,7 +1112,7 @@
   }
   .pv-resize:hover,
   .pv-resize:focus-visible {
-    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-line);
     outline: none;
   }
   .conv-frame {
@@ -1315,7 +1315,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     white-space: nowrap;
   }
   :global([dir='rtl']) .jump-pill {

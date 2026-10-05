@@ -977,7 +977,7 @@
   .snip-canvas {
     max-width: 100%;
     max-height: 100%;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     border-radius: var(--radius-s);
     touch-action: none;
     cursor: crosshair;

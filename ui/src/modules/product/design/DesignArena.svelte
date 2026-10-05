@@ -1395,7 +1395,7 @@
   .da-toggle.on {
     background: var(--accent-soft);
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+    border-color: var(--accent-line);
   }
   .stage-body {
     flex: 1;

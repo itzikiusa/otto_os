@@ -365,7 +365,7 @@
     text-align: start;
   }
   .sess-h:hover {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .s-title {
     color: var(--text);

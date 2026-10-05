@@ -351,8 +351,8 @@ There are three levels, each with one token:
   and above the ambient backdrop on Home. Don't add a stronger shadow to "lift"
   a card; change its surface step or its border (`--border-strong`) instead.
 - Floating layers share one family: `--glass-border` + `--glass-shadow`, whether
-  the surface is glass (menus, palette) or opaque (Modal). `--shadow` remains
-  for older floating UI (toasts, legacy popovers) until they move over.
+  the surface is glass (menus, palette) or opaque (Modal). The legacy
+  `--shadow` alias is retired; toasts and popovers use `--glass-shadow` too.
 - A selected segment in `.segmented` has a 1 px micro-shadow. That is the only
   other in-flow shadow.
 

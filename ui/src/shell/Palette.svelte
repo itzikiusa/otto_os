@@ -786,7 +786,7 @@
   }
   .pal-english textarea:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .pal-english-row {
     display: flex;
@@ -797,8 +797,8 @@
     font-size: var(--fs-s);
     padding: 8px 10px;
     border-radius: var(--radius-s);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-soft-strong);
   }
   .pal-plan {
     border: 1px solid var(--border);

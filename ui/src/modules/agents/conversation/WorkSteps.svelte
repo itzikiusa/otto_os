@@ -178,7 +178,7 @@
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent);
+    border: 2px solid var(--accent-soft-strong);
     border-top-color: var(--accent);
   }
   @media (prefers-reduced-motion: no-preference) {

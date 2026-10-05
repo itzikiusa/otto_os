@@ -534,7 +534,7 @@
   }
   .theme-card.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .theme-preview {
     height: 72px;

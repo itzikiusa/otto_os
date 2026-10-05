@@ -408,7 +408,7 @@
     padding: 10px;
     box-sizing: border-box;
     color: #222; /* ui-guards: allow — sticky-note ink on its fixed paper color */
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: auto;
     white-space: pre-wrap;
   }
@@ -466,7 +466,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 6px 12px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     transition: opacity var(--dur-enter);
   }
   .controls.hidden {

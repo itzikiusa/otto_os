@@ -56,7 +56,7 @@
 
 <div class="cmp">
   <h2>Compare {runs.length} runs</h2>
-  <p class="lede">Scores from each run's best iteration. <Icon name="check" size={12} /> marks the top score in each row.</p>
+  <p class="lede">Scores from each run’s best iteration. <Icon name="check" size={12} /> marks the top score in each row.</p>
   <div class="table-wrap">
     <table>
       <thead>

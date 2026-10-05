@@ -410,7 +410,7 @@
   }
   .att-panel.drag-over {
     border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
 
   .att-header-row {
@@ -482,7 +482,7 @@
     border-radius: 999px;
     background: var(--accent-soft);
     color: var(--accent-text);
-    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     flex-shrink: 0;
   }
   .mockup-badge {

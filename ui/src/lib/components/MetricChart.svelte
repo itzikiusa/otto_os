@@ -436,7 +436,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     padding: 6px 8px;
     font-size: var(--fs-xs);
     min-width: 120px;

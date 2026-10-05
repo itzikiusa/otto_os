@@ -468,7 +468,7 @@ registerUiCommands('connections', {
         const connection = resolveConn(requested);
         const owner = database.locateTab(tabId);
         if (owner && owner.connId !== connection.id) {
-          throw new UiCommandError('invalid_args', `Tab ${tabId} belongs to another connection. Pass its connection_id or omit connection_id to use the tab's owner.`);
+          throw new UiCommandError('invalid_args', `Tab ${tabId} belongs to another connection. Pass its connection_id or omit connection_id to use the tab’s owner.`);
         }
       }
       await focusTab(tabId, ctx);

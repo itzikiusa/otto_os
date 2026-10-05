@@ -284,7 +284,7 @@
     const ok = await confirmer.ask(
       engine === 'mongodb'
         ? `Remove “${ctx.path}” from this document? ($unset — reviewed before it runs)`
-        : `Remove “${ctx.path}” from this column's JSON? (reviewed before it runs)`,
+        : `Remove “${ctx.path}” from this column’s JSON? (reviewed before it runs)`,
       { title: 'Delete field', danger: true },
     );
     if (ok) flow.unsetPath(ctx.rowIdx, ctx.colIdx, ctx.path);
@@ -522,7 +522,7 @@
   }
   .vv-tool:hover:not(:disabled) {
     color: var(--text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
   }
   .vv-tool:disabled {
     opacity: 0.5;
@@ -579,7 +579,7 @@
     overflow: hidden;
   }
   .vrec.compare-pick {
-    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .vrec-head {
     display: flex;

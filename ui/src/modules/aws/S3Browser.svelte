@@ -956,7 +956,7 @@
     justify-content: center;
     gap: 8px;
     pointer-events: none;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     color: var(--accent-text);
     font-size: var(--fs-m);
     font-weight: 600;

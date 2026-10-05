@@ -455,7 +455,7 @@ PageHeader: crumbs / title · status pill · version   [device ▢▢▢] [Fit] 
 - **The stage is full-bleed** on a neutral pasteboard (`--bg` or `--term-bg`
   with a subtle dot grid). Chrome never covers the artboard except for the
   **floating contextual toolbar** anchored to the selection. That toolbar is a
-  small `--surface` pill with `--shadow`, and it is clamped into the stage.
+  small `--surface` pill with `--glass-shadow`, and it is clamped into the stage.
 - Side panels are 240–320 px, can be collapsed, and use segmented tabs at the
   top.
 - **Versions are the undo model.** Every applied change (the user's or an
@@ -553,7 +553,7 @@ Otto's front door, inspired by cnvs.dev: **one** shared component,
 ```
 
 **Anatomy.** One glass surface (`--bg-sidebar` at 78% + blur, `--border`,
-`--shadow`; a pill at rest, `--radius-l` + 6 px once it opens). The panel above
+`--glass-shadow`; a pill at rest, `--radius-l` + 6 px once it opens). The panel above
 the pill is drawn in the SAME surface — never a second glass layer.
 
 1. **Input** "Type or speak…" — a `combobox` driving a `listbox` with

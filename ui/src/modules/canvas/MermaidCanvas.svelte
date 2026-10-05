@@ -600,7 +600,7 @@
     color: var(--text-dim);
     font-size: var(--fs-xs);
     font-weight: 600;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .code-toggle {
     display: inline-flex;
@@ -614,7 +614,7 @@
     font-size: var(--fs-xs);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .code-toggle:hover,
   .code-toggle.on {
@@ -633,7 +633,7 @@
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zoombar button {
     display: inline-flex;

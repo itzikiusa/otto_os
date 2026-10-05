@@ -219,7 +219,7 @@
     {#if drawerTab === 'overview'}
       <div class="dt">
         <div class="logs-link">
-          <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance's exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
+          <button class="btn small" onclick={() => router.go(`aws/${account.id}/logs/${encodeURIComponent(`/aws/rds/instance/${inst.identifier}/`)}/${encodeURIComponent(rowRegion(inst))}`)} title="Open this instance’s exported log groups in CloudWatch Logs (needs log exports enabled)"><Icon name="text" size={12} /> Logs</button>
         </div>
         <dl class="kv">
           <dt>Engine</dt><dd>{inst.engine ?? '—'} {inst.engine_version ?? ''}</dd>

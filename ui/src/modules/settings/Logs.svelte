@@ -506,6 +506,6 @@
     position: absolute;
     inset-block-end: 16px;
     inset-inline-end: 24px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
 </style>

@@ -151,7 +151,7 @@
   }
   .vchip.sel {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .av {
     width: 8px;

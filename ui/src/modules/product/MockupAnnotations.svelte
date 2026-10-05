@@ -476,7 +476,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     padding: 8px;
     pointer-events: auto;
   }

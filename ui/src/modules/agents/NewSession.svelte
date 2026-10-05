@@ -690,7 +690,7 @@
   .seg-btn.active {
     background: var(--surface);
     color: var(--text);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .seg + .hint {
     display: block;

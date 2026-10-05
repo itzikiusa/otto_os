@@ -433,7 +433,7 @@
     font-size: var(--fs-m);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .ai-fab :global(svg) {
     color: var(--accent-text);

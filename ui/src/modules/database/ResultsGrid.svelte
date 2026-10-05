@@ -1867,7 +1867,7 @@
     color: var(--text);
   }
   .rg-seg.on {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     background: var(--accent-soft);
     color: var(--accent-text);
   }
@@ -1905,7 +1905,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     font-size: var(--fs-m);
     color: var(--text);
   }
@@ -2092,7 +2092,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 4px 8px;
     margin-bottom: 6px;
@@ -2126,7 +2126,7 @@
     gap: 4px;
     height: 22px;
     padding-block: 0; padding-inline: 0 4px;
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     background: var(--surface);
     font-size: var(--fs-xs);
@@ -2254,7 +2254,7 @@
     min-width: 96px;
   }
   .gt-search:focus-within {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   .gt-search-input {
@@ -2348,7 +2348,7 @@
   }
   /* Nudge the user toward the full export when the shown result is capped. */
   .export-nudge {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   /* Server-side masking badge — shown in toolbar when result.masked is true. */
@@ -2359,7 +2359,7 @@
     height: 22px;
     padding: 0 8px;
     border-radius: var(--radius-s);
-    border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1px solid var(--accent-line-strong);
     background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
@@ -2483,7 +2483,7 @@
     gap: 4px;
     height: 16px;
     padding: 0 6px;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 999px;
     font-size: var(--fs-xs);
     font-weight: 600;

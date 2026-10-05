@@ -218,7 +218,7 @@
       title: `Request changes on PR #${number}?`,
       where: `${repoLabel} · PR #${number}${pr ? ` “${pr.title}”` : ''}`,
       what: requestChangesBody.trim() || 'A “changes requested” review with no message.',
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
     });
     if (!ok || disposed || busy !== '') return;
     busy = 'request-changes';
@@ -262,7 +262,7 @@
       title: `Update PR #${number} on ${providerName}?`,
       where: `${repoLabel} · PR #${number}`,
       what: `Title: ${editTitle.trim() || '(empty)'}${editDesc !== pr?.description_md ? '\nThe description is replaced with your text.' : ''}`,
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers see the change.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers see the change.`,
     });
     if (!ok || disposed || busy !== '') return;
     busy = 'edit';
@@ -378,7 +378,7 @@
       what: approve
         ? 'Your approval, posted under your git account.'
         : 'The PR is closed without merging. It can be reopened on the provider.',
-      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR's reviewers are notified.`,
+      who: `${pr?.author ? `${pr.author} (the author)` : 'The author'} and the PR’s reviewers are notified.`,
       danger: !approve,
     });
     if (!ok || disposed || busy !== '') return;

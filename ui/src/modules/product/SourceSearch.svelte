@@ -401,7 +401,7 @@
   }
   .issue-row:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
   }
   .issue-left {
     display: flex;
@@ -442,13 +442,13 @@
     font-weight: 600;
     color: var(--accent-text);
     background: transparent;
-    border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px dashed var(--accent-line);
     border-radius: var(--radius-s);
     cursor: pointer;
     transition: background var(--dur-fast) ease-out;
   }
   .load-more-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .load-more-btn:disabled {
     opacity: 0.55;

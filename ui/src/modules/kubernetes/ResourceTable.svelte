@@ -210,7 +210,7 @@
     background: var(--accent-soft);
   }
   .rt-row:focus-visible {
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   .rt-cell,
   .rt-hcell {

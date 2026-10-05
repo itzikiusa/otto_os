@@ -82,7 +82,7 @@
   {/if}
 
   {#if facts.why}
-    <p class="why"><span class="dim">Agent's reason:</span> {facts.why}</p>
+    <p class="why"><span class="dim">Agent’s reason:</span> {facts.why}</p>
   {/if}
 
   {#if facts.screenshot}
@@ -117,7 +117,7 @@
         inflight = 'deny';
         ondecide('deny', reason);
       }}
-      denyTarget="the agent's request"
+      denyTarget="the agent’s request"
       denyTitle="Deny the request"
     >
       {#snippet extra()}
@@ -125,7 +125,7 @@
           class="btn"
           disabled={busy}
           onclick={() => ondecide('take_over')}
-          title="Deny the agent's request and drive the page yourself"
+          title="Deny the agent’s request and drive the page yourself"
         >Take over</button>
       {/snippet}
     </ApprovalActions>
@@ -141,7 +141,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     color: var(--text);
     font-size: var(--fs-m);
   }

@@ -337,7 +337,7 @@
           <div class="md-body report-md" data-testid="report-rendered">{@html bodyHtml}</div>
         </section>
       {/if}
-      <p class="dim r-attrib"><Icon name="sparkle" size={12} /> Written by the <code>insights</code> skill from your agent transcripts. Figures are the agent's reading; open HTML for the charts.</p>
+      <p class="dim r-attrib"><Icon name="sparkle" size={12} /> Written by the <code>insights</code> skill from your agent transcripts. Figures are the agent’s reading; open HTML for the charts.</p>
     </div>
   {/if}
 </article>

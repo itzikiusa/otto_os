@@ -870,7 +870,7 @@
   }
   .toolbar .on {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .grow {

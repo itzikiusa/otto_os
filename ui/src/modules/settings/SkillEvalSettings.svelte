@@ -159,7 +159,7 @@
         <select id="sv-imp" class="input" bind:value={cfg.improver.provider}>
           {#each providerOpts as p (p)}<option value={p}>{p}</option>{/each}
         </select>
-        <span class="hint">Runs with the provider's default model.</span>
+        <span class="hint">Runs with the provider’s default model.</span>
       </div>
     </section>
 
@@ -198,7 +198,7 @@
               id={`sv-crit-${i}`}
               class="input val-textarea"
               rows="2"
-              placeholder="Logs use the skill's conventions and never leak secrets."
+              placeholder="Logs use the skill’s conventions and never leak secrets."
               bind:value={v.criteria}
             ></textarea>
           </div>

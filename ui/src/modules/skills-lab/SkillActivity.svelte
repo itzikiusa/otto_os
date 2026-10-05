@@ -157,7 +157,7 @@
 {#if error}
   <LoadState what="activity for this skill" {error} empty onretry={() => { void load(wsId); void loadEvals(wsId, group.name); }} />
 {:else if !wsId}
-  <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill's activity." icon="folder" />
+  <EmptyState title="No workspace selected" body="Evaluations and reviews belong to a workspace. Pick one in the sidebar to see this skill’s activity." icon="folder" />
 {:else if evals == null}
   <LoadState what="activity for {group.name}" loading empty rows={3} />
 {:else if view === 'evals'}

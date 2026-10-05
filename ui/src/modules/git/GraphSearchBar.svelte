@@ -229,7 +229,7 @@
     color: var(--text-dim);
   }
   .gsb-box:focus-within {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .gsb-input {
     flex: 1;

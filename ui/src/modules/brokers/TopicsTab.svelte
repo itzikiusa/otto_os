@@ -499,7 +499,7 @@
     gap: 8px;
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
-    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    background: var(--accent-faint);
   }
   .create input {
     padding: 6px 8px;

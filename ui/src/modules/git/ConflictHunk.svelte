@@ -406,7 +406,7 @@
     border-inline-end: none;
   }
   .side-head.theirs {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .side-tag {
     display: inline-grid;
@@ -459,7 +459,7 @@
     background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .split-col.theirs {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
   .pick-line {
     display: flex;
@@ -580,7 +580,7 @@
     background: color-mix(in srgb, var(--success) 5%, transparent);
   }
   .stack-side.theirs {
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    background: var(--accent-faint);
   }
 
   /* ── Mobile + tablet (≤1024px): real touch targets. ── */

@@ -7,7 +7,7 @@
    Canonical set: --bg --bg-sidebar --surface --surface-2 --surface-3 --border
    --border-strong --hover --text --text-dim --accent(-soft/-text/-solid/
    -contrast) --danger/--warning/--success/--info (+ -soft, --danger-solid)
-   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --shadow.
+   --status-* (indicators) --fs-* --radius-* --font-ui --font-mono --glass-shadow / --shadow-card / --shadow-xs.
    Also defined here: --glass-* / --separator / --shadow-card (chrome
    materials), --scrim / --scrim-soft / --scrim-media + --on-scrim (overlay backdrops and
    the text on them), --shadow-xs, --accent-soft-strong, --control-border, the
@@ -109,6 +109,12 @@
   /* A stronger accent tint for a selected row that must still read when it
      also hovers, or a drop target under a drag. */
   --accent-soft-strong: color-mix(in srgb, var(--accent) 22%, transparent);
+  /* The rest of the accent ladder: a barely-there wash (hover on accent rows,
+     drop targets) and two line strengths (accent borders/outlines/rings).
+     Hand-typed `color-mix(var(--accent) N%)` is ratcheted (accent-mix-literal). */
+  --accent-faint: color-mix(in srgb, var(--accent) 6%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 40%, transparent);
+  --accent-line-strong: color-mix(in srgb, var(--accent) 60%, transparent);
   /* Accent as TEXT (links, accent labels): pulled toward --text so it clears
      4.5:1 in every theme, a user-picked custom accent included. */
   --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
@@ -210,7 +216,6 @@ html[data-theme='native'][data-scheme='light'] {
   --text: #1d1d1f;
   --text-dim: #636368;
   --term-bg: #fbfbfd;
-  --shadow: var(--glass-shadow);
   --control-border: #86868b;
 }
 
@@ -224,7 +229,6 @@ html[data-theme='native'][data-scheme='dark'] {
   --text: #f2f2f5;
   --text-dim: #acacb3;
   --term-bg: #131318;
-  --shadow: var(--glass-shadow);
 }
 
 /* ---------- Pro Dark theme ---------- */
@@ -240,7 +244,6 @@ html[data-theme='pro-dark'][data-scheme='dark'] {
   --text: #e8e8ee;
   --text-dim: #9a9aa8;
   --term-bg: #0f0f14;
-  --shadow: var(--glass-shadow);
   --accent: #6c5ce7;
 }
 
@@ -256,7 +259,6 @@ html[data-theme='warm'][data-scheme='light'] {
   --text: #3d3a35;
   --text-dim: #605c56;
   --term-bg: #fbfaf7;
-  --shadow: var(--glass-shadow);
   --control-border: #87827a;
   --accent: #0f9d58;
   /* This green needs a firmer pull toward --text to clear 4.5:1 on
@@ -274,7 +276,6 @@ html[data-theme='warm'][data-scheme='dark'] {
   --text: #e8e4da;
   --text-dim: #ada79b;
   --term-bg: #1a1916;
-  --shadow: var(--glass-shadow);
   --accent: #2bb673;
   /* White on this bright green is 2.61:1 — fill with the accent itself and
      put dark text on it instead (6.8:1). */
@@ -389,6 +390,10 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --success-soft: color-mix(in srgb, var(--success) 14%, transparent);
   --info-soft: color-mix(in srgb, var(--info) 14%, transparent);
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --accent-soft-strong: color-mix(in srgb, var(--accent) 22%, transparent);
+  --accent-faint: color-mix(in srgb, var(--accent) 6%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 40%, transparent);
+  --accent-line-strong: color-mix(in srgb, var(--accent) 60%, transparent);
   --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
   --hover: color-mix(in srgb, var(--text) 7%, transparent);
   --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
@@ -397,7 +402,6 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --glass-shadow:
     0 0 0 0.5px rgba(0, 0, 0, 0.5),
     0 12px 40px rgba(0, 0, 0, 0.5);
-  --shadow: var(--glass-shadow);
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
   color: var(--text);
 }

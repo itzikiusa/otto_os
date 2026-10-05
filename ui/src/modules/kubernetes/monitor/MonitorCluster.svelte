@@ -766,7 +766,7 @@
     cursor: pointer;
   }
   .wl-row:hover {
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    background: var(--accent-faint);
   }
   .wl-row.open {
     background: var(--surface-2);

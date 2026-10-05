@@ -1203,7 +1203,7 @@
     padding-inline-end: 6px;
   }
   .wp-folder:hover {
-    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    background: var(--accent-faint);
   }
   .wp-fold-name {
     display: flex;

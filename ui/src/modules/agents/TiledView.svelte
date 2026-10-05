@@ -641,7 +641,7 @@
   }
   .tgut:hover::after,
   .tgut:focus-visible::after {
-    background: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: var(--accent-line-strong);
   }
   .tgut:focus-visible {
     outline: none;
@@ -727,7 +727,7 @@
     transition: border-color var(--dur-fast) ease-out;
   }
   .tile-placeholder:hover {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .ph-head {
     display: flex;

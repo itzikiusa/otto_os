@@ -120,7 +120,7 @@
   async function restore(): Promise<void> {
     if (selected == null) return;
     const ok = await confirmer.ask(
-      `The file's content becomes revision ${selected}. Your current text is kept in history, so you can come back to it.`,
+      `The file’s content becomes revision ${selected}. Your current text is kept in history, so you can come back to it.`,
       { title: `Restore revision ${selected}?`, confirmLabel: 'Restore', danger: false },
     );
     if (!ok) return;

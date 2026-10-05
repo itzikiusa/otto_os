@@ -215,7 +215,7 @@
   }
   .resize-handle:hover,
   .assistant.resizing .resize-handle {
-    background: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-line);
   }
   .head {
     display: flex;

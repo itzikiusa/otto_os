@@ -73,7 +73,7 @@
     height: 100%;
     border-radius: var(--radius-s);
     padding: 10px 12px;
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     /* Sticky bodies use a fixed dark ink so colored notes stay readable on both
        schemes regardless of --text. */
     color: #2a2a1a; /* ui-guards: allow — sticky-note ink on its fixed paper color */

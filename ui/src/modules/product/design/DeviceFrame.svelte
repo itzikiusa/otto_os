@@ -67,12 +67,12 @@
     gap: 8px;
     padding: 18px 12px;
     background:
-      radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 55%),
+      radial-gradient(circle at 30% 20%, var(--accent-soft), transparent 55%),
       color-mix(in srgb, var(--text-dim) 8%, transparent);
   }
   .frame-stage.dark {
     background:
-      radial-gradient(circle at 30% 20%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 55%),
+      radial-gradient(circle at 30% 20%, var(--accent-soft), transparent 55%),
       #0b1220; /* ui-guards: allow — physical device bezel / window chrome, the same in every theme */
   }
   .device {

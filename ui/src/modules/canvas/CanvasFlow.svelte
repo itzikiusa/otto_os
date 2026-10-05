@@ -309,7 +309,7 @@
     border-radius: var(--radius-m);
   }
   .editor :global(.svelte-flow__controls) {
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     border-radius: var(--radius-m);
     overflow: hidden;
   }

@@ -855,7 +855,7 @@
   <EmptyState
     icon="layers"
     title="Builder unavailable"
-    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar's More menu."
+    body="The visual query builder works with MySQL, PostgreSQL and ClickHouse connections. For MongoDB, use Aggregate pipeline… in the results toolbar’s More menu."
   />
 {:else}
   <div class="builder" style="--qb-palette-w:{paletteW}px">
@@ -929,7 +929,7 @@
           class="canvas-scroll"
           class:dragging={dragUid !== null || pending !== null}
           role="application"
-          aria-label="Join canvas — drag from one column's dot to another table's column to join"
+          aria-label="Join canvas — drag from one column’s dot to another table’s column to join"
           bind:this={canvasEl}
           onpointermove={onCanvasMove}
           onpointerup={onCanvasUp}
@@ -1416,7 +1416,7 @@
   .side-resizer:hover,
   .side-resizer:focus-visible {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
 
   /* ── Palette ── */
@@ -1451,7 +1451,7 @@
     color: var(--text-dim);
   }
   .pal-search:focus-within {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .pal-search-input {
     flex: 1;
@@ -1612,7 +1612,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     overflow: hidden;
   }
   .node.base {
@@ -1656,7 +1656,7 @@
   }
   .alias-input:focus {
     border-color: var(--accent-text);
-    background: var(--surface); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    background: var(--surface); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .node-src {
     flex: 1;
@@ -1744,7 +1744,7 @@
     margin-top: -5px; /* ui-guards: allow — centres the 10 px handle */
     border-radius: 50%;
     background: var(--surface);
-    border: 1.5px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    border: 1.5px solid var(--accent-line-strong);
     cursor: crosshair;
     z-index: 3;
   }
@@ -1825,7 +1825,7 @@
     height: 22px;
     padding: 0 8px;
     border-radius: 999px;
-    border: 1px dashed color-mix(in srgb, var(--accent) 45%, transparent);
+    border: 1px dashed var(--accent-line);
     background: transparent;
     color: var(--accent-text);
     font-size: var(--fs-xs);

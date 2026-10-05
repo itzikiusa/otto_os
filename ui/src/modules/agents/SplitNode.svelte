@@ -284,7 +284,7 @@
     overflow: hidden;
   }
   .db-pane.focused {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .db-pane-close {
     position: absolute;
@@ -351,10 +351,10 @@
   }
   .gutter:hover::after,
   .gutter:focus-visible::after {
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   .gutter:focus-visible::after {
-    background: color-mix(in srgb, var(--accent) 65%, transparent);
+    background: var(--accent-line-strong);
   }
   .split-node[data-axis='col'] > .gutter::after {
     width: 2px;
@@ -378,14 +378,14 @@
     display: none;
   }
   .drop-veil.armed {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     outline: 1px dashed color-mix(in srgb, var(--accent-text) 60%, transparent);
     outline-offset: -2px;
   }
   .drop-ind {
     position: absolute;
     background: var(--accent-soft-strong);
-    border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+    border: 1px solid var(--accent-line-strong);
     border-radius: var(--radius-s);
     pointer-events: none;
   }
@@ -412,7 +412,7 @@
     font-weight: 600;
     color: var(--accent-contrast);
     background: var(--accent-solid);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     pointer-events: none;
   }
 </style>

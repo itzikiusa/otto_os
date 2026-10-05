@@ -762,7 +762,7 @@
   .node:focus-visible {
     outline: none;
     background: var(--accent-soft-strong);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+    box-shadow: inset 0 0 0 1px var(--accent-line-strong);
   }
   /* Active database = bold, like Workbench's default schema. */
   .node.active-db .nl-text {
@@ -892,7 +892,7 @@
     cursor: pointer;
   }
   .node-failed-retry:hover {
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     color: var(--accent-text);
   }
   .ellipsis {

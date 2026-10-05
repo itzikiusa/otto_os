@@ -502,8 +502,8 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      color-mix(in srgb, var(--accent) 40%, transparent) 45%,
-      color-mix(in srgb, var(--accent) 40%, transparent) 55%,
+      var(--accent-line) 45%,
+      var(--accent-line) 55%,
       transparent 100%
     );
   }

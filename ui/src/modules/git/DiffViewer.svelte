@@ -1438,7 +1438,7 @@
       </div>
     {:else if r.kind === 'error'}
       <div class="drow inf dfile-error" role="alert" data-rk={r.key} use:measure={[r.key, i]}>
-        <span>Couldn’t load this file's diff: {r.message}</span>
+        <span>Couldn’t load this file’s diff: {r.message}</span>
         <button class="btn small" onclick={() => retryLoad(r.file)}>Retry</button>
       </div>
     {:else if r.kind === 'end'}
@@ -1685,7 +1685,7 @@
   .nav-resize-handle:focus-visible,
   .nav-resizing .nav-resize-handle {
     outline: none;
-    background: color-mix(in srgb, var(--accent) 35%, transparent);
+    background: var(--accent-line);
   }
   .nav-file {
     display: flex;
@@ -2017,7 +2017,7 @@
   .hunk-btn {
     flex-shrink: 0;
     padding: 1px 6px;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: var(--radius-s);
     background: none;
     color: var(--accent-text);
@@ -2215,7 +2215,7 @@
       top: 1px;
       font-size: var(--fs-xs);
       line-height: 1;
-      color: color-mix(in srgb, var(--accent) 55%, transparent);
+      color: var(--accent-line-strong);
       pointer-events: none;
     }
   }

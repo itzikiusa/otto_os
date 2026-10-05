@@ -32,7 +32,7 @@
       class="plan-btn"
       class:on={rawMode}
       onclick={() => (rawMode = !rawMode)}
-      title="Toggle the engine's raw EXPLAIN JSON"
+      title="Toggle the engine’s raw EXPLAIN JSON"
     >
       <Icon name="grid" size={12} />{rawMode ? 'Tree' : 'Raw JSON'}
     </button>

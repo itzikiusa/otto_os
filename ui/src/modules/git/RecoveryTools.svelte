@@ -145,7 +145,7 @@
       <button class="btn" disabled={busy || !more} onclick={() => run(() => loadHistory())}>Load more</button>
     {:else if mode === 'rebase'}
       {#if op === 'rebase'}
-        <p>A rebase is in progress. At an Edit stop, amend the current commit from the graph's WIP row, then continue.</p>
+        <p>A rebase is in progress. At an Edit stop, amend the current commit from the graph’s WIP row, then continue.</p>
         <div class="actions">
           <button class="btn primary" disabled={busy} onclick={() => rebaseAction('continue')}>Continue rebase</button>
           <button class="btn" disabled={busy} onclick={onresolve}>Open conflict resolver</button>
@@ -192,7 +192,7 @@
         {#if bisect.output}<pre>{bisect.output}</pre>{/if}
         <details><summary>Bisect history</summary><pre>{bisect.log}</pre></details>
       {:else}
-        <p>Choose known good and bad revisions, or select them from a commit's graph menu. Progress survives closing Otto.</p>
+        <p>Choose known good and bad revisions, or select them from a commit’s graph menu. Progress survives closing Otto.</p>
         <label>Known good <input bind:value={good} placeholder="Commit SHA or revision" disabled={busy} /></label>
         <label>Known bad <input bind:value={bad} placeholder="HEAD" disabled={busy} /></label>
         <button class="btn primary" disabled={busy || !good.trim() || !bad.trim()} onclick={() => bisectAction('start')}>Start bisect…</button>

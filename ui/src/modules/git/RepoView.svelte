@@ -669,7 +669,7 @@
     width: min(520px, 90vw);
     z-index: 6;
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   /* The back chevron mirrors under RTL via Icon's DIRECTIONAL set. */
   .rv-back-arrow {

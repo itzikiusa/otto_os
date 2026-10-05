@@ -542,7 +542,7 @@
       {#if matrixLoading}
         <Skeleton rows={3} height={32} />
       {:else if matrixError}
-        <LoadState what="this workspace's members" error={matrixError} empty onretry={() => void loadMatrix(matrixWs)} />
+        <LoadState what="this workspace’s members" error={matrixError} empty onretry={() => void loadMatrix(matrixWs)} />
       {:else}
         <div class="card matrix">
           <div class="matrix-head">
@@ -641,7 +641,7 @@
     {#if grantLoading}
       <Skeleton rows={5} height={32} />
     {:else if grantError}
-      <LoadState what="this user's feature grants" error={grantError} empty onretry={() => void loadGrants(grantUserId)} />
+      <LoadState what="this user’s feature grants" error={grantError} empty onretry={() => void loadGrants(grantUserId)} />
     {:else}
       <div class="card grant-matrix">
         <div class="grant-head">

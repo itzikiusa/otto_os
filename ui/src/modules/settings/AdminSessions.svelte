@@ -188,7 +188,7 @@
   </PageHeader>
   <PageBody width="readable">
   <SectionIntro>
-    <strong>Terminate</strong> kills a live session's process and keeps its row and history; <strong>Delete</strong>
+    <strong>Terminate</strong> kills a live session’s process and keeps its row and history; <strong>Delete</strong>
     removes the session and its history for good.
   </SectionIntro>
 

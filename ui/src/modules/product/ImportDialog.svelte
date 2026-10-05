@@ -317,7 +317,7 @@
     background: var(--accent-soft);
   }
   .kind-opt:hover:not(.active) {
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    border-color: var(--accent-line);
     color: var(--text);
   }
   /* Selected chip */
@@ -329,7 +329,7 @@
     padding: 8px 12px;
     margin-bottom: 10px;
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: var(--radius-s);
     font-size: var(--fs-s);
   }

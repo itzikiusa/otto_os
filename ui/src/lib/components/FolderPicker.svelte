@@ -430,7 +430,7 @@
   }
   .file-row:hover {
     color: var(--text);
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .use-file {
     font-size: var(--fs-xs);

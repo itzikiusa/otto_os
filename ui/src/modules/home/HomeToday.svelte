@@ -95,7 +95,7 @@
       {#if today.failed}
         <!-- A source failed: say so instead of letting an empty card read as
              "nothing here". Retry re-polls every source at once. -->
-        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn't load</span>
+        <span class="warn-line"><Icon name="warning" size={12} /> Some items couldn’t load</span>
         <button class="retry" onclick={() => today.refresh()}>Retry</button>
       {/if}
     </p>

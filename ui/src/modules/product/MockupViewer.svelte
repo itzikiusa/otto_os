@@ -181,7 +181,7 @@
   {#if kind === 'html' && allowScripts}
     <div class="warn">
       <Icon name="info" size={13} />
-      Interactivity is ON — this mockup's scripts run inside a sandboxed iframe
+      Interactivity is ON — this mockup’s scripts run inside a sandboxed iframe
       (no same-origin access). Only enable for content you trust.
     </div>
   {/if}

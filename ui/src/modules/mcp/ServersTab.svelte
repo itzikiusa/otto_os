@@ -168,7 +168,7 @@
     <EmptyState
       icon="server"
       title="No external servers yet"
-      body="Register an external MCP server to govern its tools with policies, approvals and audit. Otto's own server lives on the Otto server tab."
+      body="Register an external MCP server to govern its tools with policies, approvals and audit. Otto’s own server lives on the Otto server tab."
       actionLabel={auth.isRoot ? 'Add server' : undefined}
       actionIcon="plus"
       onaction={auth.isRoot ? () => (formOpen = true) : undefined}

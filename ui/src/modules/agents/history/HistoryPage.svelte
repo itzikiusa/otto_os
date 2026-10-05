@@ -383,7 +383,7 @@
       {@const cur = headSel}
       {#if canEdit && cur.session_id && cur.status !== 'on_disk'}
         <button class="icon-btn" data-overflow="-3" data-icon="archive" data-label="Archive session" onclick={() => void archive(cur)} disabled={busy}
-          aria-label="Archive" title="Archive the session — restore it any time from the sidebar's Archived list">
+          aria-label="Archive" title="Archive the session — restore it any time from the sidebar’s Archived list">
           <Icon name="archive" size={14} />
         </button>
       {/if}
@@ -733,7 +733,7 @@
   }
   .search-wrap:focus-within {
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .search {
     flex: 1;

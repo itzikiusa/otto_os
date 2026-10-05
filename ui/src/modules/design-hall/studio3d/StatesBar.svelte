@@ -153,7 +153,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-l);
     background: var(--surface);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .k {
     font-size: var(--fs-xs);

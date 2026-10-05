@@ -85,7 +85,7 @@
   .pane-divider:hover::after,
   .pane-divider:focus-visible::after {
     inset-inline: 3px;
-    background: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-line);
   }
   .pane-divider:focus-visible {
     outline: none;

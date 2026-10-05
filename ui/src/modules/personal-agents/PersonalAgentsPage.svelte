@@ -294,6 +294,6 @@
   .meta { color: var(--text-dim); font-size: var(--fs-s); }
   .card-actions { display: flex; gap: 6px; margin-top: auto; flex-wrap: wrap; }
   .pa-card.primary { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
-  .pa-accent { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 35%, transparent); display: inline-flex; align-items: center; gap: 4px; }
+  .pa-accent { color: var(--accent-text); border-color: var(--accent-line); display: inline-flex; align-items: center; gap: 4px; }
   .pa-hint { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-s); }
 </style>

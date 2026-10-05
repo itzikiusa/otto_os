@@ -387,7 +387,7 @@
     display: block;
     height: 100%;
     width: 100%;
-    background: color-mix(in srgb, var(--accent) 70%, transparent);
+    background: var(--accent-line-strong);
     transform-origin: left;
     animation: otto-grow-x linear forwards;
   }

@@ -151,7 +151,7 @@
   .box {
     display: block;
     background: var(--accent-soft);
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border: 1px solid var(--accent-line);
     border-radius: 0;
   }
   .tile {

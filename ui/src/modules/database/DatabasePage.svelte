@@ -1851,7 +1851,7 @@
   }
   .list-search-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .rename-input {
     flex: 1;
@@ -1956,7 +1956,7 @@
   .sec-head.drop-target {
     outline: 1px dashed color-mix(in srgb, var(--accent-text) 55%, transparent);
     outline-offset: -1px;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
   }
   .sec-name {
     font-size: var(--fs-xs);
@@ -2263,7 +2263,7 @@
   }
   .type-chip.on {
     color: var(--accent-text);
-    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    border-color: var(--accent-line);
     background: var(--accent-soft);
   }
   /* Prod / guarded connection tabs get a tinted edge. */

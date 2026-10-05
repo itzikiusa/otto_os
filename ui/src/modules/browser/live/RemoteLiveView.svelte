@@ -1031,7 +1031,7 @@
   /* Keyboard focus lives in the invisible sink: show it as an inset ring on
      the frame (an outset ring would be clipped by the pane). */
   .surface.kbd {
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 70%, transparent);
+    box-shadow: inset 0 0 0 2px var(--accent-line-strong);
   }
   canvas {
     position: absolute;

@@ -141,7 +141,7 @@
     outline: none;
   }
   .search-input:focus {
-    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    border-color: var(--accent-line-strong);
   }
   .story-list {
     list-style: none;
@@ -169,7 +169,7 @@
   }
   .story-row:hover:not(:disabled) {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-color: var(--accent-line);
   }
   .story-row:disabled {
     opacity: 0.5;

@@ -765,7 +765,7 @@
     display: flex;
     align-items: center;
     padding: 6px 10px;
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    background: var(--accent-faint);
     font-size: var(--fs-s);
     gap: 8px;
   }

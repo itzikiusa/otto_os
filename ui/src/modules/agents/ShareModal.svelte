@@ -479,7 +479,7 @@
     font-size: var(--fs-xs);
     color: var(--text-dim);
     background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
-    border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+    border: 1px solid var(--accent-soft-strong);
     border-radius: var(--radius-s);
     padding: 8px 10px;
     margin: 0;
@@ -500,7 +500,7 @@
   .sm-select:focus,
   .sm-input:focus {
     outline: none;
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .sm-generate {
     align-self: flex-start;

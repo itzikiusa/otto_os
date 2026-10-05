@@ -918,7 +918,7 @@
   }
   .quick-link:hover {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    border-color: var(--accent-line);
   }
   .ql-text {
     display: flex;
@@ -967,7 +967,7 @@
     background: var(--accent-soft);
     padding: 4px 6px;
     border-radius: var(--radius-s);
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border: 1px solid var(--accent-line);
   }
   .popover-textarea {
     width: 100%;

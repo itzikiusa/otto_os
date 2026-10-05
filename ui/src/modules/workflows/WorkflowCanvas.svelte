@@ -550,7 +550,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
     cursor: grab;
     user-select: none;
     transition: border-color var(--dur-fast) ease-out;
@@ -653,7 +653,7 @@
   }
   .node.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent), var(--shadow);
+    box-shadow: 0 0 0 2px var(--accent-line), var(--glass-shadow);
   }
   /* Run status uses the shared run vocabulary (lib/status.ts): running is
      info-blue and pulses, succeeded is green — they used to share one green,
@@ -778,7 +778,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-m);
-    box-shadow: var(--shadow);
+    box-shadow: var(--glass-shadow);
   }
   .zbtn {
     display: grid;

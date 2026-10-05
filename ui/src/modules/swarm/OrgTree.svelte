@@ -439,7 +439,7 @@
   }
   .drop-zone.drop-active {
     background: var(--accent-soft);
-    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    border-color: var(--accent-line-strong);
     color: var(--accent-text);
   }
   .add-top-btn {

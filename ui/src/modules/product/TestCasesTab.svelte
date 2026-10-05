@@ -1204,7 +1204,7 @@
   .text-input:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .text-area {
     width: 100%;
@@ -1222,7 +1222,7 @@
   .text-area:focus {
     outline: none;
     border-color: var(--accent-text);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
 
   /* ── Category sections ───────────────────────────────────────── */
@@ -1299,7 +1299,7 @@
   }
   .case-card.drag-over {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+    box-shadow: 0 0 0 2px var(--accent-soft-strong);
   }
 
   /* ── Drag handle + checkbox ──────────────────────────────────────────── */

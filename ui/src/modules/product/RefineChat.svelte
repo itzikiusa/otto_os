@@ -251,7 +251,7 @@
   }
   .bubble-user {
     background: var(--accent-soft-strong);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border: 1px solid var(--accent-line);
     border-bottom-right-radius: 3px;
   }
   .bubble-agent {
@@ -321,7 +321,7 @@
     align-self: flex-start;
     margin-top: 4px;
     padding: 2px 8px;
-    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    border: 1px solid var(--accent-line-strong);
     border-radius: 999px;
     background: var(--accent-soft);
     color: var(--accent-text);
@@ -374,7 +374,7 @@
     outline: none;
   }
   .msg-input:focus {
-    border-color: var(--accent-text); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent)
+    border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
     opacity: 0.55;
