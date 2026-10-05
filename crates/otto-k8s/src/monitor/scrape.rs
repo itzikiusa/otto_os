@@ -626,15 +626,23 @@ async fn get_probes(
 async fn fetch_proxy(k: &Kubectl, target: &ScrapeTarget, p: &Probe) -> Result<ProbeResult> {
     let started = Instant::now();
     let path = proxy_path(target, &p.path);
+    // Capped while reading (S6-09): a probe on `/actuator/heapdump` × the
+    // cycle's concurrency must not buffer whole bodies before the cap.
     let out = k
-        .run_timeout(
+        .run_timeout_capped(
             ["get", "--raw", path.as_str()],
             Duration::from_millis(p.timeout_ms.max(1000) + 2000),
+            MAX_BODY,
         )
         .await?;
     let mut body = out.stdout;
     if body.len() > MAX_BODY {
-        body.truncate(MAX_BODY);
+        // Lossy UTF-8 can grow a cut multi-byte tail; keep a char boundary.
+        let mut cut = MAX_BODY;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
     }
     Ok(ProbeResult {
         probe: p.name.clone(),

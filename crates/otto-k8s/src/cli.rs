@@ -108,6 +108,96 @@ pub async fn run_raw(
     })
 }
 
+/// Bytes of stderr kept by [`run_raw_capped`] (the classification only
+/// reads the first lines).
+const CAPPED_STDERR: usize = 64 * 1024;
+
+/// [`run_raw`] for an output whose size the caller does not control (a pod's
+/// `/proxy` body): stdout is read incrementally and the child is killed once
+/// `cap` bytes arrived, instead of `wait_with_output` buffering ALL of it
+/// before any cap applies (S6-09). A capped run reports exit 0 — the cut was
+/// ours — with `stdout` holding the first `cap` bytes.
+pub async fn run_raw_capped(
+    program: &str,
+    args: &[String],
+    env: &[(String, String)],
+    timeout: Duration,
+    cap: usize,
+) -> Result<CliOutput> {
+    use tokio::io::AsyncReadExt;
+    let started = Instant::now();
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| spawn_error(program, &e))?;
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(Error::Internal(format!("{program}: no stdio pipes")));
+    };
+    let read = async {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut ebuf = vec![0u8; 8 * 1024];
+        let (mut out_done, mut err_done, mut capped) = (false, false, false);
+        while !(out_done && err_done) {
+            tokio::select! {
+                r = out.read(&mut buf), if !out_done => {
+                    let n = r?;
+                    if n == 0 {
+                        out_done = true;
+                    } else {
+                        let take = n.min(cap.saturating_sub(stdout.len()));
+                        stdout.extend_from_slice(&buf[..take]);
+                        if stdout.len() >= cap {
+                            capped = true;
+                            break;
+                        }
+                    }
+                }
+                r = err.read(&mut ebuf), if !err_done => {
+                    let n = r?;
+                    if n == 0 {
+                        err_done = true;
+                    } else {
+                        let take = n.min(CAPPED_STDERR.saturating_sub(stderr.len()));
+                        stderr.extend_from_slice(&ebuf[..take]);
+                    }
+                }
+            }
+        }
+        let status = if capped {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            0
+        } else {
+            child.wait().await?.code().unwrap_or(-1)
+        };
+        Ok::<_, std::io::Error>((status, stdout, stderr))
+    };
+    // On timeout `read` (and its borrow of `child`) is dropped; `child` drops
+    // at return and `kill_on_drop` ends the process.
+    let (status, stdout, stderr) = match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(Error::Internal(format!("{program}: {e}"))),
+        Err(_) => {
+            return Err(Error::Upstream(format!(
+                "{program} timed out after {}s",
+                timeout.as_secs()
+            )))
+        }
+    };
+    Ok(CliOutput {
+        status,
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
 /// Map a spawn error: ENOENT ⇒ the `not installed` invariant the UI relies on.
 pub fn spawn_error(program: &str, e: &std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::NotFound {
@@ -363,6 +453,45 @@ impl Kubectl {
         }
     }
 
+    /// [`Self::run_timeout`] with stdout capped at `cap` bytes (see
+    /// [`run_raw_capped`]); same re-auth retry and failure classification.
+    pub async fn run_timeout_capped<I, S>(
+        &self,
+        args: I,
+        timeout: Duration,
+        cap: usize,
+    ) -> Result<CliOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        async fn once(
+            program: &str,
+            argv: &[String],
+            env: &[(String, String)],
+            timeout: Duration,
+            cap: usize,
+        ) -> Result<CliOutput> {
+            let out = run_raw_capped(program, argv, env, timeout, cap).await?;
+            if out.status != 0 {
+                return Err(classify_failure(program, &out.stderr));
+            }
+            Ok(out)
+        }
+        let args: Vec<String> = args.into_iter().map(Into::into).collect();
+        let argv = self.argv(args.iter().cloned());
+        tracing::debug!(program = %self.program, args = ?argv, "kubectl (capped)");
+        match once(&self.program, &argv, &self.env, timeout, cap).await {
+            Err(e) if should_reauth(&e, self.reauth.is_some()) => {
+                tracing::info!("k8s: cached exec token rejected — dropping it and retrying once");
+                let fresh = (self.reauth.as_ref().expect("checked").0)().await?;
+                let argv = fresh.argv(args);
+                once(&fresh.program, &argv, &fresh.env, timeout, cap).await
+            }
+            other => other,
+        }
+    }
+
     /// Run and parse stdout as JSON (`-o json` must be part of `args`).
     pub async fn json<I, S>(&self, args: I) -> Result<Value>
     where
@@ -388,6 +517,42 @@ pub fn parse_json(stdout: &str) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_raw_capped_kills_an_endless_producer_at_the_cap() {
+        // S6-09: `yes` never ends — `wait_with_output` would grow without
+        // bound; the capped runner stops at `cap` bytes, well inside the
+        // timeout, and reports the cut as success.
+        let started = Instant::now();
+        let out = run_raw_capped(
+            "sh",
+            &["-c".into(), "yes 0123456789".into()],
+            &[],
+            Duration::from_secs(20),
+            100_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 0);
+        assert_eq!(out.stdout.len(), 100_000);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn run_raw_capped_passes_small_output_and_exit_codes_through() {
+        let out = run_raw_capped(
+            "sh",
+            &["-c".into(), "printf hello; echo oops >&2; exit 3".into()],
+            &[],
+            Duration::from_secs(20),
+            1000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.status, 3);
+        assert_eq!(out.stdout, "hello");
+        assert!(out.stderr.contains("oops"));
+    }
     use chrono::Utc;
     use otto_core::domain::Environment;
     use otto_state::K8sClusterSource;
