@@ -183,6 +183,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
             "/email-sender",
             get(email_sender::get_email_sender).put(email_sender::set_email_sender),
         )
+        .route(
+            "/email-sender/verify",
+            post(email_sender::verify_email_sender),
+        )
         // --- Agent activity (live trail + task tracker) ------------------
         .route(
             "/workspaces/{wid}/sessions/{sid}/trail",

@@ -6682,7 +6682,8 @@ export interface SetEmailSenderReq {
   app_password: string;
 }
 
-/** Response for `PUT` and `GET /api/v1/email-sender`. Never carries the app
+/** Response for `PUT` / `GET /api/v1/email-sender` and
+ *  `POST /api/v1/email-sender/verify` (re-check with the Keychain password). Never carries the app
  *  password. `gmail_address` is absent on GET when no sender is configured. */
 export interface EmailSenderResp {
   /** The configured Gmail address, or absent when no sender is set up. */

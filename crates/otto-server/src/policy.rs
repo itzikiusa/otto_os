@@ -189,7 +189,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // 7.1). Self-owned — any authed user configures/reads their OWN sender, like
     // `/auth/tokens`; no feature grant needed. The app password lives in the
     // Keychain, never the DB.
-    if p == "/email-sender" {
+    if p == "/email-sender" || p == "/email-sender/verify" {
         return Exempt;
     }
     // Email-OTP share redemption (mobile plan Task 7.3). PUBLIC by design: the
@@ -2134,6 +2134,7 @@ mod tests {
         // Per-user email sender (Gmail App Password → Keychain): self-owned.
         assert_eq!(pol(Method::GET, "/api/v1/email-sender"), Exempt);
         assert_eq!(pol(Method::PUT, "/api/v1/email-sender"), Exempt);
+        assert_eq!(pol(Method::POST, "/api/v1/email-sender/verify"), Exempt);
     }
 
     #[test]
