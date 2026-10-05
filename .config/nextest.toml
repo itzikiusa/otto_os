@@ -39,3 +39,19 @@ test-group = 'processes'
 filter = 'package(otto-server) & binary(it) & test(/^runtime_lag::/)'
 test-group = 'timing'
 threads-required = 'num-test-threads'
+
+# Unit tests with short UNSCALED wall-clock asserts ("returned in < 50 ms",
+# "did not wait for the Keychain", "woken by the poke"): they prove something
+# did not block, so they are only meaningful without CPU contention. Run them
+# alone in the timing group instead of padding every budget for a loaded runner.
+[[profile.default.overrides]]
+filter = '''
+(package(otto-server) & kind(lib) & (
+    test(/goal_loop_tests::until_flag_wakes_on_ring_and_backstops_a_silent_store$/)
+  | test(/swarm_wake::tests::a_poke_wakes_the_coordinator_after_the_min_gap$/)
+  | test(/goal_loop_commands::tests::cancellation_kills_verification_descendants$/)))
+| (package(otto-state) & test(/maintenance::tests::offline_compaction_swaps_verified_copy_and_keeps_old_until_confirmed$/))
+| (package(otto-keychain) & test(/control::tests::locked_keychain_times_out_instead_of_blocking$/))
+'''
+test-group = 'timing'
+threads-required = 'num-test-threads'
