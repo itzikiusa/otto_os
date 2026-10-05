@@ -21,6 +21,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         .route("/rooms/{id}/recaps", post(recap::http::create))
         .route("/room-recaps", get(recap::http::list))
         .route("/room-recaps/{id}", get(recap::http::detail))
+        .route("/room-recaps/{id}/revision", get(recap::http::revision))
         .route("/room-recaps/{id}/export", get(recap::http::export))
         .route("/room-recaps/{id}/images/{image}", get(recap::http::image))
         .route("/room-recaps/{id}/audio", post(recap::http::audio))

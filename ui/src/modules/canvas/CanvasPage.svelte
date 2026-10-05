@@ -41,7 +41,7 @@
 
   // The board exposes generate()/isGenerating() for agent drawing.
   let editor = $state<
-    { generate: (p: string) => Promise<void>; isGenerating: () => boolean } | undefined
+    { generate: (p: string) => Promise<boolean>; isGenerating: () => boolean } | undefined
   >(undefined);
   // The Assistant panel (the agent shell + Ask-AI input) — opens on demand.
   let showConvo = $state(false);

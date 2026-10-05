@@ -6,6 +6,7 @@
   // backlinks with hover previews, and LIVE CONTEXT from the rest of Otto.
   // Sits above the unchanged markdown body; plain notes never mount it.
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import Badge from '../../lib/components/Badge.svelte';
   import { sentenceCase } from '../../lib/labels';
   import type { VaultNote } from '../../lib/api/types';
@@ -109,7 +110,18 @@
     </div>
     <div class="col" data-testid="vault-structured-backlinks">
       <h4>Linked from <span class="n">{vault.backlinks.length}</span></h4>
-      {#if vault.backlinks.length === 0}<p class="dim">No backlinks yet</p>{/if}
+      <!-- A failed lookup is never shown as "No backlinks yet": the first load
+           fails inline with Retry, a failed refresh keeps the last good links
+           under a slim stale bar (LoadState). -->
+      <LoadState
+        what="backlinks"
+        variant="compact"
+        loading={vault.backlinksLoading}
+        error={vault.backlinksError || null}
+        empty={vault.backlinks.length === 0}
+        onretry={() => void vault.reloadBacklinks()}
+      >
+        {#snippet emptyView()}<p class="dim">No backlinks yet</p>{/snippet}
       <div class="chips">
         {#each vault.backlinks.slice(0, 40) as b (b.path + b.kind)}
           <button
@@ -124,6 +136,7 @@
         {/each}
         {#if vault.backlinks.length > 40}<span class="dim">+{vault.backlinks.length - 40} more in the side panel</span>{/if}
       </div>
+      </LoadState>
     </div>
   </div>
 

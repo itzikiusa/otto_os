@@ -955,3 +955,146 @@ done
     ctx.manager.kill_session(&session.id).await.unwrap();
     server.abort();
 }
+
+/// Exercise the actual router, auth/feature gate and archive handler without a
+/// listening server. The known detail control proves credentials/archive setup
+/// before the new revision route is expected to succeed.
+#[tokio::test]
+async fn recap_revision_http_is_owner_scoped_and_observes_external_draft_changes() {
+    use tower::ServiceExt;
+    async fn get(app: &Router, path: &str, token: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+    async fn json_body(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let pool = mem_pool().await;
+    let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+    let users = otto_state::UsersRepo::new(pool.clone());
+    let owner = users
+        .create("recap-owner", "unused", "Owner", true)
+        .await
+        .unwrap();
+    let other = users
+        .create("recap-other", "unused", "Other", true)
+        .await
+        .unwrap();
+    let auth = otto_rbac::AuthRepo::new(pool);
+    let token = auth.issue(&owner.id).await.unwrap();
+    let other_token = auth.issue(&other.id).await.unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = tmp.path().join("room-recaps").join(&id);
+    tokio::fs::create_dir_all(path.join("images"))
+        .await
+        .unwrap();
+    let metadata = json!({
+        "id":id, "owner_id":owner.id, "room_id":"synthetic-room", "session_id":"synthetic-session",
+        "session_title":"Revision fixture", "created_at":"2026-10-05T00:00:00Z", "updated_at":"2026-10-05T00:00:00Z",
+        "status":"stopped", "capture_epoch":2, "bytes_used":0, "quota_bytes":536870912, "last_seq":0,
+        "speech_available":false, "speech_error":null, "summary_status":"ready", "summary_error":null,
+        "summary_through_seq":0
+    });
+    tokio::fs::write(
+        path.join("metadata.json"),
+        serde_json::to_vec(&metadata).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(path.join("events.jsonl"), b"")
+        .await
+        .unwrap();
+    let draft = |overview: &str| json!({"overview":overview, "decisions":[], "actions":[], "open_questions":[], "coverage":[], "source_event_ids":[]});
+    let draft_path = path.join("draft.json");
+    tokio::fs::write(&draft_path, serde_json::to_vec(&draft("original")).unwrap())
+        .await
+        .unwrap();
+    let app = otto_server::build_router(ctx, vec![], vec![]);
+    let detail_url = format!("/api/v1/room-recaps/{id}");
+    let control = get(&app, &detail_url, &token).await;
+    assert_eq!(
+        control.status(),
+        200,
+        "known detail route authenticates the seeded archive"
+    );
+    assert_eq!(json_body(control).await["draft"]["overview"], "original");
+    let url = format!("{detail_url}/revision");
+    let response = get(&app, &url, &token).await;
+    assert_eq!(
+        response.status(),
+        200,
+        "revision route must exist and pass feature/auth policy"
+    );
+    let initial = json_body(response).await;
+    assert_eq!(initial["metadata"]["id"], id);
+    assert!(initial["events_revision"].is_string());
+    assert!(initial["draft_revision"].is_string());
+    assert!(initial.get("events").is_none() && initial.get("draft").is_none());
+    assert!(serde_json::to_vec(&initial).unwrap().len() < 4096);
+    for _ in 0..15 {
+        assert_eq!(json_body(get(&app, &url, &token).await).await, initial);
+    }
+    assert_eq!(get(&app, &url, &other_token).await.status(), 403);
+    assert_eq!(get(&app, &url, "invalid-token").await.status(), 401);
+
+    // Same-length atomic replacement with the original mtime still changes
+    // identity. A timestamp/length-only stamp misses this external edit.
+    let old_time = tokio::fs::metadata(&draft_path)
+        .await
+        .unwrap()
+        .modified()
+        .unwrap();
+    let replacement = path.join("replacement.json");
+    tokio::fs::write(
+        &replacement,
+        serde_json::to_vec(&draft("replaced")).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::File::open(&replacement)
+        .await
+        .unwrap()
+        .into_std()
+        .await
+        .set_times(std::fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
+    tokio::fs::rename(&replacement, &draft_path).await.unwrap();
+    let replaced = json_body(get(&app, &url, &token).await).await;
+    assert_ne!(replaced["draft_revision"], initial["draft_revision"]);
+    assert_eq!(
+        json_body(get(&app, &detail_url, &token).await).await["draft"]["overview"],
+        "replaced"
+    );
+
+    tokio::fs::write(&draft_path, serde_json::to_vec(&draft("rewritte")).unwrap())
+        .await
+        .unwrap();
+    tokio::fs::File::open(&draft_path)
+        .await
+        .unwrap()
+        .into_std()
+        .await
+        .set_times(
+            std::fs::FileTimes::new().set_modified(old_time + std::time::Duration::from_secs(1)),
+        )
+        .unwrap();
+    let rewritten = json_body(get(&app, &url, &token).await).await;
+    assert_ne!(rewritten["draft_revision"], replaced["draft_revision"]);
+    tokio::fs::remove_file(&draft_path).await.unwrap();
+    let removed = json_body(get(&app, &url, &token).await).await;
+    assert!(removed["draft_revision"].is_null());
+    assert_eq!(removed["events_revision"], initial["events_revision"]);
+    assert!(json_body(get(&app, &detail_url, &token).await).await["draft"].is_null());
+}

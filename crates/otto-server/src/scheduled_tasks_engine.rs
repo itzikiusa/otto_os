@@ -29,7 +29,9 @@ use otto_core::api::CreateSessionReq;
 use otto_core::domain::{ScheduledTask, ScheduledTaskRun, SessionKind};
 use otto_core::event::Event;
 use otto_core::{Error, Result};
-use otto_state::{FinishRun, NewScheduledRun};
+use otto_state::FinishRun;
+#[cfg(test)]
+use otto_state::NewScheduledRun;
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::warn;
@@ -342,20 +344,16 @@ pub async fn spawn_run(
     Ok(run)
 }
 
-/// Open the run row (`running`) and announce it.
+/// Atomically admit the captured definition, open its run row, and announce it.
+/// Content-only edits apply to subsequent captures; an already captured prompt
+/// and destination stay together. Disabling/retiming invalidates pending scans,
+/// including disable-enable and retime-away-back transitions.
 async fn open_run(
     ctx: &ServerCtx,
     task: &ScheduledTask,
     trigger: &str,
 ) -> Result<ScheduledTaskRun> {
-    let run = ctx
-        .scheduled_tasks
-        .create_run(NewScheduledRun {
-            task_id: task.id.clone(),
-            workspace_id: task.workspace_id.clone(),
-            trigger: trigger.to_string(),
-        })
-        .await?;
+    let run = ctx.scheduled_tasks.admit_run(task, trigger).await?;
     emit(ctx, task, &run.id, "running");
     Ok(run)
 }
@@ -370,8 +368,6 @@ async fn complete_run(
 ) -> Result<String> {
     let repo = &ctx.scheduled_tasks;
     let run_id = run_id.to_string();
-    let tz = cadence::task_tz(&task.timezone);
-
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
     let cancel = run_cancels().register(&run_id);
@@ -440,10 +436,7 @@ async fn complete_run(
             )
             .await?;
             if trigger == "schedule" {
-                let next = cadence::next_run(&task.schedule, now, tz).map(|d| d.to_rfc3339());
-                let _ = repo
-                    .set_runtime(&task.id, Some(&now.to_rfc3339()), "ok", next.as_deref())
-                    .await;
+                let _ = settle_schedule(repo, task, "ok", now).await;
             } else {
                 // A manual run's outcome is the task's latest status too — a
                 // failed "Run now" used to leave the row saying "Succeeded".
@@ -487,11 +480,7 @@ async fn complete_run(
                 )
                 .await;
             if trigger == "schedule" {
-                let now = Utc::now();
-                let next = cadence::next_run(&task.schedule, now, tz).map(|d| d.to_rfc3339());
-                let _ = repo
-                    .set_runtime(&task.id, Some(&now.to_rfc3339()), status, next.as_deref())
-                    .await;
+                let _ = settle_schedule(repo, task, status, Utc::now()).await;
             } else {
                 let _ = repo.set_last_status(&task.id, status).await;
             }
@@ -506,6 +495,27 @@ async fn complete_run(
             Ok(run_id)
         }
     }
+}
+
+/// Shared success/error/cancellation settlement boundary. Run history is written
+/// separately before this updates the scheduled occurrence's cursor.
+async fn settle_schedule(
+    repo: &otto_state::ScheduledTasksRepo,
+    task: &ScheduledTask,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let next = cadence::next_run(&task.schedule, now, cadence::task_tz(&task.timezone))
+        .map(|d| d.to_rfc3339());
+    repo.settle_generation(
+        &task.id,
+        task.schedule_generation,
+        Some(&now.to_rfc3339()),
+        status,
+        next.as_deref(),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Notification-center notice for an unattended task (review 08 · N1): the
@@ -1420,6 +1430,514 @@ async fn deliver(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    async fn admission_fixture() -> (tempfile::TempDir, ServerCtx, ScheduledTask) {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "snapshot-ws").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let mut new = otto_state::NewScheduledTask::defaults(
+            "snapshot-ws".into(),
+            "Captured occurrence".into(),
+        );
+        new.schedule = json!({"cadence":"once","run_at":"2000-01-01T10:00:00Z"});
+        ctx.scheduled_tasks.create(new).await.unwrap();
+        // The scheduler actually captures these rows before spawning run_task.
+        let captured = ctx.scheduled_tasks.list_enabled().await.unwrap().remove(0);
+        assert!(cadence::is_due_since(
+            &captured.schedule,
+            None,
+            None,
+            Utc::now(),
+            chrono_tz::UTC,
+        ));
+        (tmp, ctx, captured)
+    }
+
+    async fn stale_schedule_admission(edits: Vec<otto_state::ScheduledTaskPatch>) {
+        let (_tmp, ctx, captured) = admission_fixture().await;
+        let mut events = ctx.events.subscribe();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let pending_ctx = ctx.clone();
+        let pending_task = captured.clone();
+        let pending = tokio::spawn(async move {
+            wait.await.unwrap();
+            // This is the actual run_task / spawn_run admission boundary, before
+            // complete_run can execute a provider or deliver output.
+            open_run(&pending_ctx, &pending_task, "schedule").await
+        });
+        for edit in edits {
+            ctx.scheduled_tasks
+                .update(&captured.id, edit)
+                .await
+                .unwrap();
+        }
+        let edited = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
+        release.send(()).unwrap();
+        let result = pending.await.unwrap();
+        let rows = ctx
+            .scheduled_tasks
+            .list_runs(&captured.id, 10)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "stale scheduled snapshot opened a run row");
+        assert!(
+            result.is_err(),
+            "stale admission must stop before execution"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "rejected admission announced a run"
+        );
+        let after = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
+        assert_eq!(after.schedule, edited.schedule);
+        assert_eq!(after.enabled, edited.enabled);
+        assert_eq!(after.last_run_at, edited.last_run_at);
+        assert_eq!(after.schedule_generation, edited.schedule_generation);
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_rejects_disabled_snapshot() {
+        stale_schedule_admission(vec![otto_state::ScheduledTaskPatch {
+            enabled: Some(false),
+            ..Default::default()
+        }])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_rejects_retimed_snapshot() {
+        stale_schedule_admission(vec![otto_state::ScheduledTaskPatch {
+            schedule: Some(json!({"cadence":"once","run_at":"2099-01-01T10:00:00Z"})),
+            ..Default::default()
+        }])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_rejects_disable_enable_aba() {
+        stale_schedule_admission(vec![
+            otto_state::ScheduledTaskPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+            otto_state::ScheduledTaskPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_rejects_retime_aba() {
+        stale_schedule_admission(vec![
+            otto_state::ScheduledTaskPatch {
+                schedule: Some(json!({"cadence":"once","run_at":"2099-01-01T10:00:00Z"})),
+                ..Default::default()
+            },
+            otto_state::ScheduledTaskPatch {
+                schedule: Some(json!({"cadence":"once","run_at":"2000-01-01T10:00:00Z"})),
+                ..Default::default()
+            },
+        ])
+        .await;
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_fresh_resumed_snapshot_runs() {
+        let (_tmp, ctx, captured) = admission_fixture().await;
+        for enabled in [false, true] {
+            ctx.scheduled_tasks
+                .update(
+                    &captured.id,
+                    otto_state::ScheduledTaskPatch {
+                        enabled: Some(enabled),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let fresh = ctx.scheduled_tasks.get(&captured.id).await.unwrap();
+        // Eligibility changes must not invalidate an already-admitted run's
+        // settlement identity (the review4_once_pause tests cover completion).
+        assert_eq!(fresh.schedule_generation, captured.schedule_generation);
+        let run = open_run(&ctx, &fresh, "schedule").await.unwrap();
+        assert_eq!(run.trigger, "schedule");
+        assert_eq!(
+            ctx.scheduled_tasks
+                .list_runs(&fresh.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_content_edit_preserves_eligibility() {
+        let (_tmp, ctx, captured) = admission_fixture().await;
+        ctx.scheduled_tasks
+            .update(
+                &captured.id,
+                otto_state::ScheduledTaskPatch {
+                    name: Some("Renamed".into()),
+                    prompt: Some("New prompt".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let run = open_run(&ctx, &captured, "schedule").await.unwrap();
+        assert_eq!(run.task_id, captured.id);
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_manual_run_allows_disabled_task() {
+        let (_tmp, ctx, captured) = admission_fixture().await;
+        let disabled = ctx
+            .scheduled_tasks
+            .update(
+                &captured.id,
+                otto_state::ScheduledTaskPatch {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let run = open_run(&ctx, &disabled, "manual").await.unwrap();
+        assert_eq!(run.trigger, "manual");
+        assert_eq!(
+            ctx.scheduled_tasks
+                .list_runs(&disabled.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_same_snapshot_has_one_running_row() {
+        let (_tmp, ctx, captured) = admission_fixture().await;
+        let (first, second) = tokio::join!(
+            open_run(&ctx, &captured, "schedule"),
+            open_run(&ctx, &captured, "schedule"),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        assert_eq!(
+            ctx.scheduled_tasks
+                .list_runs(&captured.id, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    async fn paused_once_settlement(status: &str, resume_before_completion: bool) {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES('pause-ws','ws','/tmp','2099-10-05T00:00:00Z')").execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool);
+        let mut new =
+            otto_state::NewScheduledTask::defaults("pause-ws".into(), "One occurrence".into());
+        new.schedule = json!({"cadence":"once","run_at":"2099-10-05T10:00:00Z"});
+        let dispatched = repo.create(new).await.unwrap();
+        let run = repo
+            .create_run(NewScheduledRun {
+                task_id: dispatched.id.clone(),
+                workspace_id: dispatched.workspace_id.clone(),
+                trigger: "schedule".into(),
+            })
+            .await
+            .unwrap();
+        repo.update(
+            &dispatched.id,
+            otto_state::ScheduledTaskPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        if resume_before_completion {
+            repo.update(
+                &dispatched.id,
+                otto_state::ScheduledTaskPatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: status.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        settle_schedule(
+            &repo,
+            &dispatched,
+            status,
+            "2099-10-05T10:02:00Z".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        if !resume_before_completion {
+            repo.update(
+                &dispatched.id,
+                otto_state::ScheduledTaskPatch {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let resumed = repo.get(&dispatched.id).await.unwrap();
+        let cursor = resumed
+            .last_run_at
+            .as_deref()
+            .map(|s| s.parse::<DateTime<Utc>>().unwrap());
+        assert!(
+            !cadence::is_due_since(
+                &resumed.schedule,
+                cursor,
+                None,
+                "2099-10-05T11:00:00Z".parse().unwrap(),
+                chrono_tz::UTC
+            ),
+            "pause/resume must not repeat the same {status} occurrence"
+        );
+        assert!(resumed.enabled);
+        assert_eq!(resumed.last_status.as_deref(), Some(status));
+        assert_eq!(repo.get_run(&run.id).await.unwrap().status, status);
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_ok_settlement_before_resume() {
+        paused_once_settlement("ok", false).await;
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_ok_resume_before_settlement() {
+        paused_once_settlement("ok", true).await;
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_error_settlement_before_resume() {
+        paused_once_settlement("error", false).await;
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_error_resume_before_settlement() {
+        paused_once_settlement("error", true).await;
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_canceled_settlement_before_resume() {
+        paused_once_settlement("canceled", false).await;
+    }
+
+    #[tokio::test]
+    async fn review4_once_pause_canceled_resume_before_settlement() {
+        paused_once_settlement("canceled", true).await;
+    }
+
+    #[tokio::test]
+    async fn review4_old_settlement_does_not_consume_retimed_once() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES('ws','ws','/tmp','2026-10-05T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool);
+        for status in ["ok", "error", "canceled"] {
+            let mut new = otto_state::NewScheduledTask::defaults("ws".into(), status.into());
+            new.schedule = json!({"cadence":"once","run_at":"2026-10-05T10:00:00Z"});
+            let dispatched = repo.create(new).await.unwrap();
+            let run = repo
+                .create_run(NewScheduledRun {
+                    task_id: dispatched.id.clone(),
+                    workspace_id: "ws".into(),
+                    trigger: "schedule".into(),
+                })
+                .await
+                .unwrap();
+            repo.update_with_next_run(
+                &dispatched.id,
+                otto_state::ScheduledTaskPatch {
+                    schedule: Some(json!({"cadence":"once","run_at":"2026-10-05T11:00:00Z"})),
+                    ..Default::default()
+                },
+                |task| {
+                    cadence::next_run(
+                        &task.schedule,
+                        "2026-10-05T10:01:00Z".parse().unwrap(),
+                        chrono_tz::UTC,
+                    )
+                    .map(|d| d.to_rfc3339())
+                },
+            )
+            .await
+            .unwrap();
+            repo.finish_run(
+                &run.id,
+                FinishRun {
+                    status: status.into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            settle_schedule(
+                &repo,
+                &dispatched,
+                status,
+                "2026-10-05T10:02:00Z".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            let updated = repo.get(&dispatched.id).await.unwrap();
+            assert_eq!(
+                updated.next_run_at.as_deref(),
+                Some("2026-10-05T11:00:00+00:00")
+            );
+            assert!(
+                updated.last_run_at.is_none(),
+                "old {status} settlement consumed the new one-shot"
+            );
+            assert!(cadence::is_due_since(
+                &updated.schedule,
+                None,
+                None,
+                "2026-10-05T11:00:00Z".parse().unwrap(),
+                chrono_tz::UTC
+            ));
+            assert_eq!(repo.get_run(&run.id).await.unwrap().status, status);
+        }
+    }
+
+    #[tokio::test]
+    async fn review4_schedule_http_edit_and_away_back_fence_actual_settlement() {
+        use crate::routes::browser::tests::{mem_pool, root_user, seed_workspace, test_ctx};
+        use tower::ServiceExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "ws").await;
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let app = crate::routes::scheduled_tasks::routes().with_state(ctx.clone());
+        for status in ["ok", "error", "canceled"] {
+            for old_schedule in [
+                json!({"cadence":"once","run_at":"2099-10-05T10:00:00Z"}),
+                json!({"cadence":"interval","every_min":60}),
+            ] {
+                let mut new = otto_state::NewScheduledTask::defaults("ws".into(), status.into());
+                new.schedule = old_schedule;
+                let dispatched = ctx.scheduled_tasks.create(new).await.unwrap();
+                let run = ctx
+                    .scheduled_tasks
+                    .create_run(NewScheduledRun {
+                        task_id: dispatched.id.clone(),
+                        workspace_id: "ws".into(),
+                        trigger: "schedule".into(),
+                    })
+                    .await
+                    .unwrap();
+                for time in ["11:00:00", "10:00:00"] {
+                    let body = json!({"schedule":{"cadence":"once","run_at":format!("2099-10-05T{time}Z")}});
+                    let mut request = axum::http::Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/scheduled-tasks/{}", dispatched.id))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(body.to_string()))
+                        .unwrap();
+                    request
+                        .extensions_mut()
+                        .insert(otto_core::auth::AuthUser(root_user()));
+                    let response = app.clone().oneshot(request).await.unwrap();
+                    assert_eq!(response.status(), axum::http::StatusCode::OK);
+                }
+                let retimed = ctx.scheduled_tasks.get(&dispatched.id).await.unwrap();
+                assert_eq!(
+                    retimed.schedule_generation,
+                    dispatched.schedule_generation + 2
+                );
+                ctx.scheduled_tasks
+                    .finish_run(
+                        &run.id,
+                        FinishRun {
+                            status: status.into(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                settle_schedule(
+                    &ctx.scheduled_tasks,
+                    &dispatched,
+                    status,
+                    "2099-10-05T10:02:00Z".parse().unwrap(),
+                )
+                .await
+                .unwrap();
+                let after = ctx.scheduled_tasks.get(&dispatched.id).await.unwrap();
+                assert_eq!(after.next_run_at, retimed.next_run_at);
+                assert!(after.last_run_at.is_none());
+                assert!(cadence::is_due_since(
+                    &after.schedule,
+                    None,
+                    None,
+                    "2099-10-05T10:00:00Z".parse().unwrap(),
+                    chrono_tz::UTC
+                ));
+                assert_eq!(
+                    ctx.scheduled_tasks.get_run(&run.id).await.unwrap().status,
+                    status
+                );
+                // Ordinary content changes preserve this generation; its own
+                // completion still consumes exactly this new occurrence.
+                let edited = ctx
+                    .scheduled_tasks
+                    .update(
+                        &after.id,
+                        otto_state::ScheduledTaskPatch {
+                            name: Some("renamed".into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(edited.schedule_generation, after.schedule_generation);
+                settle_schedule(
+                    &ctx.scheduled_tasks,
+                    &after,
+                    "ok",
+                    "2099-10-05T10:03:00Z".parse().unwrap(),
+                )
+                .await
+                .unwrap();
+                let done = ctx.scheduled_tasks.get(&after.id).await.unwrap();
+                let cursor = done
+                    .last_run_at
+                    .as_deref()
+                    .map(|s| s.parse::<DateTime<Utc>>().unwrap());
+                assert!(!cadence::is_due_since(
+                    &done.schedule,
+                    cursor,
+                    None,
+                    "2099-10-05T11:00:00Z".parse().unwrap(),
+                    chrono_tz::UTC
+                ));
+            }
+        }
+    }
 
     #[test]
     fn wrap_prompt_embeds_sentinel_rule_and_user_prompt() {

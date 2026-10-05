@@ -85,7 +85,12 @@
 
   async function runImport(): Promise<void> {
     const id = database.selectedConnId;
-    if (!id || importing) return;
+    const objectPath = database.selectedObjectPath;
+    const selectedTable = database.importTable;
+    const origin = database.selectedConn ? { ...database.selectedConn } : null;
+    const importFormat = format;
+    const current = () => database.selectedConnId === id && database.importTable === selectedTable && canImport;
+    if (!id || importing || !canImport) return;
     const path = filePath.trim();
     const tbl = table.trim();
     if (!path || !tbl) {
@@ -104,11 +109,12 @@
       // First pass: no confirm. A guarded (Prod/read-only) connection comes back
       // with a final {error} line starting `write_blocked:` — we then run the
       // SAME typed-confirmation flow the query path uses and retry with confirm.
-      let res = await importStream(id, { local_path: path, format, table: tbl, batch_size: size });
+      let res = await importStream(id, { local_path: path, format: importFormat, table: tbl, batch_size: size });
 
       if (typeof res.error === 'string' && res.error.startsWith('write_blocked:')) {
-        const ok = await confirmGuardedWrite();
-        if (!ok) {
+        if (!current() || importAbort?.signal.aborted) return;
+        const ok = await confirmGuardedWrite(origin);
+        if (!ok || !current() || importAbort?.signal.aborted) {
           toasts.info('Import canceled');
           progress = null;
           return;
@@ -116,7 +122,7 @@
         progress = null;
         res = await importStream(id, {
           local_path: path,
-          format,
+          format: importFormat,
           table: tbl,
           batch_size: size,
           confirm_write: true,
@@ -129,7 +135,7 @@
       }
       if (res.done) {
         if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(LS_FORMAT, format);
+          localStorage.setItem(LS_FORMAT, importFormat);
           const dir = path.replace(/\/[^/]*$/, '');
           if (dir) localStorage.setItem(LS_DIR, dir);
         }
@@ -139,11 +145,12 @@
           'Imported',
           `${rows.toLocaleString()} ${pluralNoun(rows, 'row')} in ${plural(batches, 'batch', 'batches')} → ${tbl}`,
         );
-        database.importDialogOpen = false;
-        // Reflect the new rows: re-run the active tab's query (if any) and
-        // refresh the structure of the targeted object when it's open.
-        if (database.tab?.statement.trim()) void database.runQuery();
-        if (database.selectedObjectPath) void database.refreshObject();
+        if (current()) database.importDialogOpen = false;
+        // Import never authorizes executing the editor's unsubmitted draft.
+        // Only refresh the same metadata view, if it still owns the selection.
+        if (current() && objectPath && database.selectedObjectPath === objectPath) {
+          void database.refreshObject();
+        }
       }
     } catch (e) {
       // A user-initiated cancel isn't a failure. The server-side stream stops
@@ -162,8 +169,7 @@
 
   /** Typed confirmation for a write on a guarded connection — mirrors the query
    *  path's gate (type the connection name to proceed). */
-  async function confirmGuardedWrite(): Promise<boolean> {
-    const conn = database.selectedConn;
+  async function confirmGuardedWrite(conn: { name: string; environment?: string | null } | null): Promise<boolean> {
     if (!conn) return false;
     const label = conn.environment === 'prod' ? 'PRODUCTION' : 'read-only';
     const typed = await confirmer.promptText(

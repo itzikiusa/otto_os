@@ -50,8 +50,9 @@
     await git.refreshStatus(id);
     const state = await api.get<GitBisectState>(`/repos/${id}/bisect`);
     if (alive) bisect = state;
+    if (alive && mode === 'history') await loadHistory(true);
   }
-  onMount(() => { void run(async () => { await refresh(); await loadHistory(true); }); });
+  onMount(() => { void run(async () => { await refresh(); if (mode !== 'history') await loadHistory(true); }); });
 
   async function recover(entry: GitRecoveryEntry): Promise<void> {
     const name = await confirmer.promptText(`Create a branch at ${entry.sha.slice(0, 10)}. Your current branch and files stay in place.`, {

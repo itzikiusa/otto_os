@@ -4,9 +4,9 @@
 //! `scheduled_task_runs` (one row per execution, the report history). Pure storage —
 //! the cadence/cursor logic and report I/O live in `otto_server`. `schedule` and
 //! `destination` are JSON columns surfaced as `serde_json::Value`. The `last_run_at`
-//! cursor is advanced by the scheduler on run completion via [`set_runtime`].
+//! cursor is advanced by the scheduler on run completion via [`settle_generation`].
 //!
-//! [`set_runtime`]: ScheduledTasksRepo::set_runtime
+//! [`settle_generation`]: ScheduledTasksRepo::settle_generation
 
 use crate::DbPool;
 use chrono::Utc;
@@ -144,6 +144,8 @@ fn row_to_task(r: &sqlx::sqlite::SqliteRow) -> Result<ScheduledTask> {
         max_retries: r.get("max_retries"),
         notify_on_change: r.get::<i64, _>("notify_on_change") != 0,
         attach_proof: r.get::<i64, _>("attach_proof") != 0,
+        schedule_generation: r.get("schedule_generation"),
+        admission_generation: r.get("admission_generation"),
         last_run_at: r.get("last_run_at"),
         last_status: r.get("last_status"),
         next_run_at: r.get("next_run_at"),
@@ -256,6 +258,48 @@ impl ScheduledTasksRepo {
     }
 
     pub async fn update(&self, id: &str, p: ScheduledTaskPatch) -> Result<ScheduledTask> {
+        self.update_with_next_run(id, p, |_| None).await
+    }
+
+    /// Apply an edit, occurrence generation, rearming and the next-fire display
+    /// atomically. Cadence interpretation stays in the caller's synchronous
+    /// calculator; it sees the complete new definition under the write lock.
+    pub async fn update_with_next_run<F>(
+        &self,
+        id: &str,
+        p: ScheduledTaskPatch,
+        next_run: F,
+    ) -> Result<ScheduledTask>
+    where
+        F: FnOnce(&ScheduledTask) -> Option<String>,
+    {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled task edit"))?;
+        let row = sqlx::query("SELECT * FROM scheduled_tasks WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("scheduled task for edit"))?;
+        let current = row_to_task(&row)?;
+        let timing_changed = p.schedule.as_ref().is_some_and(|v| v != &current.schedule)
+            || p.timezone.as_ref().is_some_and(|v| v != &current.timezone);
+        let enabled = p.enabled.unwrap_or(current.enabled);
+        let rearm = timing_changed || (!current.enabled && enabled);
+        // Pause/resume controls eligibility, not the identity of an occurrence
+        // already running. Its completion must still consume that same once.
+        let generation_changed = timing_changed;
+        let admission_changed = timing_changed || enabled != current.enabled;
+        let once = p
+            .schedule
+            .as_ref()
+            .unwrap_or(&current.schedule)
+            .get("cadence")
+            .and_then(Value::as_str)
+            == Some("once");
+        let reset_once = timing_changed && once;
         let now = fmt(Utc::now());
         sqlx::query(
             "UPDATE scheduled_tasks SET \
@@ -297,13 +341,48 @@ impl ScheduledTasksRepo {
         .bind(p.attach_proof.map(|b| b as i64))
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(dberr("update scheduled task"))?;
-        self.get(id).await
+        let row = sqlx::query("SELECT * FROM scheduled_tasks WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("updated scheduled task"))?;
+        let updated = row_to_task(&row)?;
+        let next = if rearm {
+            next_run(&updated)
+        } else {
+            updated.next_run_at.clone()
+        };
+        let row=sqlx::query("UPDATE scheduled_tasks SET schedule_generation=schedule_generation+?, admission_generation=admission_generation+?, armed_at=CASE WHEN ? THEN ? ELSE armed_at END, last_run_at=CASE WHEN ? THEN NULL ELSE last_run_at END, next_run_at=? WHERE id=? RETURNING *")
+            .bind(i64::from(generation_changed)).bind(i64::from(admission_changed)).bind(rearm).bind(&now).bind(reset_once).bind(next).bind(id)
+            .fetch_one(&mut *tx).await.map_err(dberr("rearm edited scheduled task"))?;
+        let result = row_to_task(&row)?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled task edit"))?;
+        Ok(result)
     }
 
-    /// Advance the scheduler cursor + display fields after a run completes.
+    /// Old runs still finish their independent history row, but can only advance
+    /// the occurrence whose generation was captured with their task definition.
+    pub async fn settle_generation(
+        &self,
+        id: &str,
+        generation: i64,
+        last_run_at: Option<&str>,
+        status: &str,
+        next_run_at: Option<&str>,
+    ) -> Result<bool> {
+        let changed=sqlx::query("UPDATE scheduled_tasks SET last_run_at=COALESCE(?,last_run_at),last_status=?,next_run_at=?,updated_at=? WHERE id=? AND schedule_generation=?")
+            .bind(last_run_at).bind(status).bind(next_run_at).bind(fmt(Utc::now())).bind(id).bind(generation)
+            .execute(&self.pool).await.map_err(dberr("settle scheduled occurrence"))?.rows_affected();
+        Ok(changed > 0)
+    }
+
+    /// Legacy fixture helper. Production completions must compare generations.
+    #[cfg(test)]
     pub async fn set_runtime(
         &self,
         id: &str,
@@ -341,9 +420,10 @@ impl ScheduledTasksRepo {
 
     /// Re-arm a task's schedule at `at` (see `ScheduledTask::armed_at`);
     /// `reset_once` also forgets a fired `once` (its cursor is the fired flag).
+    #[cfg(test)]
     pub async fn rearm(&self, id: &str, at: &str, reset_once: bool) -> Result<()> {
         sqlx::query(
-            "UPDATE scheduled_tasks SET armed_at = ?, \
+            "UPDATE scheduled_tasks SET armed_at = ?, schedule_generation = schedule_generation + 1, \
              last_run_at = CASE WHEN ? THEN NULL ELSE last_run_at END WHERE id = ?",
         )
         .bind(at)
@@ -366,6 +446,69 @@ impl ScheduledTasksRepo {
 
     // -- Runs ----------------------------------------------------------------
 
+    /// Claim a captured dispatch and open its history row under one write lock.
+    /// Scheduled snapshots expire on timing/eligibility changes or another
+    /// admission. Manual runs may explicitly run disabled tasks. Neither kind
+    /// overlaps a running task, and insertion failure rolls back the claim.
+    /// Content-only edits preserve eligibility: execution uses the definition
+    /// captured by the caller, including its prompt and delivery destination.
+    pub async fn admit_run(
+        &self,
+        captured: &ScheduledTask,
+        trigger: &str,
+    ) -> Result<ScheduledTaskRun> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled task admission"))?;
+        let claimed = sqlx::query(
+            "UPDATE scheduled_tasks SET admission_generation=admission_generation+1 \
+             WHERE id=? AND workspace_id=? \
+             AND (? != 'schedule' OR (enabled=1 AND admission_generation=? \
+                  AND schedule_generation=? AND last_run_at IS ?)) \
+             AND NOT EXISTS (SELECT 1 FROM scheduled_task_runs \
+                             WHERE task_id=scheduled_tasks.id AND status='running')",
+        )
+        .bind(&captured.id)
+        .bind(&captured.workspace_id)
+        .bind(trigger)
+        .bind(captured.admission_generation)
+        .bind(captured.schedule_generation)
+        .bind(&captured.last_run_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("claim scheduled task admission"))?
+        .rows_affected();
+        if claimed == 0 {
+            return Err(otto_core::Error::Conflict(
+                "task dispatch is no longer eligible or a run is already in progress".into(),
+            ));
+        }
+        let id = new_id();
+        let now = fmt(Utc::now());
+        let row = sqlx::query(
+            "INSERT INTO scheduled_task_runs (id, task_id, workspace_id, status, trigger, \
+             started_at, summary, delivered, created_at) \
+             VALUES (?, ?, ?, 'running', ?, ?, '', 0, ?) RETURNING *",
+        )
+        .bind(&id)
+        .bind(&captured.id)
+        .bind(&captured.workspace_id)
+        .bind(trigger)
+        .bind(&now)
+        .bind(&now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(dberr("insert admitted scheduled run"))?;
+        let run = row_to_run(&row)?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled task admission"))?;
+        Ok(run)
+    }
+
+    /// Raw history insertion for import/fixtures. Engine dispatch uses `admit_run`.
     pub async fn create_run(&self, r: NewRun) -> Result<ScheduledTaskRun> {
         let id = new_id();
         let now = fmt(Utc::now());
@@ -553,6 +696,64 @@ mod tests {
             created_by: Some("u1".into()),
             ..NewScheduledTask::defaults(ws.into(), name.into())
         }
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_insert_failure_rolls_back_claim() {
+        let p = pool().await;
+        seed_ws(&p, "rollback-ws").await;
+        let repo = ScheduledTasksRepo::new(p.clone());
+        let captured = repo
+            .create(NewScheduledTask::defaults(
+                "rollback-ws".into(),
+                "rollback".into(),
+            ))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_scheduled_admission BEFORE INSERT ON scheduled_task_runs BEGIN SELECT RAISE(ABORT, 'injected insertion failure'); END")
+            .execute(&p).await.unwrap();
+        assert!(repo.admit_run(&captured, "schedule").await.is_err());
+        let after = repo.get(&captured.id).await.unwrap();
+        assert_eq!(after.admission_generation, captured.admission_generation);
+        assert_eq!(after.schedule_generation, captured.schedule_generation);
+        assert_eq!(after.last_run_at, captured.last_run_at);
+        assert!(repo.list_runs(&captured.id, 10).await.unwrap().is_empty());
+        sqlx::query("DROP TRIGGER reject_scheduled_admission")
+            .execute(&p)
+            .await
+            .unwrap();
+        repo.admit_run(&captured, "schedule").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn review5_scheduled_admission_consumed_snapshot_cannot_replay_before_settlement() {
+        let p = pool().await;
+        seed_ws(&p, "replay-ws").await;
+        let repo = ScheduledTasksRepo::new(p);
+        let captured = repo
+            .create(NewScheduledTask::defaults(
+                "replay-ws".into(),
+                "replay".into(),
+            ))
+            .await
+            .unwrap();
+        let run = repo.admit_run(&captured, "schedule").await.unwrap();
+        repo.finish_run(
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        // Engine history and cadence settlement are separate operations. A
+        // captured scan cannot replay in the gap, even without a running row.
+        assert!(repo.admit_run(&captured, "schedule").await.is_err());
+        assert_eq!(repo.list_runs(&captured.id, 10).await.unwrap().len(), 1);
+        let after = repo.get(&captured.id).await.unwrap();
+        assert_eq!(after.last_run_at, captured.last_run_at);
+        assert_eq!(after.schedule_generation, captured.schedule_generation);
     }
 
     /// Perf W12 budget: the scheduled-task scheduler's per-minute scan is ONE

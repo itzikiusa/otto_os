@@ -206,11 +206,6 @@
     gap: 10px;
   }
 
-  .muted {
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    font-style: italic;
-  }
 
   /* ── Bubbles ────────────────────────────────────────────────────────────── */
   .bubble-row {

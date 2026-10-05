@@ -11,6 +11,8 @@ export interface RecapMetadata {
   speech_error: string | null; summary_status: RecapSummaryStatus; summary_error: string | null;
   summary_through_seq: number | null;
 }
+/** Cheap owner-local metadata: opaque revisions never contain event/draft bodies. */
+export interface RecapRevision {metadata: RecapMetadata; events_revision: string; draft_revision: string | null}
 export interface RecapSpeechSegment {start_ms: number; end_ms: number; text: string}
 export interface RecapDraft {overview: string; decisions: string[]; actions: string[]; open_questions: string[]; coverage: string[]; source_event_ids: number[]}
 export type RecapEventData =

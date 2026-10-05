@@ -3,6 +3,7 @@
 
 use crate::DbPool;
 use chrono::{DateTime, Utc};
+use futures_util::TryStreamExt;
 use otto_core::{new_id, Id, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -341,6 +342,72 @@ pub struct ProductTranscript {
     pub body: String,
     pub created_by: Id,
     pub created_at: DateTime<Utc>,
+}
+
+/// A transcript list never includes its potentially large body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProductTranscriptSummary {
+    pub id: Id,
+    pub story_id: Id,
+    pub title: String,
+    pub body_bytes: i64,
+    pub created_by: Id,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductTranscriptPage<T> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProductTranscriptMatch {
+    #[serde(flatten)]
+    pub summary: ProductTranscriptSummary,
+    pub match_count: usize,
+}
+
+// Keep the raw database timestamp in the cursor: reformatting a timestamp can
+// change its SQLite text ordering. IDs disambiguate imports at the same instant.
+fn transcript_cursor(row: &sqlx::sqlite::SqliteRow) -> String {
+    hex::encode(
+        serde_json::to_vec(&(
+            row.get::<String, _>("created_at"),
+            row.get::<String, _>("id"),
+        ))
+        .expect("string tuple serializes"),
+    )
+}
+
+fn transcript_boundary(cursor: Option<&str>) -> Result<Option<(String, String)>> {
+    cursor
+        .map(|cursor| {
+            if cursor.len() > 2048 {
+                return Err(otto_core::Error::Invalid(
+                    "invalid transcript cursor".into(),
+                ));
+            }
+            hex::decode(cursor)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<(String, String)>(&bytes).ok())
+                .filter(|(timestamp, id)| {
+                    !id.is_empty() && DateTime::parse_from_rfc3339(timestamp).is_ok()
+                })
+                .ok_or_else(|| otto_core::Error::Invalid("invalid transcript cursor".into()))
+        })
+        .transpose()
+}
+
+fn transcript_summary(row: &sqlx::sqlite::SqliteRow) -> Result<ProductTranscriptSummary> {
+    Ok(ProductTranscriptSummary {
+        id: row.get("id"),
+        story_id: row.get("story_id"),
+        title: row.get("title"),
+        body_bytes: row.get("body_bytes"),
+        created_by: row.get("created_by"),
+        created_at: ts(&row.get::<String, _>("created_at"))?,
+    })
 }
 
 pub struct NewTranscript {
@@ -1721,6 +1788,118 @@ impl ProductRepo {
         .await
         .map_err(dberr("list transcripts"))?;
         rows.iter().map(row_to_transcript).collect()
+    }
+
+    /// Bounded metadata projection; a keyset keeps older pages stable when a
+    /// new transcript is inserted ahead of the current page.
+    pub async fn transcript_summaries(
+        &self,
+        story: &Id,
+        limit: usize,
+        cursor: Option<&str>,
+    ) -> Result<ProductTranscriptPage<ProductTranscriptSummary>> {
+        let boundary = transcript_boundary(cursor)?;
+        let limit = limit.clamp(1, 100);
+        let mut query = sqlx::QueryBuilder::new("SELECT id, story_id, title, octet_length(body) AS body_bytes, created_by, created_at FROM product_transcripts WHERE story_id = ");
+        query.push_bind(story);
+        if let Some((timestamp, id)) = boundary {
+            query
+                .push(" AND (created_at, id) < (")
+                .push_bind(timestamp)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        query
+            .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push_bind((limit + 1) as i64);
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(dberr("transcript summaries"))?;
+        let next_cursor = (rows.len() > limit).then(|| transcript_cursor(&rows[limit - 1]));
+        let items = rows
+            .iter()
+            .take(limit)
+            .map(transcript_summary)
+            .collect::<Result<_>>()?;
+        Ok(ProductTranscriptPage { items, next_cursor })
+    }
+
+    /// Search only on explicit demand. Stream a bounded scan page instead of
+    /// materializing the history bodies. Cost is linear in scanned body bytes;
+    /// at most one row plus SQLx's bounded row channel is retained. An empty
+    /// match page can still have a cursor: callers continue through old history.
+    pub async fn search_transcripts(
+        &self,
+        story: &Id,
+        needle: &str,
+        limit: usize,
+        max_matches: usize,
+        cursor: Option<&str>,
+    ) -> Result<ProductTranscriptPage<ProductTranscriptMatch>> {
+        let boundary = transcript_boundary(cursor)?;
+        let limit = limit.clamp(1, 100);
+        let max_matches = max_matches.clamp(1, 5000);
+        let needle = needle.to_lowercase();
+        if needle.is_empty() || needle.len() > 8192 {
+            return Err(otto_core::Error::Invalid(
+                "transcript search requires a nonempty query of at most 8192 bytes".into(),
+            ));
+        }
+        let mut query = sqlx::QueryBuilder::new("SELECT id, story_id, title, body, octet_length(body) AS body_bytes, created_by, created_at FROM product_transcripts WHERE story_id = ");
+        query.push_bind(story);
+        if let Some((timestamp, id)) = boundary {
+            query
+                .push(" AND (created_at, id) < (")
+                .push_bind(timestamp)
+                .push(", ")
+                .push_bind(id)
+                .push(")");
+        }
+        query
+            .push(" ORDER BY created_at DESC, id DESC LIMIT ")
+            .push_bind((limit + 1) as i64);
+        let mut rows = query.build().fetch(&self.pool);
+        let (mut items, mut scanned, mut found, mut last, mut next_cursor) =
+            (Vec::new(), 0, 0, None, None);
+        while let Some(row) = rows.try_next().await.map_err(dberr("search transcripts"))? {
+            if scanned == limit || found == max_matches {
+                next_cursor = last;
+                break;
+            }
+            last = Some(transcript_cursor(&row));
+            scanned += 1;
+            let summary = transcript_summary(&row)?;
+            let title = if summary.title.is_empty() {
+                "Untitled transcript"
+            } else {
+                &summary.title
+            };
+            let text = format!("{title}\n{}", row.get::<String, _>("body")).to_lowercase();
+            let match_count = text.matches(&needle).take(max_matches - found).count();
+            if match_count > 0 {
+                found += match_count;
+                items.push(ProductTranscriptMatch {
+                    summary,
+                    match_count,
+                });
+            }
+            // Cancellation of the handler drops the stream; this also keeps a
+            // long explicit scan from monopolizing a runtime worker.
+            tokio::task::yield_now().await;
+        }
+        Ok(ProductTranscriptPage { items, next_cursor })
+    }
+
+    /// Resolve authorization before reading the body of an individual row.
+    pub async fn transcript_story_id(&self, id: &Id) -> Result<Id> {
+        sqlx::query_scalar("SELECT story_id FROM product_transcripts WHERE id = ?")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(dberr("transcript owner"))
     }
 
     pub async fn get_transcript(&self, id: &Id) -> Result<ProductTranscript> {

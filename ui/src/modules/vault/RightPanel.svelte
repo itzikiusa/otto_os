@@ -6,6 +6,7 @@
   import KnowledgeMetadata from './KnowledgeMetadata.svelte';
   import { slugifyHeading } from './mdRender';
   import Icon from '../../lib/components/Icon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { plural } from '../../lib/plural';
   import Badge from '../../lib/components/Badge.svelte';
 
@@ -52,9 +53,15 @@
       <span class="hdr-count"><Badge label={String(vault.backlinks.length)} /></span>
     </button>
     {#if open.backlinks}
-      {#if vault.backlinks.length === 0}
-        <div class="none">No linked mentions</div>
-      {:else}
+      <LoadState
+        what="backlinks"
+        variant="compact"
+        loading={vault.backlinksLoading}
+        error={vault.backlinksError || null}
+        empty={vault.backlinks.length === 0}
+        onretry={() => void vault.reloadBacklinks()}
+      >
+        {#snippet emptyView()}<div class="none">No linked mentions</div>{/snippet}
         {#each vault.backlinks.slice(0, vault.visibleBacklinks) as bl (bl.path + bl.kind)}
           <button class="item" title={bl.path} onclick={() => void vault.open(bl.path)}>
             <div class="t">{bl.title}</div>
@@ -64,7 +71,7 @@
         {#if vault.backlinks.length > vault.visibleBacklinks}
           <button class="more" disabled={vault.loadingBacklinkContexts} onclick={() => void showMoreBacklinks()}>Show more ({vault.backlinks.length - vault.visibleBacklinks} hidden)</button>
         {/if}
-      {/if}
+      </LoadState>
     {/if}
   </section>
 

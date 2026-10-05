@@ -1,6 +1,7 @@
 import {test, expect} from '@playwright/test';
 import type {RoomSnapshot} from '../src/lib/api/room-types';
 import type {RecapDetail} from '../src/lib/api/room-recap-types';
+test.use({serviceWorkers: 'block'});
 const detail: RecapDetail = {
   metadata: {id: 'archive', owner_id: 'owner', room_id: 'room', session_id: 'session', session_title: 'Release planning', created_at: '2026-09-27T12:00:00Z', updated_at: '2026-09-27T12:01:00Z', status: 'stopped', capture_epoch: 1, bytes_used: 2048, quota_bytes: 536870912, last_seq: 3, speech_available: true, speech_error: null, summary_status: 'idle', summary_error: null, summary_through_seq: null},
   events: [
@@ -87,4 +88,63 @@ for (const outcome of ['stopped', 'paused'] as const) test(`ending the room wait
   }
   membership!.send(JSON.stringify({type: 'snapshot', room: {...room, recap: {...room.recap, state: outcome, pending_jobs: 0}}}));
   await expect.poll(() => actions.some(action => action.type === 'end')).toBeTruthy();
+});
+
+test('open room recap replaces archive identity and discards the old pending page after revision failure and retry', async ({page}) => {
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  let membership: import('@playwright/test').WebSocketRoute;
+  let oldPageRequested = false;
+  let failNextRevision = false;
+  let releaseOld!: () => void;
+  const heldOld = new Promise<void>(resolve => { releaseOld = resolve; });
+  const room = {room_id: 'finalize', member_id: 'host', host_member_id: 'host', admission: 'admitted', session_title: 'Archive identity fixture', members: [], presentations: [], recap: {id: 'archive-A', state: 'stopped', epoch: 2, pending_jobs: 0, consented_member_ids: [], reason: null, started_at: null}};
+  const event = (seq: number, text: string) => ({seq, created_at: '2026-10-05T00:00:00Z', capture_epoch: 2, payload: {type: 'speech', member_id: 'host', member_name: 'Host', sequence: seq, offset_ms: 0, segments: [{start_ms: 0, end_ms: 1, text}]}});
+  await page.route('**/api/v1/room-recaps/**', async route => {
+    const url = new URL(route.request().url());
+    const id = url.pathname.split('/room-recaps/')[1].split('/')[0];
+    const isOld = id === 'archive-A';
+    const metadata = {...detail.metadata, id, room_id: 'finalize', speech_available: false, last_seq: isOld ? 101 : 1, session_title: isOld ? 'Original archive' : 'Replacement archive'};
+    if (url.pathname.endsWith('/revision')) {
+      if (isOld && failNextRevision) {
+        failNextRevision = false;
+        await route.fulfill({status: 503, json: {code: 'unavailable', message: 'Synthetic revision failure'}});
+        return;
+      }
+      await route.fulfill({json: {metadata, events_revision: `${id}-events`, draft_revision: null}});
+      return;
+    }
+    const after = Number(url.searchParams.get('after') ?? 0);
+    const limit = Number(url.searchParams.get('limit') ?? 100);
+    if (isOld && after === 100) { oldPageRequested = true; await heldOld; }
+    const all = isOld ? Array.from({length: 101}, (_, i) => event(i + 1, `Old archive event ${i + 1}`)) : [event(1, 'New archive starts at its first event')];
+    const remaining = all.filter(e => e.seq > after), events = remaining.slice(0, limit);
+    // Unmount fences the old response; releasing it must never replace B.
+    await route.fulfill({json: {metadata, events, next_cursor: remaining.length > events.length ? events.at(-1)!.seq : null, draft: null}}).catch(() => {});
+  });
+  await page.routeWebSocket('**/ws/rooms/finalize', ws => {
+    membership = ws; ws.send(JSON.stringify({type: 'snapshot', room}));
+    ws.onMessage(raw => { if (JSON.parse(String(raw)).type === 'heartbeat') ws.send(JSON.stringify({type: 'heartbeat'})); });
+  });
+  try {
+    await page.goto('/#/room/identity-fixture');
+    await page.evaluate(async () => { const path = '/e2e/fixtures/room-recap.svelte.ts'; const {mountHostRoomPage} = await import(path); await mountHostRoomPage(); });
+    await page.getByRole('button', {name: 'Open recap', exact: true}).click();
+    const modal = page.getByRole('dialog', {name: 'Room recap', exact: true});
+    await expect(modal.getByText('Old archive event 1', {exact: true})).toBeVisible();
+    failNextRevision = true;
+    await modal.getByRole('button', {name: 'Next events', exact: true}).click();
+    await expect(modal.getByRole('alert')).toContainText('Synthetic revision failure');
+    await modal.getByRole('button', {name: 'Retry', exact: true}).click();
+    await expect.poll(() => oldPageRequested).toBe(true);
+    membership!.send(JSON.stringify({type: 'snapshot', room: {...room, recap: {...room.recap, id: 'archive-B'}}}));
+    // The clock is paused: switching identity must remount immediately, without
+    // waiting for a four-second poll or the obsolete page response to finish.
+    await expect(modal.getByText('New archive starts at its first event', {exact: true})).toBeVisible();
+    await expect(modal.getByRole('button', {name: 'Earlier events', exact: true})).toBeDisabled();
+    releaseOld();
+    await page.clock.runFor(1);
+    await expect(modal.getByText('Old archive event 101', {exact: true})).toHaveCount(0);
+    await expect(modal.getByText('New archive starts at its first event', {exact: true})).toBeVisible();
+  } finally { releaseOld(); }
 });

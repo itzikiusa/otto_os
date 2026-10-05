@@ -1074,14 +1074,16 @@ fn base_tool_catalog() -> Value {
             },
             {
                 "name": "workbench_get",
-                "description": "Read-only: one Workbench scratch file by `doc_id` or exact `name` — metadata + current `content`. Pass `revision` (a seq from the file's history) to read an older version instead; `history: true` adds the revision timeline.",
+                "description": "Read-only: get a Workbench file by doc_id or exact name, with metadata and current content. Set revision to read an older version. history adds newest-first metadata (history_limit: default 100, max 200). Continue with before_seq = next_before_seq; a full page may be followed by an empty page.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "doc_id": { "type": "string" },
                         "name": { "type": "string", "description": "Exact file name (used when doc_id is omitted)." },
                         "revision": { "type": "integer", "description": "Optional revision seq to read." },
-                        "history": { "type": "boolean", "description": "Include the revision list (newest first)." }
+                        "history": { "type": "boolean", "description": "Include one newest-first revision metadata page." },
+                        "history_limit": { "type": "integer", "default": 100, "minimum": 1, "maximum": 200, "description": "Metadata rows per history page, clamped 1–200." },
+                        "before_seq": { "type": "integer", "description": "Exclusive revision cursor for an older history page." }
                     }
                 }
             },
@@ -3707,7 +3709,36 @@ async fn run_tool(ctx: &Ctx, name: &str, args: &Value) -> Result<(Value, Option<
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
                     {
-                        out["revisions"] = ctx.get_json(&format!("{doc_path}/revisions")).await?;
+                        let limit = match args.get("history_limit") {
+                            None => 100,
+                            Some(value) => value
+                                .as_i64()
+                                .ok_or("history_limit must be an integer")?
+                                .clamp(1, 200),
+                        };
+                        let before = args
+                            .get("before_seq")
+                            .map(|value| value.as_i64().ok_or("before_seq must be an integer"))
+                            .transpose()?;
+                        let mut path = format!("{doc_path}/revisions?limit={limit}");
+                        if let Some(before) = before {
+                            path.push_str(&format!("&before_seq={before}"));
+                        }
+                        let revisions = ctx.get_json(&path).await?;
+                        let rows = revisions
+                            .as_array()
+                            .ok_or("invalid workbench history response")?;
+                        // A full page offers a continuation hint, not proof of
+                        // more rows; the final request can legitimately be empty.
+                        out["next_before_seq"] = if rows.len() == limit as usize {
+                            rows.last()
+                                .and_then(|row| row.get("seq"))
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                        } else {
+                            Value::Null
+                        };
+                        out["revisions"] = revisions;
                     }
                     Ok(finalize(out))
                 }
@@ -5655,6 +5686,96 @@ mod tests {
                 assert!(d.starts_with("Read-only"), "{t} must be read-only");
             }
         }
+    }
+
+    #[test]
+    fn workbench_history_catalog_exposes_bounded_paging() {
+        let catalog = tool_catalog();
+        let spec = catalog["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "workbench_get")
+            .unwrap();
+        let props = &spec["inputSchema"]["properties"];
+        assert_eq!(props["history_limit"]["type"], "integer");
+        assert_eq!(props["history_limit"]["default"], 100);
+        assert_eq!(props["history_limit"]["maximum"], 200);
+        assert_eq!(props["before_seq"]["type"], "integer");
+        assert_eq!(props["revision"]["type"], "integer");
+    }
+
+    #[tokio::test]
+    async fn workbench_history_handler_forwards_cursor_and_preserves_direct_revision() {
+        use axum::extract::OriginalUri;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = requests.clone();
+        // A fallback avoids adding fictitious routes to the route-inventory scanner.
+        let app = axum::Router::new().fallback(move |OriginalUri(uri): OriginalUri| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push(uri.to_string());
+                if uri.path().ends_with("/revisions") {
+                    let query: std::collections::HashMap<String, String> =
+                        reqwest::Url::parse(&format!("http://fixture{uri}"))
+                            .unwrap()
+                            .query_pairs()
+                            .into_owned()
+                            .collect();
+                    let before = query
+                        .get("before_seq")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(1000);
+                    let rows = if before == 2 {
+                        json!([{ "seq": 1 }])
+                    } else {
+                        json!([{ "seq": before - 1 }, { "seq": before - 2 }])
+                    };
+                    axum::Json(rows)
+                } else {
+                    axum::Json(json!({"id": "doc", "seq": 1, "content": "oldest"}))
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut ctx = test_ctx();
+        ctx.base = format!("http://{addr}");
+        let result = run_tool(
+            &ctx,
+            "workbench_get",
+            &json!({
+                "doc_id": "doc", "revision": 1, "history": true,
+                "history_limit": 2, "before_seq": 500
+            }),
+        )
+        .await;
+        let short = run_tool(
+            &ctx,
+            "workbench_get",
+            &json!({
+                "doc_id": "doc", "history": true, "history_limit": 2, "before_seq": 2
+            }),
+        )
+        .await;
+        server.abort();
+        let (result, _) = result.unwrap();
+        let (short, _) = short.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].ends_with("/revisions/1"),
+            "direct lookup must stay addressable"
+        );
+        let url = reqwest::Url::parse(&format!("http://fixture{}", requests[1])).unwrap();
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("limit").map(String::as_str), Some("2"));
+        assert_eq!(query.get("before_seq").map(String::as_str), Some("500"));
+        assert_eq!(result["content"], "oldest");
+        assert_eq!(result["revisions"].as_array().unwrap().len(), 2);
+        assert_eq!(result["next_before_seq"], 498);
+        assert_eq!(short["revisions"], json!([{ "seq": 1 }]));
+        assert!(short["next_before_seq"].is_null());
     }
 
     #[test]

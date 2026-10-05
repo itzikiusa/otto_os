@@ -30,7 +30,7 @@
   import PublishDialog from './PublishDialog.svelte';
   import { reseedDraft, type DraftSeed } from './draftSeed';
   import SwarmLinkCard from './SwarmLinkCard.svelte';
-  import type { ProductTranscript } from './types';
+  import type { ProductTranscriptSummary } from './types';
   import AttachmentsPanel from './AttachmentsPanel.svelte';
   import LinkedCanvases from './LinkedCanvases.svelte';
   import ChildrenBoard from './ChildrenBoard.svelte';
@@ -364,7 +364,7 @@
       toasts.success('Discovery started', 'The swarm is now analyzing the story.');
       await product.changeTab('discovery');
     } catch (e) {
-      toastError('Couldn’t discovery', e);
+      toastError('Couldn’t start discovery', e);
     } finally {
       runningDiscovery = false;
     }
@@ -992,7 +992,7 @@
     }
   }
 
-  async function doDeleteTranscript(t: ProductTranscript): Promise<void> {
+  async function doDeleteTranscript(t: ProductTranscriptSummary): Promise<void> {
     const ok = await confirmer.ask(
       `Remove transcript “${t.title || 'untitled'}”?`,
       { title: 'Remove transcript', confirmLabel: 'Remove', danger: true },
@@ -1006,8 +1006,19 @@
     }
   }
 
-  function toggleTranscript(id: string): void {
+  async function toggleTranscript(id: string): Promise<void> {
     expandedTranscripts = { ...expandedTranscripts, [id]: !expandedTranscripts[id] };
+    if (expandedTranscripts[id]) await product.loadTranscriptBody(id);
+  }
+
+  async function downloadTranscript(t: ProductTranscriptSummary): Promise<void> {
+    try {
+      const full = await product.getTranscript(t.id);
+      const url = URL.createObjectURL(new Blob([full.body], { type: 'text/plain;charset=utf-8' }));
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = `${t.title || 'transcript'}.txt`; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (e) { toasts.error('Couldn’t download transcript', product.errMsg(e)); }
   }
 
   // ⌘F reaches COLLAPSED transcripts too: their bodies aren't mounted, so the
@@ -1019,23 +1030,31 @@
   $effect(() => {
     if (!transcriptListEl) return;
     const list = transcriptListEl;
+    let revealGeneration = 0;
     return registerFindProvider({
       root: () => list,
-      count: () => product.transcripts.length,
+      count: () => product.transcriptSearchRows.length,
+      search: (query, limit, signal) => { revealGeneration++; return product.searchTranscripts(query, limit, signal); },
       text: (i) => {
-        const t = product.transcripts[i];
-        return t ? `${t.title || 'Untitled transcript'}\n${t.body}` : '';
+        const t = product.transcriptSearchRows[i];
+        return t ? `${t.title || 'Untitled transcript'}\n${product.transcriptBodies[t.id] ?? ''}` : '';
       },
-      reveal: async (i) => {
-        const t = product.transcripts[i];
-        if (t && !expandedTranscripts[t.id]) expandedTranscripts = { ...expandedTranscripts, [t.id]: true };
+      reveal: async (i, signal) => {
+        const t = product.transcriptSearchRows[i], owner = product.selectedId;
+        const generation = revealGeneration;
+        if (!t || signal?.aborted) return;
+        await product.revealTranscript(t);
+        if (signal?.aborted || generation !== revealGeneration || product.selectedId !== owner) return;
+        expandedTranscripts = { ...expandedTranscripts, [t.id]: true };
         await tick();
       },
       // Only an expanded row has its body mounted; a collapsed one → reveal.
       rowElement: (i) => {
-        const t = product.transcripts[i];
-        return t && expandedTranscripts[t.id] ? (list.children[i] ?? null) : null;
+        const t = product.transcriptSearchRows[i];
+        return t && expandedTranscripts[t.id] && product.transcriptBodies[t.id] !== undefined
+          ? list.querySelector(`[data-transcript-id="${CSS.escape(t.id)}"]`) : null;
       },
+      release: () => { revealGeneration++; product.releaseTranscriptSearch(); },
     });
   });
 
@@ -1447,15 +1466,20 @@
             <div class="transcripts-header">
               <span class="section-title">Transcripts</span>
             </div>
+            <div class="muted" data-find-skip>⌘F searches all imported transcripts, including older pages. Download keeps the complete text available.</div>
 
+            {#if product.transcriptsError}
+              <div role="alert">Couldn’t load transcripts. {product.transcriptsError}</div>
+              <button class="btn small" onclick={() => void product.loadTranscripts()}>Retry</button>
+            {/if}
             {#if product.loadingTranscripts}
               <LoadState what="transcripts" variant="compact" loading empty />
-            {:else if product.transcripts.length === 0}
+            {:else if product.transcripts.length === 0 && !product.transcriptsError}
               <div class="muted">No transcripts yet. Paste a conversation below.</div>
             {:else}
               <div class="transcript-list" bind:this={transcriptListEl}>
                 {#each product.transcripts as t (t.id)}
-                  <div class="transcript-item">
+                  <div class="transcript-item" data-transcript-id={t.id}>
                     <div class="transcript-header">
                       <button
                         class="transcript-toggle"
@@ -1472,12 +1496,26 @@
                         title="Remove transcript"
                         aria-label="Remove transcript"
                       ><Icon name="x" size={11} /></button>
+                      <button class="btn small" data-find-skip onclick={() => void downloadTranscript(t)}>Download</button>
                     </div>
                     {#if expandedTranscripts[t.id]}
-                      <div class="transcript-body">{t.body}</div>
+                      {#if product.transcriptBodies[t.id] !== undefined}
+                        <div class="transcript-body">{product.transcriptBodies[t.id]}</div>
+                      {:else if product.transcriptBodyLoading[t.id]}
+                        <div data-find-skip><LoadState what="this transcript" variant="compact" loading empty /></div>
+                      {:else}
+                        {#if product.transcriptBodyErrors[t.id]}<div role="alert" data-find-skip>{product.transcriptBodyErrors[t.id]}</div>{/if}
+                        <button class="btn small" data-find-skip onclick={() => void product.loadTranscriptBody(t.id)}>{product.transcriptBodyErrors[t.id] ? 'Retry' : 'Load transcript'}</button>
+                      {/if}
                     {/if}
                   </div>
                 {/each}
+              </div>
+            {/if}
+            {#if product.transcriptPreviousCursors.length || product.transcriptNextCursor}
+              <div data-find-skip>
+                <button class="btn small" disabled={product.loadingTranscripts || !product.transcriptPreviousCursors.length} onclick={() => void product.previousTranscriptPage()}>Previous transcripts</button>
+                <button class="btn small" disabled={product.loadingTranscripts || !product.transcriptNextCursor} onclick={() => void product.loadTranscripts(product.transcriptNextCursor)}>Next transcripts</button>
               </div>
             {/if}
 
@@ -2518,12 +2556,6 @@
   .jira-activity {
     margin-top: 18px;
   }
-  .jira-loading {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    font-style: italic;
-    padding: 8px 0;
-  }
 
   /* ── Jira card ─────────────────────────────────────────────── */
   .jira-card {
@@ -2675,12 +2707,6 @@
   .change-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
-  }
-  .dropdown-loading {
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    padding: 10px 12px;
-    font-style: italic;
   }
 
   /* ── Details grid ──────────────────────────────────────────── */

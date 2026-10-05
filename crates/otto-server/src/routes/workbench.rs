@@ -191,13 +191,30 @@ async fn restore_doc(
     Ok(Json(doc))
 }
 
+#[derive(Deserialize)]
+struct RevisionQuery {
+    limit: Option<i64>,
+    before_seq: Option<i64>,
+}
+
 async fn list_revisions(
     Path((ws, id)): Path<(Id, Id)>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    Query(query): Query<RevisionQuery>,
 ) -> ApiResult<Json<Vec<WorkbenchRevision>>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_revisions(&ws, &user.id, &id).await?))
+    Ok(Json(
+        repo(&ctx)
+            .list_revisions_page(
+                &ws,
+                &user.id,
+                &id,
+                query.limit.unwrap_or(100),
+                query.before_seq,
+            )
+            .await?,
+    ))
 }
 
 async fn get_revision(

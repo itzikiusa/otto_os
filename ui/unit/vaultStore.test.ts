@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { deferred } from './sourceHarness.ts';
 
 // Execute the actual store methods; the harness supplies only transport and
 // browser globals. State proxies are immaterial to these transition tests.
@@ -32,6 +33,70 @@ function setup(overrides: Record<string, unknown> = {}) {
   v.tabs = [{kind: 'note', path: 'a.md'}]; v.activeTab = 0;
   return v;
 }
+
+test('tag refresh failure keeps the last good tags available', async () => {
+  const v = setup({ vaultTags: async () => { throw new Error('Index unavailable'); } });
+  v.tags = [{ tag: 'release', count: 4 }];
+  await v.loadTags();
+  assert.equal(v.tags.length, 1);
+  assert.equal(v.tags[0].tag, 'release');
+});
+
+test('switcher transport failure remains distinguishable from an empty lookup', async () => {
+  const v = setup({ vaultSwitcher: async () => { throw new Error('Index unavailable'); } });
+  await assert.rejects(v.switcherQuery('Existing note'), /Index unavailable/);
+});
+
+test('backlink refresh failure retains current note links and exposes retry state', async () => {
+  let fail = true;
+  const v = setup({vaultBacklinks: async () => {
+    if (fail) throw new Error('Index unavailable');
+    return [];
+  }});
+  v.backlinks = [{path: 'source.md', kind: 'wiki', context: 'known source'}];
+  await v.reloadBacklinks();
+  assert.equal(v.backlinks.length, 1);
+  assert.match(v.backlinksError, /Index unavailable/);
+  assert.equal(v.backlinksLoading, false);
+  fail = false;
+  await v.reloadBacklinks();
+  assert.equal(v.backlinks.length, 0, 'successful empty response is distinct from failure');
+  assert.equal(v.backlinksError, '');
+});
+
+test('backlink pending and stale failure stay with the current note request', async () => {
+  const old = deferred<unknown>();
+  const current = deferred<unknown>();
+  let calls = 0;
+  const v = setup({vaultBacklinks: () => ++calls === 1 ? old.promise : current.promise});
+  const first = v.reloadBacklinks();
+  assert.equal(v.backlinksLoading, true);
+  v.notePath = 'b.md';
+  const second = v.reloadBacklinks();
+  old.reject(new Error('Old A error'));
+  await first;
+  assert.equal(v.backlinksLoading, true, 'old finally cannot settle B');
+  assert.equal(v.backlinksError, '');
+  current.resolve([{path: 'b-source.md', kind: 'wiki', context: ''}]);
+  await second;
+  assert.equal(v.backlinksLoading, false);
+  assert.equal(v.backlinks[0].path, 'b-source.md');
+});
+
+test('switching notes clears old backlinks before the new read and never restores old errors', async () => {
+  const next = deferred<unknown>();
+  const v = setup({vaultBacklinks: () => next.promise});
+  v.dirty = false;
+  v.backlinks = [{path: 'a-source.md', kind: 'wiki', context: ''}];
+  v.backlinksError = 'A failed';
+  await v.open('b.md');
+  assert.equal(v.backlinks.length, 0);
+  assert.equal(v.backlinksError, '');
+  assert.equal(v.backlinksLoading, true);
+  next.resolve([]);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(v.backlinksLoading, false);
+});
 
 test('backlink refresh resets the visible window and allows rehydrating edited sources', async () => {
   let revision = 'first';

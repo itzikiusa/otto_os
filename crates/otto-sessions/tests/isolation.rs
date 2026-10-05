@@ -6,7 +6,8 @@
 //! with the `AuthUser` extension injected exactly as the production
 //! `auth_middleware` does. No PTYs are spawned: sessions are inserted straight
 //! into the migrated SQLite store (the manager's `get`/`list*` read from that
-//! store), so the test exercises only the authorization path.
+//! store), except the focused `resume_` lifecycle cases at the end, which use
+//! disposable `/bin/cat` PTYs and explicitly remove them after inspection.
 //!
 //! The security property under test (Task 3.2): a workspace **editor** who is
 //! *not* the session owner must get **403** on get/patch/delete/restart/
@@ -748,4 +749,222 @@ async fn bulk_session_actions_respect_resource_denial() {
     let outcomes: serde_json::Value = serde_json::from_slice(&data).unwrap();
     assert_eq!(outcomes[0]["ok"], false);
     assert!(!repo.get(&id).await.unwrap().archived);
+}
+
+/// History's resume is an open-if-live operation, not a destructive restart.
+#[tokio::test]
+async fn resume_preserves_live_pty_and_checks_owner_and_resource() {
+    let pool = mem_pool().await;
+    for id in ["alice", "bob", "carol"] {
+        seed_user(&pool, id, false).await;
+    }
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    set_member(&pool, "ws1", "bob", "editor").await;
+    set_member(&pool, "ws1", "carol", "admin").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let (events, _rx) = broadcast::channel(64);
+    let manager = Arc::new(SessionManager::new(
+        repo.clone(),
+        events,
+        ProviderRegistry::new(None),
+    ));
+    let workspaces = WorkspacesRepo::new(pool.clone());
+    let workspace = workspaces.get(&"ws1".into()).await.unwrap();
+    let session = manager
+        .create(
+            &workspace,
+            &"alice".into(),
+            otto_core::api::CreateSessionReq {
+                kind: SessionKind::Agent,
+                provider: Some("shell".into()),
+                title: Some("resume fixture".into()),
+                cwd: Some("/tmp".into()),
+                connection_id: None,
+                model: None,
+                meta: None,
+            },
+            Some(otto_pty::CommandSpec {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: Some("/tmp".into()),
+                env: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+    let original = manager.live_handle(&session.id).unwrap();
+    let ctx = Ctx {
+        manager: manager.clone(),
+        roles: Arc::new(RbacRoleChecker::new(pool.clone())),
+        workspaces,
+    };
+    let app = api_router::<Ctx>().with_state(ctx);
+    let uri = format!("/sessions/{}/resume", session.id);
+    // All live statuses are non-destructive, including a stale exited row with
+    // an authoritative live handle. Check the same Arc, not a reused PID.
+    for state in [
+        otto_core::domain::SessionStatus::Working,
+        otto_core::domain::SessionStatus::Running,
+        otto_core::domain::SessionStatus::Idle,
+        otto_core::domain::SessionStatus::Exited,
+    ] {
+        repo.update_status(&session.id, state).await.unwrap();
+        let result = status_as(&app, &user("alice", false), Method::POST, &uri).await;
+        if result != StatusCode::OK {
+            manager.remove(&session.id).await.unwrap();
+            panic!("resume should return 200 for the existing PTY, got {result}");
+        }
+        assert!(Arc::ptr_eq(
+            &original,
+            &manager.live_handle(&session.id).unwrap()
+        ));
+    }
+    assert_eq!(
+        status_as(&app, &user("bob", false), Method::POST, &uri).await,
+        StatusCode::FORBIDDEN
+    );
+    for caller in [user("carol", false), user("root", true)] {
+        assert_eq!(
+            status_as(&app, &caller, Method::POST, &uri).await,
+            StatusCode::OK
+        );
+        assert!(Arc::ptr_eq(
+            &original,
+            &manager.live_handle(&session.id).unwrap()
+        ));
+    }
+    manager
+        .update_meta(&session.id, serde_json::json!({"resource_denied":true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        status_as(&app, &user("alice", false), Method::POST, &uri).await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(Arc::ptr_eq(
+        &original,
+        &manager.live_handle(&session.id).unwrap()
+    ));
+    manager.remove(&session.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn resume_reports_unsupported_inactive_and_archived_sessions() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let session = repo
+        .create(otto_state::NewSession {
+            workspace_id: "ws1".into(),
+            kind: SessionKind::Agent,
+            provider: "custom-unresumable".into(),
+            title: "inactive fixture".into(),
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+    repo.update_status(&session.id, otto_core::domain::SessionStatus::Exited)
+        .await
+        .unwrap();
+    let app = app(&pool).await;
+    let uri = format!("/sessions/{}/resume", session.id);
+    assert_eq!(
+        status_as(&app, &user("alice", false), Method::POST, &uri).await,
+        StatusCode::CONFLICT
+    );
+    repo.set_archived(&session.id, true).await.unwrap();
+    assert_eq!(
+        status_as(&app, &user("alice", false), Method::POST, &uri).await,
+        StatusCode::CONFLICT
+    );
+    assert!(repo.get(&session.id).await.unwrap().archived);
+}
+
+#[tokio::test]
+async fn resume_starts_inactive_fixture_and_serializes_concurrent_opens() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", false).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "editor").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let session = repo
+        .create(otto_state::NewSession {
+            workspace_id: "ws1".into(),
+            kind: SessionKind::Agent,
+            provider: "resume-fixture".into(),
+            title: "inactive resume fixture".into(),
+            cwd: "/tmp".into(),
+            provider_session_id: Some("recorded-fixture-id".into()),
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: serde_json::Value::Null,
+        })
+        .await
+        .unwrap();
+    repo.update_status(&session.id, otto_core::domain::SessionStatus::Exited)
+        .await
+        .unwrap();
+    let providers = ProviderRegistry::new(Some(&serde_json::json!({
+        "resume-fixture": {"cmd": "/bin/cat", "args": [], "resume_args": []}
+    })));
+    let (events, _rx) = broadcast::channel(64);
+    let manager = Arc::new(SessionManager::new(repo.clone(), events, providers));
+    assert!(!manager.is_live(&session.id));
+    let app = api_router::<Ctx>().with_state(Ctx {
+        manager: manager.clone(),
+        roles: Arc::new(RbacRoleChecker::new(pool.clone())),
+        workspaces: WorkspacesRepo::new(pool.clone()),
+    });
+    let uri = format!("/sessions/{}/resume", session.id);
+    let owner = user("alice", false);
+    let (first, second) = tokio::join!(
+        async {
+            let status = status_as(&app, &owner, Method::POST, &uri).await;
+            (status, manager.live_handle(&session.id))
+        },
+        async {
+            let status = status_as(&app, &owner, Method::POST, &uri).await;
+            (status, manager.live_handle(&session.id))
+        }
+    );
+    // Capture results before cleanup so an assertion failure leaves no fixture PTY.
+    let handle = manager.live_handle(&session.id);
+    let resumed = repo.get(&session.id).await.unwrap();
+    let repeated = status_as(&app, &owner, Method::POST, &uri).await;
+    let same_handle = handle
+        .as_ref()
+        .zip(manager.live_handle(&session.id).as_ref())
+        .is_some_and(|(one, two)| Arc::ptr_eq(one, two));
+    let concurrent_same_handle = first
+        .1
+        .as_ref()
+        .zip(second.1.as_ref())
+        .is_some_and(|(one, two)| Arc::ptr_eq(one, two));
+    manager.remove(&session.id).await.unwrap();
+    assert_eq!(
+        (first.0, second.0, repeated),
+        (StatusCode::OK, StatusCode::OK, StatusCode::OK)
+    );
+    assert!(same_handle);
+    assert!(
+        concurrent_same_handle,
+        "concurrent inactive opens share the same process"
+    );
+    assert!(matches!(
+        resumed.status,
+        otto_core::domain::SessionStatus::Running
+            | otto_core::domain::SessionStatus::Working
+            | otto_core::domain::SessionStatus::Idle
+    ));
+    assert_eq!(
+        resumed.provider_session_id.as_deref(),
+        Some("recorded-fixture-id")
+    );
 }

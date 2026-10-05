@@ -422,8 +422,9 @@ async fn create(
     // Set next_run_at for immediate display.
     let _ = ctx
         .scheduled_tasks
-        .set_runtime(
+        .settle_generation(
             &task.id,
+            task.schedule_generation,
             None,
             task.last_status.as_deref().unwrap_or(""),
             next.as_deref(),
@@ -488,22 +489,9 @@ async fn update(
             .or_else(|| task.workflow_id.clone());
         validate_workflow(&ctx, &task.workspace_id, wf.as_deref()).await?;
     }
-    let recompute_next = req.schedule.clone();
-    let tz_changed = req.timezone.is_some();
-    // Resumed, or a really new cadence/timezone → re-arm (see
-    // `cadence::effective_cursor`); a re-timed `once` forgets it fired.
-    let rearm = cadence::rearms(
-        task.enabled,
-        req.enabled,
-        &task.schedule,
-        req.schedule.as_ref(),
-        &task.timezone,
-        req.timezone.as_deref(),
-    );
-    let reset_once = cadence::rearms_once(&task.schedule, req.schedule.as_ref());
     let updated = ctx
         .scheduled_tasks
-        .update(
+        .update_with_next_run(
             &id,
             ScheduledTaskPatch {
                 name: req.name,
@@ -522,36 +510,18 @@ async fn update(
                 notify_on_change: req.notify_on_change,
                 attach_proof: req.attach_proof,
             },
+            |task| {
+                cadence::next_run(
+                    &task.schedule,
+                    chrono::Utc::now(),
+                    cadence::task_tz(&task.timezone),
+                )
+                .map(|d| d.to_rfc3339())
+            },
         )
         .await
         .map_err(ApiError)?;
-    if rearm || reset_once {
-        let _ = ctx
-            .scheduled_tasks
-            .rearm(&id, &chrono::Utc::now().to_rfc3339(), reset_once)
-            .await;
-    }
-    // If the cadence/timezone changed or the task resumed, refresh
-    // next_run_at for display (a resumed task's old value is in the past).
-    if recompute_next.is_some() || tz_changed || rearm {
-        let tz = cadence::task_tz(&updated.timezone);
-        let next =
-            cadence::next_run(&updated.schedule, chrono::Utc::now(), tz).map(|d| d.to_rfc3339());
-        let _ = ctx
-            .scheduled_tasks
-            .set_runtime(
-                &id,
-                None,
-                updated.last_status.as_deref().unwrap_or(""),
-                next.as_deref(),
-            )
-            .await;
-    }
-    ctx.scheduled_tasks
-        .get(&id)
-        .await
-        .map(Json)
-        .map_err(ApiError)
+    Ok(Json(updated))
 }
 
 /// `DELETE /scheduled-tasks/{id}`

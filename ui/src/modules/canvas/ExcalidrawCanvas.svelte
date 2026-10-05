@@ -204,7 +204,7 @@
           if (files.length && liveApi === ex) ex.addFiles?.(files);
         });
       }
-      ex.updateScene({ elements });
+      ex.updateScene({ elements, appState: persistedAppState(raw) });
       if (elements.length) ex.scrollToContent(elements, { fitToContent: true, animate: false });
     } finally {
       setTimeout(() => {
@@ -216,9 +216,9 @@
 
   /** Ask the agent to edit this scene's canvas.json. The server commits it +
    *  streams the edit over canvas_updated; the source effect reloads it. */
-  export async function generate(prompt: string): Promise<void> {
+  export async function generate(prompt: string): Promise<boolean> {
     const p = prompt.trim();
-    if (!p || generating) return;
+    if (!p || generating) return false;
     generating = true;
     try {
       const res = await canvas.assist(p);
@@ -227,19 +227,21 @@
         : '';
       if (!src) {
         toasts.info('Nothing to draw', res.note || 'The agent did not return a diagram.');
-        return;
+        return false;
       }
       // Bound to THIS editor's scene: a switch during the (long) agent turn
       // must not pour the result into the newly-open scene.
-      if (canvas.currentId !== sceneId) {
+      if (canvas.currentId !== sceneId || canvas.saveContext !== saveContext) {
         toasts.success('Ask Otto finished', 'The drawing was saved to the scene you asked from.');
-        return;
+        return true;
       }
       canvas.ingestDoc({ type: 'otto-canvas', version: 1, format: 'excalidraw', source: src }, sceneId);
       toasts.success('Drawn on canvas', res.note || 'Diagram updated.');
       void canvas.refreshSession();
+      return true;
     } catch (e) {
       toastError('Couldn’t ask Otto', e);
+      return false;
     } finally {
       generating = false;
     }
@@ -274,7 +276,7 @@
       source: JSON.stringify({
         type: 'excalidraw', version: 2, source: 'otto',
         elements: excaliApi.getSceneElements(),
-        appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? null },
+        appState: { viewBackgroundColor: appState.viewBackgroundColor, gridSize: appState.gridSize ?? 20, gridModeEnabled: appState.gridModeEnabled ?? false },
         files,
       }),
     };
@@ -298,7 +300,7 @@
   // Excalidraw fires onChange on every drag frame, scroll, zoom and selection.
   // Serializing the whole scene (base64 files included) per call cost ~1.5 ms
   // and a MB of garbage per frame. Instead: a cheap fingerprint (element
-  // version sum + file count + background) drops no-op changes, and the
+  // version sum + file count + persisted background/grid) drops no-op changes, and the
   // snapshot is taken once, when the 700 ms save timer fires (or on unmount).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let sceneVersionOf: ((els: readonly any[]) => number) | null = null;
@@ -308,7 +310,7 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function onSceneChange(elements: readonly any[], appState: any, files: any): void {
     const fp = sceneVersionOf
-      ? `${sceneVersionOf(elements)}:${files ? Object.keys(files).length : 0}:${appState?.viewBackgroundColor ?? ''}`
+      ? `${sceneVersionOf(elements)}:${files ? Object.keys(files).length : 0}:${appState?.viewBackgroundColor ?? ''}:${appState?.gridSize ?? 20}:${appState?.gridModeEnabled ?? false}`
       : null;
     const unchanged = fp !== null && fp === lastFingerprint;
     const baseline = lastFingerprint === null && fp !== null;
@@ -356,6 +358,16 @@
   // Excalidraw accepts a Promise here: the elements are ready at once and the
   // image refs resolve (one immutable fetch each, HTTP-cached on reopen)
   // before the first paint, so files are part of the baseline, not an edit.
+  function persistedAppState(raw: { appState?: { viewBackgroundColor?: string; gridSize?: number | null; gridModeEnabled?: boolean } } | null) {
+    return {
+      viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff',
+      // Current Excalidraw stores the enabled flag separately from its numeric
+      // spacing; older Otto documents used null for the disabled default.
+      gridSize: raw?.appState?.gridSize ?? 20,
+      gridModeEnabled: raw?.appState?.gridModeEnabled ?? false,
+    };
+  }
+
   async function initialData() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let raw: any = null;
@@ -369,7 +381,7 @@
     const resolved = raw?.files && typeof raw.files === 'object' ? await resolveFiles(raw.files, knownFiles, fileOwner) : [];
     return {
       elements,
-      appState: { viewBackgroundColor: raw?.appState?.viewBackgroundColor ?? '#ffffff' },
+      appState: persistedAppState(raw),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       files: Object.fromEntries(resolved.map((f) => [f.id, f])) as any,
       scrollToContent: elements.length > 0,

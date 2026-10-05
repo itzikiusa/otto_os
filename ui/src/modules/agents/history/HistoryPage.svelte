@@ -10,7 +10,7 @@
   // row is read through the path route (`transcriptPath` mode); every other row
   // through its session. "Resume in Otto" imports an on_disk transcript as a
   // reconnectable session and then rides the existing restart/resume path.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import PaneDivider from '../../../lib/components/PaneDivider.svelte';
   import PageBody from '../../../lib/components/PageBody.svelte';
   import { LIST_PANE, loadPaneWidth } from '../../../lib/paneResizer';
@@ -22,7 +22,7 @@
   import { ctxMenu, type MenuItem } from '../../../lib/contextmenu.svelte';
   import { toasts } from '../../../lib/toast.svelte';
   import { api } from '../../../lib/api/client';
-  import { winKey } from '../../../lib/win';
+  import { transcript } from '../../../lib/stores/transcript.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import ProviderIcon from '../../../lib/components/ProviderIcon.svelte';
   import EmptyState from '../../../lib/components/EmptyState.svelte';
@@ -64,6 +64,19 @@
   });
 
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
+  let alive = true;
+  let actionGeneration = 0;
+  // A resumed process may finish starting after this History visit has ended.
+  // Its completion must never replace a newer route or workspace decision.
+  $effect(() => {
+    void wsId; void scope; void router.parts; void router.pendingTarget;
+    return () => { ++actionGeneration; };
+  });
+  onDestroy(() => {
+    alive = false;
+    ++actionGeneration;
+    if (searchTimer) clearTimeout(searchTimer);
+  });
   function onSearchInput(): void {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(() => void history.refresh(), 250);
@@ -78,6 +91,7 @@
   });
 
   function pick(e: HistoryEntry): void {
+    ++actionGeneration;
     history.select(e);
     rememberSelection('history', entryKey(e));
     if (e.session_id) router.replace(`history/${e.session_id}`);
@@ -85,6 +99,7 @@
   }
 
   function clearSelection(): void {
+    ++actionGeneration;
     history.select(null);
     rememberSelection('history', null);
     if (router.parts[1]) router.replace('history');
@@ -149,35 +164,42 @@
     ]),
   );
 
-  /** Resume in Otto: import (on_disk) → restart (exited/reconnectable) → open in Chat. */
+  function isLiveStatus(status: HistoryStatus): boolean {
+    return status === 'working' || status === 'running' || status === 'idle';
+  }
+
+  /** Import if needed, safely ensure the session is live, then open in Chat. */
   async function resume(e: HistoryEntry): Promise<void> {
     if (!wsId || busy) return;
     busy = true;
+    const generation = actionGeneration, workspace = wsId, originScope = scope, originHash = window.location.hash;
+    // Accepted navigation can keep this page mounted while its destination
+    // chunk loads. The hash also fences the interval before hashchange parses it.
+    const current = () => alive && generation === actionGeneration && wsId === workspace && scope === originScope && window.location.hash === originHash && !router.pendingTarget;
     try {
       let sid = e.session_id;
       if (e.status === 'on_disk' || !sid) {
-        sid = (await history.importEntry(wsId, e)).id;
+        sid = (await history.importEntry(workspace, e)).id;
+        if (!current()) return;
         await ws.refreshSessions();
+        if (!current()) return;
       }
-      if (e.status !== 'running' && e.status !== 'idle') {
-        await ws.restartSession(sid);
-        history.patchSession(sid, { status: 'running' });
-      }
+      // The row may be stale in either direction. The server checks the live
+      // PTY under its resume lock and never replaces an already-live process.
+      const resumed = await ws.resumeSession(sid);
+      if (!current()) return;
+      history.patchSession(sid, { status: resumed.status });
       openInChat(sid);
     } catch (err) {
-      toastError('Couldn’t resume', err);
+      if (current()) toastError('Couldn’t resume', err);
     } finally {
       busy = false;
     }
   }
 
-  /** Open a live session in the Chat view (SessionView reads this key first). */
+  /** Update both the reactive view preference and its persisted value. */
   function openInChat(sid: string): void {
-    try {
-      localStorage.setItem(winKey(`otto_session_view:${sid}`), 'chat');
-    } catch {
-      /* storage unavailable — SessionView falls back to its default */
-    }
+    transcript.setView(sid, 'chat');
     ws.setViewMode('tabs');
     ws.navigateToSession(sid);
   }
@@ -220,11 +242,11 @@
   }
 
   function resumeLabel(e: HistoryEntry): string {
-    return e.status === 'running' || e.status === 'idle' ? 'Open in Otto' : 'Resume in Otto';
+    return isLiveStatus(e.status) ? 'Open in Otto' : 'Resume in Otto';
   }
 
   function menuFor(e: HistoryEntry): MenuItem[] {
-    const live = e.status === 'running' || e.status === 'idle';
+    const live = isLiveStatus(e.status);
     return [
       {
         label: resumeLabel(e),
@@ -286,6 +308,7 @@
 
   /** Sentence-case status words (content.md), matching the session vocabulary. */
   const STATUS_LABEL: Record<HistoryStatus, string> = {
+    working: 'Working',
     running: 'Running',
     idle: 'Idle',
     exited: 'Ended',
@@ -300,6 +323,7 @@
   ];
   const STATUSES: { id: StatusFilter; label: string }[] = [
     { id: 'all', label: 'Any status' },
+    { id: 'working', label: 'Working' },
     { id: 'running', label: 'Running' },
     { id: 'idle', label: 'Idle' },
     { id: 'exited', label: 'Exited' },
@@ -398,7 +422,7 @@
       </button>
       <!-- The primary is last (the trailing edge is where the eye lands). -->
       {#if canEdit}
-        {@const resumable = cur.status === 'running' || cur.status === 'idle' || cur.resumable || cur.status === 'on_disk'}
+        {@const resumable = isLiveStatus(cur.status) || cur.resumable || cur.status === 'on_disk'}
         <button
           class="btn small primary"
           onclick={() => void resume(cur)}

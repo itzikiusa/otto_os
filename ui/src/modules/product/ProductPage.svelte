@@ -279,6 +279,18 @@
    *  (≥641px) and the page EmptyState owns the ONE import CTA. */
   const noStories = $derived(product.view === 'stories' && !product.loadingStories && !storiesError && product.stories.length === 0);
 
+  // Reload stories whenever the workspace changes (mirrors DatabasePage pattern).
+  $effect(() => {
+    if (ws.currentId) {
+      // A workspace switch leaves no artifact open: release the arena's cached
+      // blob URLs / editor bases before the new list loads.
+      untrack(() => {
+        product.teardown();
+        void loadStories();
+      });
+    }
+  });
+
   // List/detail never opens onto an empty "pick one" pane: once a workspace's
   // stories are in, restore the last story opened here (or the first in the
   // tree). Once per workspace, so closing a story is respected. Not on phone —
@@ -307,7 +319,10 @@
   let routePending = $state<string | null>(null);
   $effect(() => {
     const [mod, storyId] = router.parts;
-    if (mod !== 'product' || !storyId) return;
+    // Workspace initialization clears selection; follow its reset before opening
+    // a deep link, including when the workspace arrives after this page mounts.
+    const workspaceId = ws.currentId;
+    if (!workspaceId || mod !== 'product' || !storyId) return;
     untrack(() => {
       if (storyId === product.selectedId && product.view === 'stories') return;
       routePending = storyId;
@@ -328,7 +343,7 @@
   });
   $effect(() => {
     const id = product.view === 'stories' ? product.selectedId : null;
-    if (routePending || router.module !== 'product') return;
+    if (!ws.currentId || routePending || router.module !== 'product') return;
     const want = id ? `product/${id}` : 'product';
     untrack(() => {
       if (router.parts.join('/') !== want) router.replace(want);
@@ -350,18 +365,6 @@
   const selectedIsEpic = $derived(
     !!selectedStory && (selectedStory.tree_kind === 'epic' || product.childrenOf(selectedStory.id).length > 0),
   );
-
-  // Reload stories whenever the workspace changes (mirrors DatabasePage pattern).
-  $effect(() => {
-    if (ws.currentId) {
-      // A workspace switch leaves no artifact open: release the arena's cached
-      // blob URLs / editor bases before the new list loads.
-      untrack(() => {
-        product.teardown();
-        void loadStories();
-      });
-    }
-  });
 
   // ── Workflow groups ───────────────────────────────────────────────────────
   // The 13 per-story sub-views are bucketed into 4 workflow groups. The top bar

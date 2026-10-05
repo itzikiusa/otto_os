@@ -95,15 +95,20 @@ export class RunBodyCache {
  * that joined it has aborted (the inspector aborts superseded reads).
  */
 export class SharedNodeBodies {
-  private done = new Map<string, {version: string; body: unknown}>();
+  private done = new Map<string, {version: string; body: unknown; bytes: number}>();
+  // Serialized UTF-16 estimate bounds retained cache bodies, not process RSS.
+  private bytes = 0;
+  private readonly byteCap = 16 * 1024 * 1024;
   private inflight = new Map<string, {promise: Promise<{detail_version: string; body: unknown}>; ctl: AbortController; refs: number}>();
   private cap: number;
   constructor(cap = 48) {this.cap = cap;}
   private key(run: string, node: string): string {return `${run}\u0000${node}`;}
   /** The cached body for exactly this version, else null. */
   peek<T = unknown>(run: string, node: string, version: string): T | null {
-    const hit = this.done.get(this.key(run, node));
-    return hit && hit.version === version ? (hit.body as T) : null;
+    const key = this.key(run, node), hit = this.done.get(key);
+    if (!hit || hit.version !== version) return null;
+    this.done.delete(key); this.done.set(key, hit);
+    return hit.body as T;
   }
   fetch<T extends {detail_version: string; body: unknown}>(
     run: string, node: string, load: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal,
@@ -113,9 +118,17 @@ export class SharedNodeBodies {
     if (!entry) {
       const ctl = new AbortController();
       const promise = load(ctl.signal).then((result) => {
-        this.done.delete(key);
-        this.done.set(key, {version: result.detail_version, body: result.body});
-        while (this.done.size > this.cap) this.done.delete(this.done.keys().next().value as string);
+        // An aborted request may settle after its replacement; it no longer owns
+        // this key. Every joined consumer still receives its own result.
+        if (this.inflight.get(key)?.promise === promise) {
+          this.remove(key);
+          const bytes = 2 * (JSON.stringify(result.body)?.length ?? 0);
+          if (bytes <= this.byteCap) {
+            this.done.set(key, {version: result.detail_version, body: result.body, bytes});
+            this.bytes += bytes;
+            while (this.done.size > this.cap || this.bytes > this.byteCap) this.remove(this.done.keys().next().value as string);
+          }
+        }
         return result;
       });
       const settle = () => { if (this.inflight.get(key)?.promise === promise) this.inflight.delete(key); };
@@ -138,7 +151,11 @@ export class SharedNodeBodies {
     }
     return e.promise as Promise<T>;
   }
-  clear(): void {this.done.clear();}
+  private remove(key: string): void {
+    const entry = this.done.get(key);
+    if (entry) { this.bytes -= entry.bytes; this.done.delete(key); }
+  }
+  clear(): void {this.done.clear(); this.bytes = 0;}
 }
 
 /** The app-wide instance (module scope: survives the inspector re-mounting). */

@@ -1439,6 +1439,7 @@ mod tests {
             kind: "chat".to_string(),
             spec,
             enabled: true,
+            admission_generation: 0,
             created_at: chrono::Utc::now(),
             armed_at: None,
         }

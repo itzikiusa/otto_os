@@ -2,8 +2,10 @@
   // "Save request" sheet: a name and WHERE it goes (collection / folder picked
   // from a tree-ordered list, or a new collection created on the spot).
   // Replaces the old two-prompt flow with its numbered collection list.
+  import { onDestroy } from 'svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import { apiClient } from '../../lib/stores/apiClient.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
   import { collectionPaths } from '../../lib/api/apiVars';
   import type { Id } from '../../lib/api/types';
 
@@ -16,6 +18,13 @@
     onsave: (name: string, collectionId: Id | null) => Promise<boolean>;
   }
   let { title = 'Save request', initialName, initialCollection, onclose, onsave }: Props = $props();
+
+  let alive = true;
+  onDestroy(() => { alive = false; });
+  function close(): void {
+    alive = false;
+    onclose();
+  }
 
   const NEW = '__new__';
   const paths = $derived(collectionPaths(apiClient.collections));
@@ -34,21 +43,27 @@
     if (!valid || busy) return;
     busy = true;
     error = '';
+    const workspaceId = ws.currentId;
+    const tabId = apiClient.draft?.tabId;
+    const current = () => alive && ws.currentId === workspaceId && apiClient.draft?.tabId === tabId;
     try {
       let collectionId: Id | null = target === '' ? null : target;
       if (target === NEW) {
         const created = await apiClient.saveCollection({ name: newCollection.trim(), parent_id: null });
+        if (!current()) return;
         if (!created) { error = 'Couldn’t create the collection. Try again, or pick an existing one.'; return; }
         collectionId = created.id;
+        // Keep the completed first step if request persistence needs a retry.
+        target = created.id;
       }
-      if (await onsave(name.trim(), collectionId)) onclose();
+      if (await onsave(name.trim(), collectionId) && current()) close();
     } finally {
       busy = false;
     }
   }
 </script>
 
-<Modal {title} width={440} {onclose}>
+<Modal {title} width={440} onclose={close}>
   <form class="save-form" onsubmit={submit}>
     <div class="field">
       <label for="save-req-name">Name</label>
@@ -72,7 +87,7 @@
     <button type="submit" hidden aria-hidden="true" tabindex="-1"></button>
   </form>
   {#snippet footer()}
-    <button class="btn" onclick={onclose}>Cancel</button>
+    <button class="btn" onclick={close}>Cancel</button>
     <button class="btn primary" onclick={() => void submit()} disabled={!valid || busy}>{busy ? 'Saving…' : 'Save'}</button>
   {/snippet}
 </Modal>

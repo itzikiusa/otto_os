@@ -132,11 +132,6 @@
     margin-top: 12px;
     font-size: var(--fs-s);
   }
-  .swarm-link-card.dim {
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    padding: 8px 12px;
-  }
   .slc-head {
     display: flex;
     align-items: center;

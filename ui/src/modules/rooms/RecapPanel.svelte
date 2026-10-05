@@ -2,7 +2,7 @@
   import {onMount} from 'svelte';
   import {recapStateLabel, sentenceCase} from '../../lib/labels';
   import {pollWhileVisible} from '../../lib/poll';
-  import type {RecapDetail, RecapDraft, RecapEventData} from '../../lib/api/room-recap-types';
+  import type {RecapDetail, RecapDraft, RecapEventData, RecapRevision} from '../../lib/api/room-recap-types';
   import {recapRequest, recapBlob} from './recap-client';
   import {confirmer} from '../../lib/confirm.svelte';
   import {copyTextOrThrow} from '../../lib/clipboard';
@@ -13,9 +13,73 @@
   let {recapId}: {recapId: string} = $props();
   let detail = $state<RecapDetail | null>(null), error = $state(''), actionError = $state(''), loading = $state(true), busy = $state(false), copied = $state(false), cancelling = $state(false), exporting = $state(false);
   let tab = $state<'transcript' | 'activity' | 'summary'>('transcript'), after = $state(0), previous = $state<number[]>([]);
-  let live = true, request = 0;
-  onMount(() => { const poller = pollWhileVisible(signal => busy ? undefined : load(!detail, signal), {ms: 4000}); return () => { live = false; request++; poller.stop(); }; });
-  async function load(showLoading = true, signal?: AbortSignal) { if (showLoading) loading = true; const seq = ++request; try { const value = await recapRequest<RecapDetail>(`/room-recaps/${encodeURIComponent(recapId)}?after=${after}&limit=100`, undefined, signal); if (live && seq === request) { detail = value; error = ''; } return true; } catch (e) { if (live && seq === request) error = loadErrorText(e); return false; } finally { if (seq === request) loading = false; } }
+  let live = true, request = 0, loadingBody = false;
+  let revision: RecapRevision | null = null, loadedAfter: number | null = null;
+  onMount(() => { const poller = pollWhileVisible(signal => busy ? undefined : poll(signal), {ms: 4000}); return () => { live = false; request++; poller.stop(); }; });
+  function readRevision(signal?: AbortSignal) {
+    return recapRequest<RecapRevision>(`/room-recaps/${encodeURIComponent(recapId)}/revision`, undefined, signal);
+  }
+  function sameBody(a: RecapRevision, b: RecapRevision) {
+    return a.events_revision === b.events_revision && a.draft_revision === b.draft_revision;
+  }
+  async function poll(signal?: AbortSignal) {
+    if (loadingBody) return;
+    if (!detail || !revision || loadedAfter !== after) return load(!detail, signal);
+    const seq = ++request;
+    try {
+      const next = await readRevision(signal);
+      if (!live || seq !== request) return;
+      // Older complete pages are immutable. Refresh the current tail when it
+      // grows, including the exact full-page boundary that exposes Next events.
+      if (next.draft_revision !== revision.draft_revision ||
+          (next.events_revision !== revision.events_revision && detail.next_cursor === null)) {
+        return load(false, signal, next);
+      }
+      detail = {...detail, metadata: next.metadata};
+      revision = next;
+      error = '';
+    } catch (e) {
+      if (live && seq === request) error = loadErrorText(e);
+      return false;
+    }
+  }
+  async function load(showLoading = true, signal?: AbortSignal, knownRevision?: RecapRevision) {
+    if (showLoading) loading = true;
+    loadingBody = true;
+    const seq = ++request, requestedAfter = after;
+    try {
+      let before = knownRevision ?? await readRevision(signal);
+      // A changed archive may race the body request. Retry once, then leave the
+      // body unacknowledged so the next visible tick recovers without a loop.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!live || seq !== request) return false;
+        const value = await recapRequest<RecapDetail>(`/room-recaps/${encodeURIComponent(recapId)}?after=${requestedAfter}&limit=100`, undefined, signal);
+        if (!live || seq !== request) return false;
+        const latest = await readRevision(signal);
+        if (!live || seq !== request) return false;
+        if (sameBody(before, latest)) {
+          detail = {...value, metadata: latest.metadata};
+          revision = latest;
+          loadedAfter = requestedAfter;
+          error = '';
+          return true;
+        }
+        if (attempt === 1) {
+          detail = value;
+          revision = null;
+          loadedAfter = requestedAfter;
+          error = '';
+        }
+        before = latest;
+      }
+      return true;
+    } catch (e) {
+      if (live && seq === request) error = loadErrorText(e);
+      return false;
+    } finally {
+      if (seq === request) { loading = false; loadingBody = false; }
+    }
+  }
   async function generate() { if (!await confirmer.ask('Send captured text and representative shared-screen images to Codex using your ChatGPT subscription to create a draft. This uses your subscription allowance. Not every saved image is included; the draft reports coverage. The local archive remains available if generation fails.', {title: 'Generate recap summary?', confirmLabel: 'Generate summary'})) return; busy = true; actionError = ''; try { await recapRequest(`/room-recaps/${recapId}/summary`, {}); tab = 'summary'; await load(false); } catch (e) { actionError = e instanceof Error ? e.message : 'Summary generation could not start.'; } finally { busy = false; } }
   async function cancel() { cancelling = true; try { await recapRequest(`/room-recaps/${recapId}/summary`, undefined, undefined, 'DELETE'); await load(false); } catch { actionError = 'Could not cancel generation. Try again.'; } finally { cancelling = false; } }
   async function exportArchive() { exporting = true; try { const blob = await recapBlob(`/room-recaps/${recapId}/export`); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `room-recap-${recapId}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000); } catch { actionError = 'Could not export the recap. Try again.'; } finally { exporting = false; } }
@@ -40,7 +104,7 @@
   {:else if error}<p class="error" role="alert">{error} <button class="btn small" onclick={() => load()}>Retry</button></p>{/if}
   {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
   {#if detail}
-    <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{recapStateLabel(detail.metadata.status)} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
+    <div class="recap-heading"><div><strong>{detail.metadata.session_title}</strong><p>{recapStateLabel(detail.metadata.status)} · {formatBytes(detail.metadata.bytes_used)} of {formatBytes(detail.metadata.quota_bytes)}</p></div><button class="btn small" disabled={loading} onclick={() => load()}>Refresh</button><button class="btn small" disabled={exporting} onclick={exportArchive}>{exporting ? 'Exporting…' : 'Export full archive'}</button></div>
     {#if !detail.metadata.speech_available}<p class="coverage">Speech is unavailable: {detail.metadata.speech_error ?? 'The archive contains available room activity only.'}</p>{/if}
     <nav aria-label="Recap sections">{#each ['transcript', 'activity', 'summary'] as value}<button class="btn" aria-pressed={tab === value} onclick={() => tab = value as typeof tab}>{value === 'transcript' ? 'Transcript' : value === 'activity' ? 'Activity & screens' : 'Summary'}</button>{/each}</nav>
     {#if tab === 'summary'}

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onDestroy, untrack } from 'svelte';
+  import { router } from '../../lib/router.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { toastError } from '../../lib/toastError';
   import { ws } from '../../lib/stores/workspace.svelte';
@@ -47,9 +49,23 @@
     agentProviders(),
   );
 
+  let alive = true;
+  let formGeneration = 0;
+  let initialSnapshot = untrack(formState);
+  onDestroy(() => { alive = false; formGeneration++; });
+  $effect(() => router.guard(() => canLeaveForm()));
+
+  function formState(): string {
+    return JSON.stringify([seed, mode, allowCommits, requireReview, sourceLinks, selectedSkills, repoPath,
+      feedback, draft, name, maxIterations, maxMinutes, perPhaseMinutes, executorCount,
+      execProvider, execModel, defProvider, defModel]);
+  }
+
   async function define(): Promise<void> {
     const wsId = ws.currentId;
-    if (!wsId || !seed.trim() || (mode === 'build' && !repoPath.trim())) return;
+    if (!alive || !wsId || !seed.trim() || (mode === 'build' && !repoPath.trim())) return;
+    const generation = formGeneration;
+    const ownsForm = () => alive && generation === formGeneration && ws.currentId === wsId;
     defining = true;
     try {
       const d = await loops.define(wsId, {
@@ -58,6 +74,7 @@
         context: draft ? JSON.stringify(draft.definition) : undefined,
         feedback: feedback.trim() || undefined,
       });
+      if (!ownsForm()) return;
       draft = d;
       name = d.definition.title;
       maxIterations = d.suggested_limits.max_iterations;
@@ -65,9 +82,9 @@
       perPhaseMinutes = Math.max(1, Math.round(d.suggested_limits.per_phase_timeout_secs / 60));
       feedback = '';
     } catch (e) {
-      toastError('Couldn’t draft the goal', e);
+      if (ownsForm()) toastError('Couldn’t draft the goal', e);
     } finally {
-      defining = false;
+      if (ownsForm()) defining = false;
     }
   }
 
@@ -92,7 +109,7 @@
   }
 
   function canLaunch(): boolean {
-    if (!ws.currentId || !draft || !name.trim()) return false;
+    if (!alive || !ws.currentId || !draft || !name.trim()) return false;
     const cs = draft.definition.acceptance_criteria;
     return cs.length > 0 && cs.every((c) => c.text.trim() !== '' && c.verify.trim() !== '');
   }
@@ -100,6 +117,9 @@
   async function launch(): Promise<void> {
     const wsId = ws.currentId;
     if (!wsId || !draft || !canLaunch()) return;
+    if (launching) return;
+    const generation = formGeneration;
+    const ownsForm = () => alive && generation === formGeneration && ws.currentId === wsId;
     launching = true;
     try {
       const base = draft.suggested_config.executors[0] ?? {
@@ -130,24 +150,42 @@
           skills: selectedSkills.split(',').map(s => s.trim()).filter(Boolean) },
         autostart: true,
       });
-      oncreated(loop.id);
+      if (ownsForm()) {
+        initialSnapshot = formState();
+        oncreated(loop.id);
+      }
     } catch (e) {
-      toastError('Couldn’t launch the goal loop', e);
+      if (ownsForm()) toastError('Couldn’t launch the goal loop', e);
     } finally {
-      launching = false;
+      if (ownsForm()) launching = false;
     }
   }
 
-  /** Leave the form; ask first once there is work to lose (a draft or a typed goal). */
-  async function cancel(): Promise<void> {
-    if (draft || seed.trim()) {
+  /** Route/workspace navigation and local Cancel use the same complete draft. */
+  async function canLeaveForm(): Promise<boolean> {
+    if (!alive) return true;
+    if (formState() !== initialSnapshot) {
       const ok = await confirmer.ask('Discard this goal loop? The draft and your edits are lost.', {
         title: 'Discard goal loop',
         confirmLabel: 'Discard',
       });
-      if (!ok) return;
+      if (!ok) return false;
     }
+    // A workspace switch keeps LoopsPage mounted. Settle its creation state,
+    // rather than marking an A draft clean and leaving it launchable under B.
+    // Invalidate ownership before the callback; repeated leave/Cancel callbacks
+    // during teardown must neither close twice nor publish a pending launch.
+    if (!alive) return true;
+    alive = false;
+    formGeneration++;
+    defining = false;
+    launching = false;
     oncancel();
+    return true;
+  }
+
+  async function cancel(): Promise<void> {
+    await canLeaveForm();
   }
 
   function setKind(c: AcceptanceCriterion, kind: AcceptanceCriterion['verify_kind']): void {

@@ -25,6 +25,7 @@ function workflow() {
     let current = { id: 'A' }, running = false, dirty = true, destroyed = false;
     let ws = {currentId: 'ws'}, viewGeneration = 0, versionsGeneration = 0;
     let versions = [], versionsLoading = false, versionsError = null, workflows = [];
+    const VERSION_PAGE_SIZE = 50; let versionsBefore, versionsHasMore = false;
     let run = null, requestedRunId = null;
     async function save() { await saving.promise; dirty = false; }
     function open(wf) { current = wf; viewGeneration++; }

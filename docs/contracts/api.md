@@ -27,6 +27,7 @@ are absolute). Detailed bodies, permissions and limits are in
 | POST | `/rooms/{id}/recaps` | Prepare a consent-gated recap |
 | GET | `/room-recaps` | List owner-local archives |
 | GET | `/room-recaps/{id}` | Read a paginated archive |
+| GET | `/room-recaps/{id}/revision` | Read body-free metadata and opaque event/draft revisions |
 | GET | `/room-recaps/{id}/export` | Export the event timeline |
 | GET | `/room-recaps/{id}/images/{image}` | Read one archived JPEG |
 | POST | `/room-recaps/{id}/audio` | Queue a consent-fenced speech chunk |
@@ -77,6 +78,7 @@ connection library unusable for every non-root account.)
 | 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control` and `meta.client_id` are **server-owned**: a PATCH that changes either is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
+| — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, or when the provider's active-conversation guard refuses a fork. Resume errors propagate; this never falls back to an unconditional restart. |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
 | 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
@@ -636,12 +638,14 @@ coalesced file-change invalidations plus this read path when not admitted.
 | POST /sessions/{id}/tasks | ws editor + owner-or-admin | `CreateAgentTaskReq {title, description?}` | `AgentTask` (`source: "user"`, `nudge_pending: true`); broadcasts `tasks_updated`. 400 unless the session is a `claude`/`codex` **agent** session — its own provider or the one captured running inside a terminal (`meta.nested_provider`); 409 `agent not running in this terminal` when that captured CLI has exited (the sweep likewise keeps such tasks pending); title/description are reduced to one line with every control character stripped. The nudge sweep (atomic per-task claim; PTY must be ≥ 10 s old, drawn and quiet 600 ms) submits `Otto board: new task — "<title>". <description> Add it to your task list and do it next.` via `submit_text` when the session is `idle`, or after at most 120 s while `working`; it waits (no override) while an approval/permission prompt is on screen. Then `nudge_pending: false`, `nudged_at` set |
 | GET /sessions/{id}/slash-commands | ws viewer + owner-or-admin | — | `SlashCommand[]` — what the chat composer completes after `/`: the provider CLI's built-ins (`source: builtin`) plus the user's commands/skills on disk (Claude: `~/.claude/{commands,skills}` = `user`, `<cwd>/.claude/{commands,skills}` = `project`, subdirs namespaced `dir:name`; Codex: `$CODEX_HOME/skills`, `<cwd>/.codex/skills`). Description = frontmatter `description:` or the file's first line, ≤ 160 chars. Other providers → `[]` |
 | POST /sessions/{id}/inbox | ws editor + owner-or-admin | `InboxUploadReq {filename, mime, data_b64}` — `image/*` only, ≤ 10 MB decoded | `{path}` under `<data>/sessions/<id>/inbox/` for the composer's `[Image: <path>]` line. 415 for non-images, 413 over the cap |
-| GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit= | ws viewer | `q` (title / first prompt / cwd, case-insensitive), `provider` ∈ `claude\|codex`, `cwd` (exact or prefix), `status` ∈ `running\|idle\|exited\|reconnectable\|on_disk`, `before` = `last_active_at` cursor (exclusive), `limit` (default 100, max 1000) | `HistoryEntry[]` newest activity first: the workspace's agent sessions with a resolvable transcript (all statuses incl. archived; own sessions only for non-admins; `status` from the row) merged with indexed transcripts no session claims by path or `provider_session_id` (`status: "on_disk"`, `session_id: null`) — **`on_disk` rows are returned to workspace Admins/root only**; other members see exactly their own sessions |
+| GET /workspaces/{wid}/history?q=&provider=&cwd=&status=&before=&limit= | ws viewer | `q` (title / first prompt / cwd, case-insensitive), `provider` ∈ `claude\|codex`, `cwd` (exact or prefix), `status` ∈ `running\|working\|idle\|exited\|reconnectable\|on_disk`, `before` = `last_active_at` cursor (exclusive), `limit` (default 100, max 1000) | `HistoryEntry[]` newest activity first: the workspace's agent sessions with a resolvable transcript (all statuses incl. archived; own sessions only for non-admins; `status` from the row) merged with indexed transcripts no session claims by path or `provider_session_id` (`status: "on_disk"`, `session_id: null`) — **`on_disk` rows are returned to workspace Admins/root only**; other members see exactly their own sessions |
 | GET /workspaces/{wid}/history/transcript?path=&before=&limit=&sub= | ws viewer | `path` = an absolute `.jsonl` that must resolve (symlink-aware) under `~/.claude/projects` or `$CODEX_HOME/sessions` — the ONE route that accepts a client path | `Transcript` (same paging as the session route); 403 for any other location, and 403 unless the caller is a workspace Admin/root or the path is the transcript of one of the caller's own sessions in `wid` (same rule for `…/images/{img_id}` and `import`) |
 | GET /workspaces/{wid}/history/artifacts?path= | ws viewer | same `path` confinement and 403 rule as `history/transcript` | `Artifact[]` newest first (same order as `GET /sessions/{id}/artifacts`) — the artifacts the fold of that on-disk transcript collected. History's "Outputs" for an `on_disk` row uses this instead of paging 500 turns to pick the chips out of their blocks |
 | GET /workspaces/{wid}/history/transcript/images/{img_id}?path= | ws viewer | same `path` confinement | image bytes (same store as the session route, keyed by the provider session id in the filename) |
 | POST /workspaces/{wid}/history/import | ws editor | `HistoryImportReq {provider, transcript_path}` (same confinement) | `Session` — a new `reconnectable` agent row with `provider_session_id` + `transcript_path` (so `resume_args` continues it) and `meta.imported_from = "history"`; when a session already owns the id it is returned instead (409 if it lives in another workspace). Broadcasts `session_created` |
 | POST /workspaces/{wid}/history/rescan | ws editor | — | **202**; a background walk of both roots (skips unchanged `(mtime,size)`, reads head 64 KB + tail 16 KB only) refreshes `transcript_index`; progress via `history_index_progress`. One scan at a time (a second request is a no-op 202). The same scan runs at daemon boot |
+
+History treats `running`, `working` and `idle` as live. Every explicit open uses the safe session resume operation: an existing live PTY is preserved, while an inactive process resumes through the serialized path. Authoritative liveness is rechecked so stale History status in either direction cannot interrupt an active turn or skip a needed resume.
 
 **Provider roots.** All reads (session transcripts, History index, `history/*`
 confinement) use two roots: `<claude projects>` and `<codex sessions>`.
@@ -1434,18 +1438,48 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | POST /product/testcase-runs/{rid}/publish | ws editor | — | publish approved test cases |
 | POST /product/testcase-runs/{rid}/testcases/bulk-approve | ws editor | `{ids: string[]}` | `{approved: number}` — bulk-approve selected draft cases |
 | POST /product/testcase-runs/{rid}/testcases/reorder | ws editor | `{ordered_ids: string[]}` | `Testcase[]` — persist new display order |
-| GET /product/stories/{sid}/transcripts | ws viewer | — | `Transcript[]` |
+| GET /product/stories/{sid}/transcripts | ws viewer | optional `summary=true&limit=50&cursor=` | Legacy `Transcript[]` with full bodies; summary mode returns `ProductTranscriptPage` without bodies |
+| GET /product/stories/{sid}/transcripts/search | ws viewer | `q`, optional `limit=100&max_matches=5000&cursor=` | Bounded scan page `{items:(ProductTranscriptSummary & {match_count:number})[],next_cursor:string|null}` |
+| GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
 | POST /product/stories/{sid}/transcripts | ws editor | CreateTranscriptReq | Transcript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
 | POST /product/stories/{sid}/draft (PATCH) | ws editor | — | create/update the working RFC draft |
-| POST /product/stories/{sid}/publish-as-rfc | ws editor | — | publish the draft as an RFC |
-| POST /product/stories/{sid}/publish-as-story | ws editor | — | publish the draft as a story |
+| POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
+| POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
 | POST /workspaces/{ws}/product/learnings | ws editor | CreateLearningReq | Learning |
 | PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
 | GET /workspaces/{ws}/product/drafts | ws viewer | — | `Draft[]` |
+
+### Transcript pages and publication review
+
+`ProductTranscriptSummary` is `{id,story_id,title,body_bytes,created_by,created_at}`; `body_bytes` counts UTF-8 bytes. `ProductTranscriptPage` is `{items:ProductTranscriptSummary[],next_cursor:string|null}`. Summary pages default to 50 rows, clamp `limit` to 1–100, and order by `(created_at,id)` descending. The opaque cursor preserves timestamp text plus ID, so new imports ahead of a page cannot skip older rows; malformed cursors return 400. Existing callers omitting `summary=true` retain the full-array/body contract. Individual missing IDs return 404; each read checks Viewer on the owning story's workspace.
+
+Search uses a nonempty, case-insensitive **literal** substring (`q`, at most 8192 UTF-8 bytes, no regex), counting nonoverlapping matches over the displayed title (empty → `Untitled transcript`), newline and body. Each request scans at most `limit` rows (default100, clamped1–100), streams bodies rather than collecting all history, and returns at most `max_matches` occurrences (default5000, clamped1–5000). `next_cursor` refers to the last scanned row, so **empty `items` with a non-null cursor must continue**. Explicit search remains linear in history bytes; server memory includes the current body and SQLx's bounded row buffer. Client cancellation stops subsequent scan pages; dropping a handler releases its stream. Collapsed UI loads only summaries, keeps at most four bodies/4MiB of UTF-16 string bytes, and offers a full-body download for larger legacy rows.
+
+Both publishing requests require `reviewed_content`:
+
+```json
+{"version_id":null,"body_sha256":"lowercase-sha256-of-exact-utf8-body","title":"Reviewed story title","source_kind":"draft","url":""}
+```
+
+`version_id` is a string or JSON null. Choose newest `suggested`, else `draft`, else `source` revision; when none exists, review the empty body and use null. Hash **exact body bytes**, retaining newlines/whitespace; mutable draft versions require the digest even when the version ID is unchanged. Metadata is the story title/source kind/URL actually displayed in the confirmation. Jira prepends `> RFC: {url}\n\n` only for a Confluence source with a nonempty URL; RFC publication sends the body without this prefix. The service captures and checks content once and sends that same body/title/reference even if a later edit arrives while awaiting the account or upstream.
+
+`PublishAsStoryReq` additionally has `{account_id,project_key,issue_type}`. `PublishAsRfcReq` additionally has `{account_id,space_key,parent_id?:string|null,title?:string|null}`; its optional title overrides the reviewed story title and must be the title shown in the confirmation. Missing or changed reviewed identity returns409 with an instruction to reload/review before retry, before any outbound request. **Compatibility change:** old unreviewed HTTP and workflow `product_publish` calls now fail closed. Workflow publication requires the preview → human approval → publish flow described below; a copied identity or `approved:true` input alone is insufficient. The shared Product service has no unreviewed publishing entrypoint; no direct MCP wrapper bypasses it. The UI freezes preview metadata/body, invalidates stale previews on409, and requires explicit reload/review before another submit.
+
+#### Workflow publication migration
+
+Configure a `product_publish` node with `dry_run:true`, `story_id`, `kind` (`jira` or `rfc`), `account_id`, and its destination fields (Jira `project_key`/`issue_type`; RFC `space_key`/optional `parent_id`/`title`). Preview now requires a real authorized destination and returns `{story_id,kind,dry_run:true,publication_preview:{story_id,kind,request,body_md,account_label,account_url}}`; it makes no outward call. `request` is the complete typed publish request, including `reviewed_content` and `reviewed_account_url`. The latter optionally binds the fetched account's actual base URL inside the publication service, preventing later account-setting changes from redirecting the approved request.
+
+Connect that node directly to `human_approval`, then to another `product_publish` with `dry_run:false`. The pending gate stores the exact preview in its own node output; the UI loads that full detail (progress summaries have no bodies), shows the frozen account/project or space/parent, title and complete body, and blocks approval while that read is pending or failed. Ordinary non-Product approval output is unchanged. Approval forwards the exact preview plus `approval_run_id`/`approval_node_id`; rejection forwards nothing.
+
+The decision request carries `expected_detail_version` from the successful full-node GET that supplied the displayed preview; it must not substitute a newer progress-summary version. The state layer reads the pending node, verifies its SHA-256 body version, and records the decision only if the same run revision, running status, pending flag and gate ID still match in one CAS update. Missing/stale Product identity returns409 without recording approval or rejection. This prevents an old P1 banner approving replacement P2 after same-run/gate rejection and retry. The UI invalidates its displayed identity on409 and reloads for another explicit review.
+
+Live publish requires the matching successful persisted human-approval node in this run and the recorded approval decision. It compares the full preview with that node's output, resolves the run's immutable graph, and rejects forged/missing/denied/cross-run approval. It uses the frozen request; conflicting story, mode or destination params fail rather than overriding the review. Body/title/reference changes since preview still return409 through the Product service. A newer human gate invalidates the prior gate's publication handoff; create/review a fresh preview after a conflict.
+
+**Existing workflows:** insert a destination-configured preview node and Human Approval before the live node. Keep the live node's matching old params, clear them, or create a fresh live Product Publish node with only `dry_run:false`. Old dry runs that omitted a destination must configure it. Previously accepted live params with only `reviewed_content` no longer suffice. This is a deliberate review migration, not a service bypass; rerun the preview and approval after any source/destination change. No new endpoint or database schema is required for the workflow handoff.
 
 ### Product AI actions (async; 202 Accepted)
 
@@ -1985,7 +2019,7 @@ workspace from the workflow/run row.
 | GET /workflow-runs/{id} | ws viewer | — | WorkflowRun |
 | POST /workflow-runs/{id}/cancel | ws editor | — | WorkflowRun — cancel a `pending`/`running` run (status-only, conditional: a no-op once the run settled; never rewrites `nodes` — the engine stops the in-flight step, marks the rest skipped and re-emits). A cancel that lands while the run is still starting up is honored: nothing executes |
 | POST /workflow-runs/{id}/retry-node | ws editor | `{node_id, include_downstream?}` | WorkflowRun — re-enter a **finished** run in place: the run reopens (back to running), out-of-scope nodes keep their prior state/output, in-scope nodes re-execute (same run id ⇒ same context dir + `otto-wf/<run_id>` worktree/branch — unlike the canvas "run from here", which mints a fresh run/worktree), then the run's final status is recomputed. Scope: the target step only (default; target must be `error`), or target + descendants with `include_downstream: true` (any settled target). Retry re-entries bypass node-cache READS so in-scope nodes genuinely re-execute. `409` while the run is still active — including a just-canceled run whose engine driver has not stopped yet ("still stopping"; retry in a few seconds); `400` on a bad target. A retry starts a fresh restart-resume budget |
-| GET /workflows/{id}/versions | ws viewer | — | `WorkflowVersion[]` — graph snapshot history, newest first |
+| GET /workflows/{id}/versions | ws viewer | `?summary=true&limit=50&before_version=N` | Array, newest first. Default `limit=50`, clamped to 1–100; `before_version` is exclusive. `summary=true` returns `WorkflowVersionSummary[]` without definition bodies; otherwise returns full `WorkflowVersion[]` with the same page bound. Continue from the last version of a full page; an empty page ends history. |
 | GET /workflows/{id}/versions/{v} | ws viewer | — | `WorkflowVersion` — one snapshot (404 if `v` unknown) |
 | POST /workflows/{id}/versions/{v}/restore | ws editor | `RestoreVersionReq {note?}` | Workflow — copies `v`'s graph back in as a **new** version (append-only history) |
 
@@ -2002,13 +2036,16 @@ Backed by migration **0096** (`instructions` column on `workflows` and
 
 **Versioning.** A `Workflow` carries a monotonic `version` (default 1). A snapshot
 is written on create (v1) and on **every graph-, instructions-, or restart-policy-changing PATCH**
-(`bump_version` + `snapshot_version`, note `"edited"`); restoring writes a new
+(one transaction applies the patch, allocates the version and inserts its snapshot, note `"edited"`); run admission observes only committed version/snapshot pairs. Snapshot collisions fail and roll back the patch. Restoring writes a new
 version equal to the chosen one rather than rewinding the counter (note
 `"restored from v{n}"`) and restores the graph **and** instructions to the live
 row (name/description are not — they only live in the version snapshot).
 `WorkflowVersion` = `{id, workflow_id, version, name, description, instructions,
-graph, note, created_by, created_at}`. Backed by migration **0089**
-(`workflows.version`, `workflow_versions` table).
+graph, note, on_restart, created_by, created_at}`. `WorkflowVersionSummary` =
+`{id, workflow_id, version, note, created_by, created_at}`. History is never pruned
+by paging: any version remains available through the direct full-version GET and
+restore endpoints. Backed by migration **0089** (`workflows.version`,
+`workflow_versions` table).
 
 **Run fields (0089).** A `WorkflowRun` now also carries `workflow_version` (the
 version snapshot pinned when its queue row is created) and `proof_pack_id` (the Proof Pack assembled on
@@ -3191,7 +3228,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
 | DELETE /workflow-triggers/{id} | ws editor (Workflows:Edit) | — | 204 |
-| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id, approved}` | resumed run status. `409` when the run is not `running` (canceled/failed runs can't be approved) or was decided concurrently; `400` when it is not waiting at `node_id` |
+| POST /workflow-runs/{id}/approve | ws editor (Workflows:Edit) | `{node_id,approved,note?,expected_detail_version?}` | decision result. Product preview gates require the `detail_version` of the full node body actually displayed, on approve **and deny**. `409` for missing/stale Product identity, a changed pending snapshot, non-running run or concurrent decision; `400` when not waiting at `node_id`. Ordinary non-Product gates retain the request without identity. |
 
 New workflow node kinds (node-types catalog): product_analyze, product_rewrite, product_plan,
 product_publish, review_run, canvas, git_pr, condition, loop, swarm_task, api_run, db_query,
@@ -5894,14 +5931,21 @@ retention job touches them. Doc content cap 5 MB; asset cap 20 MB.
 | PATCH /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `WorkbenchUpdateReq {content?, name?, language?, pinned?, folder?, tags?, checkpoint?, client_id?}` | `WorkbenchDoc`; `409` while trashed; `400` on validation (empty name, bad language, content > 5 MB) |
 | DELETE /workspaces/{ws}/workbench/docs/{id} | member (Agents:Edit) | `?permanent=true` = irreversible purge | soft: `200 WorkbenchDoc` (`deleted_at` set, history kept); permanent: `204` — only for a TRASHED doc (live doc → `409`), removes the doc, every revision and unreferenced blobs |
 | POST /workspaces/{ws}/workbench/docs/{id}/restore | member (Agents:Edit) | `{}` | `WorkbenchDoc` (out of the trash) |
-| GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | — | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |
+| GET /workspaces/{ws}/workbench/docs/{id}/revisions | member (Agents:View) | `?limit=100&before_seq=<seq>`; limit clamped 1–200, exclusive cursor | `WorkbenchRevision[]` newest first `{seq, kind, content_hash, size, created_at, updated_at, saves, restored_from}` |
 | GET /workspaces/{ws}/workbench/docs/{id}/revisions/{seq} | member (Agents:View) | — | `WorkbenchRevisionDetail` (revision + `doc_id` + `content`) |
 | POST /workspaces/{ws}/workbench/docs/{id}/revisions/{seq}/restore | member (Agents:Edit) | `{}` | `WorkbenchDocFull` — appends a `restore` revision; nothing is overwritten |
 | GET /workspaces/{ws}/workbench/docs/{id}/diff | member (Agents:View) | `?from=<seq>&to=<seq\|current>` (`to` omitted = current content) | `WorkbenchDiff {doc_id, from, to, added, removed, lines:[{op:eq\|add\|del, text, old_line?, new_line?}]}` — Myers line diff, exact up to 2 000 edits / 20 000 lines per side, else the changed middle as one delete + one add block |
 | POST /workspaces/{ws}/workbench/assets | member (Agents:Edit) | raw image body (PNG/JPEG/GIF/WebP by magic bytes; SVG when sent as `image/svg+xml`), ≤ 20 MB | `201 WorkbenchAsset {id, mime, size, sha256, created_at}` — identical bytes from the same owner return the existing asset |
 | GET /workspaces/{ws}/workbench/assets/{id} | member (Agents:View) | — | the image bytes with its `Content-Type`, `X-Content-Type-Options: nosniff`; SVG adds `Content-Security-Policy: sandbox` |
 
+Revision listing returns one metadata page (default 100, maximum 200), never revision bodies. Continue with `before_seq` set to the previous page's last `seq`; stop on a short or empty page. A full final page can require one empty request. Concurrent new revisions do not shift older keyset pages. All history is retained; direct revision detail, diff and restore remain available for any stored seq. The TypeScript response remains `WorkbenchRevision[]`; its API wrapper accepts the same optional limit/cursor parameters.
+
 Every mutation emits the owner-only WS event `workbench_doc_changed`
 (see ws.md). MCP (`ottod mcp-tools`): `workbench_list`, `workbench_get`
 (read-only) and `workbench_write` (MUTATING, Agents Edit — writes land as
-`checkpoint` revisions).
+`checkpoint` revisions). `workbench_get(history:true)` accepts `history_limit`
+(default 100, clamped 1–200) and exclusive `before_seq`; it adds one bounded
+`revisions` array and `next_before_seq` (last seq for a full page, null for a
+short page). A non-null cursor is only a continuation hint; the next page may
+be empty. `revision:<seq>` still fetches that explicit revision independently
+of the metadata page.

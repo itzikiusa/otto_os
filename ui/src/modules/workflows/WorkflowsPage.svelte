@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { ProductPublicationPreview } from '../product/types';
   import { toastError } from '../../lib/toastError';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { liveQuery } from '../../lib/live';
@@ -57,7 +58,7 @@
     NodeRunState,
     WorkflowTemplate,
     WorkflowTrigger,
-    WorkflowVersion,
+    WorkflowVersionSummary,
     FsRead,
     Repo,
     ReviewMode,
@@ -198,6 +199,47 @@
   //      single-flight, rev-guarded GET of the full run.
   //   3. A 2.5s fallback poll while the viewed run is non-terminal (missed
   //      events, or no WS connection).
+
+  // Product approval previews are full node bodies; progress polling carries
+  // only summaries. Load exactly this pending gate/version before approving.
+  let approvalPreview = $state<ProductPublicationPreview | null>(null);
+  let approvalPreviewLoading = $state(false);
+  let approvalPreviewError = $state('');
+  let approvalPreviewReady = $state(false);
+  let approvalPreviewVersion = $state<string | null>(null);
+  let approvalPreviewSequence = 0;
+  let approvalPreviewAbort: AbortController | null = null;
+  const approvalNode = $derived(run?.nodes.find(node => node.node_id === run?.approval_node_id));
+  const approvalNeedsPreview = $derived(!!(approvalNode?.has_output || approvalNode?.output));
+  const approvalBody = $derived(approvalPreview?.kind === 'jira' && approvalPreview.request.reviewed_content.source_kind === 'confluence' && approvalPreview.request.reviewed_content.url
+    ? `> RFC: ${approvalPreview.request.reviewed_content.url}\n\n${approvalPreview.body_md}` : (approvalPreview?.body_md ?? ''));
+
+  async function loadApprovalPreview(runId: string, node: NodeRunState): Promise<void> {
+    const sequence = ++approvalPreviewSequence;
+    approvalPreviewAbort?.abort();
+    const ctl = new AbortController(); approvalPreviewAbort = ctl;
+    approvalPreview = null; approvalPreviewError = ''; approvalPreviewReady = false; approvalPreviewVersion = null; approvalPreviewLoading = true;
+    const current = () => !ctl.signal.aborted && sequence === approvalPreviewSequence && run?.id === runId && run.waiting_approval && run.approval_node_id === node.node_id;
+    try {
+      const result = await workflowNodeDetail(runId, node.node_id, ctl.signal);
+      if (!current()) return;
+      if (node.detail_version && result.detail_version !== node.detail_version) throw new Error('The approval preview changed. Retry to load the current review.');
+      const output = result.body.output as { publication_preview?: ProductPublicationPreview } | null;
+      const preview = output?.publication_preview;
+      if (preview && ((preview.kind !== 'jira' && preview.kind !== 'rfc') || typeof preview.body_md !== 'string' || !preview.request?.reviewed_content)) throw new Error('The publication preview is incomplete. Run a new preview before approving.');
+      approvalPreview = preview ?? null; approvalPreviewVersion = result.detail_version; approvalPreviewReady = true;
+    } catch (error) {
+      if (current()) approvalPreviewError = loadErrorText(error);
+    } finally { if (current()) approvalPreviewLoading = false; }
+  }
+
+  $effect(() => {
+    const id = run?.id, waiting = run?.waiting_approval, node = approvalNode;
+    void node?.detail_version;
+    if (id && waiting && node && approvalNeedsPreview) untrack(() => void loadApprovalPreview(id, node));
+    else untrack(() => { approvalPreview = null; approvalPreviewReady = false; approvalPreviewVersion = null; approvalPreviewError = ''; approvalPreviewLoading = false; });
+    return () => { approvalPreviewAbort?.abort(); };
+  });
 
   let destroyed = false;
   $effect(() => () => {
@@ -609,6 +651,8 @@
     runsOpen = false;
     versionsOpen = false;
     versions = [];
+    versionsBefore = undefined;
+    versionsHasMore = false;
     versionsError = null;
     // Never show the previous workflow's runs under this one while they load.
     runs = [];
@@ -1281,16 +1325,25 @@
 
   async function approveRun(approved: boolean, note?: string | null): Promise<void> {
     if (!run?.waiting_approval || !run.approval_node_id || approving) return;
+    if (approvalNeedsPreview && (!approvalPreviewReady || !approvalPreviewVersion || approvalPreviewLoading || approvalPreviewError)) return;
+    const runId = run.id, nodeId = run.approval_node_id;
+    const reviewedVersion = approvalNeedsPreview ? approvalPreviewVersion : null;
     approving = true;
     approvingKind = approved ? 'approve' : 'deny';
     try {
-      await api.post(`/workflow-runs/${run.id}/approve`, {
-        node_id: run.approval_node_id,
+      await api.post(`/workflow-runs/${runId}/approve`, {
+        node_id: nodeId,
+        ...(reviewedVersion ? { expected_detail_version: reviewedVersion } : {}),
         approved,
         ...(note ? { note } : {}),
       });
       toasts.success(approved ? 'Approved — run resuming' : 'Denied — the run will stop with an error');
     } catch (e) {
+      if (reviewedVersion && run?.id === runId && run.approval_node_id === nodeId && (e as {status?: number})?.status === 409) {
+        approvalPreviewReady = false; approvalPreviewVersion = null;
+        approvalPreviewError = 'The publication preview changed. Reload and review it before deciding.';
+        void refetchRun(runId);
+      }
       toastError('Couldn’t record the approval', e);
     } finally {
       approving = false;
@@ -1628,21 +1681,27 @@
   // --- Version history ------------------------------------------------------
   let versionsGeneration = 0;
   let versionsOpen = $state(false);
-  let versions = $state<WorkflowVersion[]>([]);
+  const VERSION_PAGE_SIZE = 50;
+  let versions = $state<WorkflowVersionSummary[]>([]);
+  let versionsBefore = $state<number | undefined>(undefined);
+  let versionsHasMore = $state(false);
   let versionsLoading = $state(false);
   let versionsError = $state<string | null>(null);
 
-  async function loadVersions(): Promise<void> {
+  async function loadVersions(beforeVersion?: number): Promise<void> {
     if (!current) return;
     const workflowId = current.id;
     const generation = ++versionsGeneration;
     const view = viewGeneration;
     const ownsView = () => !destroyed && current?.id === workflowId && generation === versionsGeneration && view === viewGeneration;
+    versionsBefore = beforeVersion;
     versionsLoading = true;
     try {
-      const rows = await listWorkflowVersions(workflowId);
+      const rows = await listWorkflowVersions(workflowId, {limit: VERSION_PAGE_SIZE, beforeVersion});
       if (!ownsView()) return;
-      versions = rows;
+      // Keep one window in the drawer, regardless of how far back we browse.
+      versions = rows.slice(0, VERSION_PAGE_SIZE);
+      versionsHasMore = rows.length >= VERSION_PAGE_SIZE;
       versionsError = null;
     } catch (e) {
       if (ownsView()) versionsError = loadErrorText(e);
@@ -1651,7 +1710,7 @@
     }
   }
 
-  async function restoreVersion(v: WorkflowVersion): Promise<void> {
+  async function restoreVersion(v: WorkflowVersionSummary): Promise<void> {
     if (!current || v.workflow_id !== current.id) return;
     const workflowId = v.workflow_id;
     const generation = viewGeneration;
@@ -2094,6 +2153,22 @@
 
       {#if run?.waiting_approval && run.approval_node_id}
         {@const gate = approvalGate(run.approval_node_id)}
+        {#if approvalNeedsPreview}
+          <section aria-label="Publication review">
+            {#if approvalPreviewLoading}<LoadState what="the content and destination for review" variant="compact" loading empty />
+            {:else if approvalPreviewError}
+              <p role="alert">{approvalPreviewError}</p>
+              <button class="btn small" onclick={() => { if (run && approvalNode) void loadApprovalPreview(run.id, approvalNode); }}>Retry preview</button>
+            {:else if approvalPreview}
+              <h3>{approvalPreview.kind === 'rfc' ? (approvalPreview.request.title ?? approvalPreview.request.reviewed_content.title) : approvalPreview.request.reviewed_content.title}</h3>
+              <p>Publish via {approvalPreview.account_label} ({approvalPreview.account_url}).
+                {#if approvalPreview.kind === 'jira'}Create {approvalPreview.request.issue_type} in project {approvalPreview.request.project_key}; visible to people with access to that project.
+                {:else}Create a page in space {approvalPreview.request.space_key}{approvalPreview.request.parent_id ? ` under page ${approvalPreview.request.parent_id}` : ''}; visible to people with access to that space.{/if}
+              </p>
+              <textarea class="np-prompt" aria-label="Full publication content" rows="12" readonly value={approvalBody}></textarea>
+            {/if}
+          </section>
+        {/if}
         <div class="approval-banner" role="group" aria-label="Approval needed">
           <Icon name="userCheck" size={14} />
           <span>
@@ -2102,6 +2177,8 @@
             <span class="approval-sub">Run started <RelTime iso={run.started_at} /> · approving runs {gate.next.length > 0 ? gate.next.join(', ') : 'the rest of the run'}; denying stops the run with an error.</span>
           </span>
           <ApprovalActions
+            disabled={approvalNeedsPreview && (!approvalPreviewReady || approvalPreviewLoading || !!approvalPreviewError)}
+            disabledReason="Load and review the publication preview before approving."
             busy={approving ? approvingKind : null}
             denyTarget={`the run at ${nodeName(run.approval_node_id)}`}
             denyTitle="Deny approval"
@@ -2198,7 +2275,9 @@
           <div class="versions-h">
             <span>Version history</span>
             <span class="grow"></span>
-            <button class="btn small" disabled={versionsLoading} onclick={() => void loadVersions()}>
+            <button class="btn small" disabled={versionsLoading || versionsBefore === undefined} onclick={() => void loadVersions()}>Newest</button>
+            <button class="btn small" disabled={versionsLoading || !versionsHasMore || !!versionsError} onclick={() => void loadVersions(versions.at(-1)?.version)}>Older</button>
+            <button class="btn small" disabled={versionsLoading} onclick={() => void loadVersions(versionsBefore)}>
               Refresh
             </button>
           </div>
@@ -2208,9 +2287,9 @@
             loading={versionsLoading}
             error={versionsError}
             empty={versions.length === 0}
-            onretry={() => void loadVersions()}
+            onretry={() => void loadVersions(versionsBefore)}
           >
-            {#snippet emptyView()}<EmptyState icon="clock" title="No saved versions yet" body="Saving the canvas or restoring a version creates one." />{/snippet}
+            {#snippet emptyView()}<EmptyState icon="clock" title={versionsBefore === undefined ? 'No saved versions yet' : 'No older versions'} body={versionsBefore === undefined ? 'Saving the canvas or restoring a version creates one.' : ''} />{/snippet}
             <ul class="versions">
               {#each versions as v (v.id)}
                 <li class="ver">
@@ -3021,6 +3100,14 @@
                 </label>
               {/if}
             {:else if selectedNode.kind === 'product_publish'}
+              <label class="np-chk">
+                <input
+                  type="checkbox"
+                  checked={paramBool('dry_run', true)}
+                  onchange={(e) => onParam('dry_run', e.currentTarget.checked)}
+                /> Dry run (preview only)
+              </label>
+              {#if paramBool('dry_run', true)}
               <label for="np-story">Story ID</label>
               <input
                 id="np-story"
@@ -3038,14 +3125,7 @@
                 <option value="rfc">RFC (Confluence)</option>
                 <option value="jira">Jira story</option>
               </select>
-              <label class="np-chk">
-                <input
-                  type="checkbox"
-                  checked={paramBool('dry_run', true)}
-                  onchange={(e) => onParam('dry_run', e.currentTarget.checked)}
-                /> Dry run (preview only)
-              </label>
-              {#if !paramBool('dry_run', true)}
+
                 <label for="np-account">Account ID</label>
                 <input
                   id="np-account"
@@ -3097,6 +3177,8 @@
                     oninput={(e) => onParam('title', e.currentTarget.value)}
                   />
                 {/if}
+              {:else}
+                <p class="insp-note">Connect a preview Product Publish node to Human Approval, then this node. It publishes the approved content and destination from that run. Existing destination overrides must match the preview; clear them or create a new live node.</p>
               {/if}
             {:else if selectedNode.kind === 'canvas'}
               <label for="np-cprompt">Prompt</label>

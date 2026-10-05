@@ -92,7 +92,9 @@ export interface SubagentBody {
   loading: boolean;
   error: string | null;
   has_earlier: boolean;
+  has_later: boolean;
   cursor: string;
+  retryable: boolean;
 }
 
 /**
@@ -136,6 +138,20 @@ export function trimTurnHead(
 // Per-source conversation
 // ---------------------------------------------------------------------------
 
+// Shared by every mounted parent in this window, not just one conversation.
+const CHILD_BODY_COUNT = 8;
+const CHILD_BODY_BYTES = 32 * 1024 * 1024;
+const CHILD_PAGE_BYTES = 8 * 1024 * 1024;
+const childBodyCharges = new Map<symbol, number>();
+interface ChildReader {
+  refs: number;
+  key: symbol;
+  controller: AbortController | null;
+  pages: (string | undefined)[];
+  index: number;
+  retry: {before: string | undefined; index: number} | null;
+}
+
 export class Conversation {
   readonly src: TranscriptSource;
   /** Raw like `turns`: always replaced whole, never mutated. A deep proxy
@@ -173,6 +189,7 @@ export class Conversation {
   private setSub(agentId: string, body: SubagentBody): void {
     this.subagents = { ...this.subagents, [agentId]: body };
   }
+  private childReaders = new Map<string, ChildReader>();
   private inflight: AbortController | null = null;
   /** Index of the last record the client has folded (from the WS delta). */
   private tailCursor: string | null = null;
@@ -182,10 +199,15 @@ export class Conversation {
   /** The reader paged history in on purpose — don't trim it back out. */
   private holdCap = false;
 
-  retainedBytes = 4096;
+  private parentBytes = 4096;
+  get retainedBytes(): number {
+    let total = this.parentBytes;
+    for (const reader of this.childReaders.values()) total += childBodyCharges.get(reader.key) ?? 0;
+    return total;
+  }
   private retain(value: unknown): void {
-    this.retainedBytes = Math.min(32 * 1024 * 1024 + 1,
-      this.retainedBytes + TranscriptLifecycle.payloadCharge(value));
+    this.parentBytes = Math.min(32 * 1024 * 1024 + 1,
+      this.parentBytes + TranscriptLifecycle.payloadCharge(value));
   }
   private readEpoch = 0;
   private reads = new AbortController();
@@ -200,6 +222,11 @@ export class Conversation {
 
   activate(): void {
     if (this.reads.signal.aborted) this.reads = new AbortController();
+    // Visibility admission is restored after activate; defer until that same
+    // synchronous store update completes, then refetch still-expanded cards.
+    void Promise.resolve().then(() => {
+      for (const [id, reader] of this.childReaders) if (reader.refs > 0) void this.loadSubagent(id);
+    });
   }
 
   get key(): string {
@@ -386,49 +413,115 @@ export class Conversation {
     this.liveArtifacts = [...this.liveArtifacts, a];
   }
 
-  /** Fetch a subagent's body once (nested card expand). */
-  async loadSubagent(agentId: string): Promise<void> {
-    if (!this.isActive()) return;
-    const epoch = this.readEpoch;
-    if (this.subagents[agentId]?.turns.length || this.subagents[agentId]?.loading) return;
-    this.setSub(agentId, { turns: [], loading: true, error: null, has_earlier: false, cursor: '' });
-    try {
-      const t = await fetchTranscript(this.src, { sub: agentId, limit: PAGE_TURNS }, this.reads.signal);
-      if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.retain(t);
-      this.setSub(agentId, { turns: t.turns, loading: false, error: null, has_earlier: t.has_earlier, cursor: t.cursor });
-    } catch (e) {
-      if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.setSub(agentId, {
-        turns: [],
-        loading: false,
-        error: e instanceof Error ? e.message : String(e),
-        has_earlier: false,
-        cursor: '',
-      });
+  /** Cards own bodies explicitly. The final collapse drops payload immediately;
+   * only small page cursors survive, so reopening preserves the reading page. */
+  acquireSubagent(agentId: string): () => void {
+    let reader = this.childReaders.get(agentId);
+    if (!reader) {
+      reader = {refs: 0, key: Symbol(agentId), controller: null, pages: [undefined], index: 0, retry: null};
+      this.childReaders.set(agentId, reader);
     }
+    reader.refs++;
+    let released = false;
+    const owned = reader;
+    return () => {
+      if (released) return;
+      released = true;
+      if (--owned.refs === 0) this.releaseSubagentBody(agentId, owned);
+    };
+  }
+
+  private releaseSubagentBody(agentId: string, reader: ChildReader): void {
+    reader.controller?.abort();
+    reader.controller = null;
+    childBodyCharges.delete(reader.key);
+    const {[agentId]: _released, ...remaining} = this.subagents;
+    this.subagents = remaining;
+  }
+
+  async loadSubagent(agentId: string): Promise<void> {
+    const reader = this.childReaders.get(agentId);
+    if (!reader?.refs || !this.isActive() || this.subagents[agentId]?.loading) return;
+    const body = this.subagents[agentId];
+    if (body?.turns.length && !body.error) return;
+    if (body?.error && !body.retryable) return;
+    const target = reader.retry ?? {before: reader.pages[reader.index], index: reader.index};
+    await this.readSubagentPage(agentId, reader, target.before, target.index);
   }
 
   async loadSubagentEarlier(agentId: string): Promise<void> {
-    if (!this.isActive()) return;
-    const epoch = this.readEpoch;
-    const cur = this.subagents[agentId];
-    if (!cur || !cur.has_earlier || cur.loading) return;
-    this.setSub(agentId, { ...cur, loading: true });
+    const reader = this.childReaders.get(agentId), body = this.subagents[agentId];
+    if (!reader?.refs || !body?.has_earlier || body.loading || !this.isActive()) return;
+    await this.readSubagentPage(agentId, reader, body.cursor, reader.index + 1);
+  }
+
+  async loadSubagentLater(agentId: string): Promise<void> {
+    const reader = this.childReaders.get(agentId), body = this.subagents[agentId];
+    if (!reader?.refs || !body?.has_later || body.loading || !this.isActive()) return;
+    const index = reader.index - 1;
+    await this.readSubagentPage(agentId, reader, reader.pages[index], index);
+  }
+
+  private async readSubagentPage(agentId: string, reader: ChildReader, before: string | undefined, index: number): Promise<void> {
+    const previous = this.subagents[agentId];
+    const ac = new AbortController(), epoch = this.readEpoch;
+    reader.controller?.abort();
+    reader.controller = ac;
+    const current = () => !ac.signal.aborted && reader.controller === ac && reader.refs > 0 && epoch === this.readEpoch && this.isActive();
+    const empty: SubagentBody = {turns: [], loading: false, error: null, has_earlier: false, has_later: index > 0, cursor: '', retryable: true};
+    this.setSub(agentId, {...(previous ?? empty), loading: true, error: null});
+    let retryable = true;
+    const hadBody = childBodyCharges.has(reader.key);
+    let committed = false;
     try {
-      const t = await fetchTranscript(this.src, { sub: agentId, before: cur.cursor, limit: PAGE_TURNS }, this.reads.signal);
-      if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.retain(t);
-      this.setSub(agentId, {
-        turns: [...t.turns, ...cur.turns],
-        loading: false,
-        error: null,
-        has_earlier: t.has_earlier,
-        cursor: t.cursor,
-      });
-    } catch (e) {
-      if (epoch !== this.readEpoch || !this.isActive()) return;
-      this.setSub(agentId, { ...cur, loading: false, error: e instanceof Error ? e.message : String(e) });
+      // Reserve before fetching: expanding many cards must not start an
+      // unbounded set of response downloads/JSON parses before admission.
+      if (!hadBody) {
+        if (childBodyCharges.size >= CHILD_BODY_COUNT) {
+          throw new Error('Close another expanded subagent, then retry to display this transcript.');
+        }
+        childBodyCharges.set(reader.key, 0);
+      }
+      let limit = PAGE_TURNS;
+      let t: Transcript;
+      let charge: number;
+      // A page with several large turns can be reduced without losing history:
+      // the server's earlier cursor still reaches the omitted prefix.
+      while (true) {
+        t = await fetchTranscript(this.src, {sub: agentId, before, limit}, ac.signal);
+        if (!current()) return;
+        charge = TranscriptLifecycle.payloadCharge(t.turns);
+        if (charge <= CHILD_PAGE_BYTES) break;
+        if (t.turns.length <= 1 || limit === 1) {
+          retryable = false;
+          throw new Error('This recorded turn exceeds the subagent display limit. Read it in the provider transcript.');
+        }
+        limit = Math.max(1, Math.min(t.turns.length - 1, Math.floor(limit / 2)));
+      }
+      const oldCharge = childBodyCharges.get(reader.key) ?? 0;
+      let total = 0;
+      for (const bytes of childBodyCharges.values()) total += bytes;
+      if (total - oldCharge + charge > CHILD_BODY_BYTES) {
+        throw new Error('Close another expanded subagent, then retry to display this transcript.');
+      }
+      childBodyCharges.set(reader.key, charge);
+      committed = true;
+      reader.pages[index] = before;
+      reader.index = index;
+      reader.retry = null;
+      this.setSub(agentId, {turns: t.turns, loading: false, error: null,
+        has_earlier: t.has_earlier, has_later: index > 0, cursor: t.cursor, retryable: true});
+    } catch (error) {
+      if (!current()) return;
+      reader.retry = {before, index};
+      this.setSub(agentId, {...(previous ?? empty), loading: false, retryable,
+        error: error instanceof Error ? error.message : String(error)});
+    } finally {
+      if (reader.controller === ac) {
+        // A collapsed/reopened reader may already own a new reservation.
+        if (!hadBody && !committed) childBodyCharges.delete(reader.key);
+        reader.controller = null;
+      }
     }
   }
 
@@ -437,11 +530,7 @@ export class Conversation {
     this.reads.abort();
     this.inflight?.abort();
     this.loadingEarlier = false;
-    if (Object.values(this.subagents).some((b) => b.loading)) {
-      this.subagents = Object.fromEntries(
-        Object.entries(this.subagents).map(([id, b]) => [id, b.loading ? { ...b, loading: false } : b]),
-      );
-    }
+    for (const [agentId, reader] of this.childReaders) this.releaseSubagentBody(agentId, reader);
   }
 }
 

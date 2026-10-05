@@ -138,6 +138,7 @@ pub fn api_router<S: SessionsCtx>() -> Router<S> {
                 .delete(delete_session::<S>),
         )
         .route("/sessions/{id}/restart", post(restart_session::<S>))
+        .route("/sessions/{id}/resume", post(resume_session::<S>))
         .route("/sessions/{id}/archive", post(archive_session::<S>))
         .route("/sessions/{id}/unarchive", post(unarchive_session::<S>))
         .route("/sessions/{id}/kill", post(kill_session::<S>))
@@ -507,6 +508,27 @@ async fn delete_session<S: SessionsCtx>(
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     ctx.manager().remove(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /sessions/{id}/resume — open-if-live, with no destructive fallback.
+async fn resume_session<S: SessionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<Session>> {
+    let session = ctx.manager().get(&id).await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    if session.archived {
+        return Err(Error::Conflict("session is archived — unarchive it first".into()).into());
+    }
+    ctx.manager().ensure_live(&id).await?;
+    if !ctx.manager().is_live(&id) {
+        return Err(Error::Conflict(
+            "session cannot be resumed — no supported resumable process is available".into(),
+        )
+        .into());
+    }
+    Ok(Json(ctx.manager().get(&id).await?))
 }
 
 /// #22 POST /sessions/{id}/restart — owner-or-admin

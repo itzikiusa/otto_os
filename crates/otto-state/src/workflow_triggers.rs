@@ -23,6 +23,9 @@ pub struct WorkflowTrigger {
     /// Kind-specific configuration (JSON object).
     pub spec: Value,
     pub enabled: bool,
+    /// Internal eligibility epoch captured by scheduler scans, not a wire field.
+    #[serde(skip)]
+    pub admission_generation: i64,
     pub created_at: chrono::DateTime<Utc>,
     /// When the schedule was last (re)armed — created, re-enabled after a
     /// pause, or its cadence/timezone/expression changed. The scheduler's
@@ -55,6 +58,7 @@ fn row_to_trigger(r: &sqlx::sqlite::SqliteRow) -> Result<WorkflowTrigger> {
         kind: r.get("kind"),
         spec,
         enabled: r.get::<i64, _>("enabled") != 0,
+        admission_generation: r.get("admission_generation"),
         created_at: ts(&r.get::<String, _>("created_at"))?,
         armed_at: r
             .get::<Option<String>, _>("armed_at")
@@ -98,7 +102,7 @@ impl TriggersRepo {
     /// List all triggers for a workflow, ordered oldest-first.
     pub async fn list(&self, workflow_id: &Id) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
              FROM workflow_triggers
              WHERE workflow_id = ?
              ORDER BY created_at",
@@ -115,7 +119,7 @@ impl TriggersRepo {
     /// Used by the scheduler to find `schedule` triggers that are due.
     pub async fn list_enabled_by_kind(&self, kind: &str) -> Result<Vec<WorkflowTrigger>> {
         let rows = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
              FROM workflow_triggers
              WHERE kind = ? AND enabled = 1
              ORDER BY created_at",
@@ -131,7 +135,7 @@ impl TriggersRepo {
     /// Fetch a single trigger by id.
     pub async fn get(&self, id: &Id) -> Result<WorkflowTrigger> {
         let row = sqlx::query(
-            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at
+            "SELECT id, workflow_id, kind, spec_json, enabled, created_at, armed_at, admission_generation
              FROM workflow_triggers WHERE id = ?",
         )
         .bind(id)
@@ -188,48 +192,102 @@ impl TriggersRepo {
         spec: Option<Value>,
         enabled: Option<bool>,
     ) -> Result<WorkflowTrigger> {
-        let current = self.get(id).await?;
-        let new_spec = spec.unwrap_or(current.spec.clone());
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin trigger edit"))?;
+        let row = sqlx::query("SELECT * FROM workflow_triggers WHERE id=?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(dberr("get trigger for edit"))?;
+        let current = row_to_trigger(&row)?;
+        let mut new_spec = spec.unwrap_or_else(|| current.spec.clone());
         let new_enabled = enabled.unwrap_or(current.enabled);
-        let spec_json = serde_json::to_string(&new_spec)
-            .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
-        // Re-arm (see `WorkflowTrigger::armed_at`) when the trigger is resumed
-        // or its schedule really changed; re-saving an unchanged form must not
-        // push the next fire out. NULL keeps the row's current arm instant.
+        let changed = SCHEDULE_KEYS
+            .iter()
+            .any(|k| current.spec.get(k) != new_spec.get(k));
+        let reset_once = current.kind == "schedule"
+            && new_spec.get("cadence").and_then(Value::as_str) == Some("once")
+            && changed;
         let armed_at = rearms(current.enabled, new_enabled, &current.spec, &new_spec)
             .then(|| Utc::now().to_rfc3339());
-        // The schedule cursor (`spec.last_run`) is SERVER-owned. A config edit
-        // carries the client's copy of the spec — captured when its edit dialog
-        // opened — and writing it back rolled the cursor back (the trigger then
-        // fired a second time) or wiped it (an interval trigger fired at once).
-        // Keep whatever cursor the row holds at write time, atomically.
-        sqlx::query(
-            "UPDATE workflow_triggers
-             SET spec_json = CASE
-                     WHEN json_extract(spec_json, '$.last_run') IS NULL
-                         THEN json_remove(?, '$.last_run')
-                     ELSE json_set(?, '$.last_run', json_extract(spec_json, '$.last_run'))
-                 END,
-                 enabled = ?,
-                 armed_at = COALESCE(?, armed_at)
-             WHERE id = ?",
-        )
-        .bind(&spec_json)
-        .bind(&spec_json)
-        .bind(new_enabled as i64)
-        .bind(&armed_at)
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(dberr("update trigger"))?;
-
-        self.get(id).await
+        // The write lock protects both schedule comparison and cursor ownership.
+        // Ordinary edits/resume retain the stored fired flag, never a client one;
+        // a distinct one-shot occurrence (including timezone changes) clears it.
+        if let Some(object) = new_spec.as_object_mut() {
+            object.remove("last_run");
+            if !reset_once {
+                if let Some(cursor) = current.spec.get("last_run") {
+                    object.insert("last_run".into(), cursor.clone());
+                }
+            }
+        }
+        let eligibility_changed = changed || current.enabled != new_enabled;
+        let row=sqlx::query("UPDATE workflow_triggers SET spec_json=?,enabled=?,armed_at=COALESCE(?,armed_at),admission_generation=admission_generation+? WHERE id=? RETURNING *")
+            .bind(new_spec.to_string()).bind(new_enabled as i64).bind(armed_at).bind(i64::from(eligibility_changed)).bind(id)
+            .fetch_one(&mut *tx).await.map_err(dberr("update trigger"))?;
+        let updated = row_to_trigger(&row)?;
+        tx.commit().await.map_err(dberr("commit trigger edit"))?;
+        Ok(updated)
     }
 
-    /// Advance ONLY the schedule cursor, leaving the rest of the spec as it is
-    /// in the row now. The scheduler used to write back the whole spec it had
-    /// read at the start of its tick, silently undoing a config edit saved in
-    /// between.
+    /// Admit one captured schedule tick. Cursor claim and queued run (including
+    /// its immutable workflow version) commit together. Re-check active runs
+    /// inside the write transaction, since the scheduler's early check may age.
+    pub async fn claim_scheduled_run(
+        &self,
+        captured: &WorkflowTrigger,
+        workspace_id: &Id,
+        input: &Value,
+        now: &str,
+    ) -> Result<Option<otto_core::workflows::WorkflowRun>> {
+        if !captured.enabled || captured.kind != "schedule" {
+            return Ok(None);
+        }
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("begin scheduled workflow admission"))?;
+        let claimed = sqlx::query(
+            "UPDATE workflow_triggers SET spec_json=json_set(spec_json,'$.last_run',?)
+             WHERE id=? AND workflow_id=? AND kind='schedule' AND enabled=1
+             AND admission_generation=? AND json_extract(spec_json,'$.last_run') IS ?
+             AND EXISTS(SELECT 1 FROM workflows WHERE id=? AND workspace_id=?)
+             AND NOT EXISTS(SELECT 1 FROM workflow_runs WHERE workflow_id=? AND status IN ('pending','running'))",
+        )
+        .bind(now).bind(&captured.id).bind(&captured.workflow_id)
+        .bind(captured.admission_generation)
+        .bind(captured.spec.get("last_run").and_then(Value::as_str))
+        .bind(&captured.workflow_id).bind(workspace_id).bind(&captured.workflow_id)
+        .execute(&mut *tx).await.map_err(dberr("claim scheduled workflow occurrence"))?
+        .rows_affected();
+        if claimed == 0 {
+            tx.commit()
+                .await
+                .map_err(dberr("finish stale workflow admission"))?;
+            return Ok(None);
+        }
+        // An insertion/projection failure drops the transaction and rolls back
+        // the cursor too; the occurrence remains available to a later tick.
+        let run = crate::workflows::WorkflowsRepo::insert_run(
+            &mut tx,
+            &captured.workflow_id,
+            workspace_id,
+            input,
+            None,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(dberr("commit scheduled workflow admission"))?;
+        Ok(Some(run))
+    }
+
+    /// Fixture-only cursor seeding. Production uses the atomic run claim.
+    #[cfg(test)]
     pub async fn set_last_run(&self, id: &Id, last_run: &str) -> Result<()> {
         sqlx::query(
             "UPDATE workflow_triggers SET spec_json = json_set(spec_json, '$.last_run', ?)
@@ -240,19 +298,6 @@ impl TriggersRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("advance trigger cursor"))?;
-        Ok(())
-    }
-
-    /// Update only the spec (used by the scheduler to advance `last_run`).
-    pub async fn set_spec(&self, id: &Id, spec: Value) -> Result<()> {
-        let spec_json = serde_json::to_string(&spec)
-            .map_err(|e| Error::Internal(format!("spec serialize: {e}")))?;
-        sqlx::query("UPDATE workflow_triggers SET spec_json = ? WHERE id = ?")
-            .bind(&spec_json)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(dberr("set_spec trigger"))?;
         Ok(())
     }
 
@@ -301,6 +346,67 @@ mod tests {
             .unwrap();
         sqlx::migrate!().run(&pool).await.unwrap();
         pool.into()
+    }
+
+    #[tokio::test]
+    async fn review4_retimed_once_rearms_without_trusting_client_cursor() {
+        let pool = mem_pool().await;
+        let workflows = WorkflowsRepo::new(pool.clone());
+        let repo = TriggersRepo::new(pool);
+        let wf = workflows
+            .create(
+                &"ws".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u".into(),
+            )
+            .await
+            .unwrap();
+        for old in [
+            serde_json::json!({"cadence":"once","run_at":"2026-10-05T10:00:00","timezone":"UTC"}),
+            serde_json::json!({"cadence":"interval","every_min":60}),
+            serde_json::json!({"cadence":"once","run_at":"2026-10-05T11:00:00","timezone":"Europe/London"}),
+        ] {
+            let trigger = repo
+                .create(NewWorkflowTrigger {
+                    workflow_id: wf.id.clone(),
+                    kind: "schedule".into(),
+                    spec: old,
+                    enabled: true,
+                })
+                .await
+                .unwrap();
+            repo.set_last_run(&trigger.id, "2026-10-05T10:00:00Z")
+                .await
+                .unwrap();
+            let next = serde_json::json!({"cadence":"once","run_at":"2026-10-05T11:00:00","timezone":"UTC","last_run":"1900-01-01T00:00:00Z"});
+            let retimed = repo
+                .update(&trigger.id, Some(next.clone()), None)
+                .await
+                .unwrap();
+            assert!(
+                retimed.spec.get("last_run").is_none(),
+                "new one-shot occurrence retains its old fired flag: {}",
+                retimed.spec
+            );
+            repo.set_last_run(&trigger.id, "2026-10-05T11:00:00Z")
+                .await
+                .unwrap();
+            let mut ordinary = next;
+            ordinary["prompt"] = serde_json::json!("new prompt");
+            let resaved = repo
+                .update(&trigger.id, Some(ordinary), Some(false))
+                .await
+                .unwrap();
+            assert_eq!(resaved.spec["last_run"], "2026-10-05T11:00:00Z");
+            let resumed = repo.update(&trigger.id, None, Some(true)).await.unwrap();
+            assert_eq!(
+                resumed.spec["last_run"], "2026-10-05T11:00:00Z",
+                "resuming the same occurrence must not duplicate it"
+            );
+        }
     }
 
     /// Perf W12 budget: the workflow-trigger scheduler's per-minute scan is

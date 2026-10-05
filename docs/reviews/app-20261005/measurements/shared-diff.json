@@ -1,0 +1,39 @@
+{
+  "scope": "Actual shared DiffView in an isolated mounted fixture; client rendering and JS heap only. Paint duration includes two animation frames. Timings are observations; row and full-download correctness are assertions.",
+  "baselineHeapBytes": 3086036,
+  "samples": [
+    {
+      "kind": "equal-50k",
+      "paintMs": 16.30000001192093,
+      "rows": 0,
+      "heapBytes": 5443668
+    },
+    {
+      "kind": "equal-50k-released",
+      "heapBytes": 3718224
+    },
+    {
+      "kind": "sparse-50k",
+      "paintMs": 43.39999997615814,
+      "rows": 18,
+      "heapBytes": 7456816
+    },
+    {
+      "kind": "sparse-50k-released",
+      "heapBytes": 3852008
+    },
+    {
+      "kind": "rewrite-10k",
+      "paintMs": 30.69999998807907,
+      "rows": 500,
+      "heapBytes": 12743764
+    },
+    {
+      "kind": "rewrite-10k-released",
+      "heapBytes": 4530052
+    }
+  ],
+  "longTaskMs": [
+    54
+  ]
+}

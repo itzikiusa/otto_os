@@ -1,0 +1,30 @@
+# Iteration 5 — UX partition 3
+
+Source: `64a850e6`. Scope: bounded recheck of Vault lookup/recovery, Canvas failed-assist recovery, Design Hall conflict preservation, Product publication/transcript paging, Browser navigation ownership and Snip save recovery. **No new confirmed defect in this sampled matrix. Provisional 9.7/10; target not yet met.**
+
+Read PLAN.md, VERIFICATION.md and iteration-4-ux-3.md. This reviewer performed source inspection only: no test, build, browser, source edit or git mutation. Execution below is inherited from the root verification ledger, not claimed as new execution. The original iteration-4 score remains 7.4/10 in its report.
+
+## Repair and merge recheck
+
+- **Publication trust:** `ui/src/modules/product/PublishDialog.svelte:95` binds the displayed bytes and story metadata into reviewed content; `:240` and `:254` submit that identity; `:267` invalidates it after a conflict and requires a refreshed preview. Root's Product HTTP 24/24 and reviewed-publication UI 17/17 provide direct checks of changed/missing identity rejection, exact unchanged payload, null-version empty content and explicit reload. The original R4-UX3-01 is closed in this bounded review.
+- **Publication recovery:** `PublishDialog.svelte:318` and `:369` expose projects/spaces Retry; form fields survive recovery. Root's mounted exact-content conflicts and destination recovery passed on merged source. R4-UX3-02 is closed. Departed/reopened A→B→A publication is already fixed and mounted green: the lifetime and captured-selection check at `:235` fences post-publication selection/close. It is not a new open finding.
+- **Canvas prompt preservation:** `ui/src/modules/canvas/ConversationPanel.svelte:53` captures the submitted draft/editor/scene context, then clears only accepted, unchanged owned input at `:58`. The three editor acceptance handshake and restore/grid regressions have recorded green handler tests. R4-UX3-03 is closed; a current merged mounted three-format failed-assist/retry matrix is still a specific evidence gap.
+- **Vault lookup:** `ui/src/modules/vault/Switcher.svelte:16`, `:31`, `:56`, `:74` prevent unresolved/failed lookup Enter from creating a note and fence responses to lookup generation; `:102` offers Retry. `TagsPanel.svelte:16` offers Retry. The ledger records lookup/browser follow-up green plus backlinks failure-state red/green. No new source-level recovery regression found in these paths.
+- **Browser ownership:** `ui/src/lib/stores/browser.svelte.ts:81` serializes tab patches; `:128` fences creation to workspace generation; `:284`–`:287` scopes navigation completion. Recorded browser follow-up tests cover close-before-response and pending keyboard navigation fixes. Native live-browser/CDP completion ordering was not exercised by this reviewer.
+- **Design Hall/Snip:** Rechecked ArtifactView dirty/conflict handling and SnipEditor failed/pending-save recovery against the prior report. Retained edits and explicit recovery remain present. The ledger's metadata service tests repair the known lost-update problem; no additional defect asserted. Native Snip capture/clipboard recovery remains outside the executed fixture matrix.
+- **Large-content reachability:** `ui/src/lib/components/DiffView.svelte:27`, `:327`–`:342` limits rendered page inputs to 500 rows, exposes previous/next and full-source downloads. Root's reconstruction/pagination tests and Product transcript lifecycle/HTTP tests are green. The new mounted 50k/10k SharedDiff measurement is **authored, unrun**; handler/Blob checks do not establish mounted page-control responsiveness or download behavior.
+
+## Fixed-rubric score
+
+| UX dimension | /2 | Evidence and bounded deduction |
+|---|---:|---|
+| Task completion/discovery | 2.0 | Sampled Retry, preview reload, change paging and full-source actions are explicit; source and executed handlers establish access to formerly blocked work. No known material discovery defect remains in this bounded matrix. |
+| Feedback/state clarity | 2.0 | Current merged publication mounted journeys and inspected desktop/phone light/dark captures support readable content/destination/error states; lookup handlers distinguish failure from empty. No new state-label defect found in sampled repairs. |
+| Recovery/retry | 1.9 | Publication recovery has mounted evidence; Canvas failure keeps retryable input in handler execution, but the merged three-editor mounted failed-assist/retry matrix is missing. Deduction is for that concrete recovery evidence gap. |
+| Draft/scope/trust preservation | 2.0 | Exact publication identity is enforced through UI and real HTTP/service checks; current mounted departed/reopened publication passes. Scope fences and draft-preservation checks remain after merge. No unresolved confirmed trust defect in inspected paths. |
+| Executed end-to-end journeys | 1.8 | Current root evidence includes Product conflict/destination/departure/ABA journeys; all 15 distinct merged desktop cases passed across runs, plus API automation. Named handler/service tests cover substantial adjacent repair behavior. Canvas three-format failed-assist, mounted large-diff paging/download and native Snip clipboard/CDP sequences remain bounded omissions. |
+| **Total** | **9.7/10** | Provisional source recheck with inherited execution; no arbitrary per-dimension cap. |
+
+Inherited integration evidence: merged UI check 0 errors/0 warnings, 1,333 unit passes, production build and unchanged bundle budgets green; Rust clippy/doc/build green. These gates support integration but do not replace the specifically missing journeys. Root inspected publication screenshots at desktop and phone sizes in light/dark; this is publication-only visual evidence. No real external publication or native-device acceptance is inferred.
+
+No repair request from this bounded pass. To close the remaining UX evidence gap, execute the mounted three-format Canvas failure/retry cases and the authored large-diff paging/download workload; preserve the native Snip/CDP boundary explicitly if unavailable. Shell released after writing this report.

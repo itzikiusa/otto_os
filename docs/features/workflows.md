@@ -365,7 +365,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `product_analyze` | Product Analyze / Product | Runs a real single-agent turn (the **`grill`** lens) over the story's built context; outputs `{ story_id, analysis, session_id }`. | `story_id`, `instruction?` | **Real** ² |
 | `product_rewrite` | Product Rewrite / Product | Rewrites the story (**`jira-story-writer`**); outputs `{ story_id, body_md, session_id }`; `persist:true` saves a `suggested` product version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
 | `product_plan` | Product Plan / Product | Breaks the story into a plan (**`story-task-breakdown`**); outputs `{ story_id, plan_md, session_id }`; `persist:true` saves a `plan` version. | `story_id`, `persist?`, `instruction?` | **Real** ² |
-| `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** (no-op note); a real publish needs `account_id` (+ `project_key`/`space_key`). | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
+| `product_publish` | Product Publish / Product | Publishes a story as a Confluence **RFC** or a **Jira** issue. **`dry_run` defaults true** and captures a real content/destination preview; configure `story_id`, `account_id` and `project_key`/`space_key` before preview. Connect Preview → Human Approval → live Product Publish; live publication consumes that exact approved snapshot. | `kind` (`rfc`/`jira`), `dry_run`, `account_id`, … | **Real** |
 | `review_run` | Review Run / AI | Runs the **PR-review engine** (multi-provider × multi-lens reviewer agents + a scoring summarizer), polls to completion, emits a **0–100 `score`** (`100−20×blocking−5×advisory`), optional `goals` assessment blended in, `passed = score≥threshold && status==done`. `require_pass:true` **errors** the step when below threshold. Output also carries `blocking`/`advisory`/`findings`/`providers`/`lenses`. See *`review_run`, gating & auto-PR* below. | `repo_id`, `base` (default `main`), `providers[]`, `lenses[]` (alias `skills[]`), `threshold` (default 80), `require_pass`, `await`, `timeout_s`, `goals[]`, `mode?` (`fan_out`/`orchestrator` — *Execution mode* below) | **Real** |
 | `canvas` | Canvas Diagram / Product | Asks an agent for a **mermaid/excalidraw** diagram and writes it under the data dir (`workflow-canvas/{run}/{node}.{ext}`); output `{ scene_id, path, diagram, … }`. | `prompt`, `mode` (`mermaid`/`excalidraw`), `provider?`, `model?` | **Real** |
 | `self_improve` | Self-Improve (offer) / AI | Runs the **self-improvement engine** in OFFER-ONLY mode (`Autonomy::Propose` — every skill/memory edit is queued for approval, **never** applied) over recent sessions and posts the offered list to the trigger's chat thread; output `{ run_id, summary, offered, edits }`. | `providers[]` or `provider?` (empty ⇒ the workspace's configured Self-Improvement providers) | **Real** |
@@ -823,9 +823,13 @@ to create a workflow; the center is the canvas editor.
        review loop (lenses `correctness-review`/`security-review`) → **auto-opened
        `git_pr`** on pass (same `output.satisfied == true` edge gate; no approval
        node).
-     - **`po-lifecycle`** — *PO discovery → RFC/Jira* (**unchanged**): discovery draft
-       → `canvas` diagram → `human_approval` → `product_rewrite` → `human_approval`
-       → `product_publish` (RFC, dry-run). They expect the run **input** to carry `repo_id` (and
+     - **`po-lifecycle`** — *PO discovery → RFC/Jira*: discovery draft
+       → `canvas` diagram → `human_approval` → persisted `product_rewrite`
+       → Product Publish **preview** → Human Approval → **publish approved snapshot**.
+       Before running, configure the same `story_id` on Refine and Preview, plus an Atlassian
+       `account_id` and Confluence `space_key` (or Jira `project_key`/issue type) on Preview.
+       The live node inherits that frozen destination; the review banner shows all content before any publication.
+       Other repository templates expect the run **input** to carry `repo_id` (and
        optionally `base`, `story_id`, `goals`) — a Slack `Action: Workflow` message
        or the Run dialog supplies these.
      - **`ui-test-authoring`** — *UI test authoring*: `prepare_context` (app-fetched
@@ -1373,8 +1377,12 @@ are **append-only** — never edit or renumber an existing one.
 - **`game_engine` / `verifier` are scaffolds** — real, runnable, useful for the
   game-pipeline templates, but they emit canned specs / scaffold reports awaiting
   a real external game engine + certifier (see footnote ¹ in §4).
-- **`product_publish` defaults to a dry run** — a real RFC/Jira publish requires
-  `dry_run:false` + an Atlassian `account_id` (and `project_key`/`space_key`).
+- **`product_publish` defaults to a preview** — configure the story, account and destination even
+  for previews. Live publishing requires Preview → Human Approval → Product Publish (`dry_run:false`)
+  in the same run, using the approved snapshot. A copied review identity or toggling `dry_run` alone
+  cannot authorize it. To migrate older graphs, insert a destination-configured preview before the
+  publication gate and leave matching live fields or create a new live node with only `dry_run:false`.
+  Source/destination changes require a new preview and review; see [publication contract](../contracts/api.md#workflow-publication-migration).
 - **`git_pr` defaults to draft-only** (`opened:false`) — set **`open:true`** (gate it
   on the incoming edge so it only fires when the review passed) to actually open the
   PR on the remote; the `write-tests`/`implement-feature` templates do exactly this

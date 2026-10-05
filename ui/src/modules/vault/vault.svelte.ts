@@ -116,6 +116,8 @@ class VaultStore {
   /** 409 conflict from autosave — the banner offers Reload / Overwrite. */
   conflict = $state(false);
   backlinks = $state<VaultBacklink[]>([]);
+  backlinksLoading = $state(false);
+  backlinksError = $state('');
   /** Visible rows and their hydrated windows share the same refresh lifetime. */
   visibleBacklinks = $state(100);
   private backlinksGeneration = 0;
@@ -144,6 +146,10 @@ class VaultStore {
    *  results" apart from "typed but not run yet" (search runs on Enter). */
   searchedQuery = $state('');
   tags = $state<VaultTagCount[]>([]);
+  tagsLoading = $state(false);
+  tagsError = $state('');
+  lookupGeneration = $state(0);
+  private tagsSequence = 0;
 
   // Quick switcher.
   switcherOpen = $state(false);
@@ -287,12 +293,21 @@ class VaultStore {
     this.noteLoadSeq += 1;
     this.noteOpenError = null;
     this.current = v;
+    this.lookupGeneration++;
+    this.tagsSequence++;
+    this.tags = [];
+    this.tagsError = '';
+    this.tagsLoading = false;
     this.status = null;
     this.dirty = false;
     this.conflict = false;
     this.note = null;
     this.notePath = null;
     this.backlinks = [];
+    this.backlinksGeneration++;
+    this.backlinksLoading = false;
+    this.backlinksError = '';
+    this.loadingBacklinkContexts = false;
     this.searchHits = [];
     this.searchedQuery = '';
     this.okfReport = null;
@@ -569,6 +584,13 @@ class VaultStore {
       // The existing editor remains usable during the read. Save any edits
       // typed meanwhile before replacing it, and recheck navigation ownership.
       if (!(await this.canLeaveNote()) || !current()) return false;
+      if (this.notePath !== path) {
+        this.backlinksGeneration++;
+        this.backlinks = [];
+        this.backlinksError = '';
+        this.backlinksLoading = false;
+        this.loadingBacklinkContexts = false;
+      }
       this.note = n;
       this.notePath = path;
       this.draft = n.raw;
@@ -793,18 +815,22 @@ class VaultStore {
   async reloadBacklinks(): Promise<void> {
     if (!this.current || !this.notePath) return;
     // Late replies must not show note A's backlinks under note B (or vault B).
-    const id = this.current.id, path = this.notePath;
+    const id = this.current.id, path = this.notePath, wsId = this.wsId;
     const generation = ++this.backlinksGeneration;
+    const current = () => this.current?.id === id && this.notePath === path && this.wsId === wsId && generation === this.backlinksGeneration;
     this.loadingBacklinkContexts = false;
-    let next: VaultBacklink[];
+    this.backlinksLoading = true;
+    this.backlinksError = '';
     try {
-      next = await vaultBacklinks(this.wsId, id, path);
-    } catch {
-      next = [];
-    }
-    if (this.current?.id === id && this.notePath === path && generation === this.backlinksGeneration) {
-      this.backlinks = next;
-      this.visibleBacklinks = 100;
+      const next = await vaultBacklinks(wsId, id, path);
+      if (current()) {
+        this.backlinks = next;
+        this.visibleBacklinks = 100;
+      }
+    } catch (e) {
+      if (current()) this.backlinksError = msg(e);
+    } finally {
+      if (current()) this.backlinksLoading = false;
     }
   }
 
@@ -1190,23 +1216,24 @@ class VaultStore {
 
   async loadTags(): Promise<void> {
     if (!this.current) return;
-    const id = this.current.id;
-    let next: typeof this.tags;
+    const id = this.current.id, workspace = this.wsId, generation = this.lookupGeneration;
+    const sequence = ++this.tagsSequence;
+    const current = () => this.current?.id === id && this.wsId === workspace && this.lookupGeneration === generation && this.tagsSequence === sequence;
+    this.tagsLoading = true;
+    this.tagsError = '';
     try {
-      next = await vaultTags(this.wsId, id);
-    } catch {
-      next = [];
+      const next = await vaultTags(workspace, id);
+      if (current()) this.tags = next;
+    } catch (e) {
+      if (current()) this.tagsError = msg(e);
+    } finally {
+      if (current()) this.tagsLoading = false;
     }
-    if (this.current?.id === id) this.tags = next;
   }
 
   async switcherQuery(q: string): Promise<VaultSwitchHit[]> {
     if (!this.current) return [];
-    try {
-      return await vaultSwitcher(this.wsId, this.current.id, q);
-    } catch {
-      return [];
-    }
+    return vaultSwitcher(this.wsId, this.current.id, q);
   }
 
   // -- OKF ---------------------------------------------------------------------------

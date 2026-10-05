@@ -3,7 +3,7 @@
   // `subagents[]` meta row for grandchildren), body fetched lazily via `?sub=`
   // on first expand and rendered with the same turn renderer. Children come
   // from `Transcript.subagents[]` (parent_agent_id), never from the body.
-  import { getContext } from 'svelte';
+  import { getContext, untrack } from 'svelte';
   import Skeleton from '../../../lib/components/Skeleton.svelte';
   import Icon from '../../../lib/components/Icon.svelte';
   import TurnItem from './TurnItem.svelte';
@@ -33,9 +33,18 @@
   const body = $derived(ctx.conv.subagents[agentId] ?? null);
   const items = $derived(groupTurns(body?.turns ?? []));
 
+  $effect(() => {
+    const conv = ctx.conv, id = agentId;
+    if (!open) return;
+    return untrack(() => {
+      const release = conv.acquireSubagent(id);
+      void conv.loadSubagent(id);
+      return release;
+    });
+  });
+
   function toggle(): void {
     open = !open;
-    if (open) void ctx.conv.loadSubagent(agentId);
   }
 </script>
 
@@ -60,19 +69,26 @@
     <div class="sub-body">
       {#if body?.loading && !body.turns.length}
         <div class="sub-note"><Skeleton rows={2} height={18} label="the subagent transcript" /></div>
-      {:else if body?.error}
-        <div class="sub-note err">Could not load: {body.error}</div>
-      {:else if !items.length}
-        <div class="dim sub-note">No recorded turns.</div>
       {:else}
-        {#if body?.has_earlier}
-          <button class="btn small ghost" disabled={body.loading} onclick={() => ctx.conv.loadSubagentEarlier(agentId)}>
-            {body.loading ? 'Loading earlier turns…' : 'Load earlier'}
-          </button>
+        {#if body?.error}
+          <div class="sub-note err">Could not load: {body.error}</div>
+          {#if body.retryable}<button class="btn small ghost" onclick={() => ctx.conv.loadSubagent(agentId)}>Retry</button>{/if}
         {/if}
-        {#each items as item (item.id)}
-          <TurnItem {item} nested active={status === 'running'} />
-        {/each}
+        {#if !items.length && !body?.error}
+          <div class="dim sub-note">No recorded turns.</div>
+        {:else}
+          {#if body?.has_earlier}
+            <button class="btn small ghost" disabled={body.loading} onclick={() => ctx.conv.loadSubagentEarlier(agentId)}>
+              {body.loading ? 'Loading earlier turns…' : 'Load earlier'}
+            </button>
+          {/if}
+          {#each items as item (item.id)}
+            <TurnItem {item} nested active={status === 'running'} />
+          {/each}
+          {#if body?.has_later}
+            <button class="btn small ghost" disabled={body.loading} onclick={() => ctx.conv.loadSubagentLater(agentId)}>Load newer</button>
+          {/if}
+        {/if}
       {/if}
       {#if children.length}
         <div class="sub-children">

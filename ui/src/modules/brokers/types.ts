@@ -78,4 +78,3 @@ export const CLUSTER_VIEWS: { id: ClusterView; label: string }[] = [
   { id: 'replay', label: 'Replay' },
   { id: 'alerts', label: 'Lag alerts' },
 ];
-

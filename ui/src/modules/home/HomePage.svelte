@@ -240,6 +240,8 @@
   <!-- Hovering or focusing a widget pauses cycling (the user is reading). -->
   <div
     class="stage"
+    role="group"
+    aria-label="Home widgets"
     onpointerenter={() => (hovering = true)}
     onpointerleave={() => (hovering = false)}
     onfocusin={() => (focusInside = true)}

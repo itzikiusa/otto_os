@@ -17,6 +17,7 @@ are in `ui/src/lib/api/room-recap-types.ts`.
 | POST `/rooms/{id}/recaps` | `{allow_unavailable_speech:false}` | `RecapMetadata` |
 | GET `/room-recaps` | — | `RecapMetadata[]`, newest first |
 | GET `/room-recaps/{id}?after=0&limit=200` | — | `RecapDetail`; limit 1–1000 |
+| GET `/room-recaps/{id}/revision` | — | `RecapRevision`; metadata and stat-only body revisions |
 | GET `/room-recaps/{id}/export` | — | streamed `application/x-ndjson`, complete event timeline |
 | GET `/room-recaps/{id}/images/{image_id}` | — | JPEG, `Cache-Control:no-store` |
 | POST `/room-recaps/{id}/audio` | `RecapAudioReq` | `{queued:true}` |
@@ -59,6 +60,30 @@ events remain browseable, with an `archive_recovery` gap projected into detail,
 summary and export. Export emits the complete prefix plus that gap. Metadata durability is batched
 every 64 data events or one second of active appends; lifecycle changes persist
 immediately.
+`RecapRevision` is `{metadata:RecapMetadata,events_revision:string,draft_revision:string|null}`.
+The ordinary owner and Agents:Edit checks are identical to detail (401 for invalid
+credentials, 403 for another owner, including root). Revision strings are opaque
+and must only be compared for equality; null means no draft exists. This endpoint
+clones current metadata and stats the journal/draft files without opening or
+parsing their bodies, hashing content, or building the sparse journal index. A
+cold archive can therefore be polled without a transcript scan. Filesystem stamps
+include nanosecond modification time, size and file identity on supported Unix
+hosts, plus change time to detect in-place rewrites that restore modification time.
+Same-size atomic replacement and removal of draft.json are detected. Normal
+capture/summary mutations update metadata in memory; arbitrary external edits of
+metadata.json or the append-only journal are not a supported write protocol.
+
+Clients may check revision after stopped capture to notice another client's
+summary generation or a manually replaced/rewritten draft. Unchanged stamps do
+not require another detail response; metadata-only changes update status without
+transferring events or draft. New events may extend the current tail or enable
+Next on a full page, while an older complete page stays selected. Fetching a
+changed draft, explicit refresh or page navigation still uses detail. Since
+revision and detail are separate requests, a body must only be cached with a
+matching revision sampled before and after its fetch. If stamps change during
+the fetch, retry at most once, then leave the body unacknowledged for the next
+visible poll; never label an older body with the newest stamp.
+
 `RecapDraft` contains `overview:string`, `decisions:string[]`, `actions:string[]`,
 `open_questions:string[]`, `coverage:string[]`, `source_event_ids:number[]`.
 Drafts are attributed model output and never execute or publish actions.

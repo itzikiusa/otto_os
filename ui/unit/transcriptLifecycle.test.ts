@@ -86,9 +86,9 @@ test('busy folds retry only while visible and never touch after the failed read'
 });
 test('closing a subagent read releases loading and ignores a late failure after reopening',async()=>{
   let reject!: (e:Error)=>void; const h=setup(url=>url.includes('sub=')?new Promise((_,r)=>{reject=r;}):Promise.resolve(page()));
-  let close=h.acquire('a');await settle();const c=h.store.peek('a');const pending=c.loadSubagent('child');await settle();close();
-  assert.equal(c.subagents.child.loading,false);close=h.acquire('a');await settle();reject(new Error('obsolete child failure'));await pending;
-  assert.equal(c.subagents.child.error,null);close();
+  let close=h.acquire('a');await settle();const c=h.store.peek('a');const child=c.acquireSubagent('child');const pending=c.loadSubagent('child');await settle();close();
+  assert.equal(c.subagents.child?.loading ?? false,false);child();close=h.acquire('a');await settle();reject(new Error('obsolete child failure'));await pending;
+  assert.equal(c.subagents.child?.error ?? null,null);close();
 });
 test('releasing a large reader does not traverse or serialize its retained body',async()=>{
   const h=setup(),close=h.acquire('a');await settle();const c=h.store.peek('a');
@@ -97,19 +97,20 @@ test('releasing a large reader does not traverse or serialize its retained body'
 });
 test('parent Reload preserves accounting for retained child bodies',async()=>{
   const h=setup(url=>Promise.resolve(url.includes('sub=')?{...page(),turns:[{id:'child-turn',role:'assistant',blocks:[{kind:'text',md:'x'.repeat(100_000)}]}]}:page()));
-  const close=h.acquire('a');await settle();const c=h.store.peek('a');await c.loadSubagent('child');const before=c.retainedBytes;
-  assert.ok(before>=200_000);await c.load();assert.ok(c.retainedBytes>=before,'Reload retains subagents, so their charge must remain');close();
+  const close=h.acquire('a');await settle();const c=h.store.peek('a');const child=c.acquireSubagent('child');await c.loadSubagent('child');const before=c.retainedBytes;
+  assert.ok(before>=200_000);await c.load();assert.ok(c.retainedBytes>=before,'Reload retains subagents, so their charge must remain');child();close();
 });
 test('subagent bodies are replaced whole (raw state), never mutated in place',async()=>{
   const h=setup(url=>Promise.resolve(url.includes('sub=')?{...page(),turns:[{id:url.includes('sub=one')?'one-turn':'two-turn',role:'assistant',blocks:[]}]}:page()));
   const close=h.acquire('a');await settle();const c=h.store.peek('a');
+  const oneLease=c.acquireSubagent('one'),twoLease=c.acquireSubagent('two');
   await c.loadSubagent('one');const afterOne=c.subagents;const one=afterOne.one;
   await c.loadSubagent('two');
   assert.notEqual(c.subagents,afterOne,'a change swaps the record, so raw state re-renders');
   assert.equal(c.subagents.one,one,'an untouched body keeps its identity');
   assert.equal(afterOne.two,undefined,'the previous record was not mutated');
   assert.deepEqual([c.subagents.one.turns[0].id,c.subagents.two.turns[0].id],['one-turn','two-turn']);
-  close();
+  oneLease();twoLease();close();
 });
 
 for (const hasEarlier of [false, true]) test(`disjoint reconnect retains a reachable earlier cursor (old earlier=${hasEarlier})`, async () => {
@@ -149,4 +150,196 @@ test('live following bounds payload bytes as well as turn count', async () => {
   assert.ok(JSON.stringify(c.turns).length <= 8 * 1024 * 1024);
   assert.equal(c.transcript.has_earlier, true);
   close();
+});
+
+// Until explicit child consumers exist, exercise the current card behavior:
+// expand loads once and collapse has no release action. The assertions below
+// expose retained payload, rather than failing because a new method is absent.
+function childLease(c: any, id: string): () => void {
+  return c.acquireSubagent ? c.acquireSubagent(id) : () => {};
+}
+test('collapsing 100 inspected subagents releases bodies while their parent stays mounted', async () => {
+  const h = setup(url => Promise.resolve(url.includes('sub=') ? {...page(), turns: [{id: 'child', role: 'assistant', blocks: [{kind: 'text', md: 'x'.repeat(250_000)}]}]} : page()));
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  for (let i = 0; i < 100; i++) {
+    const close = childLease(c, `child${i}`); await c.loadSubagent(`child${i}`); close();
+  }
+  const bodies = Object.values(c.subagents) as any[];
+  assert.ok(bodies.filter(b => b.turns.length > 0).length <= 8, 'released children must not retain 100 body pages');
+  assert.ok(JSON.stringify(c.subagents).length <= 8 * 1024 * 1024, 'parent stays mounted under a child-body byte budget');
+  const reopen = childLease(c, 'child0'); await c.loadSubagent('child0');
+  assert.equal(c.subagents.child0.turns[0].id, 'child', 'an evicted body remains reachable by reopening');
+  reopen(); parent();
+});
+test('paging a 1200-turn child keeps its retained/render input window bounded', async () => {
+  const h = setup(async url => {
+    if (!url.includes('sub=')) return page();
+    const before = new URL(url, 'http://fixture').searchParams.get('before');
+    const end = before === null ? 1200 : Number(before), start = Math.max(0, end - 60);
+    return {...page(), cursor: String(start), has_earlier: start > 0,
+      turns: Array.from({length: end - start}, (_, i) => ({id: String(start + i), role: 'assistant', blocks: [{kind: 'text', md: `child turn ${start + i}`}]}))};
+  });
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a'), close = childLease(c, 'long');
+  await c.loadSubagent('long');
+  for (let i = 0; i < 19; i++) await c.loadSubagentEarlier('long');
+  assert.equal(c.subagents.long.turns[0].id, '0', 'oldest page remains reachable');
+  assert.ok(c.subagents.long.turns.length <= 300, 'group/render input may not grow with all 1200 turns');
+  assert.equal(typeof c.loadSubagentLater, 'function', 'bounded history must provide a newer-page path');
+  for (let i = 0; i < 19; i++) await c.loadSubagentLater('long');
+  assert.equal(c.subagents.long.turns.at(-1).id, '1199', 'newer pages remain reachable after bounded eviction');
+  close(); parent();
+});
+test('collapse revokes a pending child read without affecting its mounted parent', async () => {
+  let finish!: (v: any) => void;
+  const h = setup(url => url.includes('sub=') ? new Promise(resolve => {finish = resolve;}) : Promise.resolve(page()));
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a'), close = childLease(c, 'pending');
+  const read = c.loadSubagent('pending'); await settle(); close(); finish(page()); await read;
+  assert.equal(c.subagents.pending?.turns.length ?? 0, 0, 'late body must not repopulate a collapsed card');
+  assert.equal(c.turns[0].id, 'turn'); parent();
+});
+
+test('active child-body count is shared across parents and admission recovers after collapse', async () => {
+  const h = setup(), parentA = h.acquire('a'), parentB = h.acquire('b'); await settle();
+  const a = h.store.peek('a'), b = h.store.peek('b'), releases: (() => void)[] = [];
+  for (let i = 0; i < 8; i++) {releases.push(a.acquireSubagent(String(i))); await a.loadSubagent(String(i));}
+  const releaseB = b.acquireSubagent('ninth'); await b.loadSubagent('ninth');
+  assert.equal(b.subagents.ninth.turns.length, 0);
+  assert.match(b.subagents.ninth.error, /Close another expanded subagent/);
+  releases.shift()!(); await b.loadSubagent('ninth');
+  assert.equal(b.subagents.ninth.turns[0].id, 'turn');
+  releases.forEach(release => release()); releaseB(); parentA(); parentB();
+});
+test('two child consumers share a body and only final collapse releases it', async () => {
+  const h = setup(), parent = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  const one = c.acquireSubagent('shared'), two = c.acquireSubagent('shared'); await c.loadSubagent('shared');
+  one(); assert.equal(c.subagents.shared.turns[0].id, 'turn');
+  two(); assert.equal(c.subagents.shared, undefined); parent();
+});
+test('a permanently oversized child turn gives no impossible retry', async () => {
+  const h = setup(async url => url.includes('sub=') ? {...page(), turns: [{id: 'large', role: 'assistant', blocks: [{kind: 'text', md: 'x'.repeat(3 * 1024 * 1024)}]}]} : page());
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a'), close = c.acquireSubagent('large');
+  await c.loadSubagent('large'); assert.equal(c.subagents.large.turns.length, 0);
+  assert.equal(c.subagents.large.retryable, false); assert.match(c.subagents.large.error, /provider transcript/);
+  close(); parent();
+});
+
+test('concurrent child expansion reserves capacity before fetching response bodies', async () => {
+  const requests: {url: string; signal?: AbortSignal; finish: (value: any) => void}[] = [];
+  const h = setup((url, signal) => url.includes('sub=') ? new Promise(resolve => requests.push({url, signal, finish: resolve})) : Promise.resolve(page()));
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  const releases = Array.from({length: 100}, (_, i) => c.acquireSubagent(`concurrent${i}`));
+  const loads = Array.from({length: 100}, (_, i) => c.loadSubagent(`concurrent${i}`));
+  await settle();
+  try {
+    assert.ok(requests.length <= 8, `100 expansions launched ${requests.length} child fetches before admission`);
+    const initial = requests.length;
+    releases[0]();
+    assert.equal(requests[0].signal?.aborted, true);
+    const retry = c.loadSubagent('concurrent99'); await settle();
+    assert.equal(requests.length, initial + 1, 'collapse releases a reserved slot for a refused visible card');
+    requests.forEach(request => request.finish(page())); await retry; await Promise.all(loads);
+    assert.equal(c.subagents.concurrent99.turns[0].id, 'turn');
+  } finally {
+    releases.forEach(release => release()); parent(); requests.forEach(request => request.finish(page()));
+    await Promise.all(loads);
+  }
+});
+
+test('shared child byte budget credits replacement pages and preserves a refused destination for retry', async () => {
+  const h = setup(async url => {
+    const q = new URL(url, 'http://fixture').searchParams, child = q.get('sub');
+    if (!child) return page();
+    const before = q.get('before');
+    const size = child === 'replace' ? (before === '60' ? 1.9 : 1.5) : 1.55;
+    return {...page(), cursor: before === null ? '120' : before === '120' ? '60' : '0', has_earlier: before !== '60',
+      turns: [{id: `${child}-${before}`, role: 'assistant', blocks: [{kind: 'text', md: 'x'.repeat(Math.floor(size * 1024 * 1024))}]}]};
+  });
+  const parentA = h.acquire('a'), parentB = h.acquire('b'); await settle();
+  const a = h.store.peek('a'), b = h.store.peek('b');
+  const close = a.acquireSubagent('replace'), others: (() => void)[] = [];
+  try {
+    await a.loadSubagent('replace');
+    for (let i = 0; i < 4; i++) {others.push(b.acquireSubagent(`other${i}`)); await b.loadSubagent(`other${i}`);}
+    const charged = a.retainedBytes + b.retainedBytes;
+    assert.ok(charged > 30 * 1024 * 1024 && charged < 32 * 1024 * 1024);
+    await a.loadSubagentEarlier('replace');
+    assert.equal(a.subagents.replace.error, null, 'replacement credits the previous page instead of double-counting it');
+    assert.equal(a.subagents.replace.turns[0].id, 'replace-120');
+    await a.loadSubagentEarlier('replace');
+    assert.match(a.subagents.replace.error, /Close another expanded subagent/);
+    assert.equal(a.subagents.replace.turns[0].id, 'replace-120', 'a rejected page keeps the existing readable page');
+    assert.ok(a.retainedBytes + b.retainedBytes < 32 * 1024 * 1024);
+    others.shift()!(); await a.loadSubagent('replace');
+    assert.equal(a.subagents.replace.error, null);
+    assert.equal(a.subagents.replace.turns[0].id, 'replace-60', 'retry reaches the refused earlier page');
+  } finally {close(); others.forEach(release => release()); parentA(); parentB();}
+});
+
+test('adaptive child page reduction keeps every older and newer turn reachable', async () => {
+  const limits: number[] = [], text = 'x'.repeat(100 * 1024);
+  const h = setup(async url => {
+    const q = new URL(url, 'http://fixture').searchParams;
+    if (!q.has('sub')) return page();
+    const limit = Number(q.get('limit')); limits.push(limit);
+    const end = q.has('before') ? Number(q.get('before')) : 180, start = Math.max(0, end - limit);
+    return {...page(), cursor: String(start), has_earlier: start > 0,
+      turns: Array.from({length: end - start}, (_, i) => ({id: String(start + i), role: 'user', blocks: [{kind: 'text', md: text}]}))};
+  });
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a'), close = c.acquireSubagent('adaptive');
+  const visited = new Set<string>(), reverseVisited = new Set<string>();
+  const inspect = (seen: Set<string>) => {
+    const body = c.subagents.adaptive;
+    assert.equal(body.error, null);
+    assert.ok(body.turns.length > 0 && body.turns.length <= 20);
+    assert.ok(JSON.stringify(body.turns).length <= 2 * 1024 * 1024, 'visible payload stays bounded on every page');
+    body.turns.forEach((t: any) => seen.add(t.id));
+  };
+  try {
+    await c.loadSubagent('adaptive');
+    let pages = 0;
+    while (true) {
+      assert.ok(++pages <= 180, 'earlier cursors must make finite progress');
+      inspect(visited);
+      if (!c.subagents.adaptive.has_earlier) break;
+      await c.loadSubagentEarlier('adaptive');
+    }
+    const expectedIds = Array.from({length: 180}, (_, i) => String(i));
+    assert.deepEqual([...visited].sort((a, b) => Number(a) - Number(b)), expectedIds);
+    assert.equal(c.subagents.adaptive.turns[0].id, '0');
+    inspect(reverseVisited);
+    for (let i = 1; i < pages; i++) {
+      assert.equal(c.subagents.adaptive.has_later, true);
+      await c.loadSubagentLater('adaptive');
+      inspect(reverseVisited);
+    }
+    assert.deepEqual([...reverseVisited].sort((a, b) => Number(a) - Number(b)), expectedIds);
+    assert.equal(c.subagents.adaptive.turns.at(-1).id, '179');
+    assert.equal(c.subagents.adaptive.has_later, false);
+    assert.deepEqual(limits.slice(0, 3), [60, 30, 15]);
+  } finally {close(); parent();}
+});
+
+test('a late collapsed read cannot publish over or release its reopened child reservation', async () => {
+  const pending: ((value: any) => void)[] = [];
+  const h = setup(url => url.includes('sub=') ? new Promise(resolve => pending.push(resolve)) : Promise.resolve(page()));
+  const parent = h.acquire('a'); await settle(); const c = h.store.peek('a');
+  const oldClose = c.acquireSubagent('same'), oldRead = c.loadSubagent('same');
+  oldClose();
+  const freshClose = c.acquireSubagent('same'), freshRead = c.loadSubagent('same');
+  const others = Array.from({length: 7}, (_, i) => c.acquireSubagent(`other${i}`));
+  const otherReads = others.map((_, i) => c.loadSubagent(`other${i}`));
+  const ninthClose = c.acquireSubagent('ninth');
+  try {
+    pending[0]({...page(), turns: [{id: 'stale', blocks: [], role: 'user'}]}); await oldRead;
+    assert.equal(c.subagents.same.loading, true);
+    assert.equal(c.subagents.same.turns.length, 0);
+    await c.loadSubagent('ninth');
+    assert.equal(pending.length, 9, 'old finally must not free the replacement reservation');
+    assert.match(c.subagents.ninth.error, /Close another expanded subagent/);
+    pending[1]({...page(), turns: [{id: 'fresh', blocks: [], role: 'user'}]}); await freshRead;
+    assert.equal(c.subagents.same.turns[0].id, 'fresh');
+  } finally {
+    freshClose(); others.forEach(release => release()); ninthClose(); parent();
+    pending.forEach(resolve => resolve(page())); await Promise.all([oldRead, freshRead, ...otherReads]);
+  }
 });

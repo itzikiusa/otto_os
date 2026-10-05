@@ -88,8 +88,6 @@ pub async fn update_workflow(
 ) -> ApiResult<Json<Workflow>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
-    let graph_changed = req.graph.is_some();
-    let instructions_changed = req.instructions.is_some();
     if let Some(v) = req.on_restart.as_deref() {
         if !matches!(v, "resume" | "fail") {
             return Err(ApiError(Error::Invalid(format!(
@@ -97,49 +95,53 @@ pub async fn update_workflow(
             ))));
         }
     }
-    let updated = repo(&ctx)
-        .update(
-            &id,
-            req.name.as_deref(),
-            req.description.as_deref(),
-            req.instructions.as_deref(),
-            req.graph.as_ref(),
-            req.on_restart.as_deref(),
-        )
-        .await
-        .map_err(ApiError)?;
-    // A graph- or instructions-changing edit bumps the version and snapshots
-    // the new state (an instructions-only edit is treated like a graph edit).
-    if graph_changed || instructions_changed || req.on_restart.is_some() {
-        let v = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
+    Ok(Json(
         repo(&ctx)
-            .snapshot_version(
+            .publish(
                 &id,
-                v,
-                &updated.name,
-                &updated.description,
-                &updated.instructions,
-                &updated.graph,
+                req.name.as_deref(),
+                req.description.as_deref(),
+                req.instructions.as_deref(),
+                req.graph.as_ref(),
+                req.on_restart.as_deref(),
                 "edited",
-                &updated.on_restart,
-                &user.id,
+                Some(&user.id),
+                None,
             )
             .await
-            .map_err(ApiError)?;
-        return Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?));
-    }
-    Ok(Json(updated))
+            .map_err(ApiError)?,
+    ))
 }
 
-/// `GET /workflows/{id}/versions` — version history (newest first).
+#[derive(Debug, Default, Deserialize)]
+pub struct VersionQuery {
+    #[serde(default)]
+    summary: bool,
+    limit: Option<i64>,
+    before_version: Option<i64>,
+}
+
+/// `GET /workflows/{id}/versions` — bounded, newest-first array pages.
 pub async fn list_versions(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-) -> ApiResult<Json<Vec<WorkflowVersion>>> {
+    Query(query): Query<VersionQuery>,
+) -> ApiResult<Json<Value>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Viewer).await?;
-    Ok(Json(repo(&ctx).list_versions(&id).await.map_err(ApiError)?))
+    let limit = query.limit.unwrap_or(50).clamp(1, 100);
+    if query.summary {
+        Ok(Json(json!(repo(&ctx)
+            .version_summaries(&id, query.before_version, limit)
+            .await
+            .map_err(ApiError)?)))
+    } else {
+        Ok(Json(json!(repo(&ctx)
+            .version_page(&id, query.before_version, limit)
+            .await
+            .map_err(ApiError)?)))
+    }
 }
 
 /// `GET /workflows/{id}/versions/{v}` — a single snapshot.
@@ -173,39 +175,26 @@ pub async fn restore_version(
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(Error::NotFound(format!("version {v}"))))?;
-    repo(&ctx)
-        // Restore rewinds the live graph AND instructions; the historical
-        // name/description are recorded in the version snapshot below, not
-        // applied back to the live row.
-        .update(
-            &id,
-            None,
-            None,
-            Some(&ver.instructions),
-            Some(&ver.graph),
-            Some(&ver.on_restart),
-        )
-        .await
-        .map_err(ApiError)?;
-    let newv = repo(&ctx).bump_version(&id).await.map_err(ApiError)?;
     let note = body
         .and_then(|b| b.0.note)
         .unwrap_or_else(|| format!("restored from v{v}"));
-    repo(&ctx)
-        .snapshot_version(
-            &id,
-            newv,
-            &ver.name,
-            &ver.description,
-            &ver.instructions,
-            &ver.graph,
-            &note,
-            &ver.on_restart,
-            &user.id,
-        )
-        .await
-        .map_err(ApiError)?;
-    Ok(Json(repo(&ctx).get(&id).await.map_err(ApiError)?))
+    // Preserve live labels, while the appended snapshot keeps historical labels.
+    Ok(Json(
+        repo(&ctx)
+            .publish(
+                &id,
+                None,
+                None,
+                Some(&ver.instructions),
+                Some(&ver.graph),
+                Some(&ver.on_restart),
+                &note,
+                Some(&user.id),
+                Some((&ver.name, &ver.description)),
+            )
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 
 /// `DELETE /workflows/{id}`
@@ -1084,9 +1073,9 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
         WorkflowTemplate {
             id: "po-lifecycle".into(),
             name: "PO discovery → RFC/Jira".into(),
-            description: "Discovery draft → Canvas diagram → review → refine/attach info → \
-                          review → publish as RFC or Jira (dry-run by default). Provide story_id \
-                          in the input to persist/publish."
+            description: "Discovery → diagram → review → refine → publication preview → human approval → publish. \
+                          Before running, configure story_id on Refine and Preview, and account plus Confluence space \
+                          (or Jira project) on Preview. Publication only follows approval of that exact preview."
                 .into(),
             instructions: String::new(),
             icon: "compass".into(),
@@ -1105,12 +1094,13 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     node("review1", "human_approval", "Review discovery + diagram", 900.0, json!({
                         "prompt": "Review the discovery draft and the diagram."
                     })),
-                    node("refine", "product_rewrite", "Refine + attach info", 1200.0, Value::Null),
-                    node("review2", "human_approval", "Review refined story", 1500.0, json!({
-                        "prompt": "Review the refined story before publishing."
+                    node("refine", "product_rewrite", "Refine + attach info", 1200.0, json!({"persist":true})),
+                    node("preview", "product_publish", "Preview — configure account/destination", 1500.0, json!({"kind":"rfc","dry_run":true})),
+                    node("review2", "human_approval", "Review publication content and destination", 1800.0, json!({
+                        "prompt": "Review the full publication title, content, account and destination. Approve to publish this snapshot."
                     })),
-                    node("publish", "product_publish", "Publish (RFC/Jira)", 1800.0, json!({
-                        "kind": "rfc", "dry_run": true
+                    node("publish", "product_publish", "Publish approved snapshot", 2100.0, json!({
+                        "dry_run": false
                     })),
                 ],
                 edges: vec![
@@ -1118,7 +1108,8 @@ fn flow_templates() -> Vec<WorkflowTemplate> {
                     edge("discovery", "diagram"),
                     edge("diagram", "review1"),
                     edge("review1", "refine"),
-                    edge("refine", "review2"),
+                    edge("refine", "preview"),
+                    edge("preview", "review2"),
                     edge("review2", "publish"),
                 ],
             },
@@ -1642,6 +1633,9 @@ pub async fn webhook_trigger(
 
 #[derive(Debug, Deserialize)]
 pub struct ApproveRunReq {
+    /// Required for Product gates: the full pending node detail version displayed.
+    #[serde(default)]
+    pub expected_detail_version: Option<String>,
     /// The node id of the `human_approval` node being resolved.
     pub node_id: String,
     /// `true` = approve, `false` = reject.
@@ -1668,107 +1662,27 @@ pub async fn approve_run(
 ) -> ApiResult<Json<Value>> {
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
-    // Only a LIVE run can be approved: a canceled/failed run that still
-    // carried the pause flag used to "resume" (and announce `running`) here.
-    if run.status != RunStatus::Running {
-        return Err(ApiError(Error::Conflict(format!(
-            "run is {} — only a running run can be approved or rejected",
-            run.status.as_str()
-        ))));
-    }
-
-    // Confirm the run is actually waiting for approval.
-    let row =
-        sqlx::query("SELECT waiting_approval, approval_node_id FROM workflow_runs WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&ctx.pool)
-            .await
-            .map_err(|e| ApiError(Error::Internal(format!("approve_run: {e}"))))?
-            .ok_or_else(|| ApiError(Error::NotFound("run".into())))?;
-
-    use sqlx::Row as _;
-    let waiting: i64 = row.get("waiting_approval");
-    if waiting == 0 {
-        return Err(ApiError(Error::Invalid(
-            "run is not currently waiting for approval".into(),
-        )));
-    }
-    let node_in_row: Option<String> = row.get("approval_node_id");
-    if node_in_row.as_deref() != Some(&req.node_id) {
-        return Err(ApiError(Error::Invalid(format!(
-            "approval node_id mismatch: run is paused at '{}', not '{}'",
-            node_in_row.as_deref().unwrap_or("?"),
-            req.node_id
-        ))));
-    }
-
-    let now = chrono::Utc::now().to_rfc3339();
+    let rev = repo(&ctx)
+        .record_approval(
+            &id,
+            &req.node_id,
+            req.approved.then_some(&user.id),
+            req.note
+                .as_deref()
+                .unwrap_or(if req.approved { "" } else { "rejected" }),
+            req.expected_detail_version.as_deref(),
+        )
+        .await
+        .map_err(ApiError)?;
+    emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
     if req.approved {
-        // Record the approver and clear the pause flag atomically. Bump `rev`
-        // and announce the decision so open run views drop the banner at once
-        // (the engine's own resume poll follows within its 2s cadence).
-        let rev: i64 = sqlx::query_scalar(
-            "UPDATE workflow_runs
-             SET waiting_approval = 0,
-                 approved_by     = ?,
-                 approval_note   = ?,
-                 approved_at     = ?,
-                 rev             = rev + 1
-             WHERE id = ? AND status = 'running' AND waiting_approval = 1
-             RETURNING rev",
-        )
-        .bind(&user.id)
-        .bind(req.note.as_deref().unwrap_or(""))
-        .bind(&now)
-        .bind(&id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("approve_run record: {e}"))))?
-        // Decided (or canceled) by someone else between the check and now.
-        .ok_or_else(|| {
-            ApiError(Error::Conflict(
-                "run is no longer waiting for approval".into(),
-            ))
-        })?;
-        emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
-
-        Ok(Json(json!({
-            "approved": true,
-            "approved_by": user.id,
-            "note": req.note,
-        })))
+        Ok(Json(
+            json!({"approved":true,"approved_by":user.id,"note":req.note}),
+        ))
     } else {
-        // Rejection: clear `approved_by` (NULL) and clear the pause flag so the
-        // engine's poll loop sees `waiting_approval = 0` AND `approved_by = NULL`
-        // and errors the node.
-        let rev: i64 = sqlx::query_scalar(
-            "UPDATE workflow_runs
-             SET waiting_approval = 0,
-                 approved_by     = NULL,
-                 approval_note   = ?,
-                 approved_at     = ?,
-                 rev             = rev + 1
-             WHERE id = ? AND status = 'running' AND waiting_approval = 1
-             RETURNING rev",
-        )
-        .bind(req.note.as_deref().unwrap_or("rejected"))
-        .bind(&now)
-        .bind(&id)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|e| ApiError(Error::Internal(format!("reject_run record: {e}"))))?
-        .ok_or_else(|| {
-            ApiError(Error::Conflict(
-                "run is no longer waiting for approval".into(),
-            ))
-        })?;
-        emit_run_decision(&ctx, &run.workspace_id, &id, &req.node_id, rev);
-
-        Ok(Json(json!({
-            "approved": false,
-            "rejected_by": user.id,
-            "note": req.note,
-        })))
+        Ok(Json(
+            json!({"approved":false,"rejected_by":user.id,"note":req.note}),
+        ))
     }
 }
 
@@ -1791,6 +1705,333 @@ fn emit_run_decision(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id, node_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn version_page_fixture(
+        count: i64,
+    ) -> (tempfile::TempDir, ServerCtx, axum::Router, Workflow) {
+        use crate::routes::browser::tests::{mem_pool, seed_workspace, test_ctx};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = mem_pool().await;
+        seed_workspace(&pool, "version-ws").await;
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,created_at) VALUES('root','root','x','Root',1,?)")
+            .bind(chrono::Utc::now().to_rfc3339()).execute(&pool).await.unwrap();
+        let ctx = test_ctx(&pool, tmp.path().to_path_buf()).await;
+        let graph: WorkflowGraph = serde_json::from_value(json!({"nodes":[{"id":"n","kind":"agent","params":{"prompt":"x".repeat(4096)}}],"edges":[]})).unwrap();
+        let wf = repo(&ctx)
+            .create(
+                &"version-ws".into(),
+                "Current name",
+                "Current description",
+                &"instruction".repeat(512),
+                &graph,
+                &"root".into(),
+            )
+            .await
+            .unwrap();
+        for version in 2..=count {
+            repo(&ctx)
+                .snapshot_version(
+                    &wf.id,
+                    version,
+                    "Historical name",
+                    "Historical description",
+                    &format!("instruction-{version}"),
+                    &graph,
+                    "saved",
+                    "resume",
+                    &"root".into(),
+                )
+                .await
+                .unwrap();
+        }
+        sqlx::query("UPDATE workflows SET version=? WHERE id=?")
+            .bind(count)
+            .bind(&wf.id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        let app = axum::Router::new()
+            .route("/workflows/{id}", axum::routing::patch(update_workflow))
+            .route(
+                "/workflows/{id}/versions",
+                axum::routing::get(list_versions),
+            )
+            .route(
+                "/workflows/{id}/versions/{v}",
+                axum::routing::get(get_version),
+            )
+            .route(
+                "/workflows/{id}/versions/{v}/restore",
+                axum::routing::post(restore_version),
+            )
+            .with_state(ctx.clone());
+        (tmp, ctx, app, wf)
+    }
+
+    async fn version_request(app: &axum::Router, method: &str, path: &str) -> (StatusCode, Value) {
+        version_request_body(app, method, path, None).await
+    }
+
+    async fn version_request_body(
+        app: &axum::Router,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+        let has_body = body.is_some();
+        let request_body = body
+            .map(|v| axum::body::Body::from(v.to_string()))
+            .unwrap_or_default();
+        let mut builder = axum::http::Request::builder().method(method).uri(path);
+        if has_body {
+            builder = builder.header("content-type", "application/json");
+        }
+        let mut request = builder.body(request_body).unwrap();
+        request.extensions_mut().insert(otto_core::auth::AuthUser(
+            crate::routes::browser::tests::root_user(),
+        ));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| json!(String::from_utf8_lossy(&bytes))),
+        )
+    }
+
+    #[tokio::test]
+    async fn review4_workflow_routes_publish_matching_snapshots_with_run_admission() {
+        for restore in [false, true] {
+            let (_tmp, ctx, app, wf) = version_page_fixture(2).await;
+            let path = format!("/workflows/{}", wf.id);
+            let second_path = if restore {
+                format!("{path}/versions/2/restore")
+            } else {
+                path.clone()
+            };
+            let graph = json!({"nodes":[{"id":"saved-X","kind":"manual_trigger"}],"edges":[]});
+            let repository = repo(&ctx);
+            let input = json!({});
+            let (a, b, queued) = tokio::join!(
+                version_request_body(
+                    &app,
+                    "PATCH",
+                    &path,
+                    Some(json!({"graph":graph,"instructions":"saved X","on_restart":"fail"}))
+                ),
+                version_request_body(
+                    &app,
+                    if restore { "POST" } else { "PATCH" },
+                    &second_path,
+                    Some(if restore {
+                        json!({})
+                    } else {
+                        json!({"instructions":"saved Y"})
+                    })
+                ),
+                repository.create_run(&wf.id, &wf.workspace_id, &input, None),
+            );
+            assert_eq!(a.0, StatusCode::OK);
+            assert_eq!(b.0, StatusCode::OK);
+            assert_ne!(a.1["version"], b.1["version"]);
+            for row in [&a.1, &b.1] {
+                let snapshot = repository
+                    .get_version(&wf.id, row["version"].as_i64().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(row["instructions"], snapshot.instructions);
+                assert_eq!(row["graph"], json!(snapshot.graph));
+                assert_eq!(row["on_restart"], snapshot.on_restart);
+            }
+            let queued = queued.unwrap();
+            assert!(repository.definition_for_run(&queued).await.is_ok());
+            let live = repository.get(&wf.id).await.unwrap();
+            let next = repository
+                .create_run(&wf.id, &wf.workspace_id, &input, None)
+                .await
+                .unwrap();
+            let pinned = repository.definition_for_run(&next).await.unwrap();
+            assert_eq!(pinned.version, live.version);
+            assert_eq!(pinned.instructions, live.instructions);
+            assert_eq!(json!(pinned.graph), json!(live.graph));
+            assert_eq!(repository.list_versions(&wf.id).await.unwrap().len(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn review4_workflow_route_snapshot_conflict_never_partially_saves() {
+        let (_tmp, ctx, app, wf) = version_page_fixture(1).await;
+        repo(&ctx)
+            .snapshot_version(
+                &wf.id,
+                2,
+                "existing",
+                "",
+                "collision",
+                &wf.graph,
+                "import",
+                "resume",
+                &"root".into(),
+            )
+            .await
+            .unwrap();
+        let (status, _) = version_request_body(
+            &app,
+            "PATCH",
+            &format!("/workflows/{}", wf.id),
+            Some(json!({"name":"lost name","instructions":"lost instructions"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let live = repo(&ctx).get(&wf.id).await.unwrap();
+        assert_eq!(live.version, 1);
+        assert_eq!(live.name, wf.name);
+        assert_eq!(live.instructions, wf.instructions);
+    }
+
+    #[tokio::test]
+    async fn review4_version_http_default_and_requested_pages_are_bounded() {
+        let (_tmp, _ctx, app, wf) = version_page_fixture(121).await;
+        for query in ["", "?summary=true&limit=10000", "?limit=10000"] {
+            let (status, body) = version_request(
+                &app,
+                "GET",
+                &format!("/workflows/{}/versions{query}", wf.id),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.as_array().unwrap().len() <= 100,
+                "version page must be bounded, query={query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review4_version_http_summary_excludes_definition_bodies() {
+        let (_tmp, _ctx, app, wf) = version_page_fixture(3).await;
+        let (status, body) = version_request(
+            &app,
+            "GET",
+            &format!("/workflows/{}/versions?summary=true&limit=2", wf.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = body.as_array().unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.get("graph").is_none() && row.get("instructions").is_none()),
+            "summary pages must omit graph and instructions"
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["version"], 3);
+        assert!(
+            rows[0].get("id").is_some()
+                && rows[0].get("created_at").is_some()
+                && rows[0].get("note").is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn review4_version_http_exclusive_cursor_reaches_oldest_despite_new_version() {
+        let (_tmp, ctx, app, wf) = version_page_fixture(5).await;
+        let (_, first) = version_request(
+            &app,
+            "GET",
+            &format!("/workflows/{}/versions?summary=true&limit=2", wf.id),
+        )
+        .await;
+        assert_eq!(
+            first
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["version"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![5, 4]
+        );
+        repo(&ctx)
+            .snapshot_version(
+                &wf.id,
+                6,
+                "new",
+                "",
+                "new instructions",
+                &wf.graph,
+                "intervening save",
+                "resume",
+                &"root".into(),
+            )
+            .await
+            .unwrap();
+        let mut seen = vec![5, 4];
+        let mut before = 4;
+        loop {
+            let (status, page) = version_request(
+                &app,
+                "GET",
+                &format!(
+                    "/workflows/{}/versions?summary=true&limit=2&before_version={before}",
+                    wf.id
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let rows = page.as_array().unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            assert!(rows.len() <= 2);
+            for row in rows {
+                let v = row["version"].as_i64().unwrap();
+                assert!(v < before, "cursor must be exclusive");
+                seen.push(v);
+            }
+            before = rows.last().unwrap()["version"].as_i64().unwrap();
+        }
+        assert_eq!(seen, vec![5, 4, 3, 2, 1]);
+        assert_eq!(
+            repo(&ctx).list_versions(&wf.id).await.unwrap().len(),
+            6,
+            "paging must never prune history"
+        );
+    }
+
+    #[tokio::test]
+    async fn review4_version_http_full_detail_and_oldest_restore_remain_reachable() {
+        let (_tmp, ctx, app, wf) = version_page_fixture(121).await;
+        let (status, full) =
+            version_request(&app, "GET", &format!("/workflows/{}/versions/1", wf.id)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(full["instructions"], wf.instructions);
+        assert_eq!(
+            full["graph"]["nodes"][0]["params"]["prompt"]
+                .as_str()
+                .unwrap()
+                .len(),
+            4096
+        );
+        let (status, restored) = version_request(
+            &app,
+            "POST",
+            &format!("/workflows/{}/versions/2/restore", wf.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(restored["version"], 122);
+        assert_eq!(restored["name"], "Current name");
+        assert_eq!(restored["description"], "Current description");
+        assert_eq!(restored["instructions"], "instruction-2");
+        let snapshot = repo(&ctx).get_version(&wf.id, 122).await.unwrap().unwrap();
+        assert_eq!(snapshot.name, "Historical name");
+        assert_eq!(snapshot.description, "Historical description");
+        assert_eq!(repo(&ctx).list_versions(&wf.id).await.unwrap().len(), 122);
+    }
 
     #[test]
     fn workflow_trigger_validation_accepts_canonical_events_and_rejects_bad_destinations() {
@@ -1899,6 +2140,54 @@ mod tests {
                 "catalog missing new kind '{kind}'"
             );
         }
+    }
+
+    #[test]
+    fn review4_product_publish_template_has_preview_then_approval_then_live() {
+        let template = flow_templates()
+            .into_iter()
+            .find(|template| template.id == "po-lifecycle")
+            .unwrap();
+        let preview = template
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == "product_publish" && node.params["dry_run"] == true)
+            .expect("preview node");
+        let publish = template
+            .graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == "product_publish" && node.params["dry_run"] == false)
+            .expect("approved live successor");
+        let gate = template
+            .graph
+            .edges
+            .iter()
+            .filter(|edge| edge.source == preview.id)
+            .filter_map(|edge| {
+                template
+                    .graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == edge.target && node.kind == "human_approval")
+            })
+            .find(|gate| {
+                template
+                    .graph
+                    .edges
+                    .iter()
+                    .any(|edge| edge.source == gate.id && edge.target == publish.id)
+            })
+            .expect("preview → review → publish edges");
+        assert!(!gate.params["prompt"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
+        assert!(
+            template.description.contains("account") && template.description.contains("space"),
+            "destination prerequisites visible before running"
+        );
     }
 
     #[test]

@@ -153,7 +153,7 @@ pub struct RawMessage {
     pub timestamp_ms: Option<i64>,
     pub key: Option<Vec<u8>>,
     pub value: Option<Vec<u8>>,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
     pub size: usize,
 }
 
@@ -1134,10 +1134,7 @@ impl KafkaClient {
                     if let Some(hs) = m.headers() {
                         for i in 0..hs.count() {
                             let h = hs.get(i);
-                            headers.push((
-                                h.key.to_string(),
-                                h.value.map(|v| v.to_vec()).unwrap_or_default(),
-                            ));
+                            headers.push((h.key.to_string(), h.value.map(|v| v.to_vec())));
                         }
                     }
                     let key = m.key().map(|k| k.to_vec());
@@ -1511,23 +1508,49 @@ impl KafkaClient {
             Some(k) => Some(k.clone().into_bytes()),
             None => None,
         };
-        let mut owned = OwnedHeaders::new();
-        for h in &req.headers {
-            owned = owned.insert(Header {
-                key: &h.key,
-                value: Some(h.value.as_bytes()),
-            });
-        }
+        let headers: Vec<_> = req
+            .headers
+            .iter()
+            .map(|h| (h.key.clone(), Some(h.value.as_bytes().to_vec())))
+            .collect();
+        // The public text API spells a tombstone as empty text. Base64 is the
+        // escape hatch for a present, zero-byte payload; never collapse these.
+        let payload = if !req.value_base64 && value.is_empty() {
+            None
+        } else {
+            Some(value.as_slice())
+        };
+        self.produce_raw(topic, req.partition, key.as_deref(), payload, &headers)
+            .await
+    }
 
-        let mut record: FutureRecord<'_, Vec<u8>, Vec<u8>> = FutureRecord::to(topic);
-        record = record.payload(&value);
-        if let Some(k) = &key {
-            record = record.key(k);
+    /// Internal replay adapter: no text decoding or nullable-payload coercion.
+    pub(crate) async fn produce_raw(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[(String, Option<Vec<u8>>)],
+    ) -> Result<ProduceResp> {
+        let mut record: FutureRecord<'_, [u8], [u8]> = FutureRecord::to(topic);
+        if let Some(value) = value {
+            record = record.payload(value);
         }
-        if let Some(p) = req.partition {
-            record = record.partition(p);
+        if let Some(key) = key {
+            record = record.key(key);
         }
-        if !req.headers.is_empty() {
+        if let Some(partition) = partition {
+            record = record.partition(partition);
+        }
+        if !headers.is_empty() {
+            let mut owned = OwnedHeaders::new();
+            for (key, value) in headers {
+                owned = owned.insert(Header {
+                    key,
+                    value: value.as_deref(),
+                });
+            }
             record = record.headers(owned);
         }
         match self.producer()?.send(record, Duration::from_secs(15)).await {

@@ -488,7 +488,9 @@
         {vault.status?.notes ?? vault.current.notes} notes · {vault.status?.links ?? vault.current.links} links{#if (vault.status?.unresolved ?? 0) > 0}{' · '}{vault.status?.unresolved} unresolved{/if}
       </span>
       {#if vault.note}
-        <span>{vault.backlinks.length} backlinks</span>
+        <span>
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={11} /> couldn’t refresh</span>{/if}
+        </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
@@ -767,6 +769,14 @@
     border-inline-start: 1px solid var(--border);
     flex-shrink: 0;
     min-height: 0;
+  }
+  .vs-inline {
+    margin-inline-start: 6px;
+    vertical-align: middle;
+  }
+  .vs-warn {
+    margin-inline-start: 6px;
+    color: var(--warning);
   }
   .vault-statusbar {
     display: flex;

@@ -77,7 +77,7 @@ type CommitLocks = HashMap<(PathBuf, String), Weak<tokio::sync::Mutex<()>>>;
 /// Services are request-scoped. Share the complete publication boundary across
 /// instances, including aliases of the same filesystem root. Weak entries avoid
 /// retaining a mutex for every artifact ever edited.
-async fn commit_lock(root: PathBuf, id: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+pub(crate) async fn commit_lock(root: PathBuf, id: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| Error::Internal(format!("design root: {e}")))?;
@@ -1232,6 +1232,10 @@ impl DesignService {
         version_id: Option<&str>,
         actor: &Author,
     ) -> Result<DesignArtifact> {
+        // Read, merge and publish under the same canonical boundary as content
+        // commits, including service instances reached through root aliases.
+        let lock = commit_lock(self.root(), artifact_id).await?;
+        let _publication = lock.lock().await;
         let a = self.store.require_artifact(artifact_id).await?;
         let vid = match version_id {
             Some(v) => v.to_string(),
@@ -1281,6 +1285,10 @@ impl DesignService {
         req: UpdateArtifactReq,
         actor: &Author,
     ) -> Result<DesignArtifact> {
+        // Read, merge and publish under the same canonical boundary as content
+        // commits, including service instances reached through root aliases.
+        let lock = commit_lock(self.root(), artifact_id).await?;
+        let _publication = lock.lock().await;
         let mut a = self.store.require_artifact(artifact_id).await?;
         let prev_status = a.status.clone();
         if let Some(t) = req.title {
@@ -1778,6 +1786,11 @@ impl DesignService {
                 "a thumbnail must be a PNG or WebP image".into(),
             ));
         }
+        let lock = commit_lock(self.root(), &a.id).await?;
+        let _publication = lock.lock().await;
+        // The caller's snapshot can predate another thumbnail or metadata
+        // publication. No-op detection and GC must use the durable row.
+        let a = self.store.require_artifact(&a.id).await?;
         let sha = self.blobs.put(bytes).await?;
         if a.thumb_blob.as_deref() == Some(sha.as_str()) {
             return Ok(a.clone());
@@ -1931,6 +1944,157 @@ mod tests {
             decode_content(None, Some("aGk=".into())).unwrap().unwrap(),
             b"hi"
         );
+    }
+
+    #[tokio::test]
+    async fn thumbnail_waits_for_metadata_publication_through_alias_root() {
+        let (service, dir, _) = svc().await;
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("data");
+        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+        let other = DesignService::new(service.store.pool().clone(), alias, None);
+        let artifact = service
+            .create_artifact(input("html", "Before", Some("<p>body</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let lock = commit_lock(service.root(), &artifact.id).await.unwrap();
+        let held = lock.lock().await;
+        let pending = other.set_thumbnail(&artifact, b"\x89PNG\r\n\x1a\nnew-thumbnail");
+        tokio::pin!(pending);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut pending)
+                .await
+                .is_err(),
+            "thumbnail must not slip between metadata's read and write"
+        );
+        drop(held);
+        let saved = pending.await.unwrap();
+        assert!(saved.thumb_blob.is_some());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_stale_snapshot_does_not_skip_requested_restore_or_gc() {
+        let (service, _dir, _) = svc().await;
+        let initial = service
+            .create_artifact(input("html", "Before", Some("<p>body</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let thumb_a = b"\x89PNG\r\n\x1a\nthumbnail-a";
+        let thumb_b = b"\x89PNG\r\n\x1a\nthumbnail-b";
+        let stale_a = service.set_thumbnail(&initial, thumb_a).await.unwrap();
+        let current_b = service.set_thumbnail(&stale_a, thumb_b).await.unwrap();
+        // A stale caller has A in its snapshot, but durable state has B. An A
+        // request must restore A and collect B rather than return a false no-op.
+        service.set_thumbnail(&stale_a, thumb_a).await.unwrap();
+        let saved = service.store.require_artifact(&initial.id).await.unwrap();
+        assert_eq!(saved.thumb_blob, stale_a.thumb_blob);
+        assert!(
+            service
+                .blobs
+                .exists(saved.thumb_blob.as_deref().unwrap())
+                .await
+        );
+        assert!(
+            !service
+                .blobs
+                .exists(current_b.thumb_blob.as_deref().unwrap())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn aliased_metadata_patches_preserve_independent_acknowledged_edits() {
+        let (service, dir, _) = svc().await;
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("data");
+        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+        let other = DesignService::new(service.store.pool().clone(), alias, None);
+        let artifact = service
+            .create_artifact(input("html", "Before", Some("<p>body</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let actor = Author::user("u1");
+        // Both real service calls begin together. The single-connection test
+        // pool queues their initial reads before either whole-row write.
+        let (title, tags) = tokio::join!(
+            service.update_meta(
+                &artifact.id,
+                UpdateArtifactReq {
+                    title: Some("Acknowledged title".into()),
+                    meta: Some(json!({"title_owner": true})),
+                    ..Default::default()
+                },
+                &actor
+            ),
+            other.update_meta(
+                &artifact.id,
+                UpdateArtifactReq {
+                    tags: Some(vec!["acknowledged-tag".into()]),
+                    meta: Some(json!({"tag_owner": true})),
+                    ..Default::default()
+                },
+                &actor
+            ),
+        );
+        title.unwrap();
+        tags.unwrap();
+        let saved = service.store.require_artifact(&artifact.id).await.unwrap();
+        assert_eq!(saved.title, "Acknowledged title");
+        assert_eq!(saved.tags, vec!["acknowledged-tag"]);
+        assert_eq!(saved.meta, json!({"title_owner": true, "tag_owner": true}));
+    }
+
+    #[tokio::test]
+    async fn metadata_and_approval_share_canonical_publication_boundary() {
+        let (service, dir, _) = svc().await;
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("data");
+        std::os::unix::fs::symlink(dir.path(), &alias).unwrap();
+        let other = DesignService::new(service.store.pool().clone(), alias, None);
+        let artifact = service
+            .create_artifact(input("html", "Before", Some("<p>body</p>")))
+            .await
+            .unwrap()
+            .artifact;
+        let actor = Author::user("u1");
+        let lock = commit_lock(service.root(), &artifact.id).await.unwrap();
+        // This is the actual publication lock, not a mocked service boundary.
+        // Keeping it held deterministically pauses whichever mutation is tested.
+        for approve in [false, true] {
+            let held = lock.lock().await;
+            let pending = async {
+                if approve {
+                    other.approve(&artifact.id, None, &actor).await
+                } else {
+                    other
+                        .update_meta(
+                            &artifact.id,
+                            UpdateArtifactReq {
+                                title: Some("Acknowledged title".into()),
+                                ..Default::default()
+                            },
+                            &actor,
+                        )
+                        .await
+                }
+            };
+            tokio::pin!(pending);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut pending)
+                    .await
+                    .is_err(),
+                "{approve:?}: mutation bypassed the canonical publication boundary"
+            );
+            drop(held);
+            pending.await.unwrap();
+        }
+        let saved = service.store.require_artifact(&artifact.id).await.unwrap();
+        assert_eq!(saved.title, "Acknowledged title");
+        assert_eq!(saved.status, "approved");
+        assert_eq!(saved.approved_version_id, artifact.head_version_id);
     }
 
     #[tokio::test]

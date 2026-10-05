@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import PathField from '../../lib/components/PathField.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -96,6 +96,10 @@
   /** Form snapshot taken when the form opens — Back/Cancel only asks before
    *  discarding when something actually changed. */
   let formSnapshot = $state('');
+  let formGeneration = 0;
+  let alive = true;
+  onDestroy(() => { alive = false; formGeneration++; });
+  $effect(() => router.guard(() => canLeaveForm()));
   /** Destination the task had when the edit began ('' for a new task) — a
    *  save only re-confirms delivery when the destination is new or changed. */
   let originalDest = $state('');
@@ -193,6 +197,8 @@
   const presets = $derived(scheduledTasks.presets);
 
   function resetForm(): void {
+    formGeneration++;
+    busy = false;
     fName = '';
     fPrompt = '';
     fSkill = '';
@@ -237,18 +243,25 @@
     formSnapshot = formState();
   }
 
-  /** Leave the form (Back / Cancel), asking first only when edits would be lost. */
-  async function closeForm(): Promise<void> {
-    if (formState() !== formSnapshot) {
+  /** Local Back/Cancel and route/workspace navigation share one decision. */
+  async function canLeaveForm(): Promise<boolean> {
+    if ((creating || editId) && formState() !== formSnapshot) {
       const ok = await confirmer.ask(editId ? 'Discard your changes to this task?' : 'Discard this new task?', {
         title: 'Discard changes',
         confirmLabel: 'Discard',
       });
-      if (!ok) return;
+      if (!ok) return false;
     }
+    formGeneration++;
     creating = false;
     editId = null;
+    busy = false;
     error = '';
+    return true;
+  }
+
+  async function closeForm(): Promise<void> {
+    await canLeaveForm();
   }
 
   async function loadWorkflowOptions(): Promise<void> {
@@ -400,6 +413,7 @@
   }
 
   async function save(): Promise<void> {
+    if (busy) return;
     error = '';
     if (!fName.trim()) {
       error = 'Give the task a name.';
@@ -429,18 +443,6 @@
       error = 'Pick the date and time it runs.';
       return;
     }
-    // Outward-facing: every run posts its report off the Mac. Say where
-    // before the first save that turns delivery on (or points it elsewhere).
-    if (fDestType !== 'none' && JSON.stringify(buildDestination()) !== originalDest) {
-      const ok = await confirmOutward({
-        verb: editId ? 'Save and deliver' : 'Create and deliver',
-        title: 'Deliver reports outside Otto?',
-        where: destWhere(),
-        what: `The report of every run of “${fName.trim()}” on its schedule, starting with the next run.`,
-        who: destWho(fDestType),
-      });
-      if (!ok) return;
-    }
     const body: ScheduledTaskInput = {
       name: fName.trim(),
       prompt: fPrompt,
@@ -464,17 +466,37 @@
       error = 'Pick a workspace first — scheduled tasks belong to a workspace.';
       return;
     }
+    const generation = formGeneration;
+    const submittedId = editId;
+    const submitted = formState();
+    const destination = JSON.stringify(body.destination);
+    const outward = fDestType !== 'none' && destination !== originalDest ? {
+      verb: submittedId ? 'Save and deliver' : 'Create and deliver',
+      title: 'Deliver reports outside Otto?',
+      where: destWhere(),
+      what: `The report of every run of “${body.name}” on its schedule, starting with the next run.`,
+      who: destWho(fDestType),
+    } : null;
+    const ownsForm = () => alive && generation === formGeneration && ws.currentId === wsId;
     busy = true;
     try {
-      if (editId) await scheduledTasks.update(editId, body);
-      else await scheduledTasks.create(wsId, body);
-      toasts.success(editId ? 'Scheduled task saved' : 'Scheduled task created', body.name);
+      if (outward && !await confirmOutward(outward)) return;
+      if (!ownsForm()) return;
+      const savedId = submittedId
+        ? (await scheduledTasks.update(submittedId, body), submittedId)
+        : (await scheduledTasks.create(wsId, body)).id;
+      if (!ownsForm()) return;
+      toasts.success(submittedId ? 'Scheduled task saved' : 'Scheduled task created', body.name);
+      // Acknowledge exactly what was submitted. Keep edits made while saving,
+      // and adopt a created id so the next save updates this same task.
+      formSnapshot = submitted;
+      originalDest = destination;
       creating = false;
-      editId = null;
+      editId = formState() === submitted ? null : savedId;
     } catch (e) {
-      error = `Couldn’t save the task. ${errText(e)}`;
+      if (ownsForm()) error = `Couldn’t save the task. ${errText(e)}`;
     } finally {
-      busy = false;
+      if (ownsForm()) busy = false;
     }
   }
 
