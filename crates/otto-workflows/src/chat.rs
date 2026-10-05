@@ -821,8 +821,8 @@ impl<C: WorkflowCtx> WorkflowChatTrigger for WorkflowChatTriggerImpl<C> {
             };
 
             // The result is reported back via the workspace whose integration
-            // received the message (`origin_workspace_id`), not necessarily the
-            // workflow's own workspace (workflows are global).
+            // received the message (`origin_workspace_id`) — the workflow's
+            // own, since chat only resolves workflows of that workspace.
             let input = json!({
                 "trigger": "chat",
                 "origin_workspace_id": workspace_id,

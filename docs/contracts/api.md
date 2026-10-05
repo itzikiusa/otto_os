@@ -3233,7 +3233,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
 | GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
 | GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
-| POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
+| POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
@@ -3252,6 +3252,19 @@ polled). A `schedule` trigger's `spec.prompt` (string, optional), when set, is t
 run's input as `input.prompt` (in addition to `input.trigger:"schedule"`) — same input shape at
 both `create_run` and the spawned `run_workflow` call — so a fixed instruction reaches the
 engine's prompt normalization exactly like a chat-started run.
+
+**Reserved run-input keys.** Some run-input keys steer who reports a run, where its
+result goes and where agents run; which trigger may set them:
+
+| Keys | Chat path | Trigger spec (schedule/event/webhook) | Manual `POST /workflows/{id}/run` | Webhook body |
+|---|---|---|---|---|
+| `origin_*` (e.g. `origin_workspace_id`), `channel`, `chat`, `thread` | yes | — | dropped | dropped |
+| `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
+| `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
+
+Results always post through the **workflow's own** workspace integration: an
+`origin_workspace_id` naming another workspace is ignored (chat triggers only
+resolve workflows of the receiving workspace).
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
 `otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
@@ -3280,9 +3293,9 @@ every inbound Slack/Telegram/webhook message *before* normal session routing. Re
 is GLOBAL across every workspace, so match candidates are walked in preference order and each
 candidate's workflow is re-checked against the inbound `workspace_id` before being trusted — a
 channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
-channel's messages) into workspace A. This is unlike the legacy/simplified name-addressed
-commands above (1 and 2), which intentionally resolve against the GLOBAL workflow library
-(`find_by_name`, preferring but not requiring the message's own workspace).
+channel's messages) into workspace A. The name-addressed commands above (1 and 2) apply the
+same gate: `find_by_name` resolves only within the message's own workspace, so a member of
+workspace A's channel can never start workspace B's workflow.
 
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll

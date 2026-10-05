@@ -34,6 +34,68 @@ pub fn copy_result_destinations(spec: &Value, input: &mut serde_json::Map<String
     }
 }
 
+/// Run-input keys that steer WHERE a run reports or WHOSE integration posts:
+/// the inbound-chat origin (`origin_*`, `channel`/`chat`/`thread`) only the
+/// chat path sets. See "Reserved run-input keys" in `docs/contracts/api.md`.
+const ORIGIN_KEYS: [&str; 3] = ["channel", "chat", "thread"];
+/// Result destinations — a trigger SPEC (Editor-configured) or an Editor's
+/// manual run may set these; an untrusted webhook body may not.
+const DELIVERY_KEYS: [&str; 5] = [
+    "result_channel",
+    "result_chat",
+    "result_thread",
+    "result_webhook",
+    "callback_url",
+];
+/// Where agents run / which worktrees a run provisions.
+const LOCATION_KEYS: [&str; 5] = ["working_directory", "repos", "worktree", "worktree_path", "cwd"];
+
+/// Who supplied a run input, which decides the reserved keys it may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputSource {
+    /// `POST /workflows/{id}/run` by a workspace Editor: may pick result
+    /// destinations and a working directory, never a chat origin.
+    Manual,
+    /// A public token-only webhook body: may set none of the reserved keys
+    /// (the trigger's own spec supplies destinations/location instead).
+    Webhook,
+}
+
+/// Strip the reserved keys `source` may not set from an untrusted run input
+/// (S3-02). A non-object input passes through unchanged. Returns the keys
+/// that were dropped (for a log line).
+pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<String> {
+    let Value::Object(map) = input else {
+        return Vec::new();
+    };
+    let reserved = |k: &str| {
+        k.starts_with("origin_")
+            || ORIGIN_KEYS.contains(&k)
+            || (source == InputSource::Webhook
+                && (DELIVERY_KEYS.contains(&k) || LOCATION_KEYS.contains(&k)))
+    };
+    let dropped: Vec<String> = map.keys().filter(|k| reserved(k)).cloned().collect();
+    for k in &dropped {
+        map.remove(k);
+    }
+    dropped
+}
+
+/// A webhook trigger's spec-configured run location (`working_directory` /
+/// `repos`) — the Editor-owned counterpart of the keys stripped from its body.
+pub fn copy_location_defaults(spec: &Value, input: &mut serde_json::Map<String, Value>) {
+    if let Some(v) = spec
+        .get("working_directory")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        input.insert("working_directory".into(), json!(v));
+    }
+    if let Some(v) = spec.get("repos").filter(|v| v.is_array()) {
+        input.insert("repos".into(), v.clone());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event-trigger listener (B8): subscribes to the daemon event bus and fires
 // any enabled `event`-kind triggers whose `event_kind` spec field matches the
@@ -304,5 +366,49 @@ mod tests {
         assert_eq!(input.get("result_chat"), Some(&json!("C123")));
         assert!(input.get("result_thread").is_none(), "empty string skipped");
         assert!(input.get("prompt").is_none(), "unrelated keys not copied");
+    }
+
+    /// S3-02: a webhook body can't pick the chat origin, the result
+    /// destinations or the run location; a manual run keeps destinations and
+    /// location but never a chat origin.
+    #[test]
+    fn reserved_input_keys_are_stripped_per_source() {
+        let body = json!({
+            "prompt": "summarize",
+            "origin_workspace_id": "other-ws",
+            "origin_user": "x",
+            "channel": "slack", "chat": "C-attacker", "thread": "1",
+            "result_chat": "C-attacker", "result_channel": "slack", "result_thread": "2",
+            "result_webhook": "https://evil", "callback_url": "https://evil",
+            "working_directory": "~/other-repo", "repos": [], "cwd": "/",
+            "worktree": "/x", "worktree_path": "/y",
+        });
+        let mut w = body.clone();
+        let mut dropped = strip_reserved_input(&mut w, InputSource::Webhook);
+        dropped.sort();
+        assert_eq!(w, json!({ "prompt": "summarize" }));
+        assert_eq!(dropped.len(), 15);
+        let mut m = body.clone();
+        strip_reserved_input(&mut m, InputSource::Manual);
+        let m = m.as_object().unwrap();
+        for k in ["origin_workspace_id", "origin_user", "channel", "chat", "thread"] {
+            assert!(!m.contains_key(k), "manual must drop {k}");
+        }
+        for k in ["prompt", "result_chat", "result_webhook", "callback_url", "working_directory", "repos"] {
+            assert!(m.contains_key(k), "manual keeps {k}");
+        }
+        // Non-object input is untouched.
+        let mut s = json!("text");
+        assert!(strip_reserved_input(&mut s, InputSource::Webhook).is_empty());
+    }
+
+    #[test]
+    fn location_defaults_come_from_the_trigger_spec() {
+        let spec = json!({"working_directory": "~/repo", "repos": [{"repo": "r"}], "x": 1});
+        let mut input = serde_json::Map::new();
+        copy_location_defaults(&spec, &mut input);
+        assert_eq!(input.get("working_directory"), Some(&json!("~/repo")));
+        assert_eq!(input.get("repos"), Some(&json!([{"repo": "r"}])));
+        assert!(input.get("x").is_none());
     }
 }

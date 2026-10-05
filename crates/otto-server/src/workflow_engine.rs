@@ -354,6 +354,19 @@ struct ChatTarget {
     thread: Option<String>,
 }
 
+/// The workspace whose Slack/Telegram integration reports a run: always the
+/// workflow's own. Chat triggers only start workflows of the receiving
+/// workspace (S3-03), so a legitimate `origin_workspace_id` equals it; any
+/// other value is a forged/legacy input and must not borrow another
+/// workspace's bot token (S3-02).
+fn result_workspace(workflow: &Workflow, origin: Option<&str>) -> String {
+    if let Some(o) = origin.filter(|o| *o != workflow.workspace_id) {
+        tracing::warn!(workflow_id = %workflow.id, origin = o,
+              "run input names another workspace as its origin — reporting via the workflow's own");
+    }
+    workflow.workspace_id.clone()
+}
+
 /// Resolve the chat target for live progress + result delivery from the run input.
 /// Honors an explicit `result_chat`(+`result_channel`/`result_thread`) override,
 /// else the incoming-hook origin (`channel`/`chat`/`thread`). Returns `None` for a
@@ -361,9 +374,7 @@ struct ChatTarget {
 fn resolve_chat_target(workflow: &Workflow, input: &Value) -> Option<ChatTarget> {
     let obj = input.as_object()?;
     let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    let ws = str_at("origin_workspace_id")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| workflow.workspace_id.clone());
+    let ws = result_workspace(workflow, str_at("origin_workspace_id"));
     let (channel, chat, thread) = match str_at("result_chat") {
         Some(c) => (
             str_at("result_channel").or_else(|| str_at("channel")),
@@ -3233,11 +3244,9 @@ async fn deliver_run_result(
     // `result_channel`/`result_thread`) — e.g. to post results to a #releases
     // channel, or to give a manual UI run a destination.
     let str_at = |k: &str| obj.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
-    // Token comes from the workspace whose integration received the message
-    // (workflows are global, so that may differ from the workflow's workspace).
-    let result_ws: String = str_at("origin_workspace_id")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| workflow.workspace_id.clone());
+    // Token comes from the workflow's OWN workspace integration (see
+    // `result_workspace`).
+    let result_ws: String = result_workspace(workflow, str_at("origin_workspace_id"));
     let (channel, chat, thread) = match str_at("result_chat") {
         Some(c) => (
             str_at("result_channel").or_else(|| str_at("channel")),
@@ -9007,8 +9016,8 @@ mod tests {
         assert_eq!(t.chat, "C123");
         assert_eq!(t.thread.as_deref(), Some("169.1"));
         assert_eq!(
-            t.ws, "trigger-ws",
-            "reports via the integration's workspace"
+            t.ws, "wf-ws",
+            "S3-02: a foreign origin_workspace_id never borrows another workspace's bot"
         );
         // Explicit override wins.
         let t = resolve_chat_target(
