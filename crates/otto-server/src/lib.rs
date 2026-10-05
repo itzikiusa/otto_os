@@ -116,7 +116,8 @@ pub mod transcript_tail;
 pub mod transport;
 pub mod turn_oracle;
 pub mod ui_bridge;
-pub mod ui_commands;
+// Moved to `otto_mcp::outward`; re-exported so `crate::ui_commands` keeps working.
+pub use otto_mcp::outward::ui_commands;
 pub mod vault_docs_agent;
 pub mod workflow_chat;
 mod workflow_checkpoint;

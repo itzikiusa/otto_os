@@ -1372,7 +1372,7 @@ fn build_context_block(annotation: &BrowserAnnotation, title: &str, nonce: &str)
 /// `{note_path}`. Writes an OKF-flavored note (front-matter + summary + one
 /// `## Mark N` section per annotation on the URL) through the vault engine's
 /// own `write_note` — the same call `otto_vault_write` lands on
-/// (`crates/otto-server/src/mcp_outward.rs`).
+/// (`crates/otto-mcp/src/outward/exec.rs`).
 async fn vault_save(
     Path(wid): Path<Id>,
     State(ctx): State<ServerCtx>,

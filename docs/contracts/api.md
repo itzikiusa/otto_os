@@ -4801,7 +4801,7 @@ title field of their own).
 
 **`POST /browser/vault-save`** writes an OKF-flavored note through the vault
 engine's `write_note` (the same call `otto_vault_write` lands on —
-`crates/otto-server/src/mcp_outward.rs`): YAML front-matter (`url`, `title`,
+`crates/otto-mcp/src/outward/exec.rs`): YAML front-matter (`url`, `title`,
 `saved` date, `tags: [browser]` — `url`/`title` are YAML-double-quoted with
 `\`/`"`/newlines escaped), a `## Summary` section, then one `## Mark N`
 section per annotation on that URL (selector, excerpt, comment). The note
