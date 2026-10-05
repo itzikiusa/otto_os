@@ -576,8 +576,6 @@ fn parse_turn(raw: &str) -> (String, Option<String>, Option<String>) {
     (reply, updated, summary)
 }
 
-/// Truncate `text` to at most `max` chars, appending an ellipsis when cut. Keeps
-/// the prompt bounded so a sprawling report/summary doesn't blow the budget.
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
