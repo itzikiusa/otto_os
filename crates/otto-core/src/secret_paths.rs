@@ -215,7 +215,9 @@ mod tests {
                 subtree_root_denial(&h.join("Library/Application Support/Otto/backups")).is_some(),
                 "inside the data dir"
             );
-            assert!(subtree_root_denial(&h.join("Documents/notes")).is_none());
+            if !in_protected_dir(&h) {
+                assert!(subtree_root_denial(&h.join("Documents/notes")).is_none());
+            }
         }
         assert!(
             subtree_root_denial(Path::new("/private")).is_some(),

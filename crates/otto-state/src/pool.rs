@@ -550,11 +550,12 @@ mod tests {
     /// can't start a write transaction while it is open.
     #[tokio::test]
     async fn acquire_begin_is_immediate() {
-        use sqlx::{Acquire as _, ConnectOptions as _, Connection as _};
+        use sqlx::{ConnectOptions as _, Connection as _};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.db");
         let pool = crate::open(&path).await.unwrap();
-        let tx = (&pool).begin().await.unwrap();
+        // Explicitly the TRAIT method (the inherent `begin` would win `.begin()`).
+        let tx = sqlx::Acquire::begin(&pool).await.unwrap();
         let mut other = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&path)
             .busy_timeout(std::time::Duration::ZERO)
