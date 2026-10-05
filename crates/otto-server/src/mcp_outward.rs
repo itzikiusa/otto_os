@@ -1984,7 +1984,7 @@ mod tests {
         ));
         assert!(refs_need_lookup(
             "send_message",
-            &json!({"session_id": id, "workspace_id": "elsewhere"}),
+            &json!({"session_id": id}),
             false
         ));
     }
