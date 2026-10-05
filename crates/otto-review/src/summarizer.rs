@@ -22,7 +22,13 @@ impl Attempt {
         } else {
             provider.trim()
         };
-        let mut meta = serde_json::json!({ "source": "review_summarizer" });
+        // Confined + no project settings, like every reviewer (see
+        // `session::review_session_meta`): it runs in the same checkout.
+        let mut meta = serde_json::json!({
+            "source": "review_summarizer",
+            "read_only": true,
+            "project_settings": false,
+        });
         if !model.trim().is_empty() {
             meta["model"] = model.trim().into();
         }
