@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import { plural } from '../../lib/plural';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   // Shared diff renderer (Changes / commit / PR views): unified or
@@ -874,7 +875,7 @@
   function composerFocus(e: FocusEvent): void {
     const el = e.currentTarget as HTMLElement | null;
     if (!el) return;
-    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+    requestAnimationFrame(() => el.scrollIntoView({ block: 'center', behavior: scrollBehavior() }));
   }
 
   // ── Hunk / line staging (WIP mode) ─────────────────────────────────────────
@@ -1189,9 +1190,9 @@
       title={sub.path}
     >
       <span class="nav-dir-chevron">
-        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={10} />
+        <Icon name={navDirCollapsed[sub.path] ? 'chevronRight' : 'chevronDown'} size={12} />
       </span>
-      <Icon name="folder" size={11} />
+      <Icon name="folder" size={12} />
       <span class="nav-dir-label">{sub.label}</span>
     </button>
   {/snippet}
@@ -1314,7 +1315,7 @@
         <div class="dfile-headrow">
           <button class="dfile-head" aria-expanded={!r.collapsed} onclick={() => toggleCollapsed(r.file)}>
             <span class="dfile-chevron">
-              <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={11} />
+              <Icon name={r.collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
             </span>
             <span class="dfile-path mono" dir="ltr">
               {#if r.file.old_path}{r.file.old_path}<span class="rename-arrow"> → </span>{/if}{r.file.path}
@@ -2025,7 +2026,7 @@
     background: var(--accent-soft);
   }
   .hunk-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .hunk-btn.danger {

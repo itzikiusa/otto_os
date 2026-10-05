@@ -362,7 +362,7 @@
     box-shadow: var(--glass-shadow);
   }
   .seg-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

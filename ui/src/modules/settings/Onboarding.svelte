@@ -247,7 +247,7 @@
         <div class="tools">
           <div class="tool-row">
             <span class="tool-status" class:ok={clickhouse?.found}>
-              {#if clickhouse?.found}<Icon name="check" size={12} />{:else}<Icon name="x" size={11} />{/if}
+              {#if clickhouse?.found}<Icon name="check" size={12} />{:else}<Icon name="x" size={12} />{/if}
             </span>
             <span class="mono">clickhouse</span>
             <span class="grow"></span>
@@ -277,7 +277,7 @@
           {#each auth.meta?.tools ?? [] as t (t.name)}
             <div class="tool-row">
               <span class="tool-status" class:ok={t.found}>
-                {#if t.found}<Icon name="check" size={12} />{:else}<Icon name="x" size={11} />{/if}
+                {#if t.found}<Icon name="check" size={12} />{:else}<Icon name="x" size={12} />{/if}
               </span>
               <span class="mono">{t.name}</span>
               <span class="grow"></span>
@@ -434,7 +434,7 @@
     line-height: 1.5;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .tools {
     display: flex;

@@ -765,7 +765,7 @@
   {#snippet leading()}
     {#if creating || editId}
       <button class="icon-btn" title="Back to Scheduled Tasks" aria-label="Back to Scheduled Tasks" disabled={busy} onclick={closeForm}>
-        <Icon name="chevronLeft" size={15} />
+        <Icon name="chevronLeft" size={14} />
       </button>
     {/if}
   {/snippet}

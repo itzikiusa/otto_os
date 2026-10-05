@@ -40,7 +40,7 @@
       aria-current={it.id === selectedId ? 'true' : undefined}
       onclick={() => onOpen(it.id)}
     >
-      <span class="wi-icon" title={KIND_LABEL[it.kind]}><Icon name={KIND_ICON[it.kind]} size={15} /></span>
+      <span class="wi-icon" title={KIND_LABEL[it.kind]}><Icon name={KIND_ICON[it.kind]} size={14} /></span>
       <span class="wi-main">
         <span class="wi-title" title={it.title}>{it.title}</span>
         <span class="wi-sub">

@@ -446,7 +446,7 @@
     background: var(--accent-faint);
   }
   .load-more-btn:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

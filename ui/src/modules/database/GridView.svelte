@@ -1440,7 +1440,7 @@
     padding: 4px 10px;
   }
   .grid :global(.cell-input:disabled) {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .grid :global(td mark) {
     background: var(--accent-line);

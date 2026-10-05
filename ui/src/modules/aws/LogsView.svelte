@@ -657,7 +657,7 @@
             {#each saved as s (s.name)}
               <span class="sq-chip">
                 <button class="chip-l" onclick={() => (query = s.query)} title={s.query}>{s.name}</button>
-                <button class="chip-x" onclick={() => void deleteSaved(s)} aria-label={`Delete saved query ${s.name}`} title="Delete"><Icon name="x" size={10} /></button>
+                <button class="chip-x" onclick={() => void deleteSaved(s)} aria-label={`Delete saved query ${s.name}`} title="Delete"><Icon name="x" size={12} /></button>
               </span>
             {/each}
           </div>

@@ -82,7 +82,7 @@
     </button>
     {#if showSections}
       <ul class="secs">
-        {#each model.sections as s (s.label)}<li class:missing={!s.present}><Icon name={s.present ? 'check' : 'x'} size={11} />{s.label}</li>{/each}
+        {#each model.sections as s (s.label)}<li class:missing={!s.present}><Icon name={s.present ? 'check' : 'x'} size={12} />{s.label}</li>{/each}
       </ul>
     {/if}
   </div>

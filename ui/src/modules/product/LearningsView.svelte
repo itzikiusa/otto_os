@@ -336,7 +336,7 @@
           <div class="learning-card" class:inactive={!l.active}>
             {#if !l.active}
               <div class="suggested-banner">
-                <Icon name="zap" size={11} />
+                <Icon name="zap" size={12} />
                 AI-suggested · pending acceptance
               </div>
             {/if}
@@ -413,7 +413,7 @@
               {#if tags.length > 0}
                 <div class="tags-row">
                   {#each tags as tag}
-                    <span class="tag-chip"><Icon name="tag" size={10} />{tag}</span>
+                    <span class="tag-chip"><Icon name="tag" size={12} />{tag}</span>
                   {/each}
                 </div>
               {/if}
@@ -424,7 +424,7 @@
                     {@const href = refHref(r)}
                     {#if href}
                       <a class="ref-badge {refClass(r.type)}" href={href} target="_blank" rel="noopener noreferrer">
-                        <Icon name="link" size={10} />
+                        <Icon name="link" size={12} />
                         {r.label || r.ref}
                       </a>
                     {:else}
@@ -460,7 +460,7 @@
           <div class="learning-card avoid-card" class:inactive={!l.active}>
             {#if !l.active}
               <div class="suggested-banner">
-                <Icon name="zap" size={11} />
+                <Icon name="zap" size={12} />
                 AI-suggested · pending acceptance
               </div>
             {/if}
@@ -537,7 +537,7 @@
               {#if tags.length > 0}
                 <div class="tags-row">
                   {#each tags as tag}
-                    <span class="tag-chip"><Icon name="tag" size={10} />{tag}</span>
+                    <span class="tag-chip"><Icon name="tag" size={12} />{tag}</span>
                   {/each}
                 </div>
               {/if}
@@ -548,7 +548,7 @@
                     {@const href = refHref(r)}
                     {#if href}
                       <a class="ref-badge {refClass(r.type)}" href={href} target="_blank" rel="noopener noreferrer">
-                        <Icon name="link" size={10} />
+                        <Icon name="link" size={12} />
                         {r.label || r.ref}
                       </a>
                     {:else}
@@ -835,7 +835,7 @@
   }
   .icon-act:hover { background: var(--hover); color: var(--text); }
   .icon-act.danger:hover { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
-  .icon-act:disabled { opacity: 0.4; cursor: not-allowed; }
+  .icon-act:disabled { opacity: var(--disabled-opacity); cursor: not-allowed; }
 
   /* Card body (markdown) */
   .card-body {

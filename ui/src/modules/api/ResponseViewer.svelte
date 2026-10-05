@@ -375,7 +375,7 @@
       {#if apiClient.sending}
         <p class="empty-title" role="status">Sending…</p>
       {:else}
-        <Icon name="send" size={compact ? 20 : 24} />
+        <Icon name="send" size={compact ? 24 : 24} />
         <p class="empty-title">Send the request to see the response here</p>
         {#if !compact}
           <p class="empty-sub">Press <kbd>⌘</kbd><kbd>↵</kbd> or click Send. You’ll see the status, timing, headers and body.</p>

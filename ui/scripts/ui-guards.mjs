@@ -105,6 +105,10 @@
 //                     stroke-dasharray: data bars and meters show the value,
 //                     they don't animate to it (foundations §8). A resize the
 //                     user drags carries `ui-guards: allow`.
+//   disabled-opacity  an `opacity` literal (0.2–0.7) in a disabled-state rule set
+//                     (`:disabled`, `[disabled]`, `[aria-disabled…]`,
+//                     `.disabled`) → var(--disabled-opacity) (0.45, tokens.css);
+//                     `node scripts/codemods/disabled-opacity.mjs` rewrites them.
 //   local-spinner     a component rule set spinning its own ring (`animation:
 //                     … spin …`, incl. otto-spin) → the global `.spinner`
 //                     (`--spinner-size` for the diameter).
@@ -125,6 +129,22 @@
 //                     label…). Fix the markup (a real <button>, a label)
 //                     instead of muting the compiler.
 //
+// More ratcheted MARKUP rules (script/style/comments blanked):
+//
+//   icon-size         an `<Icon size={…}>` literal off the icon scale
+//                     (foundations §9): 12, 13–14, 16, 24–26 — and 20 only in
+//                     the phone touch chrome (ICON_TOUCH_CHROME below). Numeric
+//                     literals inside an expression count (`compact ? 16 : 26`).
+//                     `node scripts/codemods/icon-sizes.mjs` snaps them.
+//   inline-retry      a hand-rolled Retry button (`…Retry</button>`) outside
+//                     lib/components → LoadState (`error` + `onretry`), which
+//                     owns the one "Couldn’t load X / detail / Retry" look
+//                     (components.md §11).
+//   local-tablist     a `role="tablist"` outside lib/components (a `.segmented`
+//                     tablist is exempt — components.md §3) → <Tabs>
+//                     (lib/components/Tabs.svelte: one underline style, arrow
+//                     keys, roving focus).
+//
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
 //
@@ -133,6 +153,9 @@
 //                     meters, a touch keep-alive) → pollWhileVisible /
 //                     liveQuery (lib/poll.ts, lib/live.ts), which pause while
 //                     hidden, never overlap, and follow the events socket.
+//   smooth-scroll     a literal `behavior: 'smooth'` — JS scrolling ignores the
+//                     CSS reduced-motion override → `behavior: scrollBehavior()`
+//                     (lib/motion.ts); a Svelte transition takes motionMs(ms).
 //   body-style        `document.body.style.cursor|userSelect = …` or
 //                     `documentElement.style.setProperty(…)` → a
 //                     full-document style recalc per write (SF-02/SF-03);
@@ -291,6 +314,11 @@ const RULES = {
   'local-spinner': 'local spinning ring (animation: …spin…) — use the global .spinner (app.css)',
   'danger-menu-ellipsis': 'danger menu row whose label doesn’t end in “…” — a destructive row that opens a confirm ends in “…”',
   'e2e-wait-timeout': 'waitForTimeout in an E2E spec — wait for the condition (expect…toBeVisible / expect.poll / waitForResponse); an absence-proving sleep carries `ui-guards: allow`',
+  'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
+  'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
+  'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
+  'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
+  'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -519,6 +547,13 @@ for (const f of files) {
       if (cls) hit('local-pill-class', f, s.decls[0].at, `"${s.sel}" draws a local .${cls}`);
     }
   }
+  const DISABLED_SEL = /:disabled\b|\[disabled\]|\[aria-disabled|\.disabled(?![\w-])/;
+  for (const s of sets) {
+    if (!DISABLED_SEL.test(s.sel)) continue;
+    for (const d of s.decls) {
+      if (d.prop === 'opacity' && /^0?\.(?:[2-6]\d*|7)\s*(?:!important)?$/.test(d.value)) hit('disabled-opacity', f, d.at, `"${s.sel}" opacity: ${d.value}`);
+    }
+  }
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
@@ -609,7 +644,39 @@ for (const f of files) {
   }
 }
 
-// script-code rules: setInterval / document-level style writes.
+// ---------- ratcheted markup rules: icon-size / inline-retry / local-tablist ----------
+/** Phone touch chrome, where a 20 px icon is the documented exception (foundations §9). */
+const ICON_TOUCH_CHROME = new Set(['src/shell/BottomNav.svelte', 'src/shell/MobileActionBar.svelte', 'src/shell/App.svelte']);
+const ICON_SIZES = new Set([12, 13, 14, 16, 24, 25, 26]);
+for (const f of files) {
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = f.text
+    .replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, blank)
+    .replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank)
+    .replace(/<!--[\s\S]*?-->/g, blank);
+  if (f.rel !== 'src/lib/components/Icon.svelte') {
+    for (const m of markup.matchAll(/<Icon(?=[\s/>])/g)) {
+      const end = tagEnd(markup, m.index + 5);
+      if (end === -1) continue;
+      const size = /\ssize=\{([^{}]*)\}/.exec(markup.slice(m.index, end));
+      if (!size) continue;
+      for (const n of size[1].matchAll(/(?<![\w.'"-])(\d+)(?![\w.'"-])/g)) {
+        const v = Number(n[1]);
+        if (ICON_SIZES.has(v) || (v === 20 && ICON_TOUCH_CHROME.has(f.rel))) continue;
+        hit('icon-size', f, m.index, `<Icon size={${size[1].trim()}}>`);
+      }
+    }
+  }
+  if (!f.rel.startsWith('src/lib/components/')) {
+    for (const m of markup.matchAll(/\bRetry\b[^<>]*<\/button>/g)) hit('inline-retry', f, m.index, m[0].slice(0, 60));
+    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) {
+      if (/\bclass(?:=["{][^"}]*|:)\bsegmented\b/.test(m[0])) continue;
+      hit('local-tablist', f, m.index, m[0].slice(0, 80));
+    }
+  }
+}
+
+// script-code rules: setInterval / document-level style writes / smooth scroll.
 const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
 const BODY_STYLE =
   /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
@@ -619,6 +686,9 @@ for (const f of files) {
   if (f.path.endsWith('.svelte')) code = code.replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank);
   if (!INTERVAL_ALLOW.has(f.rel)) {
     for (const m of code.matchAll(INTERVAL)) hit('raw-set-interval', f, m.index, 'setInterval(');
+  }
+  if (f.rel !== 'src/lib/motion.ts') {
+    for (const m of code.matchAll(/\bbehavior\s*:\s*(['"])smooth\1/g)) hit('smooth-scroll', f, m.index, m[0]);
   }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));

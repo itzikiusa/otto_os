@@ -483,7 +483,7 @@
     font-size: var(--fs-xs);
   }
   .input:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .pd-preview {

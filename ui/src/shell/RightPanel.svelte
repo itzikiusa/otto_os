@@ -416,7 +416,7 @@
         title={t.label}
         aria-label={t.label}
       >
-        <Icon name={t.icon} size={15} />
+        <Icon name={t.icon} size={14} />
       </button>
     {/each}
   </aside>

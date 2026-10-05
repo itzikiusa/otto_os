@@ -537,7 +537,10 @@
       popRight = 8;
       return;
     }
-    popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+    // Offset from the pane's inline END (inset-inline-end), so RTL mirrors.
+    const rtl = mainEl ? getComputedStyle(mainEl).direction === 'rtl' : false;
+    const fromEnd = rtl ? b.left - m.left : m.right - b.right;
+    popRight = Math.max(8, Math.min(fromEnd, m.width - width - 8));
   }
 
   /** A workflow row's ⋯ / right-click menu. */
@@ -1965,7 +1968,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Stop takes the primary's place (same
              verb as the confirm dialog's "Stop run"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={11} /> Stop run…</button>
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={12} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -2080,7 +2083,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style="right:{popRight}px">
+        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style:inset-inline-end="{popRight}px">
           {#each types as t (t.kind)}
             <button class="pal-item" onclick={() => addNode(t)}>
               <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
@@ -2093,7 +2096,7 @@
         </div>
       {/if}
       {#if runsOpen}
-        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style="right:{popRight}px">
+        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style:inset-inline-end="{popRight}px">
           <LoadState
             what="runs"
             variant="compact"
@@ -2384,7 +2387,7 @@
                   onclick={stop}
                   title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="stop" size={11} /> Stop run…
+                  <Icon name="stop" size={12} /> Stop run…
                 </button>
               {/if}
               <button
@@ -2453,7 +2456,7 @@
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
-              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={11} /> From here</button>
+              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={12} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
             <!-- Shared Provider + Model editor for every agent-running node —
@@ -2876,7 +2879,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Steps — run in order each iteration</span>
                 <button class="btn small ghost" type="button" onclick={addLoopStep}>
-                  <Icon name="plus" size={11} /> Add step
+                  <Icon name="plus" size={12} /> Add step
                 </button>
               </div>
               {#if loopSteps().length === 0}
@@ -2901,7 +2904,7 @@
                       oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
                     />
                     <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   {#if LOOP_AGENT_KINDS.includes(step.kind)}
@@ -3015,7 +3018,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
                 <button class="btn small ghost" type="button" onclick={addReviewer}>
-                  <Icon name="plus" size={11} /> Add
+                  <Icon name="plus" size={12} /> Add
                 </button>
               </div>
               {#if reviewers().length === 0}
@@ -3036,7 +3039,7 @@
                       oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
                     />
                     <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   <div class="rv-provs">
@@ -3405,8 +3408,7 @@
             <!-- Docked (or bottom) with nothing selected: a centered, intentional
                  empty state — not a stray line floating at the top. -->
             <div class="insp-blank">
-              <Icon name="split" size={30} />
-              <p>Select a node or connection<br />to configure it.</p>
+              <EmptyState icon="split" title="Select a node or connection to configure it" />
             </div>
           {/if}
         </div>
@@ -4009,18 +4011,6 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    padding: 24px 16px;
-    color: var(--text-dim);
-    text-align: center;
-  }
-  .insp-blank :global(svg) {
-    opacity: 0.5;
-  }
-  .insp-blank p {
-    font-size: var(--fs-s);
-    line-height: 1.5;
-    margin: 0;
   }
   .title-edit {
     background: none;
@@ -4205,7 +4195,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
@@ -4736,7 +4726,7 @@
     gap: 8px;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .resumed-banner {
     display: flex;

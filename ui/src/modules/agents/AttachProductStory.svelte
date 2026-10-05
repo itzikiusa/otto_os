@@ -172,7 +172,7 @@
     border-color: var(--accent-line);
   }
   .story-row:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .story-key {

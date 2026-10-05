@@ -399,7 +399,7 @@
     font-size: var(--fs-s);
   }
   .form input:disabled {
-    opacity: 0.65;
+    opacity: var(--disabled-opacity);
   }
   .warning {
     margin: 0;

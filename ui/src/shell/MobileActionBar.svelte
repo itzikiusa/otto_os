@@ -42,7 +42,7 @@
     title="Open command palette" aria-keyshortcuts="Meta+K"
     aria-label="Open command palette"
   >
-    <Icon name="command" size={18} />
+    <Icon name="command" size={20} />
     <span class="ab-label">Palette</span>
   </button>
 
@@ -52,7 +52,7 @@
     title="New session" aria-keyshortcuts="Meta+T"
     aria-label="New session"
   >
-    <Icon name="plus" size={18} />
+    <Icon name="plus" size={20} />
     <span class="ab-label">New</span>
   </button>
 
@@ -62,7 +62,7 @@
     title="Close current tab" aria-keyshortcuts="Meta+W"
     aria-label="Close current tab"
   >
-    <Icon name="x" size={18} />
+    <Icon name="x" size={20} />
     <span class="ab-label">Close</span>
   </button>
 
@@ -72,7 +72,7 @@
     title="Find in terminal or page" aria-keyshortcuts="Meta+F"
     aria-label="Find in terminal or page"
   >
-    <Icon name="search" size={18} />
+    <Icon name="search" size={20} />
     <span class="ab-label">Find</span>
   </button>
 
@@ -83,7 +83,7 @@
       title="Broadcast message to all sessions" aria-keyshortcuts="Meta+Shift+B"
       aria-label="Broadcast message to all sessions"
     >
-      <Icon name="send" size={18} />
+      <Icon name="send" size={20} />
       <span class="ab-label">Broadcast</span>
     </button>
   {/if}

@@ -609,7 +609,7 @@
     color: var(--text);
   }
   .s3d-icon-btn:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .s3d-eye,

@@ -157,7 +157,7 @@
     border-color: transparent;
   }
   .toggle:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .body {

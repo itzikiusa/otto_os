@@ -186,7 +186,7 @@
             <span class="lc-name">{label(s)}</span>
             {#if s.format}
               <span class="lc-format-chip" title={formatMeta(s.format).label}>
-                <Icon name={formatMeta(s.format).icon} size={10} />
+                <Icon name={formatMeta(s.format).icon} size={12} />
                 {formatMeta(s.format).label}
               </span>
             {/if}

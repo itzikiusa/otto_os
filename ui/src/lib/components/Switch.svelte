@@ -61,7 +61,7 @@
     background: var(--success);
   }
   .sw:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .sw:focus-visible {

@@ -526,7 +526,7 @@
               closeTab(t.id);
             }}
           >
-            <Icon name="x" size={9} />
+            <Icon name="x" size={12} />
           </button>
         </div>
       {/each}
@@ -669,7 +669,7 @@
     <div class="frame-foot">
       <span class="dim ellipsis" title={current}>{current}</span>
       <button class="link" onclick={() => openExternal(current)}>
-        <Icon name="external" size={11} /> Open externally
+        <Icon name="external" size={12} /> Open externally
       </button>
     </div>
   {:else}

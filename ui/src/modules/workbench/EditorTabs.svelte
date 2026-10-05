@@ -51,7 +51,7 @@
           title="Close tab (⌘W)"
           onclick={() => workbench.closeTab(id)}
         >
-          <Icon name="x" size={11} />
+          <Icon name="x" size={12} />
         </button>
       </div>
     {/each}

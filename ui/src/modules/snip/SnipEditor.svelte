@@ -932,7 +932,7 @@
     background: var(--danger-soft);
   }
   .tb:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .swatch {

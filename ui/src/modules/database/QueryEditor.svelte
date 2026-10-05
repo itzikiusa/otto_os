@@ -1009,14 +1009,17 @@
       window.removeEventListener('keydown', onKey);
     };
   });
-  // Clamp the popover into the viewport (never off the right/left edge); the
-  // CSS max-height + overflow cap the vertical side.
+  // Clamp the popover into the viewport: never off the right/left edge, and
+  // its height capped to the room below its top so the list scrolls instead
+  // of running off the bottom (AGENTS.md "Floating UI must survive long content").
   $effect(() => {
     const el = kbdPopEl;
     if (!shortcutsOpen || !el) return;
     el.style.transform = '';
-    const r = el.getBoundingClientRect();
     const vw = window.innerWidth;
+    el.style.maxWidth = `${Math.max(160, vw - 16)}px`;
+    el.style.maxHeight = `${Math.max(120, window.innerHeight - el.getBoundingClientRect().top - 8)}px`;
+    const r = el.getBoundingClientRect();
     let dx = 0;
     if (r.right > vw - 8) dx = vw - 8 - r.right;
     if (r.left + dx < 8) dx = 8 - r.left;
@@ -1059,12 +1062,12 @@
         }}
       >
         {#if t.pinned}
-          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={10} /></span>
+          <span class="qe-tab-pin" title="Pinned"><Icon name="pin" size={12} /></span>
         {/if}
         {#if t.agent}
           <!-- Opened by an agent session over UI control: always attributed. -->
           <span class="qe-tab-agent" title="Opened by {t.agent.label}" aria-label="Opened by {t.agent.label}">
-            <Icon name="sparkle" size={10} />
+            <Icon name="sparkle" size={12} />
           </span>
         {/if}
         {#if renaming === i}
@@ -1094,7 +1097,7 @@
                 void closeTabAt(i);
               }}
             >
-              <Icon name="x" size={10} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         {/if}
@@ -1410,7 +1413,7 @@
           onclick={() => void probeMongosh()}
           title="Probe the daemon for the mongosh CLI again"
         >
-          <Icon name="refresh" size={10} /> Retry
+          <Icon name="refresh" size={12} /> Retry
         </button>
       {/if}
     </div>
@@ -1846,14 +1849,13 @@
     inset-inline-start: 0;
     z-index: var(--z-popover);
     min-width: 220px;
-    /* Never off-screen: cap to the viewport and scroll inside (the JS clamp
-       handles the horizontal side). */
-    max-width: calc(100vw - 16px);
-    max-height: min(60vh, calc(100vh - 120px));
+    /* Never off-screen: the JS clamp below caps both sides against
+       window.innerWidth/innerHeight (vh lies on iOS and in split panes);
+       the list scrolls inside. */
     overflow-y: auto;
     padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
     background: var(--surface);
     box-shadow: var(--glass-shadow);
     display: flex;

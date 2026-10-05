@@ -205,7 +205,7 @@
     <button class="coach-close" title="Dismiss" aria-label="Dismiss the getting-started guide" onclick={dismiss}><Icon name="x" size={13} /></button>
 
     <div class="coach-head">
-      <div class="coach-mark"><Icon name="zap" size={20} /></div>
+      <div class="coach-mark"><Icon name="zap" size={24} /></div>
       <div>
         <h2>Let’s launch your first agent</h2>
         <p>A few quick checks, then Otto starts a coding agent in your workspace.</p>
@@ -223,7 +223,7 @@
           <div class="tool-chips">
             {#each agentTools as t (t.name)}
               <Badge tone={t.found && t.checked ? 'ok' : 'neutral'} title={providerReadiness(t.name).message}>
-                <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={10} />
+                <Icon name={!t.checked ? 'clock' : t.found ? 'check' : 'x'} size={12} />
                 {t.name}{!t.checked ? ' · not checked yet' : t.found && t.version ? ` ${t.version}` : ''}
               </Badge>
             {/each}
@@ -246,7 +246,7 @@
               </li>
             </ul>
             <button class="btn small" disabled={checkingProviders} onclick={recheckProviders}>
-              <Icon name="refresh" size={11} /> {checkingProviders ? 'Checking…' : 'Re-check'}
+              <Icon name="refresh" size={12} /> {checkingProviders ? 'Checking…' : 'Re-check'}
             </button>
             {#if providerCheckFailed}
               <p role="status">Could not check agent CLIs. Try again.</p>
@@ -303,7 +303,7 @@
               <div class="skill-row">
                 <span class="mono skill-name">{s.name}</span>
                 {#if installed}
-                  <Badge tone="ok"><Icon name="check" size={10} /> Installed</Badge>
+                  <Badge tone="ok"><Icon name="check" size={12} /> Installed</Badge>
                 {:else}
                   <button class="btn small" disabled={skillBusy.has(s.name)} onclick={() => installSkill(s)}>
                     {skillBusy.has(s.name) ? 'Installing…' : s.state === 'update_available' ? 'Update' : 'Install'}

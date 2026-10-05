@@ -537,7 +537,7 @@
       />
       {#if database.objectSearchQuery || hits !== null}
         <button class="tree-search-clear" onclick={clearSearch} aria-label="Clear filter" title="Clear filter">
-          <Icon name="x" size={10} />
+          <Icon name="x" size={12} />
         </button>
       {/if}
     </div>
@@ -640,7 +640,7 @@
           {@render nodeRow(row.node, row.depth)}
         {:else if row.t === 'failed'}
           <div class="node-failed" class:fixed-h={windowed} style="padding-inline-start: {(row.depth + 1) * 13 + 18}px">
-            <Icon name="x" size={10} />
+            <Icon name="x" size={12} />
             <span>failed to load</span>
             <button class="node-failed-retry" onclick={() => expandNode(row.node)}>retry</button>
           </div>

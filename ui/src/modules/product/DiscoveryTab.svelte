@@ -206,7 +206,7 @@
                (never a control nested inside another control). -->
           <div class="run-head-row">
             <button class="run-header" aria-expanded={isOpen} onclick={() => toggleRun(summary.run.id)}>
-              <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+              <span class="coll-arrow" aria-hidden="true"><Icon name={isOpen ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               <span class="status-badge"><StatusBadge status={runStatus(summary.derived_status)} /></span>
               <span class="run-date">{relDate(summary.run.created_at)}</span>
               <span class="run-progress">

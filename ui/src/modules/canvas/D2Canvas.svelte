@@ -26,6 +26,7 @@
   import { copyText } from '../../lib/clipboard';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
 
   interface Props {
@@ -387,17 +388,11 @@
           </div>
         {:else if notD2}
           <div class="empty">
-            <Icon name="shapes" size={28} />
-            <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It’s labeled D2 but contains an Excalidraw scene. Create a new
-              <strong>Excalidraw</strong> canvas to edit those shapes.</p>
+            <EmptyState icon="shapes" title="This canvas holds Excalidraw content" body="It’s labeled D2 but contains an Excalidraw scene. Create a new Excalidraw canvas to edit those shapes." />
           </div>
         {:else if !renderError}
           <div class="empty">
-            <Icon name="layers" size={28} />
-            <p class="lead">D2 diagram</p>
-            <p class="hint">Describe it in <strong>Ask Otto</strong>, or open <strong>Code</strong> to
-              edit the D2 yourself — both write the same diagram and render here live.</p>
+            <EmptyState icon="layers" title="D2 diagram" body="Describe it in Ask Otto, or open Code to edit the D2 yourself — both write the same diagram and render here live." />
           </div>
         {/if}
 
@@ -440,13 +435,13 @@
           <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
           <button onclick={downloadSvg} title="Download SVG" aria-label="Download SVG">
-            <Icon name="file" size={15} />
+            <Icon name="file" size={14} />
           </button>
           <button onclick={downloadPng} title="Download PNG" aria-label="Download PNG">
-            <Icon name="image" size={15} />
+            <Icon name="image" size={14} />
           </button>
           <button onclick={() => void copySource()} title="Copy source" aria-label="Copy source">
-            <Icon name="copy" size={15} />
+            <Icon name="copy" size={14} />
           </button>
         </div>
       {/if}
@@ -551,23 +546,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    text-align: center;
-    color: var(--text-dim);
-    padding: 24px;
     pointer-events: none;
-  }
-  .empty .lead {
-    margin: 6px 0 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .empty .hint {
-    margin: 0;
-    font-size: var(--fs-m);
-    max-width: 360px;
-    line-height: 1.5;
   }
   .err {
     position: absolute;

@@ -5,6 +5,7 @@
   // Controls auto-hide; keys: →/Space/← Home/End/Esc, N (notes), F (fullscreen).
   import { untrack } from 'svelte';
   import { fly } from 'svelte/transition';
+  import { motionMs } from '../../lib/motion';
   import Icon from '../../lib/components/Icon.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
   import { canvas } from '../../lib/stores/canvas.svelte';
@@ -249,7 +250,7 @@
               style:top={`${n.y - bbox.y}px`}
               style:width={`${n.w}px`}
               style:height={`${n.h}px`}
-              in:fly={{ y: 8, duration: 200 }}
+              in:fly={{ y: 8, duration: motionMs(160) }}
             >
               {#if n.kind === 'sticky'}
                 <div class="sticky" style:background={n.sticky?.color ?? '#ffe9a8'}>

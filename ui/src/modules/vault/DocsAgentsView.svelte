@@ -487,12 +487,12 @@
 
 <div class="docs-agents">
   <div class="inner">
-    <h2><Icon name="zap" size={15} /> Docs agent</h2>
+    <h2><Icon name="zap" size={14} /> Docs agent</h2>
     {#if pollError}
       <div class="poll-err" role="alert">
         <Icon name="warning" size={13} />
         <span>Couldn’t refresh the docs agent’s status — it may still be running. {pollError}</span>
-        <button class="btn small" onclick={() => void poll()}>Retry</button>
+        <button class="btn small" onclick={() => void poll()}>Retry</button> <!-- ui-guards: allow — re-polls a live agent; the view keeps its data -->
       </div>
     {/if}
 
@@ -663,7 +663,7 @@
           <div class="skill-chips">
             {#each runSkills as s (s)}
               <button class="skill-chip" title="Open {s}" onclick={() => void viewSkill(s)}>
-                <Icon name="function" size={11} />
+                <Icon name="function" size={12} />
                 {s}
               </button>
             {/each}
@@ -913,7 +913,7 @@
                         <p class="agent-err">{reviewer.error}</p>
                       {/if}
                       {#if reviewer.findings.length === 0 && reviewer.state === 'done'}
-                        <p class="clean-verdict"><Icon name="check" size={11} /> No findings</p>
+                        <p class="clean-verdict"><Icon name="check" size={12} /> No findings</p>
                       {:else if reviewer.findings.length > 0}
                         <div class="finding-list">
                           {#each reviewer.findings as finding, findingIndex (`${reviewer.index}-${findingIndex}`)}
@@ -950,7 +950,7 @@
                 {#if round.revision.state !== 'skipped'}
                   <div class="revision-card">
                     <div class="agent-top">
-                      <span class="revision-mark"><Icon name="edit" size={11} /></span>
+                      <span class="revision-mark"><Icon name="edit" size={12} /></span>
                       <span class="agent-name">Final author revision</span>
                       <span class="grow"></span>
                       {#if round.revision.session_id}
@@ -1123,7 +1123,7 @@
     white-space: nowrap;
   }
   .tpl-use:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .tpl-hint {
@@ -1330,7 +1330,7 @@
     cursor: pointer;
   }
   .primary:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 
@@ -1370,7 +1370,7 @@
     border-color: var(--accent);
   }
   .ghost:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .rows {
@@ -1704,7 +1704,7 @@
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .run-del:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .run-row {

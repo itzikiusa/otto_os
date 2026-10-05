@@ -314,7 +314,7 @@
             <div class="se-item-top">
               {#if compareMode}
                 <span class="se-check" class:on={compareSel.has(r.id)}>
-                  {#if compareSel.has(r.id)}<Icon name="check" size={11} />{/if}
+                  {#if compareSel.has(r.id)}<Icon name="check" size={12} />{/if}
                 </span>
               {/if}
               <span class="se-item-name" title={r.source_skill}>{r.source_skill}</span>

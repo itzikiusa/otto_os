@@ -99,7 +99,7 @@
 
 <section class="mockup-assist" class:embedded>
   <header class="ma-head">
-    <span class="ma-title"><Icon name="zap" size={15} /> {embedded ? 'Assistant' : 'Design agent'}</span>
+    <span class="ma-title"><Icon name="zap" size={14} /> {embedded ? 'Assistant' : 'Design agent'}</span>
     <div class="ma-format" role="group" aria-label="Design format">
       {#each DESIGN_FORMATS as f (f)}
         <button
@@ -117,7 +117,7 @@
     </label>
     {#if mockupAssist.busy}<span class="ma-working"><LiveWorkingDot label="Working…" /></span>{/if}
     <button class="ma-close" onclick={onclose} aria-label="Close design agent" title="Close design agent">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -234,7 +234,7 @@
   }
   .ma-format button:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   /* Locked chips: only the active one matters — hide the rest in the narrow dock. */
   .embedded .ma-format button:disabled:not(.on) {
@@ -255,7 +255,7 @@
   }
   .ma-provider select:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .ma-working {
     display: inline-flex;
@@ -383,7 +383,7 @@
     cursor: pointer;
   }
   .ma-send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

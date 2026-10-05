@@ -2,6 +2,7 @@
   // Full-text search panel (left sidebar mode). FTS5 with `tag:` / `path:` /
   // `type:` operators; snippets come highlighted with ‹› markers from bm25.
   import { vault } from './vault.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   let input = $state<HTMLInputElement | undefined>();
 
@@ -32,10 +33,7 @@
   {#if vault.searching}
     <div class="dim" role="status">Searching…</div>
   {:else if vault.searchError}
-    <div class="err" role="alert">
-      <span>Search failed: {vault.searchError}</span>
-      <button class="btn small" onclick={() => void vault.runSearch()}>Retry</button>
-    </div>
+    <LoadState variant="compact" what="search results" error={vault.searchError} empty onretry={() => void vault.runSearch()} />
   {:else if vault.searchQuery.trim() && vault.searchQuery.trim() !== vault.searchedQuery}
     <!-- Search runs on Enter: "No results" before it ran was a lie. -->
     <div class="dim">Press Enter to search</div>
@@ -101,18 +99,6 @@
   .hit.reserved .t {
     color: var(--text-dim);
     font-style: italic;
-  }
-  .err {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 6px;
-    padding: 6px 8px;
-    border-radius: var(--radius-s);
-    background: var(--danger-soft);
-    color: var(--text);
-    font-size: var(--fs-s);
-    overflow-wrap: anywhere;
   }
   .t {
     font-size: var(--fs-s);

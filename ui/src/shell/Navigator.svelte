@@ -806,7 +806,7 @@
         />
         {#if sessionQuery}
           <button class="search-clear" onclick={() => (sessionQuery = '')} aria-label="Clear search" title="Clear search">
-            <Icon name="x" size={11} />
+            <Icon name="x" size={12} />
           </button>
         {/if}
       </div>
@@ -820,7 +820,7 @@
           onclick={() => (ws.needsYouFilter = !ws.needsYouFilter)}
           title="Show only sessions waiting on you"
         >
-          <Icon name="bell" size={11} />
+          <Icon name="bell" size={12} />
           <span class="grow">Needs you</span>
           {#if ws.needsYouCount > 0}
             <span class="needs-you-count">{ws.needsYouCount}</span>
@@ -883,12 +883,12 @@
               data-testid={`sidebar-group-head-${sec.group.id}`}
             >
               <span class="group-label">{sec.group.label}</span>
-              {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={11} /></span>{/if}
+              {#if fav}<span class="group-star" aria-hidden="true"><Icon name="star" size={12} /></span>{/if}
               {#if !open && sec.modules.some((m) => m.id === 'agents') && ws.workingCount > 0}
                 <span class="count-chip working" title="Working sessions">{ws.workingCount}</span>
               {/if}
               {#if !pinned}
-                <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={11} /></span>
+                <span class="group-chev"><Icon name={open ? 'chevronDown' : 'chevronRight'} size={12} /></span>
               {/if}
             </button>
             {#if secMovable}
@@ -952,7 +952,7 @@
           />
           {#if wsQuery}
             <button class="search-clear" onclick={() => (wsQuery = '')} aria-label="Clear workspace filter" title="Clear workspace filter">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           {/if}
         </div>
@@ -1265,9 +1265,9 @@
         aria-label={`Current workspace: ${ws.current.name}. Switch workspace`}
         data-testid="agents-current-ws"
       >
-        <Icon name="folder" size={11} />
+        <Icon name="folder" size={12} />
         <span class="ellipsis">{ws.current.name}</span>
-        <Icon name="chevronDown" size={10} />
+        <Icon name="chevronDown" size={12} />
       </button>
     {/if}
     {#if q ? fAgents.length > 0 : agentsOpen}
@@ -1279,10 +1279,10 @@
               <span>{agentSelIds.length > 0 ? `${agentSelIds.length} selected` : 'Select all'}</span>
             </label>
             <button class="row-action arch-del-sel" disabled={agentSelIds.length === 0} title="Archive selected sessions" aria-label="Archive selected sessions" data-testid="agents-archive-selected" onclick={() => void archiveSelectedAgents()}>
-              <Icon name="archive" size={11} /><span>Archive</span>
+              <Icon name="archive" size={12} /><span>Archive</span>
             </button>
             <button class="row-action danger arch-del-sel" disabled={agentSelIds.length === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="agents-delete-selected" onclick={() => void deleteSelectedAgents()}>
-              <Icon name="trash" size={11} /><span>Delete</span>
+              <Icon name="trash" size={12} /><span>Delete</span>
             </button>
           </div>
         {/if}
@@ -1308,7 +1308,7 @@
           { label: 'New session (no workspace)…', icon: 'home', action: newScratchSession },
         ])}
       >
-        <Icon name="home" size={11} />
+        <Icon name="home" size={12} />
         <span class="ellipsis">No workspace</span>
       </div>
       <div class="nested">
@@ -1328,7 +1328,7 @@
         {@const rows = g.sessions.filter(matches)}
         {#if rows.length > 0}
           <div class="ws-group-label" title="Sessions in workspace “{g.ws.name}”">
-            <Icon name="folder" size={11} />
+            <Icon name="folder" size={12} />
             <span class="ellipsis">{g.ws.name}</span>
           </div>
           <div class="nested">
@@ -1415,7 +1415,7 @@
         {#if ws.archivedLoaded}
           <span class="count-chip">{ws.archivedSessions.length}{ws.archivedHasMore ? '+' : ''}</span>
         {/if}
-        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+        <Icon name={archivedOpen ? 'chevronDown' : 'chevronRight'} size={12} />
       </button>
       {#if archivedOpen}
         <div class="nested">
@@ -1426,7 +1426,7 @@
                 <span>{archSelCount > 0 ? `${archSelCount} selected` : 'Select all'}</span>
               </label>
               <button class="row-action danger arch-del-sel" disabled={archSelCount === 0} title="Delete selected sessions" aria-label="Delete selected sessions" data-testid="archived-delete-selected" onclick={() => void deleteSelectedArchived()}>
-                <Icon name="trash" size={11} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
+                <Icon name="trash" size={12} /><span>Delete{archSelCount > 0 ? ` (${archSelCount})` : ''}</span>
               </button>
             </div>
           {/if}
@@ -1460,10 +1460,10 @@
               </div>
               {#if ws.canEditSession(s)}
                 <button class="row-action" title="Restore" aria-label="Restore session" onclick={() => ws.unarchiveSession(s.id)}>
-                  <Icon name="refresh" size={11} />
+                  <Icon name="refresh" size={12} />
                 </button>
                 <button class="row-action danger" title="Delete" aria-label="Delete session" onclick={() => void deleteSession(s.id)}>
-                  <Icon name="trash" size={11} />
+                  <Icon name="trash" size={12} />
                 </button>
               {/if}
             </div>
@@ -1561,7 +1561,7 @@
              hover / the active row so the list stays scannable. -->
         {#if resumable}
           <span class="susp-dot" role="img" aria-label={st.label} title={st.hint}>
-            <Icon name="refresh" size={10} />
+            <Icon name="refresh" size={12} />
           </span>
         {:else}
           <StatusDot state={st} />
@@ -1569,7 +1569,7 @@
         <span class="grow ellipsis">{s.title}</span>
         {#if st.key === 'needs-you'}
           <span class="needs-you-dot" role="img" title="Waiting on you" aria-label="Needs you">
-            <Icon name="bell" size={10} />
+            <Icon name="bell" size={12} />
           </span>
         {/if}
         {#if (sum && sum.total > 0) || proofRow}
@@ -1657,7 +1657,7 @@
     flex-shrink: 0;
   }
   .nav-head :global(.icon-btn:disabled) {
-    opacity: 0.3;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nav-title {
@@ -1855,7 +1855,7 @@
     }
   }
   .group-head-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .sec-grip {
@@ -1963,7 +1963,7 @@
   .edit-row:focus-within .row-action.mv:disabled,
   .group-head-row:hover .row-action.mv:disabled,
   .group-head-row:focus-within .row-action.mv:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
   }
   @media (hover: none) {
     .edit-row .row-action.mv,
@@ -1973,7 +1973,7 @@
     }
     .edit-row .row-action.mv:disabled,
     .group-head-row .row-action.mv:disabled {
-      opacity: 0.25;
+      opacity: var(--disabled-opacity);
     }
   }
   .edit-row:hover {
@@ -2031,7 +2031,7 @@
     opacity: 1;
   }
   .edit-row .row-action:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .nested {
@@ -2200,7 +2200,7 @@
     padding: 0 6px; flex-shrink: 0; opacity: 1;
     border: 1px solid var(--border); border-radius: var(--radius-s); white-space: nowrap;
   }
-  .arch-tools .row-action:disabled { opacity: 0.4; cursor: default; }
+  .arch-tools .row-action:disabled { opacity: var(--disabled-opacity); cursor: default; }
   .arch-tools .row-action.danger:not(:disabled) { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
   .nav-item.subtle {
     color: var(--text-dim);

@@ -583,7 +583,7 @@
               title="Remove directory"
               aria-label="Remove {dir}"
               onclick={() => removeDir(dir)}
-            ><Icon name="x" size={11} /></button>
+            ><Icon name="x" size={12} /></button>
           </li>
         {/each}
       </ul>
@@ -623,7 +623,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={11} /></span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={12} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -797,7 +797,7 @@
     border-color: var(--accent);
   }
   .cbtn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   /* Touch: the ± targets have to be tappable on a phone, where the card is the

@@ -13,6 +13,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -176,11 +177,7 @@
   {:else if mem.state === 'unsupported'}
     <EmptyState icon="book" title="Memory isn’t available yet" body="This daemon doesn’t have the assistant’s memory. Update Otto to see and edit what it remembers about you." />
   {:else if mem.state === 'error' && !mem.data}
-    <div class="error" role="alert">
-      <Icon name="warning" size={14} />
-      <div class="error-t"><strong>Couldn’t load memory.</strong><span class="dim">{mem.error}</span></div>
-      <button class="btn small" onclick={() => void assistant.loadMemory()}>Retry</button>
-    </div>
+    <LoadState what="memory" error={mem.error || 'No data came back.'} empty onretry={() => void assistant.loadMemory()} />
   {:else}
     <section class="block">
       <div class="block-head">
@@ -318,7 +315,7 @@
 
 <style>
   .memory {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 18px 20px 32px;
     display: flex;
     flex-direction: column;
@@ -489,29 +486,6 @@
   }
   .link:hover {
     text-decoration: underline;
-  }
-  .dim {
-    color: var(--text-dim);
-  }
-  .error {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface);
-  }
-  .error > :global(svg) {
-    color: var(--danger);
-    margin-top: 2px;
-  }
-  .error-t {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: var(--fs-s);
   }
   .sr-only {
     position: absolute;

@@ -142,7 +142,7 @@
     background: var(--surface);
     color: var(--text);
     font-size: var(--fs-l);
-    font-family: 'SF Mono', SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
     transition: background var(--dur-fast);
@@ -179,7 +179,7 @@
 
   .key-btn:disabled,
   .key-btn.disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

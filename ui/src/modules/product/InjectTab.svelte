@@ -160,7 +160,7 @@
           {#each bundle.sections as sec, idx (idx)}
             <div class="section-block">
               <button class="sec-trigger" onclick={() => toggleSection(idx)}>
-                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                 <span class="sec-heading">{sec.heading}</span>
               </button>
               {#if !collapsed[idx]}

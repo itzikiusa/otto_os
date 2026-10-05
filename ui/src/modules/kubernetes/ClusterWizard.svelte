@@ -8,6 +8,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { router } from '../../lib/router.svelte';
@@ -232,11 +233,15 @@
           <input id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
         </div>
       {:else}
-        <div class="eks">
-          <Icon name="cloud" size={22} />
-          <p>EKS clusters are imported from the AWS module: pick an account → EKS → “Open in Kubernetes”. Otto runs <span class="mono">aws eks update-kubeconfig</span> into its own kubeconfig and links the cluster to that account.</p>
-          <button class="btn" onclick={() => { onclose(); router.go('aws'); }}><Icon name="external" size={13} /> Go to AWS</button>
-        </div>
+        <EmptyState
+          icon="cloud"
+          title="EKS clusters come from the AWS module"
+          body="Pick an account → EKS → “Open in Kubernetes”. Otto runs aws eks update-kubeconfig into its own kubeconfig and links the cluster to that account."
+          actionLabel="Go to AWS"
+          actionIcon="external"
+          actionKind="secondary"
+          onaction={() => { onclose(); router.go('aws'); }}
+        />
       {/if}
     {:else}
       {#if !existing && !singleName}
@@ -371,21 +376,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .eks {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-m);
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.5;
-  }
-  .eks p {
-    margin: 0;
   }
   .picked-summary {
     font-size: var(--fs-m);

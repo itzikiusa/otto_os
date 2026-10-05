@@ -630,7 +630,7 @@
     background: var(--hover);
   }
   .s3d-mini:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .s3d-notes {

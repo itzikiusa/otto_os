@@ -469,17 +469,17 @@
       <button class="picker" onclick={() => (pickerOpen = !pickerOpen)} aria-expanded={pickerOpen} title="Choose the agent for the next turn"
         data-testid="design-otto-agent">
         <strong>Otto</strong> <span class="dim">{effectiveProvider}{model ? ` · ${model}` : ''}</span>
-        <Icon name={pickerOpen ? 'chevronUp' : 'chevronDown'} size={11} />
+        <Icon name={pickerOpen ? 'chevronUp' : 'chevronDown'} size={12} />
       </button>
       <span class="grow"></span>
       {#if liveSession}
         <button class="linkbtn" onclick={() => openSession(liveSession!)} data-testid="design-otto-live">View live session</button>
-        <button class="linkbtn" onclick={() => void stopTurn()} disabled={stopping} aria-busy={stopping} data-testid="design-otto-stop"><Icon name="stop" size={11} /> {stopping ? 'Stopping…' : 'Stop'}</button>
+        <button class="linkbtn" onclick={() => void stopTurn()} disabled={stopping} aria-busy={stopping} data-testid="design-otto-stop"><Icon name="stop" size={12} /> {stopping ? 'Stopping…' : 'Stop'}</button>
       {/if}
     </div>
     <div class="state" role="status">
       {#if stale}
-        <span class="warnc"><Icon name="warning" size={11} /> Reconnecting — live updates paused</span>
+        <span class="warnc"><Icon name="warning" size={12} /> Reconnecting — live updates paused</span>
       {:else if running || runningRun}
         <LiveWorkingDot /> {runningRun && !running ? 'Drawing variants' : running?.status === 'starting' ? 'Starting' : 'Working'} on
         {head ? `v${head.seq}` : 'this design'}
@@ -548,7 +548,7 @@
             {#if ask}
               <div class="msg human">
                 <div class="who"><span class="av" aria-hidden="true">Y</span> <strong>You</strong></div>
-                {#if ask.selectionLabel}<span class="chip ctx"><Icon name="target" size={11} /> {ask.selectionLabel}</span>{/if}
+                {#if ask.selectionLabel}<span class="chip ctx"><Icon name="target" size={12} /> {ask.selectionLabel}</span>{/if}
                 <p class="bubble" title={ask.display && ask.display !== ask.prompt ? ask.prompt : undefined}>{ask.display ?? ask.prompt}</p>
               </div>
             {/if}
@@ -593,25 +593,25 @@
       <div class="ctx-chips" aria-label="Context Otto will see">
         {#if sel}
           <span class="chip ctx" data-testid="design-otto-selection">
-            <Icon name="target" size={11} /> <span class="ct" title={selLabel}>{selLabel}</span>
-            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={10} /></button>
+            <Icon name="target" size={12} /> <span class="ct" title={selLabel}>{selLabel}</span>
+            <button class="x" onclick={() => (useSelection = false)} aria-label="Don’t focus the selection" title="Don’t focus the selection"><Icon name="x" size={12} /></button>
           </span>
         {/if}
         {#if brandKit}
-          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={11} /> <span class="ct">{brandKit.title}</span></span>
+          <span class="chip ctx" title="The brand kit is always part of Otto’s context brief"><Icon name="palette" size={12} /> <span class="ct">{brandKit.title}</span></span>
         {/if}
         {#each stories as s (s.link.id)}
-          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={11} /> <span class="ct">{s.label}</span></span>
+          <span class="chip ctx" title="The story this design implements is always part of the brief"><Icon name="ticket" size={12} /> <span class="ct">{s.label}</span></span>
         {/each}
         {#each refs.slice(0, 4) as r (r.link.id)}
-          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={11} /> <span class="ct">{r.label}</span></span>
+          <span class="chip ctx" title="Linked as a reference — Otto may cite it as [R…]"><Icon name="link" size={12} /> <span class="ct">{r.label}</span></span>
         {/each}
         {#if refs.length > 4}<span class="chip ctx">+{refs.length - 4} references</span>{/if}
       </div>
       <div class="quick scroll-thin" role="group" aria-label="Quick actions">
         {#each QUICK_ACTIONS as q (q.id)}
           <button class="chip as-btn" disabled={busy || sending} title={q.hint} onclick={() => quick(q.id)} data-testid={`design-quick-${q.id}`}>
-            <Icon name={asIcon(q.icon)} size={11} /> {q.label}
+            <Icon name={asIcon(q.icon)} size={12} /> {q.label}
           </button>
         {/each}
       </div>

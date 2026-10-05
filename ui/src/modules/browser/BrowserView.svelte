@@ -976,7 +976,7 @@
     color: var(--text);
   }
   .icon-btn.tool:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .icon-btn.tool.active {

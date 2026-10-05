@@ -82,24 +82,24 @@
 
     <div class="slc-stats">
       <span class="stat">
-        <Icon name="check" size={11} />
+        <Icon name="check" size={12} />
         {doneTasks}/{totalTasks} tasks
       </span>
       {#if runCount > 0}
         <span class="stat">
-          <Icon name="clock" size={11} />
+          <Icon name="clock" size={12} />
           {plural(runCount, 'run')}
         </span>
       {/if}
       {#if link.prs.length > 0}
         <span class="stat">
-          <Icon name="pr" size={11} />
+          <Icon name="pr" size={12} />
           {plural(link.prs.length, 'PR')}
         </span>
       {/if}
       {#if link.artifacts.length > 0}
         <span class="stat">
-          <Icon name="note" size={11} />
+          <Icon name="note" size={12} />
           {plural(link.artifacts.length, 'artifact')}
         </span>
       {/if}

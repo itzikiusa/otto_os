@@ -55,7 +55,7 @@
         <span class="name">{name}</span>
         <span class="blurb" title={c.summary ?? directionBlurb(c.direction)}>{c.summary ?? directionBlurb(c.direction)}</span>
         {#if c.state === 'accepted'}
-          <span class="state ok"><Icon name="check" size={11} /> Applied</span>
+          <span class="state ok"><Icon name="check" size={12} /> Applied</span>
         {:else if rej}
           <span class="state">Rejected · {rej}</span>
         {:else if c.state === 'passed'}

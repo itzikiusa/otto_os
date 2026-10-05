@@ -138,7 +138,7 @@
 
 <aside class="assistant">
   <header class="head">
-    <span class="title"><Icon name="terminal" size={15} /> Assistant</span>
+    <span class="title"><Icon name="terminal" size={14} /> Assistant</span>
     {#if providers.length > 1}
       <select
         class="provider"
@@ -155,7 +155,7 @@
     {#if working}
       <span class="working" role="status"><LiveWorkingDot label="Working…" /></span>
       {#if canvas.sessionId}
-        <button class="hist-btn stop" onclick={() => void stop()} disabled={stopping} aria-busy={stopping} aria-label="Stop Ask Otto" title="Stop Ask Otto"><Icon name="stop" size={15} /></button>
+        <button class="hist-btn stop" onclick={() => void stop()} disabled={stopping} aria-busy={stopping} aria-label="Stop Ask Otto" title="Stop Ask Otto"><Icon name="stop" size={14} /></button>
       {/if}
     {/if}
     <button
@@ -165,10 +165,10 @@
       aria-label="Restore previous version"
       title="Restore previous version…"
     >
-      <Icon name="undo" size={15} />
+      <Icon name="undo" size={14} />
     </button>
     <button class="close" onclick={onclose} aria-label="Close assistant" title="Close assistant">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -274,7 +274,7 @@
     background: var(--hover);
   }
   .hist-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .shell {
@@ -345,7 +345,7 @@
     cursor: pointer;
   }
   .send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

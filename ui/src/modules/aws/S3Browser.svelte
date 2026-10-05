@@ -732,7 +732,7 @@
 
     {#if dragOver}
       <div class="s3-drop" aria-hidden="true">
-        <Icon name="arrowUp" size={18} />
+        <Icon name="arrowUp" size={16} />
         <span>{uploadBlocked || `Drop to upload to s3://${bucket}/${prefix}`}</span>
       </div>
     {/if}

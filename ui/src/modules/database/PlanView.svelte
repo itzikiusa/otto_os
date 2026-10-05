@@ -63,7 +63,7 @@
     {#if n.est_rows != null}<span class="plan-rows">~{Math.round(n.est_rows).toLocaleString()} rows</span>{/if}
     {#if n.detail}<span class="plan-detail" title={n.detail}>{n.detail}</span>{/if}
     {#each n.warnings ?? [] as w, wi (wi)}
-      <span class="plan-warn" title={w}><Icon name="zap" size={9} />{w}</span>
+      <span class="plan-warn" title={w}><Icon name="zap" size={12} />{w}</span>
     {/each}
   </div>
   {#if open}

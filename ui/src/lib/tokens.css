@@ -47,6 +47,18 @@
   --radius-m: 8px;
   --radius-l: 12px;
 
+  /* A disabled control is the control at this opacity (app.css .btn, .icon-btn,
+     .segmented, .pill-toggle); ui-guards ratchets other literals (foundations §3). */
+  --disabled-opacity: 0.45;
+  /* Minimum touch HIT size on a coarse pointer (layout.md: ≥ 36 px on phone).
+     The global coarse-pointer rule in app.css grows the shared controls; a
+     module control that needs it sets min-block-size: var(--hit-min) inside
+     @media (pointer: coarse) instead of its own number. */
+  --hit-min: 36px;
+  /* Readable column for chat / prose surfaces (Assistant, conversation) —
+     narrower than PageBody's --page-readable (1200px), which is for whole pages of cards/forms. */
+  --prose-readable: 820px;
+
   /* Layers (docs/design/guidelines/foundations.md §6). Floating UI picks one
      of these instead of inventing a number; scripts/ui-guards.mjs ratchets
      z-index literals outside 0–10 (in-pane stacking). Nothing exceeds

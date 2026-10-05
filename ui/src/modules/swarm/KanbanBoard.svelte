@@ -623,7 +623,7 @@
                 {#if t.status === 'todo' && waiting[t.id]}
                   {@const w = waiting[t.id]}
                   <span class="waiting" title="Ready, but not started: {w.detail} (since {rel(w.since)})">
-                    <Icon name="clock" size={11} /> Waiting: {w.detail}
+                    <Icon name="clock" size={12} /> Waiting: {w.detail}
                   </span>
                 {/if}
               </div>

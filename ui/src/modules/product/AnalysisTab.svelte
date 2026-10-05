@@ -628,7 +628,7 @@
                 {@const key = agent.id + ':repos'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Related repos
                     <span class="coll-count">({findings.related_repos.length})</span>
                   </button>
@@ -647,7 +647,7 @@
                 {@const key = agent.id + ':func'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Functionalities
                     <span class="coll-count">({findings.functionalities.length})</span>
                   </button>
@@ -666,7 +666,7 @@
                 {@const key = agent.id + ':int'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Integration points
                     <span class="coll-count">({findings.integration_points.length})</span>
                   </button>
@@ -685,7 +685,7 @@
                 {@const key = agent.id + ':risks'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Risks
                     <span class="coll-count">({findings.risks.length})</span>
                   </button>
@@ -704,7 +704,7 @@
                 {@const key = agent.id + ':oq'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Open questions
                     <span class="coll-count">({findings.open_questions.length})</span>
                   </button>
@@ -728,7 +728,7 @@
                 {@const key = agent.id + ':sl'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Suggested learnings
                     <span class="coll-count">({findings.suggested_learnings.length})</span>
                   </button>
@@ -917,7 +917,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .focus-input:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .focus-input::placeholder {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -132,7 +133,7 @@
   let settingsEl: HTMLElement | undefined = $state();
   function toggleSettings(): void {
     configOpen = !configOpen;
-    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() }));
   }
 
   // ⌘K verbs while Usage is open.
@@ -1851,7 +1852,7 @@
     max-width: 640px;
   }
   .checkbox-row.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .window-row {
     display: flex;

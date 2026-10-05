@@ -1025,9 +1025,7 @@
 
         {#if tables.length === 0}
           <div class="canvas-hint">
-            <Icon name="layers" size={22} />
-            <p class="ch-title">Build a query visually</p>
-            <p>Pick a table on the left. Add more and drag between columns (or use <strong>Add join…</strong>) to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
+            <EmptyState icon="layers" title="Build a query visually" body="Pick a table on the left. Add more and drag between columns (or use Add join…) to join — or right-click a query tab and choose Open in Builder." />
           </div>
         {/if}
         {#if tables.length > 1}
@@ -1153,7 +1151,7 @@
             {:else}
               <div class="chips">
                 {#each clauses.groupBy as r, i (refKey(r))}
-                  <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={9} /></button></span>
+                  <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={12} /></button></span>
                 {/each}
               </div>
             {/if}
@@ -1339,7 +1337,7 @@
         <span class="cg-hint">{g.conj === 'AND' ? 'all of' : 'any of'}</span>
         {#if depth > 0}
           <span class="grow"></span>
-          <button class="btn small ghost" onclick={() => addCond(g, having)}><Icon name="plus" size={10} />Condition</button>
+          <button class="btn small ghost" onclick={() => addCond(g, having)}><Icon name="plus" size={12} />Condition</button>
         {/if}
       </div>
     {/if}
@@ -1759,24 +1757,8 @@
     top: 50%;
     left: 50%; /* ui-guards: allow — centred with the translate below: the same in RTL */
     transform: translate(-50%, -50%);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
     max-width: 360px;
-    text-align: center;
-    color: var(--text-dim);
     pointer-events: none;
-  }
-  .canvas-hint p {
-    margin: 0;
-    font-size: var(--fs-s);
-    line-height: 1.5;
-  }
-  .canvas-hint .ch-title {
-    color: var(--text);
-    font-size: var(--fs-m);
-    font-weight: 500;
   }
   .join-form {
     display: flex;
@@ -1866,7 +1848,7 @@
     padding: 8px 14px 16px;
   }
   .clauses.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     pointer-events: none;
   }
   .notice {

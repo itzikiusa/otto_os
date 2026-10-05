@@ -75,14 +75,14 @@
         onclick={() => router.go('git')}
         title={`Current branch: ${git.primaryStatus.branch} — open Git`}
       >
-        <Icon name="branch" size={11} />
+        <Icon name="branch" size={12} />
         <span class="sb-branch-name">{git.primaryStatus.branch}</span>
         {#if git.primaryStatus.ahead > 0}<span class="dim">↑{git.primaryStatus.ahead}</span>{/if}
         {#if git.primaryStatus.behind > 0}<span class="dim">↓{git.primaryStatus.behind}</span>{/if}
       </button>
     {/if}
     <span class="sb-item dim" title="Network listener">
-      <Icon name="globe" size={11} />
+      <Icon name="globe" size={12} />
       {auth.meta?.network_listener ? 'network' : 'loopback'}
     </span>
     <span class="sb-item dim">{clock}</span>

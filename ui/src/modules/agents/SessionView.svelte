@@ -812,7 +812,7 @@
     {/if}
     {#if paneState.key === 'needs-you'}
       <span class="needs-you-badge" title="This session is waiting on you (input or a permission)">
-        <Icon name="bell" size={11} /><span class="head-lbl">Needs you</span>
+        <Icon name="bell" size={12} /><span class="head-lbl">Needs you</span>
       </span>
     {:else if paneState.key === 'suspended' || paneState.key === 'stale'}
       <span class="state-note" title={suspendNote ? `${suspendNote} — resumes when you open it` : paneState.hint}>{paneState.label}</span>
@@ -835,10 +835,10 @@
         onmousedown={(e) => e.stopPropagation()}
         onclick={() => ws.navigateToSession(handoverFromId)}
         aria-label="Open handover source: {handoverFrom?.title ?? 'source'}"
-      ><Icon name="undo" size={11} /><span class="crumb-text head-lbl">{handoverFrom?.title ?? 'source'}</span></button>
+      ><Icon name="undo" size={12} /><span class="crumb-text head-lbl">{handoverFrom?.title ?? 'source'}</span></button>
     {/if}
     {#if handoverPending}
-      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={11} /><span class="head-lbl">Preparing handover…</span></span>
+      <span class="handover-pending" title="Preparing the handover brief…"><Icon name="clock" size={12} /><span class="head-lbl">Preparing handover…</span></span>
     {/if}
     <!-- The details chip: provider (+ idle countdown + folder when wide) —
          the tooltip and its menu carry everything else (themed name, account,
@@ -1017,7 +1017,7 @@
                 title="Remove directory"
                 aria-label="Remove {dir}"
                 onclick={() => removeDir(dir)}
-              ><Icon name="x" size={11} /></button>
+              ><Icon name="x" size={12} /></button>
             </li>
           {/each}
         </ul>

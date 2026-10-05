@@ -407,7 +407,7 @@
           <span class="keys" aria-hidden="true">{busy ? 'Busy — ⏎ queues' : '⏎ send'} · ⇧⏎ new line</span>
           <span class="grow"></span>
           {#if busy}
-            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={11} /> Stop</button>
+            <button class="btn small stop" onclick={() => void interrupt()} disabled={stopping} title="Interrupt {agentName} — sends Esc to its terminal"><Icon name="stop" size={12} /> Stop</button>
           {/if}
           {#if uploading > 0}<span class="uploading" role="status">Uploading…</span>{/if}
           <button class="send" onclick={() => void send()} disabled={!canSend} title={sendTitle} aria-label={uploading > 0 ? 'Send (uploading images)' : 'Send'}><Icon name="send" size={14} /></button>
@@ -574,11 +574,12 @@
     inset-inline-start: 0;
     width: min(100%, 560px);
     max-width: 100%;
-    max-height: var(--pop-max, min(320px, 50vh));
+    /* popMax (script) is the room above the box, from window.innerHeight. */
+    max-height: var(--pop-max);
     overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--glass-border);
-    border-radius: var(--radius-m);
+    border-radius: var(--radius-l);
     box-shadow: var(--glass-shadow);
     padding: 4px;
     z-index: var(--z-popover);

@@ -147,7 +147,7 @@
               title={env.is_active ? 'Active' : 'Set active'}
             >
               <span class="radio" class:on={env.is_active}>
-                {#if env.is_active}<Icon name="check" size={10} />{/if}
+                {#if env.is_active}<Icon name="check" size={12} />{/if}
               </span>
               <span class="env-name ellipsis grow">{env.name}</span>
               <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} variables{#if env.secret_keys.length}{' '}· {env.secret_keys.length} secret{/if}</span>

@@ -352,8 +352,8 @@
       </span>
       {#if !agent.enabled}<span class="chip" title="Schedules don’t fire while paused. Run now and chat still work.">Paused</span>{/if}
       {#if agent.browser}<span class="chip" title="Runs and chat can use the Otto browser tool">Browser</span>{/if}
-      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={11} /> Your agent</span>{/if}
-      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
+      {#if autonomy?.primary}<span class="chip pa-accent" title="Your primary assistant — routes specialist work to your other agents"><Icon name="star" size={12} /> Your agent</span>{/if}
+      {#if autonomy?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
     {/if}
   {/snippet}
   {#snippet actions()}
@@ -544,7 +544,7 @@
               <div class="rowtitle">
                 <strong>{cadenceLabel(s.schedule, s.timezone)}</strong>
                 {#if !s.enabled}<span class="chip">Paused</span>{/if}
-                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
+                {#if s.permission === 'read_only'}<span class="chip" title="Its runs can read and report, but can’t send, post, write or change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
               </div>
               <!-- a paused schedule (or paused agent) never fires: no "next" promise -->
               <span class="meta">{#if s.enabled && agent.enabled}Next <RelTime iso={s.next_run_at} /> · {/if}Last <RelTime iso={s.last_run_at} fallback="never" /></span>
@@ -586,7 +586,7 @@
             <StatusBadge status={runStatus(r.status)} variant="text" />
             <span class="run-when"><RelTime iso={r.started_at} /></span>
             <span class="chip clip-chip" title="What started this run">{scheduleName(r)}</span>
-            {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={11} /> Read-only</span>{/if}
+            {#if r.read_only}<span class="chip" title="This run could read and report, but not change anything"><Icon name="lock" size={12} /> Read-only</span>{/if}
             {#if duration(r)}<span class="meta">{duration(r)}</span>{/if}
             <span class="run-sum" title={r.summary || r.error || undefined}>{r.summary || r.error || 'No summary'}</span>
             {#if (r.attempts ?? 1) > 1}<span class="chip pa-warn">{r.attempts} attempts</span>{/if}

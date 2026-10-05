@@ -3129,11 +3129,11 @@
           ? `Worktree · ${chip.label} — open worktree (do not switch branch)`
           : chip.label}
   >
-    {#if chip.current}<Icon name="check" size={8} />{/if}
-    {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-    {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-    {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+    {#if chip.current}<Icon name="check" size={12} />{/if}
+    {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
+    {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
+    {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
+    {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
     <span class="chip-label">{label}</span>
     {#if tracking.ahead > 0 || tracking.behind > 0}
       <span class="chip-ab" title="{tracking.ahead} ahead · {tracking.behind} behind upstream">
@@ -3196,7 +3196,7 @@
             ? `Merged into ${baseBranch} — safe to delete`
             : 'Merged — safe to delete'}
         >
-          <Icon name="check" size={10} />
+          <Icon name="check" size={12} />
         </span>
       {/snippet}
 
@@ -3231,11 +3231,11 @@
               : `${b.name} — click to highlight, double-click to checkout`}
         >
           {#if b.is_current}
-            <span class="cur-pip" title="Checked out"><Icon name="check" size={9} /></span>
+            <span class="cur-pip" title="Checked out"><Icon name="check" size={12} /></span>
           {:else if wtElsewhere}
-            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={9} /></span>
+            <span class="cur-pip wt-pip" title="Worktree — click to open"><Icon name="worktree" size={12} /></span>
           {:else}
-            <Icon name="dot" size={10} />
+            <Icon name="dot" size={12} />
           {/if}
           {@render refName(leaf.label)}
           {#if showMerged(b)}{@render mergedMark()}{/if}
@@ -3253,7 +3253,7 @@
               <!-- Default same-named tracking (e.g. origin/<branch>): redundant,
                    so collapse to a small "tracked" glyph and leave the row's
                    width for the branch NAME instead of a duplicate string. -->
-              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={10} /></span>
+              <span class="ref-track" title={`tracks ${b.upstream}`}><Icon name="globe" size={12} /></span>
             {:else}
               <!-- Non-default upstream (tracks a differently-named branch) → show it. -->
               <span class="ref-upstream mono dim" title={`upstream: ${b.upstream}`}>{b.upstream}</span>
@@ -3288,7 +3288,7 @@
           oncontextmenu={(e) => branchMenu(e, b)}
           title="{b.name} — click to highlight · double-click to checkout as a local tracking branch · drag onto a local branch to merge"
         >
-          <Icon name="dot" size={10} />
+          <Icon name="dot" size={12} />
           {@render refName(leaf.label)}
           {#if showMerged(b)}{@render mergedMark()}{/if}
           {#if checkoutBusy === b.name.replace(/^[^/]+\//, '')}<span class="dim">…</span>{/if}
@@ -3309,7 +3309,7 @@
         {@const key = folderKey(section, folder.name)}
         {@const collapsed = collapsedFolders.has(key)}
         <button class="ref-folder" class:collapsed onclick={() => toggleFolder(key)} title={folder.name}>
-          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={11} />
+          <Icon name={collapsed ? 'chevronRight' : 'chevronDown'} size={12} />
           <Icon name="folder" size={12} />
           <span class="folder-name">{folder.name}</span>
           <span class="ref-count">{folder.leaves.length}</span>
@@ -3328,7 +3328,7 @@
       <!-- LOCAL -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (localOpen = !localOpen)} aria-expanded={localOpen}>
-          <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={localOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="branch" size={12} />
           <span>LOCAL</span>
           <span class="ref-count">{refs.local.length}</span>
@@ -3358,7 +3358,7 @@
       <!-- REMOTE -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (remoteOpen = !remoteOpen)} aria-expanded={remoteOpen}>
-          <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={remoteOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="globe" size={12} />
           <span>REMOTE</span>
           <span class="ref-count">{refs.remote.length}</span>
@@ -3388,7 +3388,7 @@
       <!-- TAGS -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (tagsOpen = !tagsOpen)} aria-expanded={tagsOpen}>
-          <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={tagsOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="tag" size={12} />
           <span>TAGS</span>
           <span class="ref-count">{refs.tags.length}</span>
@@ -3403,7 +3403,7 @@
               onclick={() => selectTagRow(t)}
               oncontextmenu={(e) => tagMenu(e, t)}
             >
-              <Icon name="tag" size={10} />
+              <Icon name="tag" size={12} />
               <span class="mono ref-name">{t.name}</span>
             </button>
             <!-- Actions stay reachable without a right-click (trackpad/touch),
@@ -3427,7 +3427,7 @@
       <!-- STASHES — read-only `git stash list`; right-click for Apply / Drop. -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (stashesOpen = !stashesOpen)} aria-expanded={stashesOpen}>
-          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={stashesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="stash" size={12} />
           <span>STASHES</span>
           <span class="ref-count">{stashes.length}</span>
@@ -3441,7 +3441,7 @@
               onclick={() => selectStash(s)}
               oncontextmenu={(e) => stashMenu(e, s)}
             >
-              <Icon name="stash" size={10} />
+              <Icon name="stash" size={12} />
               <span class="ref-name stash-msg">{stashShortMsg(s)}</span>
               {#if s.branch}<span class="stash-branch mono dim">{s.branch}</span>{/if}
             </button>
@@ -3458,7 +3458,7 @@
            trees (swarm, Run-with-Otto, goal loops) too. -->
       <div class="ref-section">
         <button class="ref-header" onclick={() => (worktreesOpen = !worktreesOpen)} aria-expanded={worktreesOpen}>
-          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={worktreesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
           <Icon name="worktree" size={12} />
           <span>WORKTREES</span>
           <span class="ref-count">{worktrees.length}</span>
@@ -3485,11 +3485,11 @@
                 wtMenu(e, w);
               }}
             >
-              <Icon name="worktree" size={10} />
+              <Icon name="worktree" size={12} />
               <span class="ref-name stash-msg" class:dim={w.prunable}>{wtName(w)}</span>
               {#if !w.dirty_known}<span class="wt-dirty" title="Changes unknown — status check unavailable">?</span>
               {:else if w.dirty}<span class="wt-dirty" title="Uncommitted changes">●</span>{/if}
-              {#if w.locked}<Icon name="lock" size={9} />{/if}
+              {#if w.locked}<Icon name="lock" size={12} />{/if}
               {#if w.prunable}
                 <span class="wt-flag mono dim">stale</span>
               {:else if isHere}
@@ -3514,7 +3514,7 @@
           {/each}
           {#if worktrees.some((w) => w.prunable)}
             <button class="ref-row stash-row wt-prune" onclick={() => void wtPrune()}>
-              <Icon name="trash" size={10} />
+              <Icon name="trash" size={12} />
               <span class="ref-name">Prune stale entries</span>
             </button>
           {/if}
@@ -3525,7 +3525,7 @@
       {#if submodules.length > 0}
         <div class="ref-section">
           <button class="ref-header" onclick={() => (submodulesOpen = !submodulesOpen)} aria-expanded={submodulesOpen}>
-            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={11} />
+            <Icon name={submodulesOpen ? 'chevronDown' : 'chevronRight'} size={12} />
             <Icon name="shapes" size={12} />
             <span>SUBMODULES</span>
             <span class="ref-count">{submodules.length}</span>
@@ -3539,7 +3539,7 @@
                 aria-label="Actions for submodule {sub.path}"
                 onclick={(e) => subMenu(e, sub)}
               >
-                <Icon name="shapes" size={10} />
+                <Icon name="shapes" size={12} />
                 <span class="ref-name stash-msg">{sub.path}</span>
                 {#if sub.state !== 'ok'}
                   <span class="wt-flag mono" class:sub-warn={sub.state !== 'uninitialized'}>{sentenceCase(sub.state)}</span>
@@ -3737,7 +3737,7 @@
                   aria-expanded={refMenu?.commit.sha === row.commit.sha}
                   title="{chips.length} refs on this commit — click to list"
                   onclick={(e) => openRefMenu(e, row.commit, chips)}
-                ><Icon name="chevronDown" size={9} />+{chips.length - 1}</button>
+                ><Icon name="chevronDown" size={12} />+{chips.length - 1}</button>
               {:else}
                 {#each chips as chip (chip.kind + chip.label)}
                   {@const label = chip.kind === 'stash'
@@ -3957,11 +3957,11 @@
                       ? `Checked out · ${chip.label}`
                       : chip.label}
                 >
-                  {#if chip.current}<Icon name="check" size={8} />{/if}
-                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={8} />{/if}
-                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={8} />{/if}
-                  {#if chip.kind === 'tag'}<Icon name="tag" size={8} />{/if}
-                  {#if chip.kind === 'stash'}<Icon name="stash" size={8} />{/if}
+                  {#if chip.current}<Icon name="check" size={12} />{/if}
+                  {#if chip.worktree && !chip.current}<Icon name="worktree" size={12} />{/if}
+                  {#if chip.kind === 'remote' || chip.onRemote}<Icon name="globe" size={12} />{/if}
+                  {#if chip.kind === 'tag'}<Icon name="tag" size={12} />{/if}
+                  {#if chip.kind === 'stash'}<Icon name="stash" size={12} />{/if}
                   <span class="chip-label">{chip.kind === 'stash' ? (stashMsgBySha.get(selectedCommit.sha) ?? 'stash') : chip.label}</span>
                 </span>
               {/each}
@@ -4022,13 +4022,13 @@
           oncontextmenu={(e) => refRowMenu(e, chip)}
         >
           {#if chip.current}
-            <Icon name="check" size={10} />
+            <Icon name="check" size={12} />
           {:else if chip.worktree}
-            <Icon name="worktree" size={10} />
+            <Icon name="worktree" size={12} />
           {:else if chip.kind === 'remote' || chip.onRemote}
-            <Icon name="globe" size={10} />
+            <Icon name="globe" size={12} />
           {:else}
-            <Icon name="branch" size={10} />
+            <Icon name="branch" size={12} />
           {/if}
           <span class="ref-pop-label">{chip.label}</span>
           {#if chip.current}
@@ -4053,7 +4053,7 @@
           ondblclick={() => refRowCheckout(chip)}
           oncontextmenu={(e) => refRowMenu(e, chip)}
         >
-          <Icon name="tag" size={10} />
+          <Icon name="tag" size={12} />
           <span class="ref-pop-label">{chip.label}</span>
         </button>
         <button class="icon-btn ref-action" title="Actions for {chip.label}" aria-label="Actions for {chip.label}" onclick={(e) => refRowMenu(e, chip)}><Icon name="more" size={13} /></button>

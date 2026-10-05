@@ -596,7 +596,7 @@
     <section class="center" aria-label="3D viewport">
       <div class="toolbar">
         <button class="btn small" onclick={generateMenu} disabled={readonly} aria-haspopup="menu" data-testid="s3d-generate">
-          <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={11} />
+          <Icon name="sparkle" size={12} /> Generate <Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small" class:on={turntable} aria-pressed={turntable} onclick={() => (turntable = !turntable)} data-testid="s3d-turntable">
           <Icon name="refresh" size={12} /> Turntable
@@ -605,7 +605,7 @@
           <Icon name="play" size={12} /> {play ? 'Stop' : 'Play'}
         </button>
         <button class="btn small" onclick={exportMenu} aria-haspopup="menu" data-testid="s3d-export">
-          <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={11} />
+          <Icon name="download" size={12} /> Export <Icon name="chevronDown" size={12} />
         </button>
         <button class="btn small ghost" class:on={showSource} aria-pressed={showSource} onclick={() => (showSource = !showSource)} data-testid="design-source-toggle">
           <Icon name="file" size={12} /> Source
@@ -716,7 +716,7 @@
         </div>
         <p class="dim">Web budget: {b.label}{b.tone === 'over' ? ' — simplify the scene or split it before embedding.' : '.'}</p>
         <ul class="steps">
-          {#each r.steps as s (s)}<li><Icon name="check" size={11} /> {s}</li>{/each}
+          {#each r.steps as s (s)}<li><Icon name="check" size={12} /> {s}</li>{/each}
         </ul>
         <p class="dim">Draco isn’t offered: its encoder isn’t bundled and Otto stays offline. Every Otto viewer decodes meshopt.</p>
       {/if}

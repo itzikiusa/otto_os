@@ -302,7 +302,7 @@
         </label>
         <div class="field">
           <span>Transport</span>
-          <button class="input picker" onclick={transportMenu} disabled={!canEdit}>{cfg.transport} <Icon name="dot" size={10} /></button>
+          <button class="input picker" onclick={transportMenu} disabled={!canEdit}>{cfg.transport} <Icon name="dot" size={12} /></button>
         </div>
       </div>
       <label class="toggle small">

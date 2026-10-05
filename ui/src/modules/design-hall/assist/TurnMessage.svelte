@@ -87,7 +87,7 @@
     <div class="msg human">
       <div class="who"><span class="av" aria-hidden="true">Y</span> <strong>You</strong>
         {#if ask}<span class="when" title={new Date(ask.at).toLocaleString()}>{rel(ask.at)}</span>{/if}</div>
-      {#if ask?.selectionLabel}<span class="chip ctx"><Icon name="target" size={11} /> {ask.selectionLabel}</span>{/if}
+      {#if ask?.selectionLabel}<span class="chip ctx"><Icon name="target" size={12} /> {ask.selectionLabel}</span>{/if}
       <p class="bubble" title={ask && ask.display && ask.display !== ask.prompt ? ask.prompt : undefined}>{asked}</p>
     </div>
   {/if}
@@ -118,7 +118,7 @@
 
     {#if turn.session_id}
       <button class="linkbtn" onclick={() => onopensession(turn.session_id!)} data-testid="design-assist-session">
-        <Icon name="terminal" size={11} /> {st.working ? 'View live session' : 'Open session'}
+        <Icon name="terminal" size={12} /> {st.working ? 'View live session' : 'Open session'}
       </button>
     {/if}
 
@@ -158,7 +158,7 @@
               {f.message}{#if f.fix} <span class="dim">→ {f.fix}</span>{/if}
             </span>
             <button class="icon-btn" disabled={readonly} onclick={() => ondismiss(f)} aria-label="Dismiss this finding" title="Dismiss — Otto notes it">
-              <Icon name="x" size={11} />
+              <Icon name="x" size={12} />
             </button>
           </li>
         {/each}
@@ -183,11 +183,11 @@
         {#each chips as c (c.key)}
           {#if c.verified && c.artifactId}
             <button class="chip as-btn" class:brand={c.kind === 'brand'} title={c.title} onclick={() => onopenref(c)} data-testid="design-prov-chip">
-              <Icon name={asIcon(c.kind === 'brand' ? 'palette' : 'link')} size={11} /> <span class="ct">{c.label}</span>
+              <Icon name={asIcon(c.kind === 'brand' ? 'palette' : 'link')} size={12} /> <span class="ct">{c.label}</span>
             </button>
           {:else}
             <span class="chip unverified" title={c.title} data-testid="design-prov-unverified">
-              <Icon name="warning" size={11} /> <span class="ct">{c.label} · not verified</span>
+              <Icon name="warning" size={12} /> <span class="ct">{c.label} · not verified</span>
             </span>
           {/if}
         {/each}

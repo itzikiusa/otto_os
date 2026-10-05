@@ -249,7 +249,7 @@
   }
   .btn-primary:disabled,
   .btn-ghost:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

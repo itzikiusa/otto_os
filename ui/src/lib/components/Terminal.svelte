@@ -2823,7 +2823,7 @@
           <span class="find-status" title="Searching scrollback…">…</span>
         {:else if serverMatches.length > 0}
           <span class="find-status server" title="{plural(serverMatches.length, 'scrollback match', 'scrollback matches')} (↑↓ to step)">
-            <Icon name="clock" size={10} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
+            <Icon name="clock" size={12} />{serverMatchIdx >= 0 ? serverMatchIdx + 1 : '–'}/{serverMatches.length}
           </span>
         {/if}
         <button class="icon-btn" onclick={() => findNext(false)} title="Older match" aria-keyshortcuts="Enter" aria-label="Older match">

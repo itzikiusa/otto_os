@@ -238,7 +238,7 @@
               <input class="input grow" bind:value={r.text} disabled={!editable || saving} placeholder="e.g. Never post in #general" aria-label="Rule" />
               {#if r.id && saved?.rules.some((x) => x.id === r.id && x.text === r.text.trim())}
                 <span class="chip" class:pa-enf={!!r.enforce} title="Derived by Otto from the rule’s wording">
-                  {#if r.enforce}<Icon name="lock" size={11} />{/if}{enforceLabel(r)}
+                  {#if r.enforce}<Icon name="lock" size={12} />{/if}{enforceLabel(r)}
                 </span>
               {:else}
                 <span class="meta">Save to see what Otto enforces</span>

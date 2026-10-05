@@ -434,7 +434,7 @@
                   class="vtab-close"
                   title="Close tab"
                   aria-label="Close {tabName}"
-                  onclick={() => void vault.closeTab(i)}><Icon name="x" size={11} /></button
+                  onclick={() => void vault.closeTab(i)}><Icon name="x" size={12} /></button
                 >
               </div>
             {/each}
@@ -490,14 +490,14 @@
       </span>
       {#if vault.note}
         <span>
-          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={11} /> couldn’t refresh</span>{/if}
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
         </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
           <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}
             title={vault.okfReport.conformant ? 'This note passes OKF validation' : 'See the OKF section in the right panel'}>
-            <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={11} />
+            <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={12} />
             {vault.okfReport.conformant ? 'OKF valid' : `OKF: ${vault.okfReport.errors.length} ${vault.okfReport.errors.length === 1 ? 'issue' : 'issues'}`}
           </span>
         {/if}

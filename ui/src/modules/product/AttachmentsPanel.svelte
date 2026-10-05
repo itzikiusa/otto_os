@@ -526,7 +526,7 @@
     color: var(--accent-text);
   }
   .att-load-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

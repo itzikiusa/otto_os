@@ -648,7 +648,7 @@
          a top-aligned page when the detail lands. -->
     <div class="st-head" role="status" aria-live="polite" aria-label="Loading structure">
       <div class="st-title">
-        <Icon name="grid" size={15} />
+        <Icon name="grid" size={14} />
         <h2 class="mono">{loadingName}</h2>
         <span class="kind-chip skel-chip">loading</span>
       </div>
@@ -677,7 +677,7 @@
   {:else}
     <div class="st-head">
       <div class="st-title">
-        <Icon name={titleIcon} size={15} />
+        <Icon name={titleIcon} size={14} />
         <h2 class="mono">{detail.name}</h2>
         <span class="kind-chip">{detail.kind}</span>
         {#if detail.row_count != null}
@@ -761,7 +761,7 @@
                   <td class="fld-act">
                     {#if canIndex}
                       <button class="mini-btn" disabled={!canSchema} onclick={() => indexField(f.path)}>
-                        <Icon name="plus" size={10} />Index
+                        <Icon name="plus" size={12} />Index
                       </button>
                     {/if}
                   </td>
@@ -816,7 +816,7 @@
                     <span class="idx-cols mono">({idx.columns.join(', ')})</span>
                     {#if defText != null}
                       <span class="grow"></span>
-                      <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={10} />
+                      <Icon name={openIdxDef === i ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </button>
                   {#if canIndex}
@@ -908,7 +908,7 @@
                       </button>
                     {/if}
                     <button class="ib-x" aria-label="Remove {f}" title="Remove {f}" onclick={() => toggleIdxCol(f)}>
-                      <Icon name="x" size={10} />
+                      <Icon name="x" size={12} />
                     </button>
                   </div>
                 {/each}
@@ -945,7 +945,7 @@
                   </span>
                   <span class="grow"></span>
                   <button class="mini-btn" onclick={addIdxCond}>
-                    <Icon name="plus" size={10} />Add condition
+                    <Icon name="plus" size={12} />Add condition
                   </button>
                 </div>
                 {#each idxConds as cond, ci (ci)}
@@ -1065,7 +1065,7 @@
               <span class="fk-name mono">{fk.name}</span>
               <span class="fk-map mono">
                 ({fk.columns.join(', ')})
-                <Icon name="arrowDown" size={10} />
+                <Icon name="arrowDown" size={12} />
                 <button
                   class="fk-ref-btn mono"
                   title="Open {fk.ref_schema ? `${fk.ref_schema}.` : ''}{fk.ref_table}"
@@ -1682,7 +1682,7 @@
     color: var(--danger);
   }
   .idx-act:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .idx-item {

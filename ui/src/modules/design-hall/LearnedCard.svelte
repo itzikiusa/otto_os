@@ -97,10 +97,10 @@
         {#each pending.slice(0, 3) as e (e.edit_id)}
           <li data-testid="design-learned-proposal">
             <p class="rule">{editHeadline(e)}</p>
-            {#if e.rationale}<p class="why"><Icon name="clock" size={11} /> {e.rationale}</p>{/if}
+            {#if e.rationale}<p class="why"><Icon name="clock" size={12} /> {e.rationale}</p>{/if}
             <div class="acts">
               <button class="btn small" disabled={!canEdit || busy === e.edit_id} onclick={() => void keep(e)} data-testid="design-learned-keep">
-                <Icon name="check" size={11} /> Keep
+                <Icon name="check" size={12} /> Keep
               </button>
               <button class="btn small ghost" disabled={!canEdit || busy === e.edit_id} onclick={() => void dismiss(e)} data-testid="design-learned-dismiss">Dismiss</button>
               <span class="grow"></span>

@@ -344,7 +344,7 @@
                     <span class="row-src">{sourceLabel(e.source)}</span>
                     <span class="row-time mono" title={new Date(e.ts).toLocaleString()}>{rel(e.ts)}</span>
                     {#if e.detail != null}
-                      <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={10} />
+                      <Icon name={expanded[e.id] ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </span>
                 </span>
@@ -493,7 +493,7 @@
     color: var(--accent-contrast);
   }
   .tbtn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .task.nudge-pending .task-glyph {
@@ -646,7 +646,7 @@
     cursor: pointer;
   }
   .note-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .note-btn:not(:disabled):hover {
