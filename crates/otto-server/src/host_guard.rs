@@ -126,13 +126,16 @@ pub async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// When the `share_base_url` host was read, and its value.
+type CachedShareHost = (std::time::Instant, Option<String>);
+
 /// State for [`host_guard_with_settings`]: the settings DB + a short cache of
 /// the `share_base_url` host (only consulted for a host the static rules
 /// refuse, so the loopback hot path never touches the DB).
 #[derive(Clone)]
 pub struct HostGuardState {
     pool: otto_state::DbPool,
-    cache: std::sync::Arc<std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>>,
+    cache: std::sync::Arc<std::sync::Mutex<Option<CachedShareHost>>>,
 }
 
 impl HostGuardState {
