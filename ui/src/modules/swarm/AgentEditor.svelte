@@ -204,13 +204,13 @@
     </label>
     {#if scheduled}
       <div class="sched">
-        <select class="input small" bind:value={cadence}>
+        <select aria-label="Schedule cadence" class="input small" bind:value={cadence}>
           <option value="interval">every N minutes</option>
           <option value="daily">daily</option>
           <option value="weekly">weekly</option>
         </select>
         {#if cadence === 'interval'}
-          <input class="input small" type="number" min="1" bind:value={everyMin} /> min
+          <input aria-label="Interval in minutes" class="input small" type="number" min="1" bind:value={everyMin} /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
           <!-- The swarm scheduler matches `at` against UTC (swarm_scheduler.rs),
@@ -219,7 +219,7 @@
           <span class="dim" title="The swarm scheduler runs on UTC time">UTC</span>
         {/if}
         {#if cadence === 'weekly'}
-          <select class="input small" bind:value={weekday}>
+          <select aria-label="Weekday" class="input small" bind:value={weekday}>
             <option value={0}>Mon</option><option value={1}>Tue</option>
             <option value={2}>Wed</option><option value={3}>Thu</option>
             <option value={4}>Fri</option><option value={5}>Sat</option>

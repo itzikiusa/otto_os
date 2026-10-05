@@ -453,7 +453,7 @@
     <!-- ── History selector ─────────────────────────────────────────────────── -->
     <section class="history-row">
       <span class="field-label">History</span>
-      <select
+      <select aria-label="Analysis history"
         class="hist-select"
         onfocus={loadHistory}
         onchange={(e) => {

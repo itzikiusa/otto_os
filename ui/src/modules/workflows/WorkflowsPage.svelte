@@ -2093,7 +2093,7 @@
             <strong>Prompt</strong>
             <span class="ri-hint">What you want done this run — merged into the JSON below as `prompt` (optional).</span>
           </div>
-          <textarea dir="auto"
+          <textarea dir="auto" aria-label="Run prompt"
             class="ri-prompt"
             rows="3"
             bind:value={runPromptText}
@@ -2825,7 +2825,7 @@
               {#each loopSteps() as step, i (i)}
                 <div class="rv-row">
                   <div class="rv-top">
-                    <select
+                    <select aria-label="Step kind"
                       class="ls-kind"
                       value={step.kind}
                       onchange={(e) => updateLoopStep(i, { kind: e.currentTarget.value })}
@@ -2833,7 +2833,7 @@
                       {#each LOOP_STEP_KINDS as k (k)}<option value={k}>{k}</option>{/each}
                       {#if !LOOP_STEP_KINDS.includes(step.kind)}<option value={step.kind}>{step.kind}</option>{/if}
                     </select>
-                    <input dir="auto"
+                    <input dir="auto" aria-label="Step name"
                       class="rv-lens"
                       type="text"
                       placeholder="name (e.g. fix)"
@@ -2845,7 +2845,7 @@
                     </button>
                   </div>
                   {#if LOOP_AGENT_KINDS.includes(step.kind)}
-                    <textarea dir="auto"
+                    <textarea dir="auto" aria-label="Step prompt"
                       class="rv-instr np-prompt"
                       rows="6"
                       placeholder="prompt / instructions for this agent step"
@@ -2853,7 +2853,7 @@
                       oninput={(e) => updateLoopStepParam(i, 'prompt', e.currentTarget.value)}
                     ></textarea>
                     <div class="ls-pm">
-                      <select
+                      <select aria-label="Step provider"
                         class="ls-prov"
                         value={loopStepParam(i, 'provider')}
                         onchange={(e) => updateLoopStepParam(i, 'provider', e.currentTarget.value || undefined)}
@@ -2861,7 +2861,7 @@
                         <option value="">default ({defaultAgentProvider()})</option>
                         {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
                       </select>
-                      <input dir="ltr"
+                      <input dir="ltr" aria-label="Step model"
                         class="ls-model"
                         type="text"
                         placeholder="model (optional)"
@@ -2870,14 +2870,14 @@
                       />
                     </div>
                   {:else if step.kind === 'review_run'}
-                    <input dir="auto"
+                    <input dir="auto" aria-label="Reviewer providers"
                       class="rv-lens"
                       type="text"
                       placeholder="reviewer providers (comma-separated, e.g. claude, codex)"
                       value={loopStepParamList(i, 'providers')}
                       oninput={(e) => updateLoopStepParam(i, 'providers', e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))}
                     />
-                    <input dir="auto"
+                    <input dir="auto" aria-label="Summarizer provider"
                       class="rv-lens"
                       type="text"
                       placeholder="summarizer provider (optional)"
@@ -2968,7 +2968,7 @@
               {#each reviewers() as r, i (i)}
                 <div class="rv-row">
                   <div class="rv-top">
-                    <input dir="auto"
+                    <input dir="auto" aria-label="Reviewer lens / skill"
                       class="rv-lens"
                       type="text"
                       placeholder="lens / skill (e.g. correctness-review)"
@@ -2991,7 +2991,7 @@
                       </label>
                     {/each}
                   </div>
-                  <textarea dir="auto"
+                  <textarea dir="auto" aria-label="Reviewer instructions"
                     class="rv-instr np-prompt"
                     rows="5"
                     placeholder="custom instructions for this reviewer (optional)"
@@ -3010,7 +3010,7 @@
                 value={summarizerField('provider')}
                 oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
               />
-              <textarea dir="auto"
+              <textarea dir="auto" aria-label="Summarizer instructions"
                 class="np-prompt np-prompt-lg"
                 rows="14"
                 placeholder="summarizer instructions (optional)"
@@ -3046,7 +3046,7 @@
                 oninput={(e) => onParamLines('goals', e.currentTarget.value)}
               ></textarea>
               <label class="np-sec" for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
-              <textarea dir="auto"
+              <textarea dir="ltr"
                 id="np-checks"
                 class="np-prompt"
                 rows="7"
@@ -3470,7 +3470,7 @@
 {#if jsonZoom}
   {@const jz = jsonZoom}
   <Modal title={jz.label} width={900} onclose={() => (jsonZoom = null)}>
-    <textarea dir="ltr"
+    <textarea dir="ltr" aria-label={jz.label}
       class="json-zoom mono"
       data-testid="json-zoom-editor"
       value={paramJson(jz.field)}

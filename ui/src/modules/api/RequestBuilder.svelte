@@ -873,7 +873,7 @@
         <button class="btn ghost small" onclick={beautify}>Format JSON</button>
       </div>
       {#if compact}
-        <textarea dir="auto" class="input body-area mono" aria-label="Request message" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)} placeholder={'{ }'} spellcheck="false"></textarea>
+        <textarea dir="ltr" class="input body-area mono" aria-label="Request message" value={draft.body} oninput={(e) => setField('body', (e.currentTarget as HTMLTextAreaElement).value)} placeholder={'{ }'} spellcheck="false"></textarea>
       {:else}
         <div class="body-editor"><CodeEditor lsp={false} wrap highlightLineLimit={LONG_LINE_PLAIN} path="message.json" content={draft.body} root={ws.current?.root_path ?? ''} language="json" readOnly={false} onchange={(v) => setField('body', v)} /></div>
       {/if}

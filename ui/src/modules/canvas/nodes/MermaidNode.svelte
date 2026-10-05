@@ -85,7 +85,7 @@
     <div class="err" title={error}>Diagram error: {error}</div>
   {/if}
   {#if editing}
-    <textarea dir="auto"
+    <textarea dir="ltr" aria-label="Mermaid diagram source"
       bind:value={draft}
       use:focusOnMount
       spellcheck="false"

@@ -157,7 +157,7 @@
       <span class="grow"></span>
       <div class="refresh-pick">
         <Icon name="refresh" size={12} />
-        <select
+        <select aria-label="Auto-refresh interval"
           class="input"
           value={String(dashboard.refresh_secs ?? '')}
           onchange={(e) => {

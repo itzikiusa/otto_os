@@ -1266,7 +1266,7 @@
 
   {#snippet composerBox()}
     <div class="composer">
-      <textarea dir="auto"
+      <textarea dir="auto" aria-label="Line comment"
         class="input"
         rows="2"
         bind:value={composerText}

@@ -62,6 +62,7 @@ export function needsDir(tag, attrs) {
   if (/(^|\s)dir\s*=|\{dir\}/.test(attrs)) return false;
   if (/\{\s*\.\.\./.test(attrs)) return false;
   if (tag === 'textarea') return true;
+  if (tag !== 'input') return false;
   if (/(^|\s)type\s*=\s*\{/.test(attrs)) return false; // dynamic type
   const type = attrValue(attrs, 'type');
   return !type || /^(text|search|url|email|tel)$/.test(type);

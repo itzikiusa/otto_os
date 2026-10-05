@@ -875,8 +875,8 @@
     {/if}
   {:else if tab === 'config'}
     <div class="cfg-set">
-      <input dir="auto" class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
-      <input dir="auto" class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
+      <input dir="ltr" class="grow" bind:value={cfgName} placeholder="retention.ms" aria-label="Config name" />
+      <input dir="ltr" class="grow" bind:value={cfgValue} placeholder="604800000" aria-label="Config value" />
       <button
         class="btn small"
         onclick={setConfig}
@@ -923,7 +923,7 @@
       {#if !pTombstone}
         <label class="field grow">
           <span>Value{pValueBase64 ? ' — base64' : ''}</span>
-          <textarea dir="auto"
+          <textarea dir="ltr"
             bind:value={pValue}
             rows="6"
             placeholder={pValueBase64 ? 'base64-encoded bytes' : '{ "hello": "world" }'}

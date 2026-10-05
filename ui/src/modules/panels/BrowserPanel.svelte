@@ -524,7 +524,7 @@
     <button class="icon-btn" title="Start page" aria-label="Start page" disabled={!current} onclick={home}>
       <Icon name="home" size={13} />
     </button>
-    <input dir="ltr"
+    <input dir="ltr" aria-label="Address"
       class="input url-input"
       bind:value={urlInput}
       placeholder="Search or enter URL…"
@@ -608,7 +608,7 @@
         onkeydown={popoverKeydown}
       >
         <div class="popover-desc" title={popover.desc}>{popover.desc}</div>
-        <textarea dir="auto"
+        <textarea dir="auto" aria-label="Comment"
           class="input popover-textarea"
           bind:value={popoverComment}
           placeholder="Your comment…"

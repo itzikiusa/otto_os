@@ -48,7 +48,7 @@
   <Resizer {id} visible={selected} minWidth={100} minHeight={80} />
   <Handle type="target" position={Position.Left} />
   {#if editing}
-    <textarea dir="auto"
+    <textarea dir="auto" aria-label="Sticky note text"
       bind:value={draft}
       use:focusOnMount
       onblur={commit}

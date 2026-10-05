@@ -60,7 +60,7 @@
         <div class="cv-pending">Nested change pending on this field — saving a whole value here replaces it.</div>
       {/if}
       {#if flow.viewerEditing}
-        <textarea dir="ltr"
+        <textarea dir="ltr" aria-label="Cell value"
           class="cv-edit mono"
           bind:value={flow.viewerDraft}
           spellcheck="false"

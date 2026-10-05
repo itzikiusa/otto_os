@@ -84,7 +84,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="body" ondblclick={startEdit}>
     {#if editing}
-      <textarea dir="auto"
+      <textarea dir="ltr" aria-label="JSON source"
         bind:value={draft}
         use:focusOnMount
         spellcheck="false"

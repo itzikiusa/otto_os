@@ -171,7 +171,7 @@
           </div>
         {/if}
         <div class="da-ask">
-          <textarea dir="auto"
+          <textarea dir="auto" aria-label="Ask the database assistant"
             bind:value={draft}
             onkeydown={onKey}
             placeholder={info.placeholder}

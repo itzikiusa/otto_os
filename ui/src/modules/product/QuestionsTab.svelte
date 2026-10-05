@@ -410,7 +410,7 @@
                     aria-label="Rationale (optional)"
                     placeholder="e.g. Changes how we store the reset date"
                   />
-                  <select class="edit-sel" bind:value={editCategory}>
+                  <select aria-label="Category" class="edit-sel" bind:value={editCategory}>
                     <option value="scope">Scope</option>
                     <option value="data">Data</option>
                     <option value="ux">UX</option>

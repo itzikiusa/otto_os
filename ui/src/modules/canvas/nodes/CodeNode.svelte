@@ -63,7 +63,7 @@
     <span class="lang">{lang ?? 'text'}</span>
   </div>
   {#if editing}
-    <textarea dir="auto"
+    <textarea dir="ltr" aria-label="Code block source"
       bind:value={draft}
       use:focusOnMount
       spellcheck="false"

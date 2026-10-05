@@ -42,7 +42,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="frame-label" ondblclick={startEdit}>
     {#if editing}
-      <input dir="auto"
+      <input dir="auto" aria-label="Frame label"
         bind:value={draft}
         use:focusOnMount
         onblur={commit}

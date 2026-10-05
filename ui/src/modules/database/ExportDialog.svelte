@@ -219,7 +219,7 @@
     <div class="exp-row">
       <span class="exp-label">Folder</span>
       <div class="exp-dir">
-        <input dir="ltr" class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
+        <input dir="ltr" aria-label="Export folder" class="exp-input mono" bind:value={exportDir} spellcheck="false" placeholder="~/Downloads" />
         <button class="btn small" onclick={() => (pickingDir = true)} title="Browse the daemon host">
           <Icon name="folder" size={12} />Browse…
         </button>

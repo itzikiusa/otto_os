@@ -168,7 +168,7 @@
         {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    <textarea dir="auto"
+    <textarea dir="auto" aria-label="Message"
       class="msg-input"
       placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
       bind:value={inputText}

@@ -100,7 +100,7 @@
 
 <Modal title="Broadcast message" width={520} onclose={close}>
   <div class="bc">
-    <textarea dir="auto"
+    <textarea dir="auto" aria-label="Broadcast message"
       bind:this={textareaEl}
       bind:value={text}
       placeholder="Message to send to the selected sessions…  (Enter to send, ⇧Enter for newline)"

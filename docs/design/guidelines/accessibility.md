@@ -88,7 +88,9 @@ in audits.
 - `Icon` renders `aria-hidden="true"`. The meaning must come from the control's
   label or visible text, never from the SVG.
 - **Form fields have labels**: `<label for>`, a wrapping `<label>`, or
-  `aria-label`. The audit found 144 placeholder-only inputs.
+  `aria-label`. A placeholder is not a label. `ui-guards`' `unlabeled-control`
+  rule fails any `<input>` / `<select>` / `<textarea>` without one (hidden
+  file pickers are exempt).
 - **Toggles** expose their state:
   - `aria-pressed` on toggle buttons and value-segmented controls
   - `aria-selected` on tabs
@@ -147,6 +149,12 @@ covers it. The layout mirrors itself **if you use logical properties**:
   flip, and nothing flips inside a `dir="ltr"` island.
 - **Code, paths, commands, terminals and diffs stay LTR** (`dir="ltr"` on the
   container) even in an RTL UI.
+- **Every free-text field declares its direction.** A `<textarea>` or text
+  `<input>` that holds human language gets `dir="auto"`, so a Hebrew message
+  lays out right-to-left and an English one left-to-right whatever the UI
+  direction. One that holds code, a path, a URL, a command or a key gets
+  `dir="ltr"`. `ui-guards`' `bidi-dir` rule enforces it;
+  `node scripts/codemods/bidi-dir.mjs` adds the attribute to new fields.
 - About 247 physical `left`/`right` declarations remain in the tree. Convert
   them in any file you touch.
 

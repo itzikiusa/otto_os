@@ -734,7 +734,7 @@
           Fields <span class="count">{mongoFields.length}</span>
           <span class="hint dim">sampled</span>
           <span class="grow"></span>
-          <input dir="auto"
+          <input dir="auto" aria-label="Filter fields"
             class="ib-search"
             type="search"
             bind:value={fieldQuery}
@@ -880,7 +880,7 @@
                 Fields
                 <span class="ib-count">{idxCols.length} selected</span>
                 <span class="grow"></span>
-                <input dir="auto"
+                <input dir="auto" aria-label="Filter index fields"
                   class="ib-search"
                   type="search"
                   bind:value={idxFieldQuery}
@@ -950,15 +950,15 @@
                 </div>
                 {#each idxConds as cond, ci (ci)}
                   <div class="ib-cond">
-                    <select class="mono" bind:value={cond.field}>
+                    <select aria-label="Condition field" class="mono" bind:value={cond.field}>
                       {#each idxCondFields as f (f)}<option value={f}>{f}</option>{/each}
                     </select>
-                    <select bind:value={cond.op}>
+                    <select aria-label="Condition operator" bind:value={cond.op}>
                       <option value="exists">exists</option>
                       <option value="in">in</option>
                     </select>
                     {#if cond.op === 'in'}
-                      <input dir="ltr"
+                      <input dir="ltr" aria-label="Condition values"
                         class="mono"
                         type="text"
                         bind:value={cond.values}

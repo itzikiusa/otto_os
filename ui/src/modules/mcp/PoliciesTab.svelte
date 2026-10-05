@@ -190,7 +190,7 @@
 
   {#if importOpen}
     <div class="import-panel">
-      <textarea dir="ltr"
+      <textarea dir="ltr" aria-label="Policies JSON to import"
         bind:value={importText}
         rows="5"
         class="mono"
@@ -216,11 +216,11 @@
     <div class="eval-row">
       <Icon name="gauge" size={14} />
       <span class="el">Evaluate</span>
-      <select bind:value={evalServerId}>
+      <select aria-label="Server to evaluate" bind:value={evalServerId}>
         {#if servers.length === 0}<option value="">No servers</option>{/if}
         {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
       </select>
-      <input dir="ltr" bind:value={evalTool} placeholder="tool name" class="mono" />
+      <input dir="ltr" aria-label="Tool name to evaluate" bind:value={evalTool} placeholder="tool name" class="mono" />
       <button class="btn small" onclick={() => void evaluate()} disabled={evaluating || servers.length === 0}>
         {evaluating ? '…' : 'Preview decision'}
       </button>

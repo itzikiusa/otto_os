@@ -904,7 +904,7 @@
                   {#if action.mode === 'changes'}
                     <div class="inline-form">
                       <div class="if-label">Review note (required)</div>
-                      <textarea dir="auto"
+                      <textarea dir="auto" aria-label="Review note"
                         class="text-area"
                         rows="3"
                         placeholder="Describe what needs to change…"

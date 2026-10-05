@@ -1068,7 +1068,7 @@
           </span>
         {/if}
         {#if renaming === i}
-          <input dir="ltr"
+          <input dir="ltr" aria-label="Rename query tab"
             class="qe-tab-rename mono"
             bind:value={renameText}
             use:focusOnMount
@@ -1347,7 +1347,7 @@
         {@const spec = tab.vars[name] ?? defaultVarSpec()}
         <div class="qe-var">
           <span class="qe-var-name mono">{name}</span>
-          <input dir="auto"
+          <input dir="auto" aria-label={`Value for ${name}`}
             class="input qe-var-input"
             value={spec.value}
             placeholder={spec.type === 'number' ? '123' : 'value'}
@@ -1418,7 +1418,7 @@
 
   {#if saving}
     <div class="save-bar">
-      <input dir="auto"
+      <input dir="auto" aria-label="Query name"
         class="input grow"
         placeholder={savedLinked ? 'Name (blank = keep current)' : 'Query name'}
         bind:value={saveName}

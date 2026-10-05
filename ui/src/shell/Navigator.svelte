@@ -1513,7 +1513,7 @@
       <input type="checkbox" class="arch-check" checked={agentSel.has(s.id)} onchange={() => toggleAgentSel(s.id)} aria-label="Select {s.title}" />
     {/if}
     {#if renamingId === s.id}
-      <input dir="auto"
+      <input dir="auto" aria-label="Rename session"
         class="nav-rename"
         bind:value={draft}
         use:focusOnMount

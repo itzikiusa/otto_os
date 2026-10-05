@@ -442,7 +442,7 @@
   {#if !existing}
     {#if showDsnInput}
       <div class="field dsn-row">
-        <input dir="ltr"
+        <input dir="ltr" aria-label="Connection string"
           class="input mono"
           bind:value={dsnValue}
           placeholder="mysql://user:pass@host:3306/db"
@@ -476,7 +476,7 @@
       <label for="cf-section">Section <span class="dim">(optional)</span></label>
       {#if creatingSection}
         <div class="section-new">
-          <input dir="auto"
+          <input dir="auto" aria-label="New section name"
             class="input"
             bind:value={newSectionName}
             placeholder="New section name"

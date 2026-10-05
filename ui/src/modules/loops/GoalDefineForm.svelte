@@ -239,7 +239,7 @@
         {defining ? 'Defining…' : draft ? 'Re-define' : 'Define with AI'}
       </button>
       {#if draft}
-        <input dir="ltr" class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
+        <input dir="ltr" aria-label="Refine the draft" class="input in grow" bind:value={feedback} placeholder="Refine: what to change about the draft" />
         <button class="btn" onclick={define} disabled={!ws.currentId || defining || !feedback.trim()}>Refine</button>
       {/if}
     </div>
@@ -257,24 +257,24 @@
       {#each draft.definition.acceptance_criteria as c, i (c.id)}
         <div class="crit">
           <div class="crit-row">
-            <input dir="auto" class="input in grow" bind:value={c.text} placeholder="Criterion description" />
+            <input dir="auto" aria-label="Criterion description" class="input in grow" bind:value={c.text} placeholder="Criterion description" />
             <button class="icon-btn" onclick={() => removeCriterion(i)} aria-label="Remove criterion" title="Remove criterion"><Icon name="trash" size={13} /></button>
           </div>
           <div class="crit-row">
-            <select class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
+            <select aria-label="Verification kind" class="input in kind" value={c.verify_kind} onchange={(e) => setKind(c, e.currentTarget.value as AcceptanceCriterion['verify_kind'])}>
               <option value="agent">Agent assessment</option>
               {#if c.verify_kind === 'manual'}<option value="manual">Agent assessment (legacy)</option>{/if}
               <option value="human">Human verification</option>
               <option value="command">Shell command</option>
             </select>
             {#if c.verify_kind === 'command'}
-              <input dir="ltr" class="input in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
+              <input dir="ltr" aria-label="Verification command" class="input in grow mono" bind:value={c.verify_cmd} placeholder="shell command (exit 0 = met), e.g. cargo test" />
             {:else}
-              <input dir="auto" class="input in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
+              <input dir="auto" aria-label="How to verify" class="input in grow" bind:value={c.verify} placeholder="how to verify (behavior/file)" />
             {/if}
           </div>
           {#if c.verify_kind === 'command'}
-            <input dir="auto" class="input in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
+            <input dir="auto" aria-label="What this command checks" class="input in grow" bind:value={c.verify} placeholder="what this checks (for humans)" />
           {/if}
         </div>
       {/each}

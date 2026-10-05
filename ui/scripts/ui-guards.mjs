@@ -118,12 +118,22 @@
 //                     confirm says so (patterns §6). An instant action with
 //                     no confirm carries `ui-guards: allow`.
 //
-// One ratcheted rule scans MARKUP:
+// Ratcheted rules that scan MARKUP:
 //
 //   a11y-ignore       a `svelte-ignore a11y_…` comment — each one silences a
 //                     real accessibility check (a click on a div, a missing
 //                     label…). Fix the markup (a real <button>, a label)
 //                     instead of muting the compiler.
+//   bidi-dir          a <textarea> or text-like <input> (no type, text,
+//                     search, url, email, tel) with no `dir` → dir="auto" for
+//                     human language, dir="ltr" for code / paths / URLs
+//                     (accessibility.md §6). scripts/codemods/bidi-dir.mjs
+//                     adds them; re-run it after a merge.
+//   unlabeled-control an <input> / <select> / <textarea> with no accessible
+//                     name: no aria-label / aria-labelledby / title, no
+//                     <label for> naming its id, not inside a <label>. A
+//                     placeholder is not a label (it vanishes on typing and
+//                     many screen readers skip it) → aria-label, or a <label>.
 //
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
@@ -149,6 +159,8 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { markupOf, startTags, attrValue } from './codemods/markup.mjs';
+import { needsDir } from './codemods/bidi-dir.mjs';
 
 const UI = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(UI, 'src');
@@ -261,6 +273,8 @@ const RULES = {
   'local-pill-class': 'local pill look (background / radius / padding on a local .pill/.chip/.badge/.tag) — use <Badge> (lib/components/Badge.svelte)',
   'hover-only-reveal': 'control hidden until :hover with no :focus-visible/:focus-within reveal and no (hover: none) fallback — use .reveal-on-hover (app.css)',
   'a11y-ignore': 'svelte-ignore a11y_… — fix the markup (real <button>, label) instead of silencing the check',
+  'bidi-dir': 'free-text field with no dir — dir="auto" for prose, dir="ltr" for code/paths/URLs (node scripts/codemods/bidi-dir.mjs)',
+  'unlabeled-control': 'form control with no accessible name (placeholder is not a label) — add aria-label, or a <label for> / wrapping <label>',
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
   'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
   'private-keyframes': 'private @keyframes — spinners use .spinner / otto-spin, live-dot pulses otto-pulse, entrances otto-fade-in / otto-pop-in (app.css); keep a local one only when the motion is genuinely different',
@@ -596,6 +610,39 @@ for (const f of files) {
     const missing = [!hasAria && 'aria-label', !hasTitle && 'title'].filter(Boolean).join(' + ');
     if (allowed(f.text, m.index)) continue;
     problems.push(`${f.rel}:${lineOf(f.text, m.index)}  icon-only <button> missing ${missing} — add both (name the action)`);
+  }
+}
+
+// ---------- markup a11y ratchets: bidi-dir, unlabeled-control ----------
+// A file input is opened by a labelled button and never focused itself.
+const NO_NAME_TYPES = /^(hidden|submit|button|reset|image|file)$/;
+for (const f of files) {
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = markupOf(f.text);
+  // <label …>…</label> spans: a control inside one is named by it.
+  const spans = [];
+  for (const m of markup.matchAll(/<label(?=[\s>])/g)) {
+    const close = markup.slice(m.index).search(/<\/label\s*>/);
+    if (close !== -1) spans.push([m.index, m.index + close]);
+  }
+  const forIds = new Set([...markup.matchAll(/\sfor\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})/g)].map((m) => (m[1] ?? m[2] ?? m[3]).trim()));
+  for (const t of startTags(f.text, ['input', 'select', 'textarea'], markup)) {
+    if (needsDir(t.tag, t.attrs)) hit('bidi-dir', f, t.start, `<${t.tag}> without dir`);
+    if (/\{\s*\.\.\./.test(t.attrs)) continue; // a spread may carry the label
+    const type = attrValue(t.attrs, 'type');
+    if (t.tag === 'input' && type && NO_NAME_TYPES.test(type)) continue;
+    // Out of the accessibility tree (a hidden file picker opened by a button).
+    if (/(?:^|\s)hidden(?:\s|$|=)|aria-hidden\s*=\s*["{]?\s*["']?true/.test(t.attrs)) continue;
+    if (/(?:^|\s)(?:aria-label|aria-labelledby|title)\s*=|\{(?:aria-label|title)\}/.test(t.attrs)) continue;
+    const id = attrValue(t.attrs, 'id')?.trim();
+    if (id && forIds.has(id)) continue;
+    // A static id named again elsewhere (`{@render jsonLabel('np-body', …)}`
+    // emits the <label for> from a snippet), or a snippet's own id parameter
+    // (`{#snippet picker(id: string)}` — the caller pairs it with a label).
+    if (id && /^[\w-]+$/.test(id) && markup.split(new RegExp(`['"]${id}['"]`)).length > 2) continue;
+    if (id && /^\w+$/.test(id) && new RegExp(`\\{#snippet\\s+\\w+\\([^)]*\\b${id}\\b`).test(markup)) continue;
+    if (spans.some(([a, b]) => t.start > a && t.start < b)) continue;
+    hit('unlabeled-control', f, t.start, `<${t.tag}> with no accessible name`);
   }
 }
 

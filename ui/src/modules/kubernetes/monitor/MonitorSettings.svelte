@@ -345,8 +345,8 @@
               {#each p.mappings ?? [] as m, j (j)}
                 <div class="map">
                   <input dir="ltr" class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
-                  <input dir="ltr" class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
-                  <input dir="ltr" class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
+                  <input dir="ltr" aria-label="Metric name" class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
+                  <input dir="ltr" aria-label="Metric label" class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
                   <button class="input picker" onclick={(e) => unitMenu(e, m)} disabled={!canEdit}>{m.unit ?? 'number'}</button>
                   {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping" title="Remove mapping"><Icon name="x" size={12} /></button>{/if}
                   {#if errors[`probe.${i}.map.${j}`]}<em class="err span">{errors[`probe.${i}.map.${j}`]}</em>{/if}
@@ -373,9 +373,9 @@
         <div class="ex">
           <span class="chip">{kindLabel(x.kind)}</span>
           {#if x.kind === 'label'}
-            <input dir="ltr" class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Label selector" class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
           {:else}
-            <input dir="ltr" class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Name pattern" class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
           {/if}
           {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion" title="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
           {#if errors[`ex.${i}`]}<em class="err span">{errors[`ex.${i}`]}</em>{/if}
@@ -389,7 +389,7 @@
   <Modal title="Test probes" width={720} onclose={() => (testOpen = false)}>
     <div class="test">
       <div class="row">
-        <input dir="ltr" class="input mono" placeholder="pod name (blank = first running pod)" bind:value={testPod} />
+        <input dir="ltr" aria-label="Test pod name" class="input mono" placeholder="pod name (blank = first running pod)" bind:value={testPod} />
         <button class="btn primary" onclick={() => void runTest()} disabled={testBusy}>{testBusy ? 'Testing…' : 'Run'}</button>
       </div>
       <p class="dim help">Saves the current form, then fetches every probe from one pod and shows what parsed. Nothing is written to the metrics store.</p>

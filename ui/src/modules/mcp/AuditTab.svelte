@@ -151,17 +151,17 @@
       </button>
       {#if filtersOpen}
         <div class="bar">
-          <select bind:value={fServer}>
+          <select aria-label="Server" bind:value={fServer}>
             <option value="">All servers</option>
             {#each servers as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
           </select>
-          <input dir="ltr"
+          <input dir="ltr" aria-label="Filter by tool"
             bind:value={fTool}
             placeholder="Filter tool…"
             class="mono"
             onkeydown={(e) => e.key === 'Enter' && void load()}
           />
-          <select bind:value={fDecision}>
+          <select aria-label="Decision" bind:value={fDecision}>
             <option value="">All decisions</option>
             <option value="allowed">{sentenceCase('allowed')}</option>
             <option value="approved">{sentenceCase('approved')}</option>

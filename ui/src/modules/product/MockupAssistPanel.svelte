@@ -154,7 +154,7 @@
       </div>
 
       <div class="ma-composer">
-        <textarea dir="auto"
+        <textarea dir="auto" aria-label="Message to the mockup assistant"
           bind:value={draft}
           onkeydown={onKey}
           placeholder={locked ? 'Ask for a change…' : `Describe the ${FORMATS[mockupAssist.format].label.toLowerCase()} to create…`}

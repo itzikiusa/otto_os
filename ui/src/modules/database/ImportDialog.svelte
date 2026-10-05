@@ -201,7 +201,7 @@
     <div class="imp-row">
       <span class="imp-label">File</span>
       <div class="imp-dir">
-        <input dir="ltr"
+        <input dir="ltr" aria-label="Import file path"
           class="imp-input mono"
           bind:value={filePath}
           spellcheck="false"

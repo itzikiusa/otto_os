@@ -346,7 +346,7 @@
       </div>
       {#if streamKind === 'websocket'}
         <div class="ws-send">
-          <input dir="auto" class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
+          <input dir="ltr" class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
             bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
           <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>

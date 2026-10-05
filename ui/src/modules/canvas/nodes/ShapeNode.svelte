@@ -120,7 +120,7 @@
 
   <div class="label">
     {#if editing}
-      <textarea dir="auto"
+      <textarea dir="auto" aria-label="Shape label"
         bind:value={draft}
         use:focusOnMount
         onblur={commit}
