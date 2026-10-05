@@ -74,7 +74,8 @@ test('product: Stories|Learnings toggle + story list are usable', async ({ page 
   // Switch to Learnings via the visible toggle, then back to Stories.
   const learn = page.getByRole('tab', { name: 'Learnings' }).locator('visible=true').first();
   await learn.click();
-  await expect(page.locator('.learn-nav')).toBeVisible();
+  // Learnings is one full-width view now (no separate learnings nav pane).
+  await expect(page.locator('.learnings-view')).toBeVisible();
 
   const stories = page.getByRole('tab', { name: 'Stories' }).locator('visible=true').first();
   await stories.click();

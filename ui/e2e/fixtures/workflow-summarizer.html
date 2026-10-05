@@ -4,6 +4,10 @@
 <script type="module">
   import { mount } from 'svelte';
   import RunAgents from '/src/modules/workflows/RunAgents.svelte';
+  import { events } from '/src/lib/events.svelte.ts';
+  // The live event socket, as in the app (the spec routes /ws/events): with
+  // it down every running row honestly reads "Reconnecting…".
+  events.start();
   mount(RunAgents, { target: document.body, props: { run: {
     id: 'run', status: 'success', nodes: [{ node_id: 'review', status: 'success',
       logs: [], sessions: ['historic'], review_ids: ['r'] }],

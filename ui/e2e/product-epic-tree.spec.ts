@@ -16,12 +16,23 @@ import { apiCtx, seedWorkspace } from './seed';
 // suite runs in parallel against ONE shared daemon, so every title is unique.
 test.use({ viewport: { width: 1280, height: 900 }, actionTimeout: 12_000 });
 
-const RUN = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-const EPIC_TITLE = `E2E Epic ${RUN}`;
-const CHILD_A = `E2E Tier ladder ${RUN}`;
-const CHILD_B = `E2E Feature draft ${RUN}`;
-const LOOSE = `E2E Loose story ${RUN}`;
-const DOC_CHILD = `E2E Design note ${RUN}`;
+// Re-minted by every beforeAll: under fullyParallel a worker can run this
+// file's tests in several batches, each re-running beforeAll in the SAME module
+// instance — module-level titles would seed a second identical tree (stories are
+// global), and every title lookup would match twice.
+let EPIC_TITLE = '';
+let CHILD_A = '';
+let CHILD_B = '';
+let LOOSE = '';
+let DOC_CHILD = '';
+function mintTitles(): void {
+  const run = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  EPIC_TITLE = `E2E Epic ${run}`;
+  CHILD_A = `E2E Tier ladder ${run}`;
+  CHILD_B = `E2E Feature draft ${run}`;
+  LOOSE = `E2E Loose story ${run}`;
+  DOC_CHILD = `E2E Design note ${run}`;
+}
 
 let workspaceId = '';
 let epicId = '';
@@ -33,6 +44,7 @@ async function must(r: { ok(): boolean; status(): number; text(): Promise<string
 }
 
 test.beforeAll(async () => {
+  mintTitles();
   const { ctx, base } = await apiCtx();
   workspaceId = await seedWorkspace(ctx, base);
   // The epic: a draft flagged `tree_kind:'epic'` (a Jira story with children would

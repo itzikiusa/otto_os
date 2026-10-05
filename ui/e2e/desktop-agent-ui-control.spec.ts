@@ -353,30 +353,42 @@ test('an agent drives the Database Explorer visibly in the side pane', async ({ 
 
   const mcp = await startMcp();
   try {
-    await test.step('the session sees the ui tools', async () => {
+    const UI_TOOLS = ['otto_ui_open', 'otto_ui_db_new_tab', 'otto_ui_db_run_query', 'otto_ui_db_page', 'otto_ui_db_set_view'];
+    const listNames = async (): Promise<string[]> => {
       const listed = await mcp.request('tools/list');
-      const names = ((listed.result as { tools: { name: string }[] }).tools ?? []).map((t) => t.name);
-      for (const n of ['otto_ui_open', 'otto_ui_db_new_tab', 'otto_ui_db_run_query', 'otto_ui_db_page', 'otto_ui_db_set_view']) {
-        expect(names, `tools/list must advertise ${n}`).toContain(n);
-      }
+      return ((listed.result as { tools: { name: string }[] }).tools ?? []).map((t) => t.name);
+    };
+
+    await test.step('ungranted, the session sees only the request-control stub', async () => {
+      // The UI tools are advertised only once a person grants UI control; until
+      // then one `otto_ui_request_control` stands in for all of them.
+      const names = await listNames();
+      expect(names, 'tools/list must advertise otto_ui_request_control').toContain('otto_ui_request_control');
+      for (const n of UI_TOOLS) expect(names, `ungranted tools/list must not advertise ${n}`).not.toContain(n);
     });
 
-    await test.step('first call → pending_grant + the prompt beside the session → Allow', async () => {
-      const args = { module: 'connections', route: 'database', placement: 'side' };
-      const first = firstUngranted(mcp, 'otto_ui_open', args);
+    await test.step('request control → the prompt beside the session → Allow → the ui tools are listed', async () => {
+      const first = firstUngranted(mcp, 'otto_ui_request_control', {});
       const prompt = page.getByTestId('ui-control-request');
       await expect(prompt).toBeVisible({ timeout: 20_000 });
       await expect(prompt).toContainText('uictl-agent');
-      // The daemon may hold the call briefly for the grant, or answer at once.
-      const pending = await first;
-      await prompt.getByTestId('ui-control-allow').click();
+      await prompt.getByRole('button', { name: 'Allow for this session', exact: true }).click();
       await expect(prompt).toHaveCount(0);
-      let out = pending;
-      if (out.text.includes('pending_grant')) {
-        // "…they were asked in Otto; retry after they allow it."
-        expect(out.isError).toBe(true);
-        out = await mcp.call('otto_ui_open', args);
+      // The daemon may hold the call for the decision, or answer at once and
+      // ask the agent to retry after the person allows it.
+      let out = await first;
+      if (!out.text.includes('"ui_control_granted": true')) {
+        out = await mcp.call('otto_ui_request_control', {});
       }
+      expect(out.isError, `request_control: ${out.text}`).toBeFalsy();
+      expect(out.text).toContain('"ui_control_granted": true');
+      const names = await listNames();
+      for (const n of UI_TOOLS) expect(names, `granted tools/list must advertise ${n}`).toContain(n);
+      expect(names).not.toContain('otto_ui_request_control');
+    });
+
+    await test.step('ui_open → the side pane, visibly', async () => {
+      const out = await mcp.call('otto_ui_open', { module: 'connections', route: 'database', placement: 'side' });
       expect(out.isError, `ui_open: ${out.text}`).toBeFalsy();
       expect(dig(out.json, 'ui_visible')?.ui_visible).toBe(true);
     });
@@ -565,7 +577,7 @@ test('Deny keeps the agent out: pending_grant, no grant stored, the prompt goes 
     const prompt = page.getByTestId('ui-control-request');
     await expect(prompt).toBeVisible({ timeout: 20_000 });
     await expect(prompt).toContainText('wants to drive Otto');
-    await prompt.getByTestId('ui-control-deny').click();
+    await prompt.getByRole('button', { name: 'Deny', exact: true }).click();
     await expect(prompt).toHaveCount(0);
     // Nothing was granted, the agent is still out, and nothing opened.
     const got = await ctx.get(`${base}/api/v1/sessions/${other.id}`);

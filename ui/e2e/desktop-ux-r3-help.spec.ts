@@ -155,7 +155,11 @@ test('coach workspace and first-agent flow retries safely and sends the starter 
   await page.route(`**/api/v1/workspaces/${workspace.id}/sessions**`, (r) => {
     if (r.request().method() !== 'POST') return r.fulfill({ json: [] });
     launches.push(r.request().postDataJSON());
-    return launchFailed ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic launch failure' } }) : r.fulfill({ json: session });
+    // POST …/sessions/open carries the starter prompt; the daemon delivers it
+    // once the CLI is ready (`prompt_dispatch: queued`) — no client /input.
+    return launchFailed
+      ? r.fulfill({ status: 503, json: { code: 'upstream', message: 'Synthetic launch failure' } })
+      : r.fulfill({ json: { session, prompt_dispatch: 'queued' } });
   });
   await page.route(`**/api/v1/sessions/${session.id}/input`, (r) => { inputs.push(r.request().postDataJSON()); return r.fulfill({ json: {} }); });
   await page.route(`**/api/v1/sessions/${session.id}`, (r) => r.fulfill({ json: session }));
@@ -182,11 +186,11 @@ test('coach workspace and first-agent flow retries safely and sends the starter 
   launchFailed = false;
   await launch.click();
   await expect(coach).toHaveCount(0);
-  await expect.poll(() => inputs.length).toBe(1);
   expect(launches).toHaveLength(2);
-  expect(launches[1]).toMatchObject({ kind: 'agent', title: 'First session', cwd: '/synthetic/project', meta: { source: 'onboarding' } });
-  expect(inputs[0]).toMatchObject({ submit: true });
-  expect(inputs[0].text).toContain('summarise what this project is');
+  expect(launches[1]).toMatchObject({ title: 'First session', cwd: '/synthetic/project', meta: { source: 'onboarding' } });
+  expect(String(launches[1].prompt)).toContain('summarise what this project is');
+  // The prompt rides on the open request — nothing is typed into the PTY.
+  expect(inputs).toHaveLength(0);
   expect(await page.evaluate(() => localStorage.getItem('otto_firstrun_dismissed'))).toBe('1');
   await page.screenshot({ path: info.outputPath('first-agent-opened.png') });
 });

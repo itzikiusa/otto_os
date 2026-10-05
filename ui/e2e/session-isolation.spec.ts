@@ -50,7 +50,10 @@ test.beforeAll(async () => {
 });
 
 // Pin the active workspace + this browser's client id deterministically before
-// any page script runs. `isolation` is parameterized per test.
+// any page script runs. `isolation` is parameterized per test. The sidebar
+// lists every workspace's sessions by default, and the e2e daemon is shared by
+// every spec (and every worker's beforeAll seeds its own pair), so scope it to
+// the current workspace — the row counts below are about THIS workspace.
 function pin(isolation: boolean) {
   return async ({ page }: { page: import('@playwright/test').Page }) => {
     await page.addInitScript(
@@ -58,6 +61,7 @@ function pin(isolation: boolean) {
         localStorage.setItem('otto_workspace', wsId as string);
         localStorage.setItem('otto_client_id', clientId as string);
         localStorage.setItem('otto_session_isolation', iso as string);
+        localStorage.setItem('otto_nav_all_ws', '0');
       },
       [workspaceId, THIS_DEVICE, isolation ? '1' : '0'] as const,
     );

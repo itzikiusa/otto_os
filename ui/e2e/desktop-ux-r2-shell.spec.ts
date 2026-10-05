@@ -129,18 +129,38 @@ test('terminal preserves a selection when an in-flight resize snapshot arrives',
   const { ctx, base } = await apiCtx();
   await ctx.post(`${base}/api/v1/sessions/${sessionId}/input`, { data: { text: 'for i in $(seq 1 20); do echo SELECTION-REVIEW-$i; done', submit: true } });
   await ctx.dispose();
+  // Hold the first snapshot that follows a RESIZE (the post-resize compact)
+  // and everything behind it, so the user selects while it is in flight. The
+  // attach itself carries the grid, so boot alone may never produce a second
+  // snapshot — the widening resize below is what makes one.
+  let armed = false;
+  let held: (string | Buffer)[] | null = null;
   let release: (() => void) | undefined;
   await page.routeWebSocket('**/ws/term/**', socket => {
     const server = socket.connectToServer();
-    let snapshots = 0;
     server.onMessage(message => {
-      if (typeof message === 'string' && JSON.parse(message).type === 'scrollback' && ++snapshots === 2) {
-        release = () => socket.send(message);
-      } else socket.send(message);
+      if (held) {
+        held.push(message);
+        return;
+      }
+      if (armed && typeof message === 'string' && JSON.parse(message).type === 'scrollback') {
+        held = [message];
+        release = () => {
+          const queued = held ?? [];
+          held = null;
+          for (const m of queued) socket.send(m);
+        };
+        return;
+      }
+      socket.send(message);
     });
   });
   await boot(page);
-  await expect.poll(() => !!release).toBe(true);
+  await expect(page.locator('.xterm-rows')).toContainText('SELECTION-REVIEW-20', { timeout: 20_000 });
+  armed = true;
+  // Widen: a narrower grid is left to the TUI's SIGWINCH repaint (resizeDecision).
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await expect.poll(() => !!release, { timeout: 15_000 }).toBe(true);
   const box = await page.locator('.xterm-screen').boundingBox();
   if (!box) throw new Error('Terminal screen not rendered');
   await page.mouse.move(box.x + 8, box.y + 20);

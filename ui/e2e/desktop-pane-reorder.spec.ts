@@ -308,7 +308,9 @@ test('sidebar rows are not draggable while searching', async ({ page }) => {
   const rows = page.getByTestId('agents-list').locator('.nested-row');
   await expect(rows).toHaveCount(3, { timeout: 20_000 });
   await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(3);
-  await page.locator('.nav-search-input').fill('Boban');
+  // Not `.nav-search-input`: once enough workspaces exist the sidebar also
+  // shows a "Filter workspaces" field with the same class.
+  await page.getByRole('textbox', { name: 'Filter sessions' }).fill('Boban');
   await expect(rows).toHaveCount(1);
   await expect(page.locator("[data-testid='agents-list'] .nested-row[draggable='true']")).toHaveCount(0);
 });

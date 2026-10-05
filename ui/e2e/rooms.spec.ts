@@ -1,5 +1,7 @@
 import { test, expect, type WebSocketRoute } from '@playwright/test';
 import type { RoomSnapshot } from '../src/lib/api/room-types';
+// The UI's fetch-proxying service worker would carry room-join past page.route.
+test.use({serviceWorkers: 'block'});
 const admitted: RoomSnapshot = {
   room_id: 'demo', member_id: 'guest', admission: 'admitted', session_id: 'session', session_title: 'Build together', provider: 'shell', host_member_id: 'host', driver_member_id: 'host', grant_epoch: 1,
   members: [
@@ -45,13 +47,15 @@ test('guest admission, driver handoff and chat stay isolated from owner APIs', a
   await expect(page.getByText(/Maya controls the terminal/)).toBeVisible();
   await page.getByRole('button', {name: 'Request control', exact: true}).click();
   await expect.poll(() => actions.some(a => a.type === 'request_control')).toBeTruthy();
-  if (testInfo.project.name === 'phone') await page.getByRole('button', {name: 'People & chat'}).click();
+  // ≤1024 px the room shows one view at a time behind Session | People & chat tabs.
+  const narrow = (page.viewportSize()?.width ?? 1280) <= 1024;
+  if (narrow) await page.getByRole('button', {name: 'People & chat'}).click();
   await page.getByLabel('Message everyone').fill('<script>hello</script>');
   await page.getByRole('button', {name: 'Send', exact: true}).click();
   await expect(page.getByText('<script>hello</script>', {exact: true})).toBeVisible();
   await expect(page.getByLabel('Message everyone')).toHaveValue('');
   expect(terminalInput).toEqual([]);
-  if (testInfo.project.name === 'phone') await page.getByRole('button', {name: 'Session', exact: true}).click();
+  if (narrow) await page.getByRole('button', {name: 'Session', exact: true}).click();
   membership!.send(JSON.stringify({type: 'snapshot', room: {...admitted, driver_member_id: 'guest', grant_epoch: 4}}));
   await expect(page.getByRole('button', {name: 'Release control'})).toBeVisible();
   await page.locator('.xterm-helper-textarea').focus();
@@ -196,7 +200,8 @@ test('driver interruption drops queued output and forwards a room resync', async
   await page.locator('.xterm-helper-textarea').focus();
   terminal!.send(Buffer.from('queued output\r\n'.repeat(160000)));
   await expect.poll(() => frames.some(frame => frame.type === 'resync')).toBeTruthy();
-  expect(frames.find(frame => frame.type === 'resync')).toEqual({type: 'resync', lines: 10000});
+  // A primary pane keeps 4000 rows — the daemon's own depth (perf 01 N2).
+  expect(frames.find(frame => frame.type === 'resync')).toEqual({type: 'resync', lines: 4000});
   expect(frames.some(frame => frame.type === 'input' && frame.data === btoa('\x03') && frame.grant_epoch === 7)).toBeTruthy();
   await expect(page.locator('.xterm-rows')).toContainText('Resynchronized driver');
 });

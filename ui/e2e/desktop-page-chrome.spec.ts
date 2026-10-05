@@ -97,9 +97,15 @@ async function gotoRoute(page: Page, route: string): Promise<void> {
 test('every top-level page renders exactly one PageHeader at one height', async ({ page }) => {
   test.setTimeout(300_000);
   const heights = new Map<string, number>();
+  const header = page.locator('[data-testid="page-header"]');
   for (const route of ROUTES) {
+    // A hash route change is a same-document navigation: `goto` returns while
+    // the PREVIOUS page's header is still mounted, so the measurements below
+    // could read (or race the unmount of) the wrong page. Pass through Agents,
+    // which renders no PageHeader, so every header measured is the new route's.
+    await gotoRoute(page, 'agents');
+    await expect(header).toHaveCount(0);
     await gotoRoute(page, route);
-    const header = page.locator('[data-testid="page-header"]');
     await expect(header.first(), `${route}: page header`).toBeVisible({ timeout: 20_000 });
     await expect(header, `${route}: exactly one page header`).toHaveCount(1);
     const title = (await header.locator('h1').first().textContent())?.trim() ?? '';
