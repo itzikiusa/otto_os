@@ -414,6 +414,68 @@ async fn boot(tools: &[&str]) -> Daemon {
     d
 }
 
+impl Daemon {
+    /// A WebSocket upgrade request against a ROOT route; returns the status.
+    /// The handlers refuse before upgrading, so a refusal is a plain 403.
+    async fn ws_status(&self, path_and_query: &str) -> u16 {
+        self.http
+            .get(format!("{}{path_and_query}", self.base))
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+}
+
+/// Agent-session credentials (sec-agent P1): the daemon's unconfined Files
+/// routes and root-mounted sockets are outside the `/api/v1` read-only guard
+/// (a WS upgrade is a GET), so each applies the agent rules itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_credentials_are_confined_on_files_and_root_routes() {
+    let d = boot(&[]).await;
+    let secret = d._tmp.path().join("secrets.json");
+    std::fs::write(&secret, "{}").unwrap();
+    let file = format!("/fs/read?path={}", secret.display());
+    let agent = d.agent_session(json!({})).await;
+    let read_only = d.agent_session(json!({"read_only": true})).await;
+
+    // Host files: the person's token reads; no agent credential does.
+    let (st, body) = d.send("GET", &d.human, &file, None).await;
+    assert_eq!(st, 200, "{body}");
+    for token in [&agent, &read_only] {
+        let (st, body) = d.send("GET", token, &file, None).await;
+        assert_eq!(st, 403, "agent token must not read host files: {body}");
+        let (st, _) = d.send("GET", token, "/fs/browse?path=/tmp", None).await;
+        assert_eq!(st, 403);
+    }
+
+    // The language server reads a whole host directory: agents are refused.
+    let root = d._tmp.path().display().to_string();
+    assert_eq!(
+        d.ws_status(&format!("/ws/lsp?lang=rust&root={root}&token={agent}"))
+            .await,
+        403
+    );
+    // A read-only session never opens an HTTP stream (it sends requests).
+    assert_eq!(
+        d.ws_status(&format!(
+            "/ws/api-client/stream?workspace_id=ws1&token={read_only}"
+        ))
+        .await,
+        403
+    );
+    // Its event stream (receive-only) still opens.
+    assert_ne!(
+        d.ws_status(&format!("/ws/events?token={read_only}")).await,
+        403
+    );
+}
+
 fn pr_args(title: &str) -> Value {
     json!({"repo_id": "repo1", "title": title, "description": "Body",
            "source_branch": "fix/report", "target_branch": "main"})

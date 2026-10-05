@@ -64,6 +64,17 @@ pub async fn events_ws(
                 ))
                 .into_response();
             }
+            // Agent-credential rules for root routes (MCP-restricted tokens
+            // never subscribe; an agent session's token only receives).
+            if let Err(e) = crate::feature_guard::root_route_gate(
+                crate::feature_guard::RootRoute::Events,
+                &auth,
+                Some(&ctx.pool),
+            )
+            .await
+            {
+                return ApiError(e).into_response();
+            }
             // Only a person's own credential may act as an Otto window for
             // agent UI control (`hello`); an agent session's token — which
             // can open this socket too — only ever receives events.

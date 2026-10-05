@@ -846,15 +846,21 @@ async fn ws_auth_gate<S: SessionsCtx>(
             return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized);
         }
     };
-    // Authorize attach against the effective user (== real for a normal token);
-    // the owner-or-admin gate below runs on the effective identity.
-    let user = auth.effective_user;
-
     // 2. Session lookup.
     let session = match st.ctx.manager().get(&session_id).await {
         Ok(s) => s,
         Err(e) => return problem(StatusCode::NOT_FOUND, &e),
     };
+
+    // 2b. Agent-credential confinement. This root-mounted route never passes
+    // the `/api/v1` feature guard, so the agent-token rules are applied here.
+    let agent_input = match agent_attach_rule(&auth, &session) {
+        Ok(allowed) => allowed,
+        Err(e) => return problem(StatusCode::FORBIDDEN, &e),
+    };
+    // Authorize attach against the effective user (== real for a normal token);
+    // the owner-or-admin gate below runs on the effective identity.
+    let user = auth.effective_user;
 
     // 3. Authorize the attach + decide write capability. Two disjoint paths:
     //
@@ -913,7 +919,7 @@ async fn ws_auth_gate<S: SessionsCtx>(
                 .await
                 .is_ok()
         }
-    };
+    } && agent_input;
 
     if let Err(e) = st.ctx.check_resource(&user, &session).await {
         return problem(StatusCode::FORBIDDEN, &e);
@@ -934,6 +940,41 @@ async fn ws_auth_gate<S: SessionsCtx>(
         .insert(UsedSubprotocol(used_subprotocol));
 
     next.run(req).await
+}
+
+/// Agent-credential confinement for the terminal socket. The `/api/v1` feature
+/// guard confines agent tokens (MCP-only, read-only sessions), but `/ws/term`
+/// is root-mounted and a WS upgrade is a GET, so those rules are restated here:
+///
+/// - an MCP-restricted token (external `.mcp.json` or a session's internal MCP
+///   credential) never attaches to a terminal;
+/// - an Otto-minted agent-session token (`managed_session_id`) may attach only
+///   to its OWN session — never type into another terminal of its owner;
+/// - a read-only session (`meta.read_only = true`) gets a view-only socket.
+///
+/// `Ok(input_allowed)` caps the caller's write capability; `Err` is a 403.
+fn agent_attach_rule(
+    auth: &otto_core::auth::AuthContext,
+    session: &otto_core::domain::Session,
+) -> otto_core::Result<bool> {
+    if auth.mcp_only {
+        return Err(Error::Forbidden(
+            "mcp-restricted token cannot attach to a terminal".into(),
+        ));
+    }
+    let Some(own) = auth.managed_session_id.as_ref() else {
+        return Ok(true);
+    };
+    if *own != session.id {
+        return Err(Error::Forbidden(
+            "an agent session token may only attach to its own session".into(),
+        ));
+    }
+    Ok(session
+        .meta
+        .get("read_only")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true))
 }
 
 /// Newtype extension carrying the write-capability flag set by [`ws_auth_gate`].
@@ -957,6 +998,7 @@ impl LiveTerminalAuth {
         if auth.effective_user.id != self.user.id || auth.mcp_only {
             return Err(Error::Unauthorized);
         }
+        let agent_input = agent_attach_rule(&auth, session)?;
         let can_input = if let Some(scope) = auth.scope {
             if scope.session_id != session.id || scope.otp_pending {
                 return Err(Error::Unauthorized);
@@ -974,7 +1016,7 @@ impl LiveTerminalAuth {
                 )
                 .await
                 .is_ok()
-        };
+        } && agent_input;
         ctx.check_resource(&auth.effective_user, session).await?;
         Ok(can_input)
     }
@@ -2358,6 +2400,101 @@ mod tests {
             resp.headers().get("x-can-input").unwrap(),
             "1",
             "owner-editor keeps input capability (unscoped path unchanged)"
+        );
+    }
+
+    // ---- Agent-credential confinement on /ws/term ---------------------------
+
+    async fn seed_editor(pool: &SqlitePool, user: &str) {
+        sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ('ws1', ?, 'editor')")
+            .bind(user)
+            .execute(pool)
+            .await
+            .expect("set member");
+    }
+
+    /// An agent session's own API token may NOT attach to another terminal of
+    /// its owner (it would type into it): the WS upgrade is a GET, so the
+    /// `/api/v1` read-only guard never saw it — the gate must refuse it.
+    #[tokio::test]
+    async fn agent_session_token_refused_on_other_session() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let repo = SessionsRepo::new(pool.clone());
+        let agent = insert_session(&repo, "ws1", "alice").await;
+        let other = insert_session(&repo, "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+
+        let (token, _) = AuthRepo::new(pool.clone())
+            .issue_session_api_token(&"alice".into(), &agent)
+            .await
+            .expect("issue session token");
+        assert_eq!(
+            gate(&app, &other, &token).await.status(),
+            StatusCode::FORBIDDEN,
+            "a managed-session token must be 403 on a sibling session"
+        );
+        let own = gate(&app, &agent, &token).await;
+        assert_eq!(own.status(), StatusCode::OK, "own session still attaches");
+        assert_eq!(own.headers().get("x-can-input").unwrap(), "1");
+    }
+
+    /// A read-only agent session attaching to its own terminal is view-only.
+    #[tokio::test]
+    async fn read_only_agent_session_cannot_input() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let repo = SessionsRepo::new(pool.clone());
+        let agent = repo
+            .create(otto_state::NewSession {
+                workspace_id: "ws1".into(),
+                kind: SessionKind::Agent,
+                provider: "shell".into(),
+                title: "t".into(),
+                cwd: "/tmp".into(),
+                provider_session_id: None,
+                connection_id: None,
+                created_by: "alice".into(),
+                meta: serde_json::json!({ "read_only": true }),
+            })
+            .await
+            .expect("insert session")
+            .id;
+        let app = probe_app(build(&pool).await);
+        let (token, _) = AuthRepo::new(pool.clone())
+            .issue_session_api_token(&"alice".into(), &agent)
+            .await
+            .expect("issue session token");
+        let resp = gate(&app, &agent, &token).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-can-input").unwrap(),
+            "0",
+            "a read-only session must never get input on the terminal socket"
+        );
+    }
+
+    /// An MCP-restricted token never attaches to a terminal (its only routes
+    /// are the governed MCP endpoints).
+    #[tokio::test]
+    async fn mcp_token_refused_on_terminal() {
+        let pool = mem_pool().await;
+        seed_user(&pool, "alice").await;
+        seed_workspace(&pool, "ws1").await;
+        seed_editor(&pool, "alice").await;
+        let s1 = insert_session(&SessionsRepo::new(pool.clone()), "ws1", "alice").await;
+        let app = probe_app(build(&pool).await);
+        let token = AuthRepo::new(pool.clone())
+            .issue_mcp_token(&"alice".into(), None)
+            .await
+            .expect("issue mcp token");
+        assert_eq!(
+            gate(&app, &s1, &token).await.status(),
+            StatusCode::FORBIDDEN
         );
     }
 

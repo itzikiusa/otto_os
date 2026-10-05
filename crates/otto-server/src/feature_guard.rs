@@ -149,6 +149,14 @@ where
                 }
             }
         }
+        // HOST FILES (`/fs/*`). The daemon reads the host filesystem as the
+        // owner, unconfined — so an agent session's own credential reaching
+        // `/fs/read` would read exactly the files its Seatbelt profile hides
+        // (`Otto/secrets.json`, WebKit storage, …). Agent credentials never
+        // reach the Files surface; the owner's UI token still does.
+        if agent_session_of(ctx).is_some() && is_host_files_route(&template) {
+            return forbidden("an agent session credential cannot read host files").into_response();
+        }
         if let Some(scope) = ctx.scope.clone() {
             // EMAIL-OTP GATE (mobile plan Task 7.3). A share locked to a recipient
             // email is OTP-pending until the guest redeems the emailed code via
@@ -271,6 +279,106 @@ where
             }
         }
     }
+}
+
+/// The agent session an Otto-minted credential is bound to: an author
+/// session's API token (`managed_session_id`) or a session's internal MCP
+/// credential (`mcp_session_id`). `None` for a person's own login/PAT token.
+pub fn agent_session_of(ctx: &AuthContext) -> Option<&otto_core::Id> {
+    ctx.managed_session_id
+        .as_ref()
+        .or(ctx.mcp_session_id.as_ref())
+}
+
+/// The daemon-side host filesystem routes (`/api/v1/fs/*`).
+fn is_host_files_route(template: &str) -> bool {
+    template.starts_with("/api/v1/fs/")
+}
+
+// ---------------------------------------------------------------------------
+// Root-mounted routes (outside `/api/v1`).
+// ---------------------------------------------------------------------------
+
+/// Every root-mounted route that authenticates an Otto bearer token itself
+/// (WebSockets and the browser proxy are not nested under `/api/v1`, so
+/// [`feature_guard`] never sees them). Each one calls [`root_route_gate`]
+/// before doing any work; `/ws/term` applies the same rules in
+/// `otto_sessions::ws` (`agent_attach_rule`), and the room sockets use room
+/// tokens (agent credentials are refused when a room is joined). The
+/// `root_routes_apply_agent_rules` test keeps this list complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootRoute {
+    /// `/ws/events` — the event stream (receive-only for agents).
+    Events,
+    /// `/ws/lsp` — a language server over a host directory (host file reads).
+    Lsp,
+    /// `/ws/api-client/stream` — sends real HTTP requests.
+    ApiStream,
+    /// `/ws/browser/{tab_id}/live` — drives a live browser tab.
+    BrowserLive,
+    /// `/browser/proxy` — fetches a page for the reader view (a read).
+    BrowserProxy,
+}
+
+/// The credential facts the root-route rules depend on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RootCred {
+    /// A share-link (session-scoped) token.
+    pub scoped: bool,
+    /// A `kind='mcp'` restricted token (external or a session's internal one).
+    pub mcp_only: bool,
+    /// An Otto-minted agent-session credential.
+    pub agent_session: bool,
+    /// The agent session is confined read-only.
+    pub read_only: bool,
+}
+
+/// Pure decision for a root-mounted route — the same three rules the
+/// `/api/v1` guard applies: share and MCP-restricted tokens reach none of
+/// these; an agent session never reaches host files (LSP); a read-only
+/// session never reaches a route that acts (send HTTP, drive a browser).
+pub fn root_route_decision(route: RootRoute, cred: RootCred) -> Result<(), &'static str> {
+    if cred.scoped {
+        return Err("a share-link token cannot use this endpoint");
+    }
+    if cred.mcp_only {
+        return Err("an mcp-restricted token cannot use this endpoint");
+    }
+    if cred.agent_session && route == RootRoute::Lsp {
+        return Err("an agent session credential cannot open a language server");
+    }
+    if cred.agent_session
+        && cred.read_only
+        && matches!(route, RootRoute::ApiStream | RootRoute::BrowserLive)
+    {
+        return Err("this agent session is read-only: it may read but not change anything");
+    }
+    Ok(())
+}
+
+/// [`root_route_decision`] for an authenticated context. `pool` resolves the
+/// calling session's read-only flag (an unreadable row fails closed); pass
+/// `None` only for a route no read-only rule covers.
+pub async fn root_route_gate(
+    route: RootRoute,
+    auth: &AuthContext,
+    pool: Option<&otto_state::DbPool>,
+) -> Result<(), Error> {
+    let agent = agent_session_of(auth);
+    let read_only = match (agent, pool) {
+        (Some(sid), Some(pool)) => crate::personal_agent_policy::session_read_only(pool, sid)
+            .await
+            .unwrap_or(true),
+        // No pool: only the rules that do not need the row apply.
+        _ => false,
+    };
+    let cred = RootCred {
+        scoped: auth.is_scoped(),
+        mcp_only: auth.mcp_only,
+        agent_session: agent.is_some(),
+        read_only,
+    };
+    root_route_decision(route, cred).map_err(|m| Error::Forbidden(m.into()))
 }
 
 /// Exact HTTP surface reachable by an MCP-restricted credential. Internal
@@ -686,5 +794,167 @@ mod resource_route_tests {
                 "cluster-y".into()
             ))
         );
+    }
+}
+
+#[cfg(test)]
+mod root_route_tests {
+    use super::*;
+
+    const ALL: [RootRoute; 5] = [
+        RootRoute::Events,
+        RootRoute::Lsp,
+        RootRoute::ApiStream,
+        RootRoute::BrowserLive,
+        RootRoute::BrowserProxy,
+    ];
+
+    #[test]
+    fn share_and_mcp_tokens_reach_no_root_route() {
+        for route in ALL {
+            for cred in [
+                RootCred {
+                    scoped: true,
+                    ..Default::default()
+                },
+                RootCred {
+                    mcp_only: true,
+                    ..Default::default()
+                },
+                RootCred {
+                    mcp_only: true,
+                    agent_session: true,
+                    ..Default::default()
+                },
+            ] {
+                assert!(
+                    root_route_decision(route, cred).is_err(),
+                    "{route:?} must refuse {cred:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn agent_sessions_never_reach_host_files_and_read_only_never_acts() {
+        let agent = RootCred {
+            agent_session: true,
+            ..Default::default()
+        };
+        let read_only = RootCred {
+            read_only: true,
+            ..agent
+        };
+        assert!(root_route_decision(RootRoute::Lsp, agent).is_err());
+        for route in [RootRoute::ApiStream, RootRoute::BrowserLive] {
+            assert!(root_route_decision(route, agent).is_ok(), "{route:?}");
+            assert!(root_route_decision(route, read_only).is_err(), "{route:?}");
+        }
+        // Reads stay open to a read-only session.
+        for route in [RootRoute::Events, RootRoute::BrowserProxy] {
+            assert!(root_route_decision(route, read_only).is_ok(), "{route:?}");
+        }
+        // A person's own token is unaffected everywhere.
+        for route in ALL {
+            assert!(root_route_decision(route, RootCred::default()).is_ok());
+        }
+    }
+
+    #[test]
+    fn host_files_routes_are_recognised() {
+        assert!(is_host_files_route("/api/v1/fs/read"));
+        assert!(is_host_files_route("/api/v1/fs/browse"));
+        assert!(!is_host_files_route("/api/v1/fsx"));
+        assert!(!is_host_files_route("/api/v1/workspaces/{id}/files"));
+    }
+
+    /// Route coverage: every root-mounted WebSocket / proxy route in the
+    /// workspace (they bypass [`feature_guard`]) must be listed here with the
+    /// marker that proves its handler applies the agent-credential rules. A
+    /// new root route fails this test until it is gated and listed.
+    #[test]
+    fn root_routes_apply_agent_rules() {
+        // (route path, file that handles it, marker that file must contain)
+        const COVERED: &[(&str, &str, &str)] = &[
+            (
+                "/ws/events",
+                "otto-server/src/ws_events.rs",
+                "RootRoute::Events",
+            ),
+            ("/ws/lsp", "otto-server/src/lsp/mod.rs", "RootRoute::Lsp"),
+            (
+                "/ws/api-client/stream",
+                "otto-server/src/routes/api_stream.rs",
+                "RootRoute::ApiStream",
+            ),
+            (
+                "/ws/browser/{tab_id}/live",
+                "otto-server/src/routes/browser_live.rs",
+                "RootRoute::BrowserLive",
+            ),
+            (
+                "/browser/proxy",
+                "otto-server/src/modules.rs",
+                "RootRoute::BrowserProxy",
+            ),
+            (
+                "/ws/term/{session_id}",
+                "otto-sessions/src/ws.rs",
+                "agent_attach_rule(&auth",
+            ),
+            // Room sockets authenticate a ROOM token, never an Otto bearer
+            // token; agent credentials are refused when a room is joined.
+            (
+                "/ws/rooms/{id}",
+                "otto-server/src/rooms/socket.rs",
+                "ctx.rooms.authenticate(",
+            ),
+            (
+                "/ws/rooms/{id}/terminal",
+                "otto-server/src/rooms/terminal.rs",
+                "ctx.rooms.authenticate(",
+            ),
+        ];
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut found = std::collections::BTreeSet::new();
+        let mut stack = vec![crates.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if p.file_name().is_some_and(|n| n != "target" && n != "tests") {
+                        stack.push(p);
+                    }
+                    continue;
+                }
+                if p.extension().is_none_or(|e| e != "rs")
+                    || p.ends_with("otto-server/src/feature_guard.rs")
+                {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                for (i, _) in src.match_indices(".route(\"") {
+                    let rest = &src[i + ".route(\"".len()..];
+                    let path = &rest[..rest.find('"').unwrap_or(0)];
+                    if path.starts_with("/ws/") || path == "/browser/proxy" {
+                        found.insert(path.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            found.contains("/ws/events"),
+            "scan found nothing: {found:?}"
+        );
+        for path in &found {
+            let Some((_, file, marker)) = COVERED.iter().find(|(p, ..)| p == path) else {
+                panic!("root route {path} is not covered by the agent-credential rules");
+            };
+            let src = std::fs::read_to_string(crates.join(file)).unwrap();
+            assert!(
+                src.contains(marker),
+                "{file} must apply `{marker}` for {path}"
+            );
+        }
     }
 }

@@ -7687,12 +7687,30 @@ async fn browser_proxy(
                 .into_response();
         }
     };
-    if st.auth.authenticate(&token).await.is_err() {
+    let Ok(auth) = st.auth.authenticate(&token).await else {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(otto_core::api::Problem {
                 code: "unauthorized".into(),
                 message: "invalid token".into(),
+            }),
+        )
+            .into_response();
+    };
+    // Share-link and MCP-restricted tokens never use the proxy (no pool: the
+    // proxy is a read, so no read-only rule applies).
+    if let Err(e) = crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::BrowserProxy,
+        &auth,
+        None,
+    )
+    .await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(otto_core::api::Problem {
+                code: e.code().to_string(),
+                message: e.to_string(),
             }),
         )
             .into_response();
