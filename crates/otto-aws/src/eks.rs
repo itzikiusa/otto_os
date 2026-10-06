@@ -251,6 +251,16 @@ pub async fn describe_cluster(
 /// matching migration 0114).
 // TODO(k8s): switch the insert to `otto_state::K8sClustersRepo` once it lands
 // (it is being built in parallel by the Kubernetes console work).
+/// The S11-303 exec-plugin allow-list over a generated kubeconfig file,
+/// for the context `alias` it was written under.
+fn check_generated_kubeconfig(path: &std::path::Path, alias: &str) -> Result<()> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::Internal(format!("read generated kubeconfig: {e}")))?;
+    let cfg: serde_json::Value = serde_yaml::from_str(&text)
+        .map_err(|e| Error::Upstream(format!("generated kubeconfig is not valid YAML: {e}")))?;
+    otto_core::kubeconfig_policy::check_kubeconfig(&cfg, Some(alias)).map_err(Error::Invalid)
+}
+
 pub async fn import_kubeconfig(
     svc: &AwsService,
     pool: &DbPool,
@@ -321,6 +331,13 @@ pub async fn import_kubeconfig(
     }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| Error::Internal(format!("chmod kubeconfig: {e}")))?;
+    // S11-303: what `aws eks update-kubeconfig` wrote must name an
+    // allow-listed credential plugin (normally `aws eks get-token`) before the
+    // cluster is registered — the token cache re-checks it on every use.
+    if let Err(e) = check_generated_kubeconfig(&path, &alias) {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
 
     let now = Utc::now();
     let params = serde_json::json!({ "eks_region": region_str, "eks_cluster": name });
@@ -394,6 +411,27 @@ pub async fn import_kubeconfig(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S11-303: the EKS import registers only a kubeconfig whose context
+    /// authenticates with an allow-listed plugin (`aws eks get-token`).
+    #[test]
+    fn generated_kubeconfig_must_name_an_allowed_plugin() {
+        let dir = std::env::temp_dir().join(format!("otto-eks-kc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("k.yaml");
+        let kc = |cmd: &str| {
+            format!(
+                "apiVersion: v1\nkind: Config\ncontexts:\n- name: prod\n  context: {{cluster: c, user: u}}\n\
+                 users:\n- name: u\n  user:\n    exec:\n      command: {cmd}\n      args: [eks, get-token]\n"
+            )
+        };
+        std::fs::write(&path, kc("aws")).unwrap();
+        assert!(check_generated_kubeconfig(&path, "prod").is_ok());
+        std::fs::write(&path, kc("/bin/bash")).unwrap();
+        let err = check_generated_kubeconfig(&path, "prod").unwrap_err();
+        assert!(err.to_string().contains("/bin/bash"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn cluster_and_nodegroup_normalize() {

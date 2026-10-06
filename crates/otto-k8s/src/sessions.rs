@@ -136,6 +136,10 @@ pub async fn k9s<S: K8sCtx>(
     crate::access::check_k9s(&ctx.pool(), user, &cluster.id).await?;
     let bin = install::locate(Tool::K9s, ctx.data_dir())
         .ok_or_else(|| Error::Invalid(cli::not_installed_message("k9s")))?;
+    // S11-303: k9s runs the kubeconfig's credential plugin itself — refuse a
+    // cluster whose plugin is not allow-listed (the same derivation kubectl
+    // calls go through; its overlay is unused here).
+    crate::clusters::kubectl_for(ctx, cluster).await?;
     let env = crate::clusters::aws_env_for(ctx, cluster).await?;
     let spec = k9s_spec(&bin.to_string_lossy(), cluster, env, req.ns.as_deref());
     let title = format!("k9s · {}", cluster.name);
