@@ -40,6 +40,9 @@ async function boot(page: Page): Promise<void> {
 
 const box = (page: Page) => page.locator('section.hbox[data-kind="classrooms"]');
 const list = (page: Page) => box(page).getByRole('region', { name: 'Classrooms list' });
+/** OUR classroom: other specs on the shared daemon seed students with the
+ *  same titles ("E2E Shell") in their own workspaces. */
+const ours = (page: Page) => list(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true });
 
 /** Show the visible list (List view) — a no-op without WebGL (already a list). */
 async function listView(page: Page): Promise<void> {
@@ -50,11 +53,11 @@ async function listView(page: Page): Promise<void> {
     // so a click lost to the first paint would leave every row unhoverable.
     await expect(async () => {
       if ((await toggle.getAttribute('aria-pressed')) !== 'true') await toggle.click();
-      await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 1_000 });
-    }).toPass({ timeout: 10_000 });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true', { timeout: 3_000 });
+      await expect(list(page)).not.toHaveClass(/sr-only/, { timeout: 1_000 });
+    }).toPass({ timeout: 30_000 }); // a busy shared daemon lists many classrooms
   }
   await expect(list(page)).toBeVisible();
-  await expect(list(page)).not.toHaveClass(/sr-only/);
 }
 
 test.beforeAll(async () => {
@@ -87,7 +90,7 @@ test('the box renders classrooms with the seeded students', async ({ page }) => 
   await expect(box(page).locator('.stage, .list:not(.sr-only)').first()).toBeVisible();
   await expect(box(page).locator('.sum')).toContainText(/classroom.*student/);
   await listView(page);
-  const room = list(page).getByRole('region', { name: `Classroom ${WS_NAME}` });
+  const room = ours(page);
   await expect(room).toBeVisible();
   await expect(room.getByRole('button', { name: /^Open E2E Shell/ })).toBeVisible();
   await expect(room.getByRole('button', { name: /^Open E2E Kick/ })).toBeVisible();
@@ -97,7 +100,7 @@ test('the box renders classrooms with the seeded students', async ({ page }) => 
 test('focus / hover shows a tooltip fully inside the viewport', async ({ page }) => {
   await boot(page);
   await listView(page);
-  const row = list(page).getByRole('button', { name: /^Open E2E Shell/ });
+  const row = ours(page).getByRole('button', { name: /^Open E2E Shell/ });
   await row.hover();
   const tip = page.getByRole('tooltip');
   await expect(tip).toContainText('E2E Shell');
@@ -113,7 +116,7 @@ test('focus / hover shows a tooltip fully inside the viewport', async ({ page })
   const threeD = box(page).getByRole('button', { name: '3D', exact: true });
   if (await threeD.count()) {
     await threeD.click();
-    await list(page).getByRole('button', { name: /^Open E2E Shell/ }).focus();
+    await ours(page).getByRole('button', { name: /^Open E2E Shell/ }).focus();
     await expect(page.getByRole('tooltip')).toContainText('E2E Shell');
     await expectFullyInViewport(page, page.getByRole('tooltip'), 'classrooms tooltip (focus)');
   }
@@ -122,7 +125,7 @@ test('focus / hover shows a tooltip fully inside the viewport', async ({ page })
 test('clicking a student opens that session', async ({ page }) => {
   await boot(page);
   await listView(page);
-  await list(page).getByRole('button', { name: /^Open E2E Shell/ }).click();
+  await ours(page).getByRole('button', { name: /^Open E2E Shell/ }).click();
   await expect(page).toHaveURL(new RegExp(`#/agents/${openId}$`));
 });
 
@@ -130,7 +133,7 @@ test('the headmaster kicks a student out: danger confirm, then the session is de
   await boot(page);
   await listView(page);
   // Cancel first: nothing is deleted.
-  await list(page).getByRole('button', { name: 'More actions for E2E Kick' }).click();
+  await ours(page).getByRole('button', { name: 'More actions for E2E Kick' }).click();
   await page.getByRole('menuitem', { name: /Kick out/ }).click();
   const dlg = page.getByRole('dialog');
   await expect(dlg).toContainText('E2E Kick');
@@ -138,14 +141,14 @@ test('the headmaster kicks a student out: danger confirm, then the session is de
   await expect(dlg).toContainText('entire history');
   await dlg.getByRole('button', { name: 'Cancel' }).click();
   expect((await ctx.get(`${base}/api/v1/sessions?ids=${kickId}`)).ok()).toBe(true);
-  await expect(list(page).getByRole('button', { name: /^Open E2E Kick/ })).toBeVisible();
+  await expect(ours(page).getByRole('button', { name: /^Open E2E Kick/ })).toBeVisible();
 
   // Confirm: the student leaves, the toast says so, the row is gone server-side.
-  await list(page).getByRole('button', { name: 'More actions for E2E Kick' }).click();
+  await ours(page).getByRole('button', { name: 'More actions for E2E Kick' }).click();
   await page.getByRole('menuitem', { name: /Kick out/ }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Kick out', exact: true }).click();
   await expect(page.locator('.toast').filter({ hasText: 'Kicked out E2E Kick' })).toBeVisible();
-  await expect(list(page).getByRole('button', { name: /^Open E2E Kick/ })).toHaveCount(0);
+  await expect(ours(page).getByRole('button', { name: /^Open E2E Kick/ })).toHaveCount(0);
   await expect
     .poll(async () => {
       const r = await ctx.get(`${base}/api/v1/sessions?ids=${kickId}`);
@@ -157,8 +160,8 @@ test('the headmaster kicks a student out: danger confirm, then the session is de
 test('detention archives a student (resumable)', async ({ page }) => {
   await boot(page);
   await listView(page);
-  await list(page).getByRole('button', { name: 'More actions for E2E Shell' }).click();
+  await ours(page).getByRole('button', { name: 'More actions for E2E Shell' }).click();
   await page.getByRole('menuitem', { name: /detention/ }).click();
   await expect(page.locator('.toast').filter({ hasText: 'Session archived' })).toBeVisible();
-  await expect(list(page).getByRole('button', { name: /^Open E2E Shell/ })).toHaveCount(0);
+  await expect(ours(page).getByRole('button', { name: /^Open E2E Shell/ })).toHaveCount(0);
 });
