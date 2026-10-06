@@ -1325,10 +1325,16 @@ class WorkspaceStore {
    *  remembered "Always archive/delete" still asks about. `working` only means
    *  "printed in the last few seconds", so a plain shell (whose prompt redraw
    *  or `ls` output reads as working) is not mid-turn: its close/delete
-   *  honours the remembered choice like an idle session's. */
-  isAgentMidTurn(id: Id): boolean {
-    if (this.statusMap[id] !== 'working') return false;
-    const s = this.sessions.find((x) => x.id === id);
+   *  honours the remembered choice like an idle session's.
+   *
+   *  `statusMap` only knows the rows this store loaded (current workspace,
+   *  All-workspaces foreground agents, fetched-by-id). A caller that drew the
+   *  row from its OWN list — Classrooms' back row, other workspaces — passes
+   *  what it showed as `hint.working`; either source saying "working" counts
+   *  (S14-301: asking needlessly is cheap, a silent mid-turn kill is not). */
+  isAgentMidTurn(id: Id, hint?: { working?: boolean }): boolean {
+    if (this.statusMap[id] !== 'working' && !hint?.working) return false;
+    const s = this.sessions.find((x) => x.id === id) ?? this.otherWsSessions.find((x) => x.id === id);
     return !s || (s.kind === 'agent' && s.provider !== 'shell');
   }
 
@@ -1753,12 +1759,23 @@ class WorkspaceStore {
    *  WORKING agent asks first (its in-flight turn is lost; Undo unarchives
    *  the session but cannot bring the turn back). Idle/exited archive at once,
    *  and so does a plain shell ({@link isAgentMidTurn}: its output is not a turn).
-   *  Resolves false when the user cancelled; a failed archive rejects. */
-  async requestArchive(id: Id): Promise<boolean> {
-    if (this.isAgentMidTurn(id)) {
-      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || this.otherWsSessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+   *  `hint` carries what a caller with its own row list showed (S14-301): its
+   *  working state, title, and — for an engine-owned session — the engine's
+   *  label, which the confirm names (archiving pulls the session out from
+   *  under that run). Resolves false when the user cancelled; a failed
+   *  archive rejects. */
+  async requestArchive(id: Id, hint?: { working?: boolean; title?: string; engine?: string | null }): Promise<boolean> {
+    if (this.isAgentMidTurn(id, hint)) {
+      const name =
+        this.sessions.find((x) => x.id === id)?.title?.trim() ||
+        this.otherWsSessions.find((x) => x.id === id)?.title?.trim() ||
+        hint?.title?.trim() ||
+        'this session';
+      const engine = hint?.engine
+        ? ` It is a running ${hint.engine} session, not one you started: the ${hint.engine} run that owns it loses it and may fail.`
+        : '';
       const ok = await confirmer.ask(
-        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.`,
+        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.${engine}`,
         { title: 'Archive working session?', confirmLabel: 'Archive session', danger: true },
       );
       if (!ok) return false;
@@ -1812,7 +1829,9 @@ class WorkspaceStore {
   /** The restart working-guard on its own, for callers that restart as part
    *  of a larger action (SessionView's "Save & restart"). True = go ahead. */
   async confirmRestart(id: Id): Promise<boolean> {
-    if (this.statusMap[id] !== 'working') return true;
+    // The same working-guard as archive/close: a busy plain shell restarts
+    // without asking, an agent mid-turn asks (S14-301).
+    if (!this.isAgentMidTurn(id)) return true;
     const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
     return confirmer.ask(
       `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,

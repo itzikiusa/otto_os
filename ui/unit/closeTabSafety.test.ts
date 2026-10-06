@@ -156,3 +156,40 @@ test('sessionVerbsApply is Agents-only', () => {
   assert.equal(sessionScope.sessionVerbsApply('agents'), true);
   assert.equal(sessionScope.sessionVerbsApply('git'), false);
 });
+
+// S14-301: Classrooms' back row and other workspaces draw "working" from their
+// own list; the store's statusMap never saw those rows.
+test('requestArchive asks for a working row the store has no status for', async () => {
+  const { ws, posted, asked } = store('home', '', false);
+  ws.sessions = [];
+  ws.statusMap = {};
+  assert.equal(await ws.requestArchive('bg1', { working: true, title: 'Step 3', engine: 'workflow' }), false);
+  assert.equal(asked.length, 1, 'the working guard asked');
+  assert.match(asked[0], /“Step 3” is working right now/);
+  assert.match(asked[0], /workflow run that owns it/);
+  assert.deepEqual(posted, [], 'cancel archives nothing');
+});
+
+test('requestArchive: an idle unknown row archives at once; a busy shell never asks', async () => {
+  const idle = store('home', '');
+  idle.ws.sessions = [];
+  idle.ws.statusMap = {};
+  assert.equal(await idle.ws.requestArchive('s9', { working: false, title: 'x', engine: null }), true);
+  assert.deepEqual(idle.asked, []);
+  assert.deepEqual(idle.posted, ['/sessions/s9/archive']);
+  const shell = store('agents', '');
+  shell.ws.sessions = [{ id: 's1', workspace_id: 'w', kind: 'agent', provider: 'shell', status: 'working', title: 'zsh', archived: false }];
+  shell.ws.statusMap = { s1: 'working' };
+  assert.equal(await shell.ws.requestArchive('s1'), true);
+  assert.equal(await shell.ws.confirmRestart('s1'), true, 'restart uses the same guard as archive');
+  assert.deepEqual(shell.asked, []);
+});
+
+test('requestArchive and confirmRestart ask for a working agent', async () => {
+  const { ws, asked } = store('agents', '', false);
+  ws.sessions = [{ id: 's1', workspace_id: 'w', kind: 'agent', provider: 'claude', status: 'working', title: 'Agent one', archived: false }];
+  ws.statusMap = { s1: 'working' };
+  assert.equal(await ws.requestArchive('s1'), false);
+  assert.equal(await ws.confirmRestart('s1'), false);
+  assert.equal(asked.length, 2);
+});

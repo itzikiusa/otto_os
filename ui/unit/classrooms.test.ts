@@ -367,10 +367,25 @@ test('kick-out of a back-row engine session says which run loses it', () => {
   assert.doesNotMatch(kickOutPrompt(student()).message, /run that owns it/);
 });
 
+test('detention hands the archive guard what the scene showed (S14-301)', async () => {
+  const hints: unknown[] = [];
+  const deps = { archive: async (_id: string, h: unknown) => { hints.push(h); return true; }, failed() {} };
+  await sendToDetention(student({ visual: 'working', background: true, source: 'pr_review' }), deps);
+  await sendToDetention(student(), deps);
+  assert.equal(JSON.stringify(hints[0]), JSON.stringify({ working: true, title: 'Refactor', engine: 'pr review' }));
+  assert.equal(JSON.stringify(hints[1]), JSON.stringify({ working: false, title: 'Refactor', engine: null }));
+});
+
+test('engine copy shows a readable source label, not the raw id (S14-305)', () => {
+  const p = kickOutPrompt(student({ background: true, source: 'pr_review' }));
+  assert.match(p.message, /running pr review session/);
+  assert.doesNotMatch(p.message, /pr_review/);
+});
+
 test('the box wires kick-out to ws.killSession and detention to the guarded ws.requestArchive', () => {
   const src = readFileSync(join(import.meta.dirname, '..', 'src/modules/home/boxes/ClassroomsBox.svelte'), 'utf8');
   assert.match(src, /kill: \(id\) => ws\.killSession\(id\)/);
-  assert.match(src, /archive: \(id\) => ws\.requestArchive\(id\)/);
+  assert.match(src, /archive: \(id, hint\) => ws\.requestArchive\(id, hint\)/);
   assert.doesNotMatch(src, /ws\.archiveSession\(/, 'detention must go through the working-guard');
   assert.match(src, /ask: \(message, opts\) => confirmer\.ask\(message, opts\)/);
   assert.doesNotMatch(src, /[^.\w]confirm\(/, 'never the native confirm()');
