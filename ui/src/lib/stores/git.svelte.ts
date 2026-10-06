@@ -149,8 +149,14 @@ class GitStore {
   detecting = $state(false);
   /** Set when the focused session's cwd is not inside a git repo. */
   notARepo = $state(false);
+  /** The workspace repo list failed to load (S13-305): the panel offers
+   *  Retry and the app retries on window focus. Null when loaded. */
+  reposError: string | null = $state(null);
   private loadedFor: Id | null = null;
   private detectedCwd: string | null = null;
+  /** The repo the last successful {@link detectFor} made primary — a
+   *  `loadRepos` that lands after it must not replace it with `repos[0]`. */
+  private detectedRepoId: Id | null = null;
   // Stale-response guards (S13-03): switching workspace / focused session
   // A→B used to let A's slower status / PR list / repo list land last and
   // show repo A's branch and PRs under repo B's name.
@@ -363,6 +369,16 @@ class GitStore {
     try {
       const repos = await api.get<Repo[]>(`/workspaces/${workspaceId}/repos`);
       if (!t.current) return; // a newer workspace's load owns the panel
+      this.reposError = null;
+      // A detect for the focused session's cwd that resolved FIRST already
+      // picked the right primary (S13-305): keep it rather than snapping back
+      // to the workspace's first registered repo. The detect registers its
+      // repo, but this list may predate that — so add it if missing.
+      const kept = this.primary;
+      if (kept && kept.workspace_id === workspaceId && (kept.id === this.detectedRepoId || repos.some((r) => r.id === kept.id))) {
+        this.repos = repos.some((r) => r.id === kept.id) ? repos : [...repos, kept];
+        return;
+      }
       this.repos = repos;
       this.primary = this.repos[0] ?? null;
       this.primaryStatus = null;
@@ -370,14 +386,16 @@ class GitStore {
       if (this.primary) {
         await this.selectPrimary(this.primary);
       }
-    } catch {
+    } catch (e) {
       if (!t.current) return;
       this.repos = [];
       this.primary = null;
       this.primaryStatus = null;
       this.prs = [];
-      // Not sticky: the next loadRepos for this workspace retries.
+      // Not sticky: the next loadRepos for this workspace retries — the
+      // panel's Retry, or App's retry on window focus (S13-305).
       this.loadedFor = null;
+      this.reposError = e instanceof Error ? e.message : String(e);
     } finally {
       if (t.current) this.loading = false;
     }
@@ -440,6 +458,7 @@ class GitStore {
     try {
       const repo = await api.post<Repo>(`/workspaces/${workspaceId}/repos/detect`, { path: cwd });
       if (!t.current) return;
+      this.detectedRepoId = repo.id;
       await this.selectPrimary(repo);
     } catch {
       if (!t.current) return;
@@ -448,6 +467,13 @@ class GitStore {
     } finally {
       if (t.current) this.detecting = false;
     }
+  }
+
+  /** Retry a failed workspace load (and the cwd detect that may have fallen
+   *  back with it). */
+  async retryRepos(workspaceId: Id, cwd?: string | null): Promise<void> {
+    await this.loadRepos(workspaceId, true);
+    if (cwd) await this.detectFor(workspaceId, cwd, true);
   }
 
   async refreshPrimary(): Promise<void> {

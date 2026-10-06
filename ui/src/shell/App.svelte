@@ -416,6 +416,15 @@
   $effect(() => {
     if (ws.currentId) void git.loadRepos(ws.currentId);
   });
+  // …and retry a failed load when the window comes back (S13-305): the
+  // effect above only re-runs on a workspace switch.
+  $effect(() => {
+    const retry = (): void => {
+      if (git.reposError && ws.currentId) void git.loadRepos(ws.currentId);
+    };
+    window.addEventListener('focus', retry);
+    return () => window.removeEventListener('focus', retry);
+  });
 
   // ---- keyboard map ----
   // One dispatcher for the key map, the side-by-side pane (which hands the

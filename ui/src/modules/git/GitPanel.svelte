@@ -25,7 +25,13 @@
     <div class="gp-pad"><Skeleton rows={4} height={26} /></div>
   {:else if !git.primary}
     <div class="gp-empty">
-      {#if git.notARepo}
+      {#if git.reposError}
+        <p class="dim">Couldn’t load this workspace’s repositories.</p>
+        <button
+          class="btn small"
+          onclick={() => ws.currentId && void git.retryRepos(ws.currentId, ws.activeSession?.cwd)}
+        >Retry</button>
+      {:else if git.notARepo}
         <p class="dim">This session’s folder isn’t a git repository.</p>
       {:else}
         <p class="dim">No repository for this session yet.</p>
