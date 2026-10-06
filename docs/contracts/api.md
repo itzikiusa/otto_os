@@ -1690,10 +1690,10 @@ configured Jira/Confluence account.
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
 | PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
-| GET /issue/projects | member | — | available projects |
+| GET /issue/projects | member | — | available projects (`IssueProject[]`). `?meta=1` → `ListingPage<IssueProject>` `{items, truncated}` — `truncated` = the walk stopped at its page cap (20 × 100) and later projects are not shown |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
 | GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
-| GET /issue/confluence/spaces | member | — | Confluence spaces |
+| GET /issue/confluence/spaces | member | — | Confluence spaces (`ConfluenceSpace[]`). `?meta=1` → `{items, truncated}` (`truncated` = stopped at the 20-page cap) |
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
 | POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |

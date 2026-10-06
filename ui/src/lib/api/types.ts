@@ -4271,6 +4271,13 @@ export interface IssueProject {
   name: string;
 }
 
+/** `GET /issue/projects?meta=1` / `/issue/confluence/spaces?meta=1`: the
+ *  listing plus whether it stopped at its page cap (later rows not shown). */
+export interface ListingPage<T> {
+  items: T[];
+  truncated: boolean;
+}
+
 export interface IssueSummary {
   key: string;
   summary: string;
