@@ -59,7 +59,7 @@
   import type { AssistSelection } from './assist/model';
   import StatusPill from './StatusPill.svelte';
   import StudioBadge from './StudioBadge.svelte';
-  import { formatLabel, isTextFormat, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
+  import { formatLabel, isTextFormat, newerHeadAfterTypedLoad, renderKind, seqLookup, splitLinks, statusLabel, studioInfo } from './model';
   import { library } from './library.svelte';
   import { originOf } from './nav';
   import { guardUnsaved } from '../../lib/leaveGuard';
@@ -172,7 +172,7 @@
       }
       if (same && source !== typedAt) {
         detail = d;
-        newerHead = d.content_version_id ?? d.head?.id ?? null;
+        newerHead = newerHeadAfterTypedLoad(d.content_version_id ?? d.head?.id ?? null, baseVersionId);
         phase = 'ready';
         loadError = null;
         return;

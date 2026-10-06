@@ -824,3 +824,12 @@ export function contrastRatio(a: string, b: string): number | null {
   const [hi, lo] = la > lb ? [la, lb] : [lb, la];
   return Math.round(((hi + 0.05) / (lo + 0.05)) * 10) / 10;
 }
+
+/** The "a newer version exists" head to flag after a load that raced the
+ *  user's typing (S18-303): only a head that differs from the version the
+ *  editor is based on is newer — the same head (a WS resync of an unchanged
+ *  artifact) must not raise a false conflict that "Load theirs" would then
+ *  answer by throwing the user's edits away. */
+export function newerHeadAfterTypedLoad(fetchedHead: string | null, baseVersionId: string | null): string | null {
+  return fetchedHead && fetchedHead !== baseVersionId ? fetchedHead : null;
+}
