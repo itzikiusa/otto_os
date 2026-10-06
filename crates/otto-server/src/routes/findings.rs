@@ -1023,6 +1023,10 @@ struct SeedReviewReq {
     /// Optional durable diff (E2E proves diff re-materialization on retry).
     #[serde(default)]
     diff: Option<String>,
+    /// Optional review status (`running` by default) — E2E seeds a settled
+    /// review to exercise per-agent retry, which refuses a mid-run review.
+    #[serde(default)]
+    status: Option<String>,
 }
 
 /// `POST /workspaces/{ws}/__e2e/review` — create a real review row so the
@@ -1059,6 +1063,14 @@ async fn e2e_seed_review(
     if let Some(diff) = &b.diff {
         ctx.reviews_store
             .set_diff(&review.id, diff)
+            .await
+            .map_err(ApiError)?;
+    }
+    if let Some(status) = b.status.as_deref() {
+        let status = otto_core::domain::ReviewStatus::parse(status)
+            .ok_or_else(|| ApiError(Error::Invalid(format!("unknown review status {status:?}"))))?;
+        ctx.reviews_store
+            .set_status(&review.id, status, None)
             .await
             .map_err(ApiError)?;
     }

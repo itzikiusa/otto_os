@@ -844,8 +844,7 @@ fn covers_home(root: &Path, home: &Path) -> bool {
 }
 
 /// Is `p` too broad to be an agent session's working directory — `/`,
-/// `$HOME`, an ancestor of `$HOME`, or Otto's data dir / an ancestor of it /
-/// a path inside it that is not an agent work area ([`AGENT_DATA_SUBDIRS`],
+/// `$HOME`, an ancestor of `$HOME`, or Otto's data dir / a path inside it that is not an agent work area ([`AGENT_DATA_SUBDIRS`],
 /// a Design Hall `design/<artifact>/work` copy)? Returns the reason. Shared
 /// by the session manager (which refuses such a cwd before spawning) and
 /// [`SandboxPolicy::for_agent`] (which never grants it).
@@ -865,9 +864,12 @@ pub fn unsafe_session_cwd(p: &Path, home: &Path, data_dir: &Path) -> Option<&'st
     }
     if !data_dir.as_os_str().is_empty() {
         let data = canonicalize_lenient(data_dir);
-        if data.starts_with(&p) {
-            return Some("Otto's data folder (or one of its parents)");
+        if data == p {
+            return Some("Otto's data folder");
         }
+        // A folder ABOVE the data dir (e.g. `/tmp` holding an isolated
+        // daemon's data dir) is fine: the profile write-denies the data dir
+        // itself as a trailing rule, whatever writable root contains it.
         if let Ok(rel) = p.strip_prefix(&data) {
             let mut parts = rel.components().map(|c| c.as_os_str().to_string_lossy());
             let first = parts.next().unwrap_or_default();
@@ -1578,7 +1580,8 @@ mod tests {
         assert!(unsafe_session_cwd(home, home, data).is_some());
         assert!(unsafe_session_cwd(Path::new("/nonexistent-otto-home"), home, data).is_some());
         assert!(unsafe_session_cwd(data, home, data).is_some());
-        assert!(unsafe_session_cwd(Path::new("/nonexistent-otto-test"), home, data).is_some());
+        // Above the data dir: allowed (the data dir stays write-denied).
+        assert!(unsafe_session_cwd(Path::new("/nonexistent-otto-test"), home, data).is_none());
         assert!(unsafe_session_cwd(&data.join("bin"), home, data).is_some());
         assert!(unsafe_session_cwd(&data.join("provider-accounts/a"), home, data).is_some());
         assert!(unsafe_session_cwd(&data.join("design/blobs/work"), home, data).is_some());
