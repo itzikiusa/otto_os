@@ -2,8 +2,8 @@ import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedShellSession, seedWorkspace } from './seed';
 import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 
-// Home → Classrooms widget: workspaces as classrooms, sessions as students,
-// the user as the headmaster. The 3D canvas needs WebGL (headless Chromium may
+// Home → Classrooms (Otto School) widget: workspaces as classrooms, sessions
+// as kids, archived sessions on the detention bench. The 3D canvas needs WebGL (headless Chromium may
 // or may not have it), so every assertion goes through the accessible
 // companion list, which exists in both modes: a visible list in List view /
 // without WebGL, a keyboard-reachable one in 3D view. Kick-out = delete via
@@ -39,7 +39,7 @@ async function boot(page: Page): Promise<void> {
 }
 
 const box = (page: Page) => page.locator('section.hbox[data-kind="classrooms"]');
-const list = (page: Page) => box(page).getByRole('region', { name: 'Classrooms list' });
+const list = (page: Page) => box(page).getByRole('region', { name: 'School list' });
 /** OUR classroom: other specs on the shared daemon seed students with the
  *  same titles ("E2E Shell") in their own workspaces. */
 const ours = (page: Page) => list(page).getByRole('region', { name: `Classroom ${WS_NAME}`, exact: true });
@@ -90,10 +90,9 @@ test('the Add widget picker offers Classrooms', async ({ page }) => {
 test('the box renders classrooms with the seeded students', async ({ page }) => {
   await boot(page);
   await expect(box(page)).toBeVisible();
-  // Settles: either the 3D stage (with the headmaster label once drawn) or the list.
   await expect(box(page).locator('.stage, .list:not(.sr-only)').first()).toBeVisible();
-  await expect(box(page).locator('.sum')).toContainText(/classroom.*student/);
   await listView(page);
+  await expect(box(page).locator('.sum')).toContainText(/classroom.*kid/);
   const room = ours(page);
   await expect(room).toBeVisible();
   await expect(room.getByRole('button', { name: /^Open E2E Shell/ })).toBeVisible();
@@ -101,29 +100,12 @@ test('the box renders classrooms with the seeded students', async ({ page }) => 
   await expectNoHorizontalOverflow(page);
 });
 
-test('focus / hover shows a tooltip fully inside the viewport', async ({ page }) => {
+test('the row menu stays inside the viewport', async ({ page }) => {
   await boot(page);
   await listView(page);
-  const row = ours(page).getByRole('button', { name: /^Open E2E Shell/ });
-  await row.hover();
-  const tip = page.getByRole('group', { name: /— details$/ });
-  await expect(tip).toContainText('E2E Shell');
-  await expect(tip).toContainText('Shell');
-  await expect(tip).toContainText(WS_NAME);
-  await expectFullyInViewport(page, tip, 'classrooms tooltip');
-  // A short window: the tooltip still clamps inside.
-  await page.setViewportSize({ width: 820, height: 420 });
-  await row.scrollIntoViewIfNeeded();
-  await row.hover();
-  await expectFullyInViewport(page, page.getByRole('group', { name: /— details$/ }), 'classrooms tooltip (short window)');
-  // Keyboard path in 3D view: focusing a student shows its tooltip too.
-  const threeD = box(page).getByRole('button', { name: '3D', exact: true });
-  if (await threeD.count()) {
-    await threeD.click();
-    await ours(page).getByRole('button', { name: /^Open E2E Shell/ }).focus();
-    await expect(page.getByRole('group', { name: /— details$/ })).toContainText('E2E Shell');
-    await expectFullyInViewport(page, page.getByRole('group', { name: /— details$/ }), 'classrooms tooltip (focus)');
-  }
+  await ours(page).getByRole('button', { name: 'More actions for E2E Shell' }).click();
+  await expectFullyInViewport(page, page.getByRole('menu'), 'school row menu');
+  await page.keyboard.press('Escape');
 });
 
 test('clicking a student opens that session', async ({ page }) => {
@@ -168,4 +150,8 @@ test('detention archives a student (resumable)', async ({ page }) => {
   await page.getByRole('menuitem', { name: /detention/ }).click();
   await expect(page.locator('.toast').filter({ hasText: 'Session archived' })).toBeVisible();
   await expect(ours(page).getByRole('button', { name: /^Open E2E Shell/ })).toHaveCount(0);
+  // It sits on the detention bench; releasing it brings it back to a desk.
+  await expect(ours(page).getByRole('button', { name: /^Release E2E Shell/ })).toBeVisible({ timeout: 15_000 });
+  await ours(page).getByRole('button', { name: /^Release E2E Shell/ }).click();
+  await expect(ours(page).getByRole('button', { name: /^Open E2E Shell/ })).toBeVisible({ timeout: 15_000 });
 });

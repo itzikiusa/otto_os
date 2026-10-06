@@ -12,6 +12,7 @@ pub mod nested;
 pub mod prompt_guard;
 pub mod providers;
 pub mod room_authority;
+pub mod screen;
 pub mod share_throttle;
 pub mod tail_scan;
 pub mod trust;

@@ -65,12 +65,13 @@ test('service worker never caches the proxy, plugin UIs or credentialed URLs', (
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v4'/, 'bump CACHE_NAME on a policy change');
 });
 
-test('Classrooms keeps three.js behind a dynamic import', () => {
-  for (const f of ['src/modules/home/boxes/ClassroomsBox.svelte', 'src/modules/home/classrooms/scene.ts', 'src/modules/home/classrooms/model.ts']) {
+test('Otto School (Classrooms) keeps three.js behind a dynamic import', () => {
+  const school = ['scene', 'model', 'life', 'furnish', 'screens', 'actions', 'assets'].map((f) => `src/modules/home/school/${f}.ts`);
+  for (const f of ['src/modules/home/boxes/ClassroomsBox.svelte', ...school]) {
     const imports = staticImports(read(f));
     assert.ok(!imports.some((s) => s === 'three' || s.startsWith('three/')), `${f} must not statically import three`);
   }
-  assert.match(read('src/modules/home/classrooms/scene.ts'), /import\('three'\)/);
+  assert.match(read('src/modules/home/school/scene.ts'), /import\('three'\)/);
   assert.match(read('scripts/bundle-budget.mjs'), /three: \['home'/);
 });
 

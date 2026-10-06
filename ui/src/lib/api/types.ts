@@ -4598,6 +4598,21 @@ export interface SlashCommand {
   source: 'builtin' | 'user' | 'project';
 }
 
+/**
+ * `GET /sessions/{id}/screen` — the session's CURRENT terminal screen as plain
+ * text (no scrollback), for the Home "Otto School" monitors. Not live ⇒
+ * `{live: false, cols: 0, rows: 0, lines: []}` (the read never spawns/resumes).
+ */
+export interface SessionScreen {
+  /** The session has a live PTY right now. */
+  live: boolean;
+  /** Emulator size; `0` when not live. */
+  cols: number;
+  rows: number;
+  /** Plain rows top→bottom: trailing blank rows dropped, each ≤ 240 chars, the LAST ≤ 60 rows. */
+  lines: string[];
+}
+
 /** A provider skill's full content (body + file list). */
 export interface ProviderSkillContent {
   provider: string;

@@ -605,8 +605,8 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // owner-or-admin gate); board tasks + the image inbox are writes into a
     // session (`Agents:Edit`). History is workspace-axis: GET = View, POST
     // (import / rescan) = Edit. Placeholder is `{wid}`, as `routes/activity.rs`.
-    if p == "/sessions/{id}/slash-commands" {
-        // Composer completion list: the same read gate as the transcript.
+    if p == "/sessions/{id}/slash-commands" || p == "/sessions/{id}/screen" {
+        // Composer completions / live screen: the transcript's read gate.
         return Require(Agents, View);
     }
     if p == "/sessions/{id}/transcript/touch" {

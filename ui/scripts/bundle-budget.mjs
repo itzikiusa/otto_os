@@ -162,7 +162,7 @@ const LAZY_ONLY = {
 /** npm package → the page keys whose STATIC import set must not reach it
  *  (same rule as LAZY_ONLY, for a whole package). `three` (~650 kB) is only
  *  ever behind a dynamic import: Home's Classrooms widget and the Design Hall
- *  3D surfaces load it on first mount (classrooms/scene.ts, scene3d/build.ts). */
+ *  3D surfaces load it on first mount (home/school/scene.ts, scene3d/build.ts). */
 const LAZY_ONLY_PKG = {
   three: ['home', 'agents'],
 };

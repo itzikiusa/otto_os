@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="2.5 2.5 19 19" width="256" height="256">
+  <!-- Claude starburst (from ui/src/lib/components/ProviderIcon.svelte), cream on transparent -->
+  <g stroke="#f7efe2" stroke-width="2.3" stroke-linecap="round">
+    <line x1="14.57" y1="12.36" x2="20.22" y2="13.16" />
+    <line x1="14.05" y1="13.60" x2="17.67" y2="16.43" />
+    <line x1="12.97" y1="14.41" x2="15.18" y2="19.88" />
+    <line x1="11.64" y1="14.57" x2="11.03" y2="18.93" />
+    <line x1="10.40" y1="14.05" x2="6.95" y2="18.46" />
+    <line x1="9.59" y1="12.97" x2="5.14" y2="14.77" />
+    <line x1="9.43" y1="11.64" x2="3.68" y2="10.83" />
+    <line x1="9.95" y1="10.40" x2="6.41" y2="7.63" />
+    <line x1="11.03" y1="9.59" x2="8.89" y2="4.30" />
+    <line x1="12.36" y1="9.43" x2="13.02" y2="4.77" />
+    <line x1="13.60" y1="9.95" x2="16.99" y2="5.62" />
+    <line x1="14.41" y1="11.03" x2="18.95" y2="9.19" />
+  </g>
+</svg>
