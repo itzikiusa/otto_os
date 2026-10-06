@@ -237,8 +237,12 @@ test('the bell spins only until a load settles and shows rows + inline Retry on 
   const src = readFileSync(new URL('../src/shell/NotificationBell.svelte', import.meta.url), 'utf8');
   assert.match(src, /\{:else if !notifications\.settled\}/, 'spinner keys on settled, not loaded');
   assert.doesNotMatch(src, /\{:else if !notifications\.loaded\}/);
-  const rowsBranch = src.slice(src.indexOf('{#each sections as sec'), -1);
+  // The rows branch sits inside LoadState with the store's error, so a failed
+  // refresh shows the rows under LoadState's "Couldn’t refresh" bar + Retry.
   const before = src.slice(0, src.indexOf('{#each sections as sec'));
-  assert.ok(rowsBranch.length > 0);
-  assert.match(before.slice(before.lastIndexOf('{:else}')), /\{#if notifications\.error\}[\s\S]*role="alert"[\s\S]*Retry/);
+  assert.match(
+    before.slice(before.lastIndexOf('{:else}')),
+    /<LoadState[\s\S]*error=\{notifications\.error\}[\s\S]*onretry=\{\(\) => notifications\.load\(\)\}/,
+  );
+  assert.match(src.slice(src.indexOf('{#each sections as sec')), /<\/LoadState>/);
 });

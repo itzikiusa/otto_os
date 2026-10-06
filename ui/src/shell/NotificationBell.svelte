@@ -1,6 +1,7 @@
 <script lang="ts">
   import { plural } from '../lib/plural';
   import Skeleton from '../lib/components/Skeleton.svelte';
+  import LoadState from '../lib/components/LoadState.svelte';
   // Notification center bell: unread badge + an anchored popover of notices.
   //
   // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
@@ -396,17 +397,15 @@
                 <p>You’re all caught up</p>
               </div>
             {:else}
-              {#if notifications.error}
-                <!-- A refresh failed but rows are here (kept, or ingested
-                     live from /ws/events): show them, plus an inline Retry. -->
-                <div class="nb-refresh-error" role="alert">
-                  <Icon name="warning" size={12} />
-                  <span class="grow">Couldn’t refresh notifications</span>
-                  <button class="btn ghost small" onclick={() => notifications.load()} disabled={notifications.loading}>
-                    <Icon name="refresh" size={12} /> Retry
-                  </button>
-                </div>
-              {/if}
+              <!-- A refresh failed but rows are here (kept, or ingested live
+                   from /ws/events): LoadState shows them under its slim
+                   "Couldn’t refresh" bar + Retry (S12-305). -->
+              <LoadState
+                what="notifications"
+                error={notifications.error}
+                loading={notifications.loading}
+                onretry={() => notifications.load()}
+              >
               {#each sections as sec (sec.bucket)}
                 {#if sections.length > 1}
                   <div class="nb-section">{SECTION[sec.bucket]}</div>
@@ -488,6 +487,7 @@
                   </div>
                 {/each}
               {/each}
+              </LoadState>
             {/if}
           </div>
         </div>
@@ -637,22 +637,6 @@
     color: var(--danger);
   }
   .nb-error p {
-    color: var(--text);
-  }
-
-  .nb-refresh-error {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin: 6px 10px 2px;
-    padding: 4px 4px 4px 10px;
-    border-radius: 6px;
-    background: var(--danger-soft);
-    color: var(--danger);
-    font-size: var(--fs-s);
-  }
-  .nb-refresh-error .grow {
-    flex: 1;
     color: var(--text);
   }
 
