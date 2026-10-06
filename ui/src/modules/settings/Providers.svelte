@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { serialLatest } from '../../lib/latest';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -284,22 +285,23 @@
   }
 
   // Exclude / re-include a provider. Optimistic; reverts on failure.
-  // Each PUT carries the WHOLE list, so quick toggles can land out of order:
-  // only the latest write's response may set `disabled` (an older reply used to
-  // re-apply its stale list over the newer one).
-  let toggleSeq = 0;
+  // Each PUT carries the WHOLE list, so the writes are SERIALIZED and each one
+  // sends the latest `disabled` at send time (S17-308): ordering only the
+  // responses still let two concurrent PUTs be applied out of order, leaving
+  // the server on the older list. A toggle superseded while queued sends
+  // nothing — the newer one carries its change.
+  const saveDisabled = serialLatest(() =>
+    api.put<Record<string, unknown>>('/settings', { disabled_providers: [...disabled] }),
+  );
   async function toggleProvider(nameOfProvider: string, enable: boolean): Promise<void> {
-    const seq = ++toggleSeq;
     const next = new Set(disabled);
     if (enable) next.delete(nameOfProvider);
     else next.add(nameOfProvider);
     disabled = next;
     try {
-      const saved = await api.put<Record<string, unknown>>('/settings', {
-        disabled_providers: [...next],
-      });
-      if (seq !== toggleSeq) return;
-      allSettings = saved;
+      const r = await saveDisabled();
+      if (!r.ok) return; // a newer toggle's write carries this change
+      allSettings = r.value;
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
       await auth.refreshMeta();
       toasts.success(
@@ -309,8 +311,8 @@
           : 'Hidden from every picker; existing sessions keep working',
       );
     } catch (e) {
-      if (seq !== toggleSeq) return;
-      // revert
+      // Undo THIS toggle only: a newer toggle queued behind it still sends
+      // the (now reverted for this provider) latest list.
       const revert = new Set(disabled);
       if (enable) revert.add(nameOfProvider);
       else revert.delete(nameOfProvider);
