@@ -56,6 +56,11 @@ const LOCATION_KEYS: [&str; 5] = [
     "cwd",
 ];
 
+/// Which repo / branch / PR a git or review step targets — an untrusted
+/// webhook body must not aim a run at an arbitrary registered repo (S3-302);
+/// the trigger spec supplies them instead (`copy_location_defaults`).
+const TARGET_KEYS: [&str; 4] = ["repo_id", "base", "pr", "pr_branch"];
+
 /// Who supplied a run input, which decides the reserved keys it may carry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputSource {
@@ -78,7 +83,9 @@ pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<Strin
         k.starts_with("origin_")
             || ORIGIN_KEYS.contains(&k)
             || (source == InputSource::Webhook
-                && (DELIVERY_KEYS.contains(&k) || LOCATION_KEYS.contains(&k)))
+                && (DELIVERY_KEYS.contains(&k)
+                    || LOCATION_KEYS.contains(&k)
+                    || TARGET_KEYS.contains(&k)))
     };
     let dropped: Vec<String> = map.keys().filter(|k| reserved(k)).cloned().collect();
     for k in &dropped {
@@ -88,14 +95,20 @@ pub fn strip_reserved_input(input: &mut Value, source: InputSource) -> Vec<Strin
 }
 
 /// A webhook trigger's spec-configured run location (`working_directory` /
-/// `repos`) — the Editor-owned counterpart of the keys stripped from its body.
+/// `repos`) and git target (`repo_id` / `base` / `pr` / `pr_branch`) — the
+/// Editor-owned counterpart of the keys stripped from its body.
 pub fn copy_location_defaults(spec: &Value, input: &mut serde_json::Map<String, Value>) {
-    if let Some(v) = spec
-        .get("working_directory")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-    {
-        input.insert("working_directory".into(), json!(v));
+    for key in ["working_directory", "repo_id", "base", "pr_branch"] {
+        if let Some(v) = spec
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
+            input.insert(key.into(), json!(v));
+        }
+    }
+    if let Some(v) = spec.get("pr").filter(|v| v.is_number() || v.is_string()) {
+        input.insert("pr".into(), v.clone());
     }
     if let Some(v) = spec.get("repos").filter(|v| v.is_array()) {
         input.insert("repos".into(), v.clone());
@@ -388,12 +401,13 @@ mod tests {
             "result_webhook": "https://evil", "callback_url": "https://evil",
             "working_directory": "~/other-repo", "repos": [], "cwd": "/",
             "worktree": "/x", "worktree_path": "/y",
+            "repo_id": "repo-of-ws-a", "base": "main", "pr": 7, "pr_branch": "x",
         });
         let mut w = body.clone();
         let mut dropped = strip_reserved_input(&mut w, InputSource::Webhook);
         dropped.sort();
         assert_eq!(w, json!({ "prompt": "summarize" }));
-        assert_eq!(dropped.len(), 15);
+        assert_eq!(dropped.len(), 19);
         let mut m = body.clone();
         strip_reserved_input(&mut m, InputSource::Manual);
         let m = m.as_object().unwrap();
@@ -413,6 +427,8 @@ mod tests {
             "callback_url",
             "working_directory",
             "repos",
+            "repo_id",
+            "base",
         ] {
             assert!(m.contains_key(k), "manual keeps {k}");
         }
@@ -423,10 +439,18 @@ mod tests {
 
     #[test]
     fn location_defaults_come_from_the_trigger_spec() {
-        let spec = json!({"working_directory": "~/repo", "repos": [{"repo": "r"}], "x": 1});
+        let spec = json!({
+            "working_directory": "~/repo", "repos": [{"repo": "r"}], "x": 1,
+            "repo_id": "r1", "base": "develop", "pr": 12, "pr_branch": " ",
+        });
         let mut input = serde_json::Map::new();
         copy_location_defaults(&spec, &mut input);
         assert_eq!(input.get("working_directory"), Some(&json!("~/repo")));
+        // S3-302: the git target comes from the spec too (blank values skipped).
+        assert_eq!(input.get("repo_id"), Some(&json!("r1")));
+        assert_eq!(input.get("base"), Some(&json!("develop")));
+        assert_eq!(input.get("pr"), Some(&json!(12)));
+        assert!(input.get("pr_branch").is_none());
         assert_eq!(input.get("repos"), Some(&json!([{"repo": "r"}])));
         assert!(input.get("x").is_none());
     }

@@ -3347,10 +3347,17 @@ result goes and where agents run; which trigger may set them:
 | `origin_*` (e.g. `origin_workspace_id`), `channel`, `chat`, `thread` | yes | — | dropped | dropped |
 | `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
 | `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
+| `repo_id`, `base`, `pr`, `pr_branch` | — | webhook spec | yes (`repo_id` must be in the workflow's workspace, else **400**) | dropped |
 
 Results always post through the **workflow's own** workspace integration: an
 `origin_workspace_id` naming another workspace is ignored (chat triggers only
 resolve workflows of the receiving workspace).
+
+Repos are **workspace-scoped** for every run: an explicit `repo_id` (run input or node
+params), a `repos[]` declaration (by id or name) and a `working_directory`/worktree path
+all resolve only to repos registered in the workflow's own workspace. A path whose
+deepest registered repo lives in another workspace resolves to nothing (the step fails
+with "no repo_id") rather than borrowing that repo's checkout or git account.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
 `otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
@@ -3381,7 +3388,9 @@ candidate's workflow is re-checked against the inbound `workspace_id` before bei
 channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
 channel's messages) into workspace A. The name-addressed commands above (1 and 2) apply the
 same gate: `find_by_name` resolves only within the message's own workspace, so a member of
-workspace A's channel can never start workspace B's workflow.
+workspace A's channel can never start workspace B's workflow. Net effect: only the trigger
+*listing* is global — every path (1–3) can start only workflows of the receiving workspace, and
+the run reports through that same workspace's integration.
 
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
