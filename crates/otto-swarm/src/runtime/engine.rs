@@ -2994,7 +2994,11 @@ mod row_workspace_guard {
             let Some(fn_start) = code[..i].rfind("async fn ") else {
                 continue;
             };
-            let name = code[fn_start + 9..].split(['(', '<']).next().unwrap().to_string();
+            let name = code[fn_start + 9..]
+                .split(['(', '<'])
+                .next()
+                .unwrap()
+                .to_string();
             let body_end = ["\nasync fn ", "\nfn ", "\npub fn ", "\npub async fn "]
                 .iter()
                 .filter_map(|m| code[i..].find(m))
@@ -3049,9 +3053,8 @@ mod row_workspace_guard {
         ] {
             let bad = format!("async fn h(\n    {sig},\n) {{\n    get(p.1)\n}}\n");
             assert_eq!(scan(&bad).0, vec!["h".to_string()], "{sig}");
-            let ok = format!(
-                "async fn h(\n    {sig},\n) {{\n    swarm_in_ws(&rt, &p.0, &p.1)\n}}\n"
-            );
+            let ok =
+                format!("async fn h(\n    {sig},\n) {{\n    swarm_in_ws(&rt, &p.0, &p.1)\n}}\n");
             assert!(scan(&ok).0.is_empty(), "{sig}");
         }
     }

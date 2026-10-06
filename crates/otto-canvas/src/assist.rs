@@ -431,7 +431,10 @@ impl Drop for SceneBusy {
     fn drop(&mut self) {
         let mut busy = busy_scenes().lock().unwrap();
         // Only our own entry (a later turn may hold the slot by now).
-        if busy.get(&self.scene).is_some_and(|f| Arc::ptr_eq(f, &self.stop)) {
+        if busy
+            .get(&self.scene)
+            .is_some_and(|f| Arc::ptr_eq(f, &self.stop))
+        {
             busy.remove(&self.scene);
         }
     }
@@ -468,7 +471,9 @@ pub async fn stop_assist<C: CanvasAssistCtx>(
         .ok_or_else(|| ApiError(Error::NotFound(format!("canvas scene {id}"))))?;
     crate::assist_ctx::require_ws_role(&ctx, &user, &scene.workspace_id, WorkspaceRole::Editor)
         .await?;
-    Ok(Json(serde_json::json!({ "stopping": request_stop(&scene.id) })))
+    Ok(Json(
+        serde_json::json!({ "stopping": request_stop(&scene.id) }),
+    ))
 }
 
 /// Throwaway-preview teardown (S4-11): kill the session (once `on_ready` saw

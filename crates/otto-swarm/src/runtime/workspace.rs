@@ -684,8 +684,15 @@ mod tests {
         assert!(ba.starts_with("swarm/"));
         assert_ne!(pa, "wt", "never the legacy per-agent dir");
         // S4-301: never nested under the legacy `swarm/<s>/<a>` ref.
-        let legacy = format!("swarm/{}/{}", short("swarm0000000001"), short("agent000000001"));
-        assert!(!ba.starts_with(&format!("{legacy}/")), "{ba} nests under {legacy}");
+        let legacy = format!(
+            "swarm/{}/{}",
+            short("swarm0000000001"),
+            short("agent000000001")
+        );
+        assert!(
+            !ba.starts_with(&format!("{legacy}/")),
+            "{ba} nests under {legacy}"
+        );
     }
 
     /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.

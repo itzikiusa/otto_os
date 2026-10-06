@@ -513,7 +513,10 @@ async fn stop_story_agents_kills_rewrite_test_and_plan_sessions() {
 
     use std::sync::atomic::Ordering;
     assert!(flag.load(Ordering::SeqCst), "the story's run is cancelled");
-    assert!(!other_flag.load(Ordering::SeqCst), "another story's run is not");
+    assert!(
+        !other_flag.load(Ordering::SeqCst),
+        "another story's run is not"
+    );
     let s = sessions.get(&rewrite.id).await.unwrap();
     assert_eq!(s.status, otto_core::domain::SessionStatus::Exited);
     let s = sessions.get(&kept.id).await.unwrap();
@@ -561,4 +564,66 @@ async fn canvas_assist_stop_is_scoped_and_idempotent() {
     let (st, body) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
     assert_eq!(st, StatusCode::OK, "{body}");
     assert_eq!(body["stopping"], false, "no turn is running");
+}
+
+/// S4-10 / S4-26: the boot reaper finalizes an analysis orphaned `running`
+/// by a restart as `partial` (else the story answers 409 forever), and leaves
+/// finished analyses alone.
+#[tokio::test]
+async fn boot_reaper_finalizes_a_running_analysis() {
+    let w = world().await;
+    let pr = &w.ctx.product_repo;
+    let story = pr
+        .create_story(otto_state::NewStory {
+            workspace_id: w.ws_a.clone(),
+            source_kind: "draft".into(),
+            account_id: String::new(),
+            source_key: otto_core::new_id(),
+            title: "s".into(),
+            url: String::new(),
+            issue_type: None,
+            stage: "draft".into(),
+            cwd: None,
+            parent_id: None,
+            tree_kind: "story".into(),
+            folder: String::new(),
+            created_by: w.alice.id.clone(),
+        })
+        .await
+        .unwrap();
+    let mk = |status: &str| otto_state::NewAnalysis {
+        story_id: story.id.clone(),
+        source_version_id: None,
+        status: status.into(),
+        created_by: w.alice.id.clone(),
+    };
+    let orphan = pr.create_analysis(mk("running")).await.unwrap();
+    let done = pr.create_analysis(mk("done")).await.unwrap();
+
+    // While it is `running`, Analyze answers 409 and spawns nothing (S4-15).
+    let app = Router::new()
+        .route(
+            "/workspaces/{ws}/product/stories/{sid}/analyze",
+            post(otto_product::analysis::analyze::<ServerCtx>),
+        )
+        .with_state(w.ctx.clone());
+    let uri = format!(
+        "/workspaces/{}/product/stories/{}/analyze",
+        w.ws_a, story.id
+    );
+    let (st, body) = call(&app, &w.alice, Method::POST, &uri, json!({})).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        pr.list_analyses(&story.id).await.unwrap().len(),
+        2,
+        "no new row"
+    );
+
+    otto_product::run::reap_orphaned_agents_on_startup(w.ctx.clone()).await;
+
+    let o = pr.get_analysis(&orphan.id).await.unwrap();
+    assert_eq!(o.status, "partial");
+    assert_eq!(o.summary, otto_product::run::INTERRUPTED_SUMMARY);
+    assert!(o.finished_at.is_some());
+    assert_eq!(pr.get_analysis(&done.id).await.unwrap().status, "done");
 }

@@ -1418,11 +1418,20 @@ mod tests {
             session_working(S::Idle, false, recent, started, now),
             "a short idle spell between tool calls is normal"
         );
-        assert!(!session_working(S::Idle, false, stale, started, now), "stalled");
+        assert!(
+            !session_working(S::Idle, false, stale, started, now),
+            "stalled"
+        );
         assert!(!session_working(S::Exited, false, recent, started, now));
-        assert!(!session_working(S::Working, true, recent, started, now), "archived");
+        assert!(
+            !session_working(S::Working, true, recent, started, now),
+            "archived"
+        );
         let ancient = now - chrono::Duration::hours(3);
-        assert!(!session_working(S::Working, false, recent, ancient, now), "hard cap");
+        assert!(
+            !session_working(S::Working, false, recent, ancient, now),
+            "hard cap"
+        );
     }
 
     /// S4-19a: a spawn reservation is recognised (and bounded); real runs aren't.
