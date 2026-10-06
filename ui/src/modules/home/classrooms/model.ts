@@ -435,11 +435,17 @@ export function shortPath(cwd: string, keep = 2): string {
   return `…/${parts.slice(-keep).join('/')}`;
 }
 
+/** Human label for a background session's `meta.source` (`pr_review` →
+ *  "pr review"): the tooltip, the kick-out and the detention copy share it. */
+export function sourceLabel(source: string | null | undefined): string {
+  return source ? source.replace(/[_-]+/g, ' ').trim() : 'engine';
+}
+
 /** Tooltip lines for a student — the same text the accessible list reads. */
 export function tooltipLines(s: Student, ago: string): { title: string; lines: string[] } {
   const lines = [
     `${providerLabel(s.provider)} · ${s.stateLabel}`,
-    s.background && s.source ? `${s.workspaceName} · back row (${s.source.replace(/[_-]+/g, ' ')})` : s.workspaceName,
+    s.background && s.source ? `${s.workspaceName} · back row (${sourceLabel(s.source)})` : s.workspaceName,
   ];
   if (ago) lines.push(`Last active ${ago}`);
   const where = [s.cwd ? shortPath(s.cwd) : '', s.branch ? `⎇ ${s.branch}` : ''].filter(Boolean).join(' · ');

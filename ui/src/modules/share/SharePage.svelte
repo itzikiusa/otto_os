@@ -152,6 +152,7 @@
   // comes back into focus): an OTP window that lapsed needs a fresh code, and
   // a revoked/expired link must say so — not leave a terminal that silently
   // stopped updating.
+  let termView = $state<{ reconnect: () => void } | null>(null);
   async function recheckAccess(): Promise<void> {
     const t = token;
     if (!t || viewState !== 'ok') return;
@@ -159,6 +160,9 @@
     const seq = generation;
     try {
       await getSharedSession(id, t);
+      // The link answers again: a terminal whose reconnects gave up during
+      // a long daemon restart picks back up on its own (S14-303).
+      if (isCurrent(seq, id, t) && viewState === 'ok') termView?.reconnect();
     } catch (e: unknown) {
       if (!isCurrent(seq, id, t) || viewState !== 'ok') return;
       if (e instanceof ApiError && e.status === 403 && isOtpPending(e)) {
@@ -398,6 +402,7 @@
         <!-- Pass shareToken so Terminal opens the WS with the otto-bearer
              subprotocol (Task 3.2). readOnly mirrors the viewer badge. -->
         <Terminal
+          bind:this={termView}
           {sessionId}
           readOnly={isViewer}
           forceDark

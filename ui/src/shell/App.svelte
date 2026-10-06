@@ -47,7 +47,7 @@
   import { ui, isTauri } from '../lib/stores/ui.svelte';
   import { RIGHT_TABS, SESSION_PANEL } from '../lib/rightTabs';
   import { startWindowDrag } from '../lib/windowDrag';
-  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute } from '../lib/desktop';
+  import { isPopout, isEmbedded, popoutTitle, openPopout, currentRoute, closePopoutWindow } from '../lib/desktop';
   import SidePane from './SidePane.svelte';
   import {
     pageKeyOf,
@@ -416,6 +416,15 @@
   $effect(() => {
     if (ws.currentId) void git.loadRepos(ws.currentId);
   });
+  // …and retry a failed load when the window comes back (S13-305): the
+  // effect above only re-runs on a workspace switch.
+  $effect(() => {
+    const retry = (): void => {
+      if (git.reposError && ws.currentId) void git.loadRepos(ws.currentId);
+    };
+    window.addEventListener('focus', retry);
+    return () => window.removeEventListener('focus', retry);
+  });
 
   // ---- keyboard map ----
   // One dispatcher for the key map, the side-by-side pane (which hands the
@@ -472,7 +481,8 @@
         ui.newSessionOpen = true;
         break;
       case 'closeTab':
-        ws.closeActiveTab();
+        // Off the Agents page there is no tab to close: a pop-out closes itself.
+        if (!ws.closeActiveTab()) void closePopoutWindow();
         break;
       case 'reopenTab':
         void ws.reopenClosedTab();

@@ -74,6 +74,26 @@ test('a stalled /meta moves boot to offline instead of spinning forever (S13-05)
   assert.equal(aborted, true, 'the stalled request is aborted, not leaked');
 });
 
+test('a stalled /meta on an in-place re-boot keeps the running shell up (S13-304)', async () => {
+  const api = {
+    get: (path: string) => (path === '/meta' ? new Promise(() => {}) : Promise.resolve({})),
+  };
+  const deadlines: number[] = [];
+  const { auth } = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
+    '../api/client': {
+      api, ApiError, UNAUTHORIZED_EVENT: 'otto:unauthorized', setAltLoopbackBase() {},
+      getToken: () => null, setToken() {},
+    },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
+  }, {
+    setTimeout: (fn: () => void, ms: number) => { deadlines.push(ms); return setTimeout(fn, 5); },
+  });
+  auth.phase = 'ready';
+  await auth.boot(true);
+  assert.equal(auth.phase, 'ready', 'never unmounts the shell to the offline screen');
+  assert.ok(deadlines.includes(10_000), 'a re-boot gets the longer /meta deadline');
+});
+
 test('impersonation start lives in this tab\'s sessionStorage, not shared localStorage (S13-07)', async () => {
   const ss = new Map<string, string>();
   const lsRemoved: string[] = [];

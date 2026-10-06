@@ -62,6 +62,10 @@ function capIndex(c: string): number {
  *  2 s offline retry only runs in 'offline', and `booting` blocked re-entry.
  *  Past this, boot goes 'offline' and the retry loop takes over. */
 export const META_BOOT_TIMEOUT_MS = 5_000;
+/** The same deadline for an in-place re-boot of a RUNNING app (S13-304):
+ *  `/meta`'s cold tool probe alone can take ~4 s, and a miss here no longer
+ *  costs a spinner — the shell stays up — so give it more room. */
+export const META_REBOOT_TIMEOUT_MS = 10_000;
 
 /** `GET /meta`, aborted (and rejected) after `ms`. */
 function metaWithin(ms: number): Promise<MetaResp> {
@@ -192,13 +196,17 @@ class AuthStore {
     // unhandled rejection behind.
     early?.me.catch(() => {});
     early?.caps.catch(() => {});
+    const running = this.phase === 'ready';
     try {
-      this.meta = await metaWithin(META_BOOT_TIMEOUT_MS);
+      this.meta = await metaWithin(running ? META_REBOOT_TIMEOUT_MS : META_BOOT_TIMEOUT_MS);
       // Background/slow calls move to the daemon's second loopback host
       // (a separate socket pool) when it advertises one.
       setAltLoopbackBase(this.meta.alt_loopback_base);
     } catch {
-      this.phase = 'offline';
+      // Like the /auth/me catch below: an in-place re-boot of a running app
+      // keeps the shell (editors, drafts, terminals) up — only a cold boot
+      // falls to the offline screen and its retry loop (S13-304).
+      if (this.phase !== 'ready') this.phase = 'offline';
       return;
     }
     if (this.meta.needs_onboarding) {

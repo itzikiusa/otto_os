@@ -11,8 +11,7 @@
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
   import { api } from '../../lib/api/client';
-  import type { FsBrowse } from '../../lib/api/types';
-  import { browsePath, checkFolder } from '../../lib/folderCheck';
+  import { checkFolder } from '../../lib/folderCheck';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -334,7 +333,7 @@
       checkingCwd = true;
       cwdError = '';
       try {
-        const check = await checkFolder(dir, (p) => api.get<FsBrowse>(browsePath(p)));
+        const check = await checkFolder(dir, (url) => api.get(url));
         if (!check.ok) {
           cwdError = check.message;
           return;

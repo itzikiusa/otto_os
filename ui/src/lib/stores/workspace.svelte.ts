@@ -1325,10 +1325,16 @@ class WorkspaceStore {
    *  remembered "Always archive/delete" still asks about. `working` only means
    *  "printed in the last few seconds", so a plain shell (whose prompt redraw
    *  or `ls` output reads as working) is not mid-turn: its close/delete
-   *  honours the remembered choice like an idle session's. */
-  isAgentMidTurn(id: Id): boolean {
-    if (this.statusMap[id] !== 'working') return false;
-    const s = this.sessions.find((x) => x.id === id);
+   *  honours the remembered choice like an idle session's.
+   *
+   *  `statusMap` only knows the rows this store loaded (current workspace,
+   *  All-workspaces foreground agents, fetched-by-id). A caller that drew the
+   *  row from its OWN list — Classrooms' back row, other workspaces — passes
+   *  what it showed as `hint.working`; either source saying "working" counts
+   *  (S14-301: asking needlessly is cheap, a silent mid-turn kill is not). */
+  isAgentMidTurn(id: Id, hint?: { working?: boolean }): boolean {
+    if (this.statusMap[id] !== 'working' && !hint?.working) return false;
+    const s = this.sessions.find((x) => x.id === id) ?? this.otherWsSessions.find((x) => x.id === id);
     return !s || (s.kind === 'agent' && s.provider !== 'shell');
   }
 
@@ -1625,6 +1631,9 @@ class WorkspaceStore {
   /** HTTP responses and events share the same idempotent membership update. */
   private applyArchiveState(s: Session): void {
     this.pendingStatus.delete(s.id);
+    // Back from the archive by any route: a pending "Always delete" must not
+    // fire on the restored session (S13-301).
+    if (!s.archived) this.cancelPendingDelete(s.id);
     this.statusMap[s.id] = s.status;
     this.clearNeedsYou(s.id);
     if (s.archived) {
@@ -1679,37 +1688,70 @@ class WorkspaceStore {
     });
   }
 
-  /** Pending "Always delete" closes: id → timer. See {@link deleteWithUndo}. */
-  private pendingDeletes = new Map<Id, ReturnType<typeof setTimeout>>();
+  /** Pending "Always delete" closes: ids whose Undo toast is still up. The
+   *  toast's own expiry commits the delete (see {@link deleteWithUndo}); an
+   *  id leaving this set cancels it. */
+  private pendingDeletes = new Set<Id>();
+
+  /** Forget a pending "Always delete" — the session came back (Undo, ⌘⇧T,
+   *  Archived ▸ Restore, another window's unarchive). Idempotent. */
+  cancelPendingDelete(id: Id): void {
+    this.pendingDeletes.delete(id);
+  }
 
   /**
    * A remembered "Always delete" close (S13-01): no dialog, but not silently
    * irreversible either. The session is ARCHIVED now (it stops, its tab
-   * closes, its history is kept) and permanently deleted only after the Undo
-   * toast runs out. Undo restores it exactly like the archive undo. If the
-   * window goes away inside the window, the session simply stays archived —
-   * the failure mode is "kept", never "lost".
+   * closes, its history is kept) and permanently deleted only once the Undo
+   * toast has gone away (S13-301):
+   * - the delete hangs off the toast's `onClose`, not a parallel timer, so a
+   *   toast held open by hover/focus holds the delete too;
+   * - ANY way of bringing the session back cancels it — the toast's Undo,
+   *   ⌘⇧T, Archived ▸ Restore, or another window's unarchive all pass through
+   *   {@link applyArchiveState}, which calls {@link cancelPendingDelete};
+   * - before the DELETE the row is re-read and must still be archived, so a
+   *   restore this window never heard about still wins.
+   * If the window goes away inside the grace period, the session simply stays
+   * archived — the failure mode is "kept", never "lost".
    */
   async deleteWithUndo(id: Id, graceMs = DELETE_UNDO_MS): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.applyArchiveState(s);
-    const timer = setTimeout(() => {
-      this.pendingDeletes.delete(id);
-      this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
-    }, graceMs);
-    this.pendingDeletes.set(id, timer);
+    this.pendingDeletes.add(id);
     toasts.push('info', 'Session deleted', s.title, graceMs, {
       action: {
         label: 'Undo',
         run: async () => {
-          const t = this.pendingDeletes.get(id);
-          if (t === undefined) throw new Error('The session was already deleted.');
-          clearTimeout(t);
-          this.pendingDeletes.delete(id);
+          if (!this.pendingDeletes.has(id)) throw new Error('The session was already deleted.');
+          this.cancelPendingDelete(id);
           await this.unarchiveAndOpen(id);
         },
       },
+      onClose: (reason) => {
+        if (reason !== 'action') void this.commitPendingDelete(id);
+      },
     });
+  }
+
+  /** The deferred half of {@link deleteWithUndo}: delete only if the close is
+   *  still pending AND the server still has the row archived. */
+  private async commitPendingDelete(id: Id): Promise<void> {
+    if (!this.pendingDeletes.has(id)) return;
+    let row: Session;
+    try {
+      row = await api.get<Session>(`/sessions/${id}`);
+    } catch {
+      // Gone already, or unreadable: never DELETE blind — it stays archived.
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    // Restored meanwhile (a cancel may also have landed during the read).
+    if (!row.archived || !this.pendingDeletes.has(id)) {
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    this.pendingDeletes.delete(id);
+    await this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
   }
 
   /** User-facing archive (session menu, History, Classrooms' detention).
@@ -1717,12 +1759,23 @@ class WorkspaceStore {
    *  WORKING agent asks first (its in-flight turn is lost; Undo unarchives
    *  the session but cannot bring the turn back). Idle/exited archive at once,
    *  and so does a plain shell ({@link isAgentMidTurn}: its output is not a turn).
-   *  Resolves false when the user cancelled; a failed archive rejects. */
-  async requestArchive(id: Id): Promise<boolean> {
-    if (this.isAgentMidTurn(id)) {
-      const name = this.sessions.find((x) => x.id === id)?.title?.trim() || this.otherWsSessions.find((x) => x.id === id)?.title?.trim() || 'this session';
+   *  `hint` carries what a caller with its own row list showed (S14-301): its
+   *  working state, title, and — for an engine-owned session — the engine's
+   *  label, which the confirm names (archiving pulls the session out from
+   *  under that run). Resolves false when the user cancelled; a failed
+   *  archive rejects. */
+  async requestArchive(id: Id, hint?: { working?: boolean; title?: string; engine?: string | null }): Promise<boolean> {
+    if (this.isAgentMidTurn(id, hint)) {
+      const name =
+        this.sessions.find((x) => x.id === id)?.title?.trim() ||
+        this.otherWsSessions.find((x) => x.id === id)?.title?.trim() ||
+        hint?.title?.trim() ||
+        'this session';
+      const engine = hint?.engine
+        ? ` It is a running ${hint.engine} session, not one you started: the ${hint.engine} run that owns it loses it and may fail.`
+        : '';
       const ok = await confirmer.ask(
-        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.`,
+        `“${name}” is working right now and will stop mid-turn. Archiving stops the agent; you can restore the session from the Archived list, but its current turn is lost.${engine}`,
         { title: 'Archive working session?', confirmLabel: 'Archive session', danger: true },
       );
       if (!ok) return false;
@@ -1776,7 +1829,9 @@ class WorkspaceStore {
   /** The restart working-guard on its own, for callers that restart as part
    *  of a larger action (SessionView's "Save & restart"). True = go ahead. */
   async confirmRestart(id: Id): Promise<boolean> {
-    if (this.statusMap[id] !== 'working') return true;
+    // The same working-guard as archive/close: a busy plain shell restarts
+    // without asking, an agent mid-turn asks (S14-301).
+    if (!this.isAgentMidTurn(id)) return true;
     const name = this.sessions.find((x) => x.id === id)?.title?.trim() || 'this session';
     return confirmer.ask(
       `“${name}” is working right now. Restarting stops its current turn and starts the agent again, resuming its saved conversation where it can.`,

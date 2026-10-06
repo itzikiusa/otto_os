@@ -222,7 +222,7 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     // so it requires Agents/Edit — a Viewer can no longer read the host disk.
     // Root bypasses; non-root callers additionally hit the secret deny list in
     // `routes/fs.rs` (Otto data dir, ~/.ssh & co., key files).
-    if matches!(p, "/fs/browse" | "/fs/read") {
+    if matches!(p, "/fs/browse" | "/fs/read" | "/fs/stat") {
         return Require(Agents, Edit);
     }
     // Agent discovery / friendly-reference resolution (`agent_refs`): GET-only
@@ -2326,6 +2326,7 @@ mod tests {
     fn host_filesystem_requires_agents_edit_not_any_signed_in_user() {
         assert_eq!(pol(Method::GET, "/api/v1/fs/browse"), Require(Agents, Edit));
         assert_eq!(pol(Method::GET, "/api/v1/fs/read"), Require(Agents, Edit));
+        assert_eq!(pol(Method::GET, "/api/v1/fs/stat"), Require(Agents, Edit));
     }
 
     #[test]
