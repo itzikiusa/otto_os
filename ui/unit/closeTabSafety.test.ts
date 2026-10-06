@@ -12,19 +12,41 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
   const deleted: string[] = [];
   const posted: string[] = [];
   const asked: string[] = [];
+  // A tiny fake daemon: archive/unarchive flip the row, GET reads it back.
+  const row = { id: 's1', workspace_id: 'w', kind: 'agent', status: 'idle', title: 'Agent one', archived: false };
   const api = {
     del: async (path: string) => { deleted.push(path); },
-    post: async (path: string) => { posted.push(path); return {}; },
+    post: async (path: string) => {
+      posted.push(path);
+      if (path.endsWith('/archive')) row.archived = true;
+      if (path.endsWith('/unarchive')) row.archived = false;
+      return { ...row };
+    },
     patch: async (path: string) => { posted.push(path); return {}; },
-    get: async () => [],
+    get: async (path: string) => (path === '/sessions/s1' ? { ...row } : path.startsWith('/sessions?ids=') ? [{ ...row }] : []),
   };
   const confirmer = {
     ask: async (msg: string) => { asked.push(msg); return confirmAnswer; },
     choose: async (msg: string) => { asked.push(msg); return { value: null, remember: false }; },
   };
+  // Toasts mirror the real store's contract: the timer can be held (hover /
+  // focus), and onClose reports 'expired' when it runs out, 'action' on Undo.
   const undo: (() => Promise<void>)[] = [];
-  const toasts = { info() {}, success() {}, push(_l: string, _t: string, _b: string, _ms: number, o: any) { if (o?.action) undo.push(o.action.run); } };
-  const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {} };
+  const held: { pause: () => void; resume: () => void }[] = [];
+  const toasts = {
+    info() {}, success() {}, error() {},
+    push(_l: string, _t: string, _b: string, ms: number, o: any) {
+      let closed = false;
+      let handle: ReturnType<typeof setTimeout> | null = null;
+      const close = (reason: string) => { if (closed) return; closed = true; if (handle) clearTimeout(handle); o?.onClose?.(reason); };
+      const arm = () => { handle = setTimeout(() => close('expired'), ms); };
+      arm();
+      held.push({ pause: () => { if (handle) clearTimeout(handle); handle = null; }, resume: arm });
+      if (o?.action) undo.push(async () => { close('action'); await o.action.run(); });
+      return 1;
+    },
+  };
+  const layout = { panes: [], focusedIndex: 0, bindKey() {}, restore() {}, retain() {}, replaceSession() {}, persist() {}, removeSession() {}, closeSession() {} };
   const { ws } = loadSource(new URL('../src/lib/stores/workspace.svelte.ts', import.meta.url), {
     '../api/client': { api, getToken: () => 'tok' }, '../api/workflows': { listActiveWorkflowRuns: async () => [] }, '../api/workspaces': { fetchWorkspace: async () => ({}) },
     '../router.svelte': { router: { module, parts: [module], go() {} } }, '../toast.svelte': { toasts }, '../toastError': { toastError: () => {} }, '../plural': { plural: (n: number, w: string) => `${n} ${w}` }, '../confirm.svelte': { confirmer },
@@ -38,7 +60,7 @@ function store(module: string, pref: '' | 'archive' | 'delete', confirmAnswer = 
   ws.statusMap = { s1: 'idle' };
   ws.activeSessionId = 's1';
   ws.openTabs = ['s1'];
-  return { ws, deleted, posted, asked, undo };
+  return { ws, deleted, posted, asked, undo, held, row };
 }
 
 const tick = () => new Promise((r) => setImmediate(r));
@@ -86,7 +108,48 @@ test('⌘W under "Always delete" goes through the undoable path', async () => {
   assert.deepEqual(asked, []);
   assert.deepEqual(posted, ['/sessions/s1/archive']);
   assert.deepEqual(deleted, [], 'a stray ⌘W is never an immediate irreversible delete');
-  ws.pendingDeletes.forEach((h: ReturnType<typeof setTimeout>) => clearTimeout(h));
+  ws.cancelPendingDelete('s1');
+});
+
+// S13-301: every way back from the archive cancels the pending delete.
+test('"Always delete" then ⌘⇧T: the reopened session is never deleted', async () => {
+  const { ws, deleted, posted } = store('agents', 'delete');
+  ws.closeTab = (id: string) => { ws.openTabs = ws.openTabs.filter((t: string) => t !== id); ws.recentlyClosed = [...ws.recentlyClosed, id]; };
+  await ws.deleteWithUndo('s1', 20);
+  assert.ok(ws.recentlyClosed.includes('s1'));
+  await ws.reopenClosedTab();
+  assert.ok(posted.includes('/sessions/s1/unarchive'), 'reopen unarchived it');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(deleted, [], 'no DELETE after the grace period');
+});
+
+test('"Always delete" then Archived ▸ Restore: no DELETE', async () => {
+  const { ws, deleted } = store('agents', 'delete');
+  await ws.deleteWithUndo('s1', 20);
+  await ws.unarchiveSession('s1');
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(deleted, []);
+});
+
+test('"Always delete" then another window restores it: the re-check keeps it', async () => {
+  const { ws, deleted, row } = store('agents', 'delete');
+  await ws.deleteWithUndo('s1', 20);
+  row.archived = false; // restored elsewhere; this window missed the event
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(deleted, [], 'the server row is live again: never DELETE');
+});
+
+test('a toast held open past the grace period still lets Undo win', async () => {
+  const { ws, deleted, posted, undo, held } = store('agents', 'delete');
+  ws.unarchiveAndOpen = async () => { posted.push('unarchive'); };
+  await ws.deleteWithUndo('s1', 20);
+  held[0].pause(); // pointer on the toast
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(deleted, [], 'a paused toast pauses the delete');
+  await undo[0]();
+  assert.deepEqual(posted, ['/sessions/s1/archive', 'unarchive']);
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepEqual(deleted, []);
 });
 
 test('sessionVerbsApply is Agents-only', () => {

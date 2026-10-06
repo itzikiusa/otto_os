@@ -1625,6 +1625,9 @@ class WorkspaceStore {
   /** HTTP responses and events share the same idempotent membership update. */
   private applyArchiveState(s: Session): void {
     this.pendingStatus.delete(s.id);
+    // Back from the archive by any route: a pending "Always delete" must not
+    // fire on the restored session (S13-301).
+    if (!s.archived) this.cancelPendingDelete(s.id);
     this.statusMap[s.id] = s.status;
     this.clearNeedsYou(s.id);
     if (s.archived) {
@@ -1679,37 +1682,70 @@ class WorkspaceStore {
     });
   }
 
-  /** Pending "Always delete" closes: id → timer. See {@link deleteWithUndo}. */
-  private pendingDeletes = new Map<Id, ReturnType<typeof setTimeout>>();
+  /** Pending "Always delete" closes: ids whose Undo toast is still up. The
+   *  toast's own expiry commits the delete (see {@link deleteWithUndo}); an
+   *  id leaving this set cancels it. */
+  private pendingDeletes = new Set<Id>();
+
+  /** Forget a pending "Always delete" — the session came back (Undo, ⌘⇧T,
+   *  Archived ▸ Restore, another window's unarchive). Idempotent. */
+  cancelPendingDelete(id: Id): void {
+    this.pendingDeletes.delete(id);
+  }
 
   /**
    * A remembered "Always delete" close (S13-01): no dialog, but not silently
    * irreversible either. The session is ARCHIVED now (it stops, its tab
-   * closes, its history is kept) and permanently deleted only after the Undo
-   * toast runs out. Undo restores it exactly like the archive undo. If the
-   * window goes away inside the window, the session simply stays archived —
-   * the failure mode is "kept", never "lost".
+   * closes, its history is kept) and permanently deleted only once the Undo
+   * toast has gone away (S13-301):
+   * - the delete hangs off the toast's `onClose`, not a parallel timer, so a
+   *   toast held open by hover/focus holds the delete too;
+   * - ANY way of bringing the session back cancels it — the toast's Undo,
+   *   ⌘⇧T, Archived ▸ Restore, or another window's unarchive all pass through
+   *   {@link applyArchiveState}, which calls {@link cancelPendingDelete};
+   * - before the DELETE the row is re-read and must still be archived, so a
+   *   restore this window never heard about still wins.
+   * If the window goes away inside the grace period, the session simply stays
+   * archived — the failure mode is "kept", never "lost".
    */
   async deleteWithUndo(id: Id, graceMs = DELETE_UNDO_MS): Promise<void> {
     const s = await api.post<Session>(`/sessions/${id}/archive`);
     this.applyArchiveState(s);
-    const timer = setTimeout(() => {
-      this.pendingDeletes.delete(id);
-      this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
-    }, graceMs);
-    this.pendingDeletes.set(id, timer);
+    this.pendingDeletes.add(id);
     toasts.push('info', 'Session deleted', s.title, graceMs, {
       action: {
         label: 'Undo',
         run: async () => {
-          const t = this.pendingDeletes.get(id);
-          if (t === undefined) throw new Error('The session was already deleted.');
-          clearTimeout(t);
-          this.pendingDeletes.delete(id);
+          if (!this.pendingDeletes.has(id)) throw new Error('The session was already deleted.');
+          this.cancelPendingDelete(id);
           await this.unarchiveAndOpen(id);
         },
       },
+      onClose: (reason) => {
+        if (reason !== 'action') void this.commitPendingDelete(id);
+      },
     });
+  }
+
+  /** The deferred half of {@link deleteWithUndo}: delete only if the close is
+   *  still pending AND the server still has the row archived. */
+  private async commitPendingDelete(id: Id): Promise<void> {
+    if (!this.pendingDeletes.has(id)) return;
+    let row: Session;
+    try {
+      row = await api.get<Session>(`/sessions/${id}`);
+    } catch {
+      // Gone already, or unreadable: never DELETE blind — it stays archived.
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    // Restored meanwhile (a cancel may also have landed during the read).
+    if (!row.archived || !this.pendingDeletes.has(id)) {
+      this.pendingDeletes.delete(id);
+      return;
+    }
+    this.pendingDeletes.delete(id);
+    await this.killSession(id).catch((e) => toastError('Couldn’t delete the session', e));
   }
 
   /** User-facing archive (session menu, History, Classrooms' detention).
