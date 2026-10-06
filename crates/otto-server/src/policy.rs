@@ -1355,8 +1355,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
             );
         }
         if rest.starts_with("sqs/") {
-            let read = get || rest.ends_with("/peek");
-            return Require(AwsSqs, if read { View } else { Edit });
+            // Every non-GET is Edit — `peek` included: a receive bumps each
+            // message's receive count (enough to dead-letter it). For an
+            // Enforced account the guard lowers this to View and the
+            // account's own `sqs_receive` operation decides (S6-303), so the
+            // handler adds no global-tier check of its own.
+            return Require(AwsSqs, if get { View } else { Edit });
         }
         if rest.starts_with("ec2/") {
             return Require(AwsEc2, if get { View } else { Edit });
