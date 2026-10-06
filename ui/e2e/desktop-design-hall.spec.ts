@@ -19,7 +19,9 @@ import { expectFullyInViewport, expectNoHorizontalOverflow } from './helpers';
 const V1 = '/api/v1';
 let wsId = '';
 let targetId = '';
-const stamp = Date.now().toString(36);
+// Per worker: two workers can load this file in the same millisecond, and the
+// references search spans every workspace's designs.
+const stamp = `${Date.now().toString(36)}${process.pid.toString(36)}`;
 const TARGET_TITLE = `Tier card component ${stamp}`;
 
 async function postJson(ctx: APIRequestContext, url: string, data: unknown): Promise<any> {
