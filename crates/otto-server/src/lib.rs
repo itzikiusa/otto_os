@@ -143,7 +143,7 @@ pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
 ///   read the authenticated user from the `otto_core::auth::AuthUser` request
 ///   extension (or via the [`CurrentUser`] extractor).
 /// - `root_extras` are merged at the root (terminal WS routers — they
-///   self-authenticate via `?token=`).
+///   self-authenticate via the `otto-bearer` subprotocol).
 /// - `/ws/events` is served here; unmatched non-API paths fall back to the
 ///   unembedded development placeholder. The daemon uses `build_router_with_assets`
 ///   to supply its SPA without making UI files server compilation inputs.

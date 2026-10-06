@@ -26,7 +26,7 @@
 //!
 //! ## Exclusions
 //! - `/ws/*` and `/browser/proxy` — WebSocket / proxy routes that
-//!   self-authenticate via `?token=` and never reach the central feature guard.
+//!   self-authenticate (WS subprotocol bearer / proxy ticket) and never reach the central feature guard.
 //!   Documented in `policy.rs` and route_inventory's exclusion comment.
 //! - `/auth/tokens` (bare path) — handled under the `/auth/tokens` Exempt rule
 //!   whether the method is GET or POST; covered correctly.
@@ -106,12 +106,12 @@ pub(crate) fn registered_routes(root: &Path) -> BTreeSet<String> {
 /// Routes that are legitimately outside the bearer-auth / feature-policy
 /// surface and must be excluded from the coverage check.
 ///
-/// `/ws/*` and `/browser/proxy` use per-session `?token=` authentication and
+/// `/ws/*` and `/browser/proxy` self-authenticate (subprotocol bearer / ticket) and
 /// never reach the central feature guard (documented in `policy.rs`).  The
 /// route-inventory test also skips `tests/` directories, so test-stub routes
 /// are never included in the source set.
 fn is_policy_exempt_by_design(path: &str) -> bool {
-    // `/ws/*` and `/browser/proxy` self-authenticate via `?token=`. The runtime
+    // `/ws/*` and `/browser/proxy` self-authenticate (bearer / ticket). The runtime
     // plugin reverse-proxy + iframe-asset routes (`/plugins/{slug}/…`) are
     // feature-gated by the dedicated plugin branch in `feature_guard` BEFORE
     // `policy_for` is consulted, so they intentionally have no policy-table entry.

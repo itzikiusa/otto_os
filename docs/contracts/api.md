@@ -446,7 +446,8 @@ change it). Anything else → `403`.
 Long-lived personal access tokens for driving the daemon over HTTP from scripts/CLIs
 (skills, CI, automation). They are issued per-user and flow through the same bearer-auth
 path as login tokens — use as `Authorization: Bearer <token>` on any route, or as
-`?token=<token>` on the WebSocket endpoints. The raw secret is shown exactly once at
+`Sec-WebSocket-Protocol: otto-bearer, <token>` on the WebSocket endpoints (`?token=` is
+refused). The raw secret is shown exactly once at
 creation (only its SHA-256 hash is stored); `kind='api'` tokens have a ~10-year fixed
 lifetime whose expiry is never slid (unlike the 30-day sliding login token). A token is
 scoped to its owner's roles: a token created by a root user has root; otherwise it has
@@ -600,8 +601,8 @@ sender → `400`. The guest then re-verifies the new code via
 The tables above (#1–#89) are the original frozen core. The sections below complete the
 contract by documenting every other route the daemon actually registers (mounted via the
 module routers in `crates/otto-server/src/modules.rs::module_routers`). They follow the same
-conventions: all live under `/api/v1` with bearer auth (`Authorization: Bearer <token>` or
-`?token=` on WS), JSON snake_case, ULID ids, RFC3339 timestamps, `Problem{code,message}`
+conventions: all live under `/api/v1` with bearer auth (`Authorization: Bearer <token>`, or
+the `otto-bearer` subprotocol on WS), JSON snake_case, ULID ids, RFC3339 timestamps, `Problem{code,message}`
 errors. Role column meaning is identical (`member`, `ws viewer/editor/admin`, `root`).
 Item routes (those keyed by a row id, e.g. `/sessions/{id}`) resolve the owning workspace
 from the row and role-check against it. This surface is a completion of the frozen contract,
@@ -609,7 +610,7 @@ not a redesign — no path here may change shape without a contract bump.
 
 Mounting summary (all paths below are under `/api/v1` unless the section says "root-level"):
 the `/api/v1` nest carries the bearer-auth middleware; root-level WS/proxy routers
-self-authenticate via `?token=` and are merged at the server root by `build_router`.
+self-authenticate (the `otto-bearer` WS subprotocol) and are merged at the server root by `build_router`.
 
 ## Activity trail & task tracker (live agent telemetry)
 
@@ -2411,7 +2412,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
 | GET /api-client/oauth2/callback?state=&code=&error= | one-use state | provider redirect | static HTML; code exchanged with PKCE, tokens stored in Keychain |
-| GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed), `?token=` legacy fallback | relay; scoped/share and MCP-only tokens rejected |
+| GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed) only — `?token=` → 401 | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command. Understands attached short flags (`-XPOST`, `-HName:v`, `-uuser:pw`), `-F`/`--form`/`--form-string` (→ `body_mode:"multipart"`, a `[{key,type,value,filename}]` row array; `name=@path` becomes a `file` row with only the file name), `--json` (body + JSON Content-Type/Accept), `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v` (User-Agent/Referer/Cookie headers), `-I` (HEAD), `--oauth2-bearer` (bearer auth); value-taking flags it doesn't model (`--cacert`, `--resolve`, `-c`, …) consume their value |
 
@@ -2923,18 +2924,18 @@ existing `PATCH /api/v1/swarm/projects/{pid}` (#72) as a top-level `skills` arra
 `integration_branch?`, `origin_channel?`, `origin_chat?`, `origin_thread?` (set when a
 project was launched from a channel trigger).
 
-## Root-level routers (NOT under /api/v1; `?token=` auth)
+## Root-level routers (NOT under /api/v1; self-authenticating)
 
-These self-authenticate via the `?token=` query parameter and are merged at the server root
+These self-authenticate (WS: the `otto-bearer` subprotocol; `/browser/proxy`: a single-use `?ticket=`) and are merged at the server root
 (not under the `/api/v1` nest). The two terminal/event WebSockets are specified in detail in
 `ws.md`.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
-| GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
-| GET /ws/api-client/stream | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | API-client streaming-response bridge |
+| GET /ws/term/{session_id} | `otto-bearer` subprotocol only (`?token=` → 401); ws viewer attach, editor input | terminal stream (see ws.md) |
+| GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` only — keeps the token out of the URL (`?token=` → 401); member | daemon event stream (see ws.md) |
+| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/api-client/stream | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)
@@ -5029,7 +5030,7 @@ a workspace Admin, or root may see, attach to or drive it; everyone else gets
 | POST /api/v1/browser/tabs/{id}/live/nav | ws editor · Browser Edit | `BrowserLiveNavReq` `{action:"goto"\|"back"\|"forward"\|"reload"\|"stop", url?}` | `BrowserLiveSession` — `goto` requires `url` (netguard-checked → 400) |
 | POST /api/v1/browser/tabs/{id}/live/control | ws editor · Browser Edit | `{action:"take_over"\|"hand_back"}` | `BrowserLiveSession` |
 | POST /api/v1/browser/tabs/{id}/live/screenshot | ws editor · Browser Edit | `BrowserScreenshotReq` `{mode?:"viewport"\|"full_page"\|"element", selector?, format?:"png"\|"jpeg", quality?}` | the image bytes (`image/png` / `image/jpeg`); `X-Otto-Page-Url` header carries the page URL. `element` requires `selector` (404 when it matches nothing). Full-page captures are capped at 16 384 px tall |
-| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (or `?token=`) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
+| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
 
 `BrowserLiveSession {tab_id, workspace_id, owner_id, engine:"remote", build,
 version, profile, headed, state:"starting"|"ready"|"crashed"|"closed", url,
