@@ -116,12 +116,28 @@ type MockNotice = {
   action: { type: 'open_session'; session_id: string } | null;
 };
 
+/** Pass /ws/events through to the daemon but DROP its `notification` events:
+ *  other specs on the shared daemon raise notices in parallel, and their live
+ *  ingest added rows to a panel these tests mock exactly (unread "3" vs "2",
+ *  S12-304). Everything else on the stream still flows. */
+async function isolateNoticeStream(page: Page): Promise<void> {
+  await page.routeWebSocket(/\/ws\/events/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((m) => server.send(m));
+    server.onMessage((m) => {
+      if (typeof m === 'string' && /"type"\s*:\s*"notification"/.test(m)) return;
+      ws.send(m);
+    });
+  });
+}
+
 /** Serve exactly `notices`; every mutation succeeds. Returns the read hit log. */
 async function mockList(
   page: Page,
   notices: MockNotice[],
 ): Promise<{ readAll: number; readIds: string[] }> {
   const hits = { readAll: 0, readIds: [] as string[] };
+  await isolateNoticeStream(page);
   await page.route(/\/api\/v1\/notifications(\?.*)?$/, async (route) => {
     if (route.request().method() === 'GET') await route.fulfill({ json: notices });
     else await route.fulfill({ status: 204, body: '' });
