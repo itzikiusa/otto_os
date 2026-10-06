@@ -384,7 +384,9 @@ async fn create_server<S: McpCtx>(
     if !req.secret_env.is_empty() || !req.secret_headers.is_empty() {
         let blob = json!({ "env": req.secret_env, "headers": req.secret_headers }).to_string();
         let sref = McpService::secret_ref(&server.id);
-        ctx.mcp_secrets().put(&sref, &blob).map_err(ApiErr)?;
+        otto_core::secrets::put_async(ctx.mcp_secrets(), &sref, &blob)
+            .await
+            .map_err(ApiErr)?;
         ctx.mcp()
             .registry()
             .set_secret_meta(
@@ -485,7 +487,9 @@ async fn update_server<S: McpCtx>(
         let headers = req.secret_headers.clone().unwrap_or_default();
         let blob = json!({ "env": env, "headers": headers }).to_string();
         let sref = McpService::secret_ref(&id);
-        ctx.mcp_secrets().put(&sref, &blob).map_err(ApiErr)?;
+        otto_core::secrets::put_async(ctx.mcp_secrets(), &sref, &blob)
+            .await
+            .map_err(ApiErr)?;
         let ek: Vec<String> = env.keys().cloned().collect();
         let hk: Vec<String> = headers.keys().cloned().collect();
         ctx.mcp()
@@ -533,7 +537,8 @@ async fn delete_server<S: McpCtx>(
     .await?;
     // Best-effort secret cleanup.
     if server.has_secret {
-        let _ = ctx.mcp_secrets().delete(&McpService::secret_ref(&id));
+        let _ =
+            otto_core::secrets::delete_async(ctx.mcp_secrets(), &McpService::secret_ref(&id)).await;
     }
     ctx.mcp().evict_client(&id);
     ctx.mcp().registry().delete(&id).await.map_err(ApiErr)?;

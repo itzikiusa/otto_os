@@ -192,7 +192,7 @@ async fn create_account<S: IssuesCtx>(
         return Err(Error::Invalid("base_url must not be empty".into()).into());
     }
     let token_ref = format!("issueacct-{}", new_id());
-    s.secrets().put(&token_ref, &req.token)?;
+    otto_core::secrets::put_async(s.secrets(), &token_ref, &req.token).await?;
     let created = s
         .issues()
         .create_account(NewIssueAccount {
@@ -209,7 +209,7 @@ async fn create_account<S: IssuesCtx>(
         Ok(a) => Ok(Json(a)),
         Err(e) => {
             // Don't leave an orphan secret behind.
-            let _ = s.secrets().delete(&token_ref);
+            let _ = otto_core::secrets::delete_async(s.secrets(), &token_ref).await;
             Err(e.into())
         }
     }
@@ -236,8 +236,8 @@ async fn update_account<S: IssuesCtx>(
     // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
     let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
         let new_ref = format!("issueacct-{}", new_id());
-        s.secrets().put(&new_ref, tok)?;
-        let _ = s.secrets().delete(&account.token_ref);
+        otto_core::secrets::put_async(s.secrets(), &new_ref, tok).await?;
+        let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
         new_ref
     } else {
         account.token_ref.clone()
@@ -297,7 +297,7 @@ async fn delete_account<S: IssuesCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let account = load_authorized_account(&s, &id, &user).await?;
-    let _ = s.secrets().delete(&account.token_ref);
+    let _ = otto_core::secrets::delete_async(s.secrets(), &account.token_ref).await;
     s.issues().delete_account(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

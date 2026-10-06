@@ -127,31 +127,6 @@ pub async fn stop(ctx: &SwarmRt, swarm_id: &str, kind: Option<&str>) -> bool {
     !handles.is_empty()
 }
 
-#[cfg(test)]
-mod registry_tests {
-    use super::*;
-
-    /// S17-307: a plan and a recruit of the same swarm have separate handles
-    /// — stopping one leaves the other running.
-    #[test]
-    fn plan_and_recruit_handles_are_independent() {
-        let plan = begin("sw-reg-test", "plan");
-        let recruit = begin("sw-reg-test", "recruit");
-        {
-            let reg = registry().lock().unwrap();
-            reg.get(&key("sw-reg-test", "plan")).unwrap().signal();
-        }
-        assert!(plan.cancelled());
-        assert!(!recruit.cancelled());
-        end("sw-reg-test", "plan");
-        assert!(registry()
-            .lock()
-            .unwrap()
-            .contains_key(&key("sw-reg-test", "recruit")));
-        end("sw-reg-test", "recruit");
-    }
-}
-
 // --- the run -----------------------------------------------------------------
 
 /// Run one agent turn as an openable session tied to a fresh `SwarmRun`. Returns
@@ -495,4 +470,29 @@ async fn set_run(
         emit_run(ctx, run_id).await;
     }
     changed
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// S17-307: a plan and a recruit of the same swarm have separate handles
+    /// — stopping one leaves the other running.
+    #[test]
+    fn plan_and_recruit_handles_are_independent() {
+        let plan = begin("sw-reg-test", "plan");
+        let recruit = begin("sw-reg-test", "recruit");
+        {
+            let reg = registry().lock().unwrap();
+            reg.get(&key("sw-reg-test", "plan")).unwrap().signal();
+        }
+        assert!(plan.cancelled());
+        assert!(!recruit.cancelled());
+        end("sw-reg-test", "plan");
+        assert!(registry()
+            .lock()
+            .unwrap()
+            .contains_key(&key("sw-reg-test", "recruit")));
+        end("sw-reg-test", "recruit");
+    }
 }

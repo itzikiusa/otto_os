@@ -172,8 +172,11 @@ pub struct UsageEngine {
     /// The last rollup each `(days, otto_only)` key produced — served by
     /// [`Self::session_totals_background`] while the server is parked, so a
     /// budget gate neither wakes it nor fails open on a cap it already saw.
-    last_totals: std::sync::Mutex<HashMap<(u32, bool), Arc<Vec<SessionTotals>>>>,
+    last_totals: std::sync::Mutex<TotalsMemo>,
 }
+
+/// `(days, otto_only)` → the last rollup that key produced (see `last_totals`).
+type TotalsMemo = HashMap<(u32, bool), Arc<Vec<SessionTotals>>>;
 
 /// How long a read waits for the writer to flush what it buffered before it
 /// queries anyway (S9-303). Bounded: a writer stuck in a slow insert must not
