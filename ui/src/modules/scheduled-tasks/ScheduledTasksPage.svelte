@@ -737,7 +737,13 @@
   async function openWorkflowRun(runId: string, fallbackWorkflowId: string | null | undefined): Promise<void> {
     let workflowId = fallbackWorkflowId ?? null;
     try {
-      workflowId = (await api.get<{ workflow_id: string }>(`/workflow-runs/${encodeURIComponent(runId)}`)).workflow_id;
+      // The summary projection (no node bodies / checkpoints): only the run's
+      // workflow id is needed — the task may have been re-targeted since —
+      // and `page.openRun` fetches the full run itself (S17-309).
+      const p = await api.get<{ run?: { workflow_id?: string } | null }>(
+        `/workflow-runs/${encodeURIComponent(runId)}/progress`,
+      );
+      workflowId = p.run?.workflow_id || workflowId;
     } catch {
       /* fall back to the task's workflow */
     }
@@ -1209,6 +1215,10 @@
                          hovering (a failed run used to say only "No summary"). -->
                     {#if r.status === 'error' && r.error}
                       <p class="run-err" role="note"><Icon name="warning" size={12} /> {r.error}</p>
+                    {:else if r.status === 'skipped' && r.error}
+                      <!-- Why it was skipped (e.g. the workflow was still busy) —
+                           neutral, not a failure (S3-306). -->
+                      <p class="run-err note" role="note">{r.error}</p>
                     {/if}
                     {#if r.delivery_error}
                       <p class="run-err warn" role="note">Not delivered: {r.delivery_error}</p>
@@ -1298,6 +1308,7 @@
   .run-sum.none { color: var(--text-dim); font-style: italic; }
   .run-err { flex-basis: 100%; margin: 0; padding-inline-start: 4px; font-size: var(--fs-xs); color: var(--danger); overflow-wrap: anywhere; display: flex; gap: 4px; align-items: baseline; }
   .run-err.warn { color: var(--warning); }
+  .run-err.note { color: var(--text-dim); }
   .form { display: flex; flex-direction: column; gap: 12px; max-width: 720px; }
   .frow { display: flex; gap: 12px; flex-wrap: wrap; }
   /* Shared .field (app.css); the form's gap spaces the rows, so no bottom margin. */
