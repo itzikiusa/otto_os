@@ -15,7 +15,9 @@ test.use({
   reducedMotion: 'no-preference',
   viewport: { width: 1440, height: 900 },
 });
-test.describe.configure({ mode: 'serial' });
+// Software WebGL on a busy CI runner: the first mount (three + ~10 MB of
+// models + the HDRI) alone can take most of Playwright's default 45 s.
+test.describe.configure({ mode: 'serial', timeout: 150_000 });
 
 const WS_NAME = `School E2E ${Date.now().toString(36)}`;
 const MARKER = `OTTO_SCHOOL_${Date.now().toString(36).toUpperCase()}`;
@@ -47,8 +49,8 @@ async function boot(page: Page): Promise<void> {
   }, wsId);
   await page.goto('/#/home');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await expect(box(page).locator('.stage canvas')).toBeVisible({ timeout: 30_000 });
-  await expect.poll(() => debug(page).then((d) => d?.frames ?? 0), { timeout: 30_000 }).toBeGreaterThan(0);
+  await expect(box(page).locator('.stage canvas')).toBeVisible({ timeout: 60_000 });
+  await expect.poll(() => debug(page).then((d) => d?.frames ?? 0), { timeout: 60_000 }).toBeGreaterThan(0);
 }
 
 const box = (page: Page) => page.locator('section.hbox[data-kind="classrooms"]');
@@ -155,7 +157,7 @@ test('a PC monitor shows the session’s live terminal output', async ({ page })
 });
 
 test('kids live: idle kids get up and wander, the headmaster walks over and inspects screens', async ({ page }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(240_000);
   await boot(page);
   await enterOurRoom(page);
   const seen = new Set<string>();
