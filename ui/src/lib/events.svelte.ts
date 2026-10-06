@@ -406,7 +406,7 @@ const reportedHandlerErrors = new Set<string>();
 /** A WS event handler threw: console + one `/client/errors` report per type. */
 function reportHandlerError(type: unknown, e: unknown): void {
   const kind = typeof type === 'string' ? type : 'unknown';
-  console.error(`[otto] /ws/events handler for "${kind}" failed`, e);
+  console.error('[otto] /ws/events handler for "%s" failed', kind, e);
   if (reportedHandlerErrors.has(kind)) return;
   reportedHandlerErrors.add(kind);
   const err = e as { message?: unknown; stack?: unknown } | null;

@@ -531,7 +531,7 @@ for (const f of files) {
   const hasRingFor = (part) => {
     const subject = subjectOf(part);
     if (!subject) return false;
-    const re = new RegExp(`(?:\\.|^|[\\s>+~])${subject.replace(/[-]/g, '\\-')}(?![\\w-])[^\\s,]*:focus(?:-visible)?\\b`);
+    const re = new RegExp(`(?:\\.|^|[\\s>+~])${subject.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}(?![\\w-])[^\\s,]*:focus(?:-visible)?\\b`);
     const ancestors = part.trim().split(/[\s>+~]+/).slice(0, -1).map((a) => a.replace(/:{1,2}[\w-]+(\([^)]*\))?/g, ''));
     return sets.some((r) => r.sel.split(',').some((rp) =>
       (re.test(rp.trim()) && sets2(r, RING)) ||

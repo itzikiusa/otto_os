@@ -124,7 +124,7 @@ function pruneCss(src, gone, rel, report) {
     report.push(`${rel}: dynamic class names — left CSS for ${dead.map((c) => '.' + c).join(' ')} in place`);
     return src;
   }
-  const deadRe = new RegExp(String.raw`\.(?:${dead.map((c) => c.replace(/[-]/g, '\\-')).join('|')})(?![\w-])`);
+  const deadRe = new RegExp(String.raw`\.(?:${dead.map((c) => c.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')).join('|')})(?![\w-])`);
   // Rules start after the <style> tag itself; a selector never holds `<`.
   const open = /<style\b[^>]*>/.exec(src.slice(styleAt))[0];
   const head = src.slice(0, styleAt + open.length);
