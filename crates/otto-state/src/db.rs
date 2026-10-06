@@ -354,6 +354,43 @@ fn sweep_partial_snapshots(backups: &Path, db_file: &str) {
     }
 }
 
+/// `backups/` is created owner-only (0700): `VACUUM INTO` writes the
+/// `.partial` copy with the umask's 0644 and it is chmod'd only once complete,
+/// so the directory — not the per-file chmod — is what keeps it private
+/// during the copy (and if that chmod fails).
+fn create_backups_dir(backups: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(backups)?;
+    // `mode` applies only to a directory this call created.
+    restrict_backups_dir_mode(backups);
+    Ok(())
+}
+
+/// `chmod 0700` an existing `backups/` (one an earlier build made 0755).
+fn restrict_backups_dir_mode(backups: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(backups) {
+            if meta.is_dir() && meta.permissions().mode() & 0o077 != 0 {
+                if let Err(e) =
+                    std::fs::set_permissions(backups, std::fs::Permissions::from_mode(0o700))
+                {
+                    tracing::warn!("migrate snapshot: chmod 0700 {}: {e}", backups.display());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = backups;
+}
+
 /// Snapshots are a full copy of the user's data: owner-only (0600).
 fn restrict_snapshot_mode(path: &Path) {
     #[cfg(unix)]
@@ -376,6 +413,17 @@ async fn snapshot_before_migrations(
     path: &Path,
     migrator: &sqlx::migrate::Migrator,
 ) {
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
+        return;
+    };
+    let backups = dir.join("backups");
+    // Every boot, not only a migrating one: a snapshot interrupted by a kill
+    // (SIGKILL, power loss) leaves only its `.partial` file — several hundred
+    // MB that a rollback to a build with nothing pending would otherwise
+    // keep until some later migrating deploy. Never a name the retention
+    // below counts as a good copy.
+    sweep_partial_snapshots(&backups, file);
+    restrict_backups_dir_mode(&backups);
     let has_table: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
     )
@@ -405,14 +453,7 @@ async fn snapshot_before_migrations(
     let (Some(&last_applied), false) = (applied.iter().max(), pending.is_empty()) else {
         return;
     };
-    let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
-        return;
-    };
-    let backups = dir.join("backups");
-    // A snapshot interrupted by a kill (SIGKILL, power loss) leaves only its
-    // `.partial` file — never a name the retention below counts as a good copy.
-    sweep_partial_snapshots(&backups, file);
-    if let Err(e) = std::fs::create_dir_all(&backups) {
+    if let Err(e) = create_backups_dir(&backups) {
         tracing::error!(
             "migrate snapshot: create {}: {e} — migrating WITHOUT a snapshot",
             backups.display()
@@ -676,6 +717,44 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// S10-304/305: a boot with NOTHING pending (a rollback to the build
+    /// before the one whose snapshot was killed) still sweeps the partial,
+    /// and an existing world-readable `backups/` is tightened to 0700.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn partials_are_swept_and_backups_dir_is_private_without_pending_migrations() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otto.db");
+        let backups = dir.path().join("backups");
+        drop(open(&path).await.unwrap());
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::set_permissions(&backups, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stale = backups.join("otto.db.pre-5-20260101T000000Z.partial");
+        std::fs::write(&stale, b"truncated").unwrap();
+        // A good snapshot is never touched by the sweep.
+        let good = backups.join("otto.db.pre-5-20260101T000000Z");
+        std::fs::write(&good, b"good").unwrap();
+        drop(open(&path).await.unwrap()); // up to date: nothing pending
+        assert!(!stale.exists(), "interrupted snapshot left behind");
+        assert!(good.exists());
+        let mode = std::fs::metadata(&backups).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backups_dir_is_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let backups = dir.path().join("backups");
+        create_backups_dir(&backups).unwrap();
+        let mode = std::fs::metadata(&backups).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // Idempotent on an existing dir.
+        create_backups_dir(&backups).unwrap();
     }
 
     async fn versions(pool: &SqlitePool) -> Vec<i64> {
