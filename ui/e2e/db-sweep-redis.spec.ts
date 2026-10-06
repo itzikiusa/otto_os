@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { execFileSync } from 'node:child_process';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
@@ -126,7 +127,7 @@ async function typeCommand(page: Page, cmd: string): Promise<void> {
   // Select-all so the next typed run replaces whatever was there (CodeMirror
   // overwrites the active selection on input — no separate Delete, which raced
   // the type and could drop the first character).
-  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.press(await editorSelectAll(page));
   await page.keyboard.type(cmd);
   // Confirm the editor actually holds the command before running it.
   await expect(editor).toContainText(cmd.split(' ')[0], { timeout: 5_000 });

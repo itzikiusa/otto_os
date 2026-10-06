@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { loadSource } from './sourceHarness.ts';
 
 // The real store, with the transport and workspace stubbed out.
-function store() {
+function store(get: (path: string) => Promise<unknown> = async () => []) {
   const { notifications } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
     svelte: { untrack: (fn: () => unknown) => fn() },
-    '../api/client': { api: { get: async () => [], post: async () => ({}), del: async () => ({}) } },
+    '../api/client': { api: { get, post: async () => ({}), del: async () => ({}) } },
     '../toast.svelte': { toasts: { warn() {}, info() {} } }, '../toastError': { toastError() {} },
     '../external': { openExternal: async () => {} },
     './workspace.svelte': { ws: { sessions: [], getSession: () => null } },
@@ -203,4 +204,41 @@ test('identity change: a load answered for the previous identity is dropped, the
   pending[1]([notice({ id: 'x-1' })]);
   await first;
   assert.deepEqual(n.notices.map((x: { id: string }) => x.id), ['x-1']);
+});
+
+// S12-305: GET /notifications fails (daemon restart, DB busy) while the events
+// WS ingests rows. The load must SETTLE (the bell's spinner keys on it) and
+// keep the ingested rows, with the error surfaced for the inline Retry.
+test('a failed load with ingested rows settles, keeps the rows and reports the error', async () => {
+  let fail = true;
+  const n = store(async (path) => {
+    if (path === '/notifications' && fail) throw new Error('boom');
+    return path === '/notifications' ? [notice({ id: 'srv' })] : {};
+  });
+  assert.equal(n.settled, false, 'nothing settled before the first load');
+  n.ingest(notice({ id: 'live', source_key: null, kind: 'system' }));
+  await n.load();
+  assert.equal(n.settled, true, 'a failed load is settled — no endless spinner');
+  assert.equal(n.loaded, false);
+  assert.match(n.error, /boom/);
+  assert.equal(n.notices.map((x: { id: string }) => x.id).join(','), 'live', 'ingested rows survive the failure');
+  // Retry succeeds: the error clears and the snapshot merges with the live row.
+  fail = false;
+  await n.load();
+  assert.equal(n.error, null);
+  assert.equal(n.loaded, true);
+  assert.equal(n.settled, true);
+  // A new identity starts unsettled again.
+  n.resetForIdentity();
+  assert.equal(n.settled, false);
+});
+
+test('the bell spins only until a load settles and shows rows + inline Retry on a failed refresh', () => {
+  const src = readFileSync(new URL('../src/shell/NotificationBell.svelte', import.meta.url), 'utf8');
+  assert.match(src, /\{:else if !notifications\.settled\}/, 'spinner keys on settled, not loaded');
+  assert.doesNotMatch(src, /\{:else if !notifications\.loaded\}/);
+  const rowsBranch = src.slice(src.indexOf('{#each sections as sec'), -1);
+  const before = src.slice(0, src.indexOf('{#each sections as sec'));
+  assert.ok(rowsBranch.length > 0);
+  assert.match(before.slice(before.lastIndexOf('{:else}')), /\{#if notifications\.error\}[\s\S]*role="alert"[\s\S]*Retry/);
 });

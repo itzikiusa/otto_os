@@ -385,7 +385,7 @@
                   <Icon name="refresh" size={12} /> Retry
                 </button>
               </div>
-            {:else if !notifications.loaded}
+            {:else if !notifications.settled}
               <div class="panel-empty" aria-busy="true">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
                 <Skeleton rows={3} height={36} label="notifications" />
@@ -396,6 +396,17 @@
                 <p>You’re all caught up</p>
               </div>
             {:else}
+              {#if notifications.error}
+                <!-- A refresh failed but rows are here (kept, or ingested
+                     live from /ws/events): show them, plus an inline Retry. -->
+                <div class="nb-refresh-error" role="alert">
+                  <Icon name="warning" size={12} />
+                  <span class="grow">Couldn’t refresh notifications</span>
+                  <button class="btn ghost small" onclick={() => notifications.load()} disabled={notifications.loading}>
+                    <Icon name="refresh" size={12} /> Retry
+                  </button>
+                </div>
+              {/if}
               {#each sections as sec (sec.bucket)}
                 {#if sections.length > 1}
                   <div class="nb-section">{SECTION[sec.bucket]}</div>
@@ -626,6 +637,22 @@
     color: var(--danger);
   }
   .nb-error p {
+    color: var(--text);
+  }
+
+  .nb-refresh-error {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 10px 2px;
+    padding: 4px 4px 4px 10px;
+    border-radius: 6px;
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: var(--fs-s);
+  }
+  .nb-refresh-error .grow {
+    flex: 1;
     color: var(--text);
   }
 

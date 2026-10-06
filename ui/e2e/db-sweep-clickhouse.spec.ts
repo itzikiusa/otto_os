@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,7 +108,7 @@ async function runSql(page: Page, sql: string): Promise<void> {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     await editor.click();
-    await page.keyboard.press('ControlOrMeta+a');
+    await page.keyboard.press(await editorSelectAll(page));
     await page.keyboard.press('Backspace');
     // Dismiss any open autocomplete popup that could swallow keys.
     await page.keyboard.press('Escape');

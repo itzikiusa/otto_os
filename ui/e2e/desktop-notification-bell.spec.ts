@@ -258,7 +258,12 @@ test('a failed load shows an error with Retry, not "all caught up"', async ({ pa
   await openPage(page, 'git');
   await navBell(page).click();
   const panel = page.getByRole('dialog', { name: 'Notifications' });
-  await expect(panel.getByText("Couldn’t load notifications")).toBeVisible();
-  await expect(panel.getByRole('button', { name: /Retry/ })).toBeVisible();
+  // Other specs on the shared daemon can push notices over /ws/events while
+  // the GET is failing: then the panel lists those rows with an inline
+  // "Couldn’t refresh" banner instead of the empty-state error. Either way it
+  // must settle (never spin forever) and offer Retry (S12-305).
+  await expect(panel.getByRole('alert')).toContainText(/Couldn’t (load|refresh) notifications/);
+  await expect(panel.getByRole('alert').getByRole('button', { name: /Retry/ })).toBeVisible();
+  await expect(panel.locator('[aria-busy="true"]')).toHaveCount(0);
   await expect(panel.getByText("You’re all caught up")).toHaveCount(0);
 });

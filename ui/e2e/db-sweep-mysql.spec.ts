@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,7 +109,7 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function typeStatement(page: Page, sql: string): Promise<void> {
   await ensureEditorOpen(page);
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
 
   // CodeMirror occasionally drops the leading character if keys arrive before
   // the click-to-focus has settled. Retry the whole type until the editor's text
@@ -117,7 +118,7 @@ async function typeStatement(page: Page, sql: string): Promise<void> {
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
     await expect(content).toBeFocused({ timeout: 5_000 });
-    await page.keyboard.press(`${mod}+A`);
+    await page.keyboard.press(selectAll);
     await page.keyboard.press('Delete');
     await content.pressSequentially(sql, { delay: 8 });
     // Dismiss any server-driven autocomplete popup so Run/⌘↵ can't accept a
