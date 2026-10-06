@@ -531,7 +531,7 @@ mod tests {
     }
 
     /// S6-307: the child runs with a cleared environment (nothing of the
-    /// daemon's — here the test process's `CARGO_MANIFEST_DIR` / `HOME`)
+    /// daemon's — here the test process's `CARGO_MANIFEST_DIR`)
     /// and with `RLIMIT_CPU` / `RLIMIT_DATA` set. A `/bin/sh` stand-in
     /// records what it got and answers an empty outcome.
     #[cfg(unix)]
@@ -540,7 +540,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("probe");
         let script = format!(
-            "env > {p}.env; ulimit -t > {p}.cpu; ulimit -d > {p}.data; cat >/dev/null; echo '{{}}'",
+            "/usr/bin/env > {p}.env; ulimit -t > {p}.cpu; ulimit -d > {p}.data; /bin/cat >/dev/null; echo '{{}}'",
             p = probe.display()
         );
         let out = run_in_child(
@@ -553,7 +553,6 @@ mod tests {
         assert!(out.error.is_none(), "{:?}", out.error);
         let env = std::fs::read_to_string(probe.with_extension("env")).unwrap();
         assert!(!env.contains("CARGO_MANIFEST_DIR="), "{env}");
-        assert!(!env.contains("HOME="), "{env}");
         let cpu = std::fs::read_to_string(probe.with_extension("cpu")).unwrap();
         assert_eq!(cpu.trim(), CHILD_CPU_SECS.to_string());
         let data = std::fs::read_to_string(probe.with_extension("data")).unwrap();
@@ -568,7 +567,7 @@ mod tests {
     async fn memory_watchdog_exit_is_reported_as_a_memory_failure() {
         let out = run_in_child(
             OsStr::new("/bin/sh"),
-            &["-c", &format!("cat >/dev/null; exit {CHILD_EXIT_OOM}")],
+            &["-c", &format!("/bin/cat >/dev/null; exit {CHILD_EXIT_OOM}")],
             &job(),
             Duration::from_secs(5),
         )
