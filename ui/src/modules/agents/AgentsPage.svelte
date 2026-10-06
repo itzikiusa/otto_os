@@ -1,5 +1,6 @@
 <script lang="ts">
   // Agent Mode: tabbed split panes, tiled grid, or Mission Control work queue.
+  import { untrack } from 'svelte';
   import Splits from './Splits.svelte';
   import TiledView from './TiledView.svelte';
   import MissionControl from './MissionControl.svelte';
@@ -8,6 +9,7 @@
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ui } from '../../lib/stores/ui.svelte';
+  import { router } from '../../lib/router.svelte';
 
   const tiled = $derived(ws.viewMode === 'tiled');
   const mission = $derived(ws.viewMode === 'mission');
@@ -32,13 +34,17 @@
   // Never open onto a "pick one" void when there are sessions: once per
   // workspace, if its restored layout has no panes, open the most recently
   // active session. Only on ARRIVAL — closing the last tab later leaves the
-  // empty state alone (the user just chose that).
+  // empty state alone (the user just chose that). An arrival that already
+  // names its session (`#/agents/<id>` — a Home box, a notification, ⌘K) is
+  // never overridden: its pane may not exist yet when this runs, and opening
+  // the latest session here used to jump away from the one just clicked.
   let autoOpenedFor: string | null | undefined = undefined;
   $effect(() => {
     if (!ws.layoutReady || ws.sessionsLoading || ws.sessionsError) return;
     const key = ws.currentId;
     if (autoOpenedFor === key) return;
     autoOpenedFor = key;
+    if (untrack(() => router.module === 'agents' && !!router.parts[1])) return;
     if (ws.panes.length > 0 || tiled || mission) return;
     const latest = [...ws.mainSessions].sort(
       (a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at),
