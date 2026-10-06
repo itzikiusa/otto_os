@@ -458,3 +458,64 @@ async fn worktree_survives_a_legacy_agent_branch() {
     // The legacy branch (and any unmerged work on it) is left in place.
     assert!(git(&["rev-parse", "--verify", "-q", &legacy]));
 }
+
+/// S4-23: deleting a story stops its rewrite / test / plan runs too — their
+/// story-keyed cancel flags are tripped (no recovery respawn) and every live
+/// session attributed to the story is killed; another story's are untouched.
+#[tokio::test]
+async fn stop_story_agents_kills_rewrite_test_and_plan_sessions() {
+    use otto_product::ProductCtx;
+    let w = world().await;
+    let mk_story = || otto_state::NewStory {
+        workspace_id: w.ws_a.clone(),
+        source_kind: "draft".into(),
+        account_id: String::new(),
+        source_key: otto_core::new_id(),
+        title: "s".into(),
+        url: String::new(),
+        issue_type: None,
+        stage: "draft".into(),
+        cwd: None,
+        parent_id: None,
+        tree_kind: "story".into(),
+        folder: String::new(),
+        created_by: w.alice.id.clone(),
+    };
+    let pr = &w.ctx.product_repo;
+    let doomed = pr.create_story(mk_story()).await.unwrap();
+    let other = pr.create_story(mk_story()).await.unwrap();
+    let sessions = otto_state::SessionsRepo::new(w.ctx.pool.clone());
+    let mk_session = |sid: &str| otto_state::NewSession {
+        workspace_id: w.ws_a.clone(),
+        kind: otto_core::domain::SessionKind::Agent,
+        provider: "claude".into(),
+        title: "Product: rewrite".into(),
+        cwd: "/tmp".into(),
+        provider_session_id: None,
+        connection_id: None,
+        created_by: w.alice.id.clone(),
+        meta: json!({ "work": { "story_id": sid, "origin": "product" } }),
+    };
+    let rewrite = sessions.create(mk_session(&doomed.id)).await.unwrap();
+    let kept = sessions.create(mk_session(&other.id)).await.unwrap();
+    // An in-flight rewrite run's flag (registered the way product_host does).
+    let key = otto_product::run::story_run_cancel_key(&doomed.id);
+    let other_key = otto_product::run::story_run_cancel_key(&other.id);
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let other_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut reg = w.ctx.product_agent_cancels.lock().unwrap();
+        reg.insert(key, flag.clone());
+        reg.insert(other_key, other_flag.clone());
+    }
+
+    w.ctx.stop_story_agents(&doomed.id).await;
+
+    use std::sync::atomic::Ordering;
+    assert!(flag.load(Ordering::SeqCst), "the story's run is cancelled");
+    assert!(!other_flag.load(Ordering::SeqCst), "another story's run is not");
+    let s = sessions.get(&rewrite.id).await.unwrap();
+    assert_eq!(s.status, otto_core::domain::SessionStatus::Exited);
+    let s = sessions.get(&kept.id).await.unwrap();
+    assert_ne!(s.status, otto_core::domain::SessionStatus::Exited);
+}

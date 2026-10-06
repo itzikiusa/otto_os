@@ -64,10 +64,10 @@ pub fn session_cwd(requested: &str) -> String {
 
     // Shared-temp fallback → unique per-session subdir so codex usage attributes
     // 1:1 by cwd instead of colliding on the shared temp dir. The children live
-    // under ONE stable root (S4-14) that is swept of day-old leftovers here, so
-    // scratch dirs no longer accumulate in `$TMPDIR` forever.
+    // under ONE stable root (S4-14) that [`spawn_scratch_sweep`] clears of
+    // day-old leftovers no session still uses, so scratch dirs no longer
+    // accumulate in `$TMPDIR` forever.
     let root = temp.join(SCRATCH_ROOT);
-    spawn_scratch_sweep(root.clone());
     let unique = root.join(uuid::Uuid::new_v4().to_string());
     if let Err(e) = std::fs::create_dir_all(&unique) {
         tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
@@ -75,43 +75,87 @@ pub fn session_cwd(requested: &str) -> String {
     unique.to_string_lossy().to_string()
 }
 
-/// Stable parent of every product scratch cwd (under the temp dir).
-pub const SCRATCH_ROOT: &str = "otto-product-scratch";
-/// Scratch dirs older than this are removed by the next [`session_cwd`] call
-/// (a product run never takes a day; the agents' sessions are long done).
-pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
-
-/// Run [`sweep_stale_scratch`] off the async workers: [`session_cwd`] is called
-/// from async run code, and a directory walk + recursive delete blocks. One
-/// sweep at a time; a call while one is running skips (the next call sweeps).
-fn spawn_scratch_sweep(root: std::path::PathBuf) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static SWEEPING: AtomicBool = AtomicBool::new(false);
-    if SWEEPING.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let run = move || {
-        sweep_stale_scratch(&root, SCRATCH_MAX_AGE);
-        SWEEPING.store(false, Ordering::Release);
-    };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            handle.spawn_blocking(run);
-        }
-        Err(_) => run(),
-    }
+/// Pre-trust a session cwd from [`session_cwd`]: a scratch child trusts the
+/// stable [`SCRATCH_ROOT`] once for claude instead of adding one dead
+/// `~/.claude.json` project entry per run (S4-14); a real story cwd is
+/// trusted as-is.
+pub fn trust_session_cwd(provider: &str, cwd: &str) {
+    otto_sessions::trust::ensure_trusted_scratch(
+        provider,
+        &std::env::temp_dir().join(SCRATCH_ROOT),
+        cwd,
+    );
 }
 
-/// Remove children of `root` last modified more than `max_age` ago
-/// (best-effort; a missing root is fine). Blocking: call it from the blocking
-/// pool (see [`spawn_scratch_sweep`]) or a test.
+/// Stable parent of every product scratch cwd (under the temp dir).
+pub const SCRATCH_ROOT: &str = "otto-product-scratch";
+/// Scratch dirs older than this — and used by no unarchived session — are
+/// removed by [`spawn_scratch_sweep`].
+pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+/// At most one sweep per this interval (each one reads the sessions table).
+const SCRATCH_SWEEP_EVERY_SECS: u64 = 3600;
+
+/// Sweep the product scratch root in the background (called when a product
+/// run starts; throttled to one sweep an hour, one at a time). A product
+/// analysis / test / plan session is a visible, RESUMABLE session that can
+/// stay open for days, and a dir's mtime does not move while an agent only
+/// reads in it — so age alone swept live sessions' cwds and broke their
+/// resume (S4-304). Every cwd an unarchived session still points at is kept.
+pub fn spawn_scratch_sweep(pool: otto_state::DbPool) {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static SWEEPING: AtomicBool = AtomicBool::new(false);
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Acquire);
+    if (last != 0 && now.saturating_sub(last) < SCRATCH_SWEEP_EVERY_SECS)
+        || SWEEPING.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    LAST.store(now, Ordering::Release);
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        SWEEPING.store(false, Ordering::Release);
+        return;
+    };
+    handle.spawn(async move {
+        let root = std::env::temp_dir().join(SCRATCH_ROOT);
+        let keep = otto_state::SessionsRepo::new(pool)
+            .unarchived_cwds_under(&root.to_string_lossy())
+            .await;
+        match keep {
+            Ok(keep) => {
+                let _ = tokio::task::spawn_blocking(move || {
+                    sweep_stale_scratch(&root, SCRATCH_MAX_AGE, &keep)
+                })
+                .await;
+            }
+            // Without the in-use set nothing is provably safe to remove.
+            Err(e) => warn!("product scratch sweep skipped: {e}"),
+        }
+        SWEEPING.store(false, Ordering::Release);
+    });
+}
+
+/// Remove children of `root` last modified more than `max_age` ago, except
+/// the paths in `keep` (best-effort; a missing root is fine). Blocking: call
+/// it from the blocking pool (see [`spawn_scratch_sweep`]) or a test.
 #[allow(clippy::disallowed_methods)] // sync helper: only run via spawn_scratch_sweep's spawn_blocking (or a test)
-pub fn sweep_stale_scratch(root: &std::path::Path, max_age: std::time::Duration) {
+pub fn sweep_stale_scratch(
+    root: &std::path::Path,
+    max_age: std::time::Duration,
+    keep: &std::collections::HashSet<String>,
+) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     let now = std::time::SystemTime::now();
     for e in entries.flatten() {
+        if keep.contains(e.path().to_string_lossy().as_ref()) {
+            continue;
+        }
         let stale = e
             .metadata()
             .and_then(|m| m.modified())
@@ -384,6 +428,30 @@ pub use otto_core::cancel::{new_cancel_registry, CancelRegistry};
 pub fn signal_cancel(reg: &CancelRegistry, agent_id: &str) {
     if let Some(flag) = reg.lock().unwrap().get(agent_id) {
         flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Cancel-registry key prefix of a story run WITHOUT an agent row (rewrite,
+/// test generation, plan generation): `story:<sid>:<unique>` (S4-23).
+const STORY_RUN_CANCEL_PREFIX: &str = "story:";
+
+/// A fresh cancel key for one agent-row-less run of `story_id`, so deleting
+/// the story can stop it ([`signal_story_cancels`]) instead of the recovery
+/// loop respawning a killed session.
+pub fn story_run_cancel_key(story_id: &str) -> String {
+    format!(
+        "{STORY_RUN_CANCEL_PREFIX}{story_id}:{}",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+/// Trip every in-flight rewrite / test / plan run of `story_id` (S4-23).
+pub fn signal_story_cancels(reg: &CancelRegistry, story_id: &str) {
+    let prefix = format!("{STORY_RUN_CANCEL_PREFIX}{story_id}:");
+    for (key, flag) in reg.lock().unwrap().iter() {
+        if key.starts_with(&prefix) {
+            flag.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1059,7 +1127,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string()),
     );
-    otto_sessions::trust::ensure_trusted(&agent.provider, &cwd);
+    trust_session_cwd(&agent.provider, &cwd);
 
     // 6. Rebuild context file (shared with this analysis's context path, or
     // fresh). Unlike the fan-out (which embeds daemon-minted ids), the retry ids
@@ -1553,7 +1621,7 @@ pub async fn run_rewrite<C: ProductRunHost>(
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
     // 5. Pre-trust provider.
-    otto_sessions::trust::ensure_trusted(&provider, &cwd);
+    trust_session_cwd(&provider, &cwd);
 
     // 6. Run as a provider-honoring session.  The requested model (if any) is
     //    injected by run_agent_with_recovery → run_lens_session → SessionManager
@@ -1866,7 +1934,7 @@ pub async fn run_generate_tests<C: ProductRunHost>(
     let prompt = augment_with_out_path(&base_prompt, &out_path.to_string_lossy());
 
     // 5. Pre-trust provider.
-    otto_sessions::trust::ensure_trusted(&provider, &cwd);
+    trust_session_cwd(&provider, &cwd);
 
     // 6. Run as a provider-honoring session.  The requested model (if any) is
     //    threaded through SessionManager's spawn path for claude/codex.
@@ -2828,11 +2896,17 @@ mod tests {
         let mine = tempfile::tempdir().unwrap();
         let child = mine.path().join("old");
         std::fs::create_dir_all(&child).unwrap();
+        let live = mine.path().join("live");
+        std::fs::create_dir_all(&live).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        sweep_stale_scratch(mine.path(), std::time::Duration::from_secs(3600));
+        let keep: std::collections::HashSet<String> =
+            [live.to_string_lossy().into_owned()].into_iter().collect();
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_secs(3600), &keep);
         assert!(child.exists(), "fresh scratch kept");
-        sweep_stale_scratch(mine.path(), std::time::Duration::from_millis(1));
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_millis(1), &keep);
         assert!(!child.exists(), "stale scratch swept");
+        // S4-304: an old dir an unarchived session still uses survives.
+        assert!(live.exists(), "a live session's scratch cwd is never swept");
     }
 
     #[test]

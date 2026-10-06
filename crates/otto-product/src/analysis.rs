@@ -70,7 +70,13 @@ pub async fn analyze<C: ProductStudioHost>(
     // spawn dozens of concurrent PTY agents.
     validate_fanout(&req.agents).map_err(ApiError)?;
     // One analysis per story at a time (409) — the boot reaper finalizes rows
-    // orphaned by a restart, so `running` here means a live fan-out.
+    // orphaned by a restart and [`spawn_supervised`] those of a crashed
+    // runner, so `running` here means a live fan-out. The per-story lock is
+    // held from this check through the row insert below (S4-306): two
+    // requests a few ms apart (double-click, two tabs, an MCP retry) both saw
+    // no running row and both fanned out.
+    let start_lock = story_start_lock(&sid);
+    let _starting = start_lock.lock().await;
     if ctx
         .product_repo()
         .list_analyses(&sid)
@@ -175,19 +181,70 @@ pub async fn analyze<C: ProductStudioHost>(
     // Spawn the fan-out; errors are isolated inside run_analysis. Each lens
     // (and the summarizer) runs as a real session on behalf of the current
     // user, mirroring the PR-review mechanism.
-    tokio::spawn(crate::run::run_analysis(
-        ctx.clone(),
-        ws.clone(),
-        user.id.clone(),
-        sid.clone(),
-        analysis.id.clone(),
-        specs,
-        summarizer_provider,
-        cwd,
-        req.focus,
-    ));
+    let crash_ctx = ctx.clone();
+    let crash_id = analysis.id.clone();
+    spawn_supervised(
+        crate::run::run_analysis(
+            ctx.clone(),
+            ws.clone(),
+            user.id.clone(),
+            sid.clone(),
+            analysis.id.clone(),
+            specs,
+            summarizer_provider,
+            cwd,
+            req.focus,
+        ),
+        async move {
+            // Only a row the runner never finalized: it may have panicked
+            // after writing its final status.
+            let repo = crash_ctx.product_repo();
+            if matches!(repo.get_analysis(&crash_id).await, Ok(a) if a.status == "running") {
+                let _ = repo
+                    .set_analysis_status(
+                        &crash_id,
+                        "error",
+                        Some("the analysis runner crashed — check the daemon log"),
+                        true,
+                    )
+                    .await;
+            }
+        },
+    );
 
     Ok(Json(analysis))
+}
+
+/// Per-story lock serializing analyze's "none running" check with its row
+/// insert (S4-306). Entries are a few bytes per story ever analyzed.
+fn story_start_lock(story_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    type Locks = std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+    static LOCKS: std::sync::OnceLock<Locks> = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(story_id.to_string())
+        .or_default()
+        .clone()
+}
+
+/// Spawn `run` and, if it panics (or is cancelled), run `on_crash` (S4-302).
+/// The analysis row is only moved out of `running` by the runner itself, so a
+/// panic inside it (a lens parser `unwrap`, a poisoned lock) used to leave the
+/// story answering 409 "already running" until the daemon restarted.
+pub(crate) fn spawn_supervised<F, G>(run: F, on_crash: G)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+    G: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(run);
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            tracing::error!("product: analysis runner died: {e}");
+            on_crash.await;
+        }
+    });
 }
 
 /// Resolve an agent cwd: the request's (400 when invalid) → the story's (a
@@ -684,6 +741,37 @@ mod tests {
 
     fn agents(v: serde_json::Value) -> Vec<crate::types::AnalyzeAgentReq> {
         serde_json::from_value(v).unwrap()
+    }
+
+    /// S4-302: a panicking runner still finalizes its row (via `on_crash`);
+    /// a runner that returns normally never triggers it.
+    #[tokio::test]
+    async fn supervised_runner_panic_runs_the_crash_hook() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_supervised(async { panic!("lens parser unwrap") }, async move {
+            let _ = tx.send(());
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("crash hook ran")
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_supervised(async {}, async move {
+            let _ = tx.send(());
+        });
+        // The hook future is dropped unrun → its sender closes.
+        assert!(rx.await.is_err(), "no crash hook after a clean run");
+    }
+
+    /// S4-306: concurrent analyze calls for one story share one start lock;
+    /// other stories do not.
+    #[tokio::test]
+    async fn story_start_lock_is_per_story() {
+        let a = story_start_lock("story-a");
+        let _held = a.lock().await;
+        assert!(story_start_lock("story-a").try_lock().is_err());
+        assert!(story_start_lock("story-b").try_lock().is_ok());
     }
 
     /// S4-15: the fan-out is bounded (400 above the caps).
