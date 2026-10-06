@@ -1079,7 +1079,7 @@ async function loadScopeRaw(account, projectsParam) {
       const rest = fe.days - fixed.reduce((a, k) => a + estimates[k].days, 0);
       const sumFree = free.reduce((a, k) => a + estimates[k].days, 0);
       if (!(sumFree > 0)) continue;
-      const f = Math.max(0.1, rest / sumFree);
+      const f = Math.min(1, Math.max(0.1, rest / sumFree)); // only ever shrink: a feature estimate spread over the few children delivered so far must not inflate them
       for (const k of free) estimates[k] = { ...estimates[k], story_days: estimates[k].days, days: Math.round(estimates[k].days * f * 100) / 100, feature_scaled: f };
     }
   }
