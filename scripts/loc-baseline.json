@@ -3,19 +3,19 @@
   "new_file_max": 4000,
   "files": {
     "crates/otto-dbviewer/src/drivers/mongodb.rs": 5361,
-    "crates/otto-dbviewer/src/service.rs": 4032,
-    "crates/otto-git/src/http.rs": 4038,
-    "crates/otto-git/src/local.rs": 8340,
-    "crates/otto-server/src/modules.rs": 7441,
-    "crates/otto-server/src/routes/api_client.rs": 5703,
+    "crates/otto-dbviewer/src/service.rs": 4118,
+    "crates/otto-git/src/http.rs": 4347,
+    "crates/otto-git/src/local.rs": 8488,
+    "crates/otto-server/src/modules.rs": 7749,
+    "crates/otto-server/src/routes/api_client.rs": 5752,
     "crates/otto-server/src/routes/browser.rs": 4564,
     "crates/otto-server/src/vault_docs_agent.rs": 5221,
-    "crates/otto-server/src/workflow_engine.rs": 9919,
-    "crates/otto-sessions/src/manager.rs": 9890,
+    "crates/otto-server/src/workflow_engine.rs": 9986,
+    "crates/otto-sessions/src/manager.rs": 10290,
     "crates/otto-sessions/src/ws.rs": 4015,
     "crates/ottod/src/mcp_tools.rs": 7431
   },
   "totals": {
-    "otto-server": 128266
+    "otto-server": 130402
   }
 }
