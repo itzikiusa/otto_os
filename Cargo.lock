@@ -4621,6 +4621,7 @@ dependencies = [
  "mime_guess",
  "notify",
  "otto-core",
+ "otto-git",
  "otto-state",
  "rustix",
  "serde",
