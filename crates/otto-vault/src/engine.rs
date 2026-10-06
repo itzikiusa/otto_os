@@ -815,7 +815,7 @@ impl VaultEngine {
             // exists on disk, but is gone from the vault — prune it rather
             // than read it as the indexed file reappearing.
             let protected = otto_core::secret_paths::protected_set();
-            let filter_protected = !protected.in_protected_dir(&root);
+            let filter_protected = !protected.in_protected_dir(root);
             for (rel, note) in removed_notes
                 .into_iter()
                 .map(|p| (p, true))
