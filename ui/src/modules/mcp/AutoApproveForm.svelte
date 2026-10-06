@@ -172,7 +172,11 @@
           <option value="" disabled>Choose a workspace…</option>
           {#each workspaces as w (w.id)}<option value={w.id}>{w.name}</option>{/each}
         </select>
-        <span class="hint">Applies to calls that land in this workspace (e.g. a PR on one of its repos).</span>
+        <span class="hint">
+          Applies to calls that land in this workspace (e.g. a PR on one of its repos). Vault, Kubernetes,
+          AWS, Jira/Confluence and improvement-edit tools act outside any one workspace — use a global or
+          session rule for those.
+        </span>
       {:else if scope === 'session'}
         {#if sessions.length}
           <select bind:value={sessionId} aria-label="Agent session">
