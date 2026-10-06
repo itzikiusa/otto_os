@@ -1060,6 +1060,37 @@ async function loadScopeRaw(account, projectsParam) {
       }
     }
   }
+  // Lead corrections propagate to SIMILAR tickets: same epic, same routine
+  // signature ("Fix error log noise in <x>"), same title prefix ("Story N —",
+  // "Kafka Migration —"). Factor = median(lead ÷ AI) of the corrected members;
+  // only uncorrected members move, and they keep their AI value as ai_days.
+  {
+    const byKeyR = new Map(records.map((r) => [r.key, r]));
+    const fam = (r) => {
+      const f = [];
+      if (r.parent_key && byKeyR.has(r.parent_key) && String(byKeyR.get(r.parent_key).type).toLowerCase() === 'epic') f.push(`epic:${r.parent_key}`);
+      f.push(`sig:${A.routineSignature(r.summary || '')}`);
+      const m = String(r.summary || '').match(/^\s*([^—:|]{6,60})\s*[—:|]/);
+      if (m) f.push(`pre:${m[1].replace(/\d+/g, '#').trim().toLowerCase()}`);
+      return f;
+    };
+    const ratios = new Map();
+    for (const r of records) {
+      const e = estimates[r.key];
+      if (!e || !e.overridden || !(e.ai_days > 0) || !(e.days > 0)) continue;
+      for (const g of fam(r)) { if (!ratios.has(g)) ratios.set(g, []); ratios.get(g).push(e.days / e.ai_days); }
+    }
+    if (ratios.size) {
+      for (const r of records) {
+        const e = estimates[r.key];
+        if (!e || e.overridden || !(e.days > 0)) continue;
+        const fs = fam(r).map((g) => ratios.get(g)).filter(Boolean).flat().sort((a, b) => a - b);
+        if (!fs.length) continue;
+        const f = fs[Math.floor(fs.length / 2)];
+        estimates[r.key] = { ...e, ai_days: e.days, days: Math.round(e.days * f * 100) / 100, propagated: Math.round(f * 100) / 100 };
+      }
+    }
+  }
   // Feature-level ruler: children of an estimated epic are scaled so their
   // sum equals the ONE feature estimate (lead-corrected children keep their
   // value; the rest share the remainder). Slicing can't inflate a feature.
