@@ -652,3 +652,140 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
         "parked on its bell"
     );
 }
+
+/// S11 "flip the default" + S11-301/303/306/308, S8-304, S3-301 through the
+/// REAL router: an agent session's own token (authorizing as its ROOT owner)
+/// is refused every root-gated or person-only write — including a
+/// `require_root` route nobody tagged — while the person's token still
+/// works, and the Outward PR routes (the `otto-pr` skill) stay open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_tokens_lose_root_authority_on_unreviewed_writes() {
+    let d = boot(&[]).await;
+    let agent = d.agent_session(json!({})).await;
+
+    // Person-only writes (Admin-tagged): the agent is refused before the
+    // handler runs, whatever the body.
+    for (m, path, body) in [
+        (
+            "POST",
+            "/workspaces/ws1/mcp/servers",
+            json!({"name": "x", "transport": "stdio", "command": "/bin/sh",
+                   "args": ["-c", "true"]}),
+        ),
+        ("PUT", "/workspaces/ws1/mcp/allowlist", json!({"tools": []})),
+        (
+            "POST",
+            "/k8s/clusters/import",
+            json!({"name": "x", "kubeconfig_yaml": "apiVersion: v1"}),
+        ),
+        (
+            "PUT",
+            "/workspaces/ws1/integrations/telegram",
+            json!({"enabled": true, "open_to_all": true}),
+        ),
+        ("PUT", "/notifications/settings", json!({})),
+        ("POST", "/improvement/edits/e1/approve", json!({})),
+        ("POST", "/findings/f1/approve", json!({})),
+        ("PUT", "/email-sender", json!({})),
+    ] {
+        let (st, resp) = d.send(m, &agent, path, Some(body)).await;
+        assert_eq!(st, 403, "agent {m} {path} must be refused: {resp}");
+    }
+
+    // A `require_root` write that carries NO route tag: the guard withheld
+    // root from the agent credential, so the handler's own root check
+    // refuses it — the person's token reaches the handler (404: no run).
+    let (st, resp) = d
+        .send("POST", &agent, "/insights/runs/nope/cancel", None)
+        .await;
+    assert_eq!(st, 403, "untagged require_root write: {resp}");
+    assert!(
+        resp.to_string().contains("agent session"),
+        "the refusal says why: {resp}"
+    );
+    let (st, resp) = d
+        .send("POST", &d.human, "/insights/runs/nope/cancel", None)
+        .await;
+    assert_ne!(st, 403, "the person keeps root: {resp}");
+
+    // Outward PR routes keep working for the agent's own token (the
+    // `otto-pr` skill): whatever the git layer answers, the gate does not.
+    let (st, resp) = d
+        .send(
+            "POST",
+            &agent,
+            "/repos/repo1/prs/1/comments",
+            Some(json!({"body": "hi"})),
+        )
+        .await;
+    assert_ne!(st, 403, "Outward PR comment stays open to agents: {resp}");
+
+    // S3-301: an agent can neither edit a workflow graph nor start a run
+    // below its `human_approval` gate; the person can.
+    let graph = json!({
+        "nodes": [
+            {"id": "implement", "kind": "agent"},
+            {"id": "approve", "kind": "human_approval"},
+            {"id": "pr", "kind": "git_pr"}
+        ],
+        "edges": [
+            {"id": "e1", "source": "implement", "target": "approve"},
+            {"id": "e2", "source": "approve", "target": "pr"}
+        ]
+    });
+    let (st, wf) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws1/workflows",
+            Some(json!({"name": "gated", "graph": graph})),
+        )
+        .await;
+    assert_eq!(st, 200, "create workflow: {wf}");
+    let wid = wf["id"].as_str().unwrap().to_string();
+    let (st, resp) = d
+        .send(
+            "PATCH",
+            &agent,
+            &format!("/workflows/{wid}"),
+            Some(json!({"graph": {"nodes": [{"id": "pr", "kind": "git_pr"}], "edges": []}})),
+        )
+        .await;
+    assert_eq!(st, 403, "agent graph edit: {resp}");
+    let (st, resp) = d
+        .send(
+            "PATCH",
+            &agent,
+            &format!("/workflows/{wid}"),
+            Some(json!({"description": "notes only"})),
+        )
+        .await;
+    assert_eq!(st, 200, "a non-graph edit stays open: {resp}");
+    let (st, resp) = d
+        .send(
+            "POST",
+            &agent,
+            &format!("/workflows/{wid}/run"),
+            Some(json!({"start_node": "pr", "only_node": true})),
+        )
+        .await;
+    assert_eq!(st, 403, "agent partial run past the approval gate: {resp}");
+    let (st, resp) = d
+        .send(
+            "POST",
+            &agent,
+            &format!("/workflows/{wid}/versions/1/restore"),
+            None,
+        )
+        .await;
+    assert_eq!(st, 403, "agent version restore is a graph write: {resp}");
+    let (st, resp) = d
+        .send(
+            "PATCH",
+            &d.human,
+            &format!("/workflows/{wid}"),
+            Some(json!({"graph": graph})),
+        )
+        .await;
+    assert_eq!(st, 200, "the person edits the graph: {resp}");
+}

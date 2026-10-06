@@ -604,3 +604,162 @@ async fn agent_credentials_are_refused_on_every_admin_and_secret_route() {
         wrong.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// S11 item 6 — every non-GET route replayed with an agent-session token.
+// ---------------------------------------------------------------------------
+
+/// `template` alone, mounted behind the real guard + auth injection, with a
+/// stub handler that is ROOT-GATED exactly like a `require_root` write
+/// handler: 200 when `otto_server::auth::require_root` passes, else 403.
+fn root_gated_one(state: TestState, template: &str, user: User, cred: Cred) -> Router {
+    async fn root_gated(
+        axum::extract::Extension(AuthUser(u)): axum::extract::Extension<AuthUser>,
+    ) -> StatusCode {
+        if otto_server::auth::require_root(&u).is_ok() {
+            StatusCode::OK
+        } else {
+            StatusCode::FORBIDDEN
+        }
+    }
+    let protected: Router<TestState> = Router::new()
+        .route(template, axum::routing::any(root_gated))
+        .route_layer(from_fn_with_state(
+            state.clone(),
+            feature_guard::<TestState>,
+        ));
+    let protected = protected.layer(from_fn(move |mut req: Request, next: Next| {
+        let u = user.clone();
+        async move {
+            let mut ctx = otto_core::auth::AuthContext {
+                real_user: u.clone(),
+                effective_user: u.clone(),
+                scope: None,
+                mcp_only: false,
+                mcp_scope: None,
+                mcp_internal: false,
+                mcp_session_id: None,
+                managed_session_id: None,
+            };
+            match cred {
+                Cred::Human => {}
+                Cred::AgentToken => ctx.managed_session_id = Some("agent-sess".into()),
+                Cred::AgentMcpSession => ctx.mcp_session_id = Some("agent-sess".into()),
+            }
+            req.extensions_mut().insert(AuthUser(u));
+            req.extensions_mut().insert(ctx);
+            next.run(req).await
+        }
+    }));
+    Router::new().nest("/api/v1", protected).with_state(state)
+}
+
+/// Replays EVERY registered route × POST/PUT/PATCH/DELETE through the real
+/// guard into a root-gated stub, as the person and as an agent session's
+/// own credentials (both authorizing as ROOT). A person passes everywhere;
+/// an agent passes ONLY where `policy::agent_root_write_allowed` (the
+/// reviewed allow-list: the Outward routes) says so — everywhere else the
+/// class gate or the withheld root refuses it with 403. This is the guard
+/// that would have caught S11-301/303/306/308: a new root-gated write is
+/// closed to agents by default, and widening the allow-list shows up here.
+#[tokio::test]
+async fn every_write_route_refuses_agent_root_authority_unless_allow_listed() {
+    use otto_server::policy::{agent_root_write_allowed, route_class, RouteClass};
+    let pool = mem_pool().await;
+    let root_user = seed_user(&pool, "root-owner", true).await;
+    let state = TestState {
+        grants: GrantsRepo::new(pool),
+    };
+    let root = super::policy_coverage::repo_root();
+    let methods = [Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
+    let mut wrong = Vec::new();
+    let mut allowed = 0usize;
+    let mut refused = 0usize;
+    for template in super::policy_coverage::registered_routes(&root) {
+        // Root-mounted (not behind the `/api/v1` guard) or plugin-proxied.
+        if template.starts_with("/ws/")
+            || template == "/browser/proxy"
+            || template == "/health"
+            || template == "/meta"
+            || template.starts_with("/plugins/")
+        {
+            continue;
+        }
+        let full = format!("/api/v1{template}");
+        let concrete: String = template
+            .split('/')
+            .map(|seg| {
+                if seg.starts_with("{*") {
+                    "a".to_string()
+                } else if seg.starts_with('{') {
+                    "x1".to_string()
+                } else {
+                    seg.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let path = format!("/api/v1{concrete}");
+        let human = root_gated_one(state.clone(), &template, root_user.clone(), Cred::Human);
+        let agents = [
+            root_gated_one(
+                state.clone(),
+                &template,
+                root_user.clone(),
+                Cred::AgentToken,
+            ),
+            root_gated_one(
+                state.clone(),
+                &template,
+                root_user.clone(),
+                Cred::AgentMcpSession,
+            ),
+        ];
+        for m in &methods {
+            let ok_for_agent = agent_root_write_allowed(m, &full);
+            // The allow-list never contains a person-only route.
+            if ok_for_agent
+                && matches!(
+                    route_class(m, &full),
+                    Some(RouteClass::Admin | RouteClass::Secret)
+                )
+            {
+                wrong.push(format!("{m} {full}: allow-listed AND Admin/Secret"));
+            }
+            let h = status(&human, m.clone(), &path).await;
+            if h != StatusCode::OK {
+                wrong.push(format!("{m} {full}: person got {h}"));
+            }
+            let want = if ok_for_agent {
+                allowed += 1;
+                StatusCode::OK
+            } else {
+                refused += 1;
+                StatusCode::FORBIDDEN
+            };
+            for app in &agents {
+                let a = status(app, m.clone(), &path).await;
+                if a != want {
+                    wrong.push(format!("{m} {full}: agent got {a}, want {want}"));
+                }
+            }
+        }
+    }
+    // Sanity floors: the scanner works and the allow-list is the Outward set
+    // (PR create/merge/approve, push, Jira/Confluence writes, …), not empty.
+    assert!(
+        refused >= 2000,
+        "only {refused} refused pairs — scanner broke?"
+    );
+    assert!(allowed >= 20, "only {allowed} allow-listed pairs");
+    assert!(
+        agent_root_write_allowed(&Method::POST, "/api/v1/repos/{id}/prs/{number}/merge"),
+        "the otto-pr skill's merge must stay open to agents"
+    );
+    assert!(
+        wrong.is_empty(),
+        "agent root authority on writes ({} wrong):\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}

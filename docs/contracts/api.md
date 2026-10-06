@@ -416,7 +416,24 @@ therefore also reads a **credential class** for each `(method, route)`
   and the approval decisions `/mcp/approvals/{id}/decide`,
   `/workflow-runs/{id}/approve`, `/runs/{id}/approve`,
   `/database-changes/{id}/approve`,
-  `/workspaces/{wid}/workgraph/approvals/{aid}/decide`.
+  `/workspaces/{wid}/workgraph/approvals/{aid}/decide` — and, structurally,
+  EVERY write whose last segment is `approve` / `decide` / `reject` /
+  `rollback` except the Outward `/repos/{id}/prs/{number}/approve`
+  (S11-308, S8-304: e.g. `/improvement/edits/{eid}/{approve,reject,rollback}`,
+  `/findings/{id}/approve`, `/pr-review-comments/{cid}/approve`,
+  `/product/testcase-runs/{rid}/approve`, `/design/artifacts/{id}/approve`,
+  `/database-changes/{id}/reject`). Also the MCP control-plane registry
+  (`/workspaces/{wid}/mcp/servers`, `/mcp/servers/{id}`,
+  `/mcp/tools/{tool_id}`, `/workspaces/{wid}/mcp/allowlist`,
+  `/mcp/otto-server/enabled` — S11-301), the kubeconfig registry
+  (`/k8s/clusters`, `/k8s/clusters/{id}`, `/k8s/clusters/import`,
+  `/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig` — S11-303),
+  channel bridges (`/workspaces/{id}/integrations`,
+  `/workspaces/{id}/integrations/{channel}`, `…/seed-from-loom`; the
+  `…/{channel}/test` send stays Outward — S11-306),
+  `/workspaces/{id}/self-improvement`, `/email-sender*`,
+  `/notifications/settings`, `DELETE /auth/tokens/{id}`,
+  `/auth/shares/revoke-all` and `/skill-reviews/{id}/apply` (S8-304).
 - **`Secret`** — plaintext credentials or credential minting (any method):
   `/browser/credentials/{id}/reveal`, `/state/connections/export`,
   `/state/archive`, `/admin/secrets/*`; writes to `/auth/tokens`,
@@ -432,6 +449,33 @@ On an `Admin` or `Secret` route every credential that is not a person's own
 (`ui_bridge::is_human` false: agent session, internal / outward MCP, share
 link) gets `403`. The handlers repeat the check (`auth::require_human`) next
 to `require_root` as a second layer.
+
+**Root authority is withheld from agent credentials on writes by default**
+(S11 "flip the default"). On every non-GET request from a non-human
+credential, the feature guard publishes an
+`otto_core::auth::RequestCredential { agent, root_withheld }` task-local
+around the handler; `root_withheld` is true unless the route is on the
+reviewed allow-list `otto_server::policy::agent_root_write_allowed` (today:
+exactly the `Outward` routes). Every root-gated write helper —
+`require_root`, `require_setup_authority` (AWS / k8s) and
+`otto_core::auth::root_authority` — then answers `403` ("an agent session's
+credential cannot use root authority here"), so a new `require_root` write
+route is closed to agents without being tagged. `rbac_matrix::
+every_write_route_refuses_agent_root_authority_unless_allow_listed` replays
+every registered route × POST/PUT/PATCH/DELETE with both agent credentials
+to pin this.
+
+Body-flag confirmations are a person's (S6-304): `confirm: true` on
+`POST /aws/accounts/{id}/athena/query` (prod DDL/DML) and `confirm_write:
+true` on the database query / multi-run / import routes are refused with
+`403` when the request carries an agent credential (reads are unaffected).
+
+Workflows (S3-301): an agent credential gets `403` on
+`PATCH /workflows/{id}` with a `graph`, on
+`POST /workflows/{id}/versions/{v}/restore`, on `POST /workflows/{id}/run`
+whose `start_node` has a `human_approval` node upstream, and on
+`POST /workflow-runs/{id}/retry-node` when an upstream `human_approval` node
+did not succeed in that run.
 
 Agent session tokens are also confined on the terminal's REST twins:
 `POST /sessions/{id}/input` reaches only the caller's own session (as

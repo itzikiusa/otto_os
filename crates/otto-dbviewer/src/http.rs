@@ -779,7 +779,10 @@ async fn export_query<S: DbViewerCtx>(
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
     let writer_tx = tx.clone();
-    tokio::spawn(async move {
+    // Carry the request credential into the task: the export / import
+    // re-checks `confirm_write` there (S6-304).
+    let cred = otto_core::auth::request_credential();
+    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
         let w: Box<dyn std::io::Write + Send> = Box::new(std::io::BufWriter::with_capacity(
             64 * 1024,
             ChannelWriter { tx: writer_tx },
@@ -801,7 +804,7 @@ async fn export_query<S: DbViewerCtx>(
             // sent stay, the client sees a truncated body + connection reset.
             let _ = tx.send(Err(std::io::Error::other(e.to_string())));
         }
-    });
+    }));
 
     let stream =
         futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
@@ -935,7 +938,10 @@ async fn export_to_path<S: DbViewerCtx>(
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(16);
 
-    tokio::spawn(async move {
+    // Carry the request credential into the task: the export / import
+    // re-checks `confirm_write` there (S6-304).
+    let cred = otto_core::auth::request_credential();
+    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
         let export = db.export_to_path(
             &conn_id,
             &uid,
@@ -978,7 +984,7 @@ async fn export_to_path<S: DbViewerCtx>(
                 }
             }
         }
-    });
+    }));
 
     let stream =
         futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });
@@ -1041,7 +1047,12 @@ async fn import_query<S: DbViewerCtx>(
     let db = ctx.db().clone();
     let uid = user.id.clone();
     let conn_id = id.clone();
-    let (table, format, confirm) = (req.table.clone(), req.format, req.confirm_write);
+    // An agent credential's `confirm_write` is not a person's (S6-304).
+    let (table, format, confirm) = (
+        req.table.clone(),
+        req.format,
+        crate::service::person_confirmed(req.confirm_write),
+    );
 
     // The producer only ever sends Ok — Infallible documents that the stream
     // itself never errors (import failures arrive as an `{error}` data line). v1
@@ -1049,7 +1060,10 @@ async fn import_query<S: DbViewerCtx>(
     // — there's no on-disk file to size as with export).
     let (tx, rx) =
         tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(4);
-    tokio::spawn(async move {
+    // Carry the request credential into the task: the export / import
+    // re-checks `confirm_write` there (S6-304).
+    let cred = otto_core::auth::request_credential();
+    tokio::spawn(otto_core::auth::with_request_credential(cred, async move {
         let line = match db
             .import_from_path(&conn_id, &uid, &path, format, &table, batch_size, confirm)
             .await
@@ -1058,7 +1072,7 @@ async fn import_query<S: DbViewerCtx>(
             Err(e) => serde_json::json!({ "error": e.to_string() }),
         };
         let _ = tx.send(Ok(ndjson_line(&line))).await;
-    });
+    }));
 
     let stream =
         futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|i| (i, rx)) });

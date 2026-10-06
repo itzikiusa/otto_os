@@ -65,8 +65,10 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Installs into the shared Otto library are root-only.
 fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
-    if user.0.is_root {
+    if otto_core::auth::root_authority(&user.0) {
         Ok(())
+    } else if user.0.is_root {
+        Err(otto_core::auth::root_refusal().into())
     } else {
         Err(Error::Forbidden("installing skills requires root".into()).into())
     }

@@ -49,10 +49,10 @@ pub(crate) use otto_agent_run::offload::blocking;
 
 /// Require the global root role.
 pub(crate) fn require_root(user: &User) -> Result<(), ApiError> {
-    if user.is_root {
+    if otto_core::auth::root_authority(user) {
         Ok(())
     } else {
-        Err(ApiError(Error::Forbidden("requires root".into())))
+        Err(ApiError(otto_core::auth::root_refusal()))
     }
 }
 
