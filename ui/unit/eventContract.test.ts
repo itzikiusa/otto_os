@@ -59,7 +59,7 @@ const snake = (name: string) =>
     .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
     .toLowerCase();
 
-interface RustField { name: string; omittedWhenEmpty: boolean }
+interface RustField { name: string; omittedWhenEmpty: boolean; ty: string }
 interface RustVariant { name: string; tag: string; fields: RustField[] | null }
 
 function rustVariants(): RustVariant[] {
@@ -93,8 +93,8 @@ function rustVariants(): RustVariant[] {
           if (/flatten/.test(a[1] ?? '')) fields = null;
           p = p.slice(a[0].length);
         }
-        const f = /^(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:/.exec(p);
-        if (f && fields) fields.push({ name: f[1], omittedWhenEmpty: pendingSkip });
+        const f = /^(?:pub\s+)?([a-z_][a-z0-9_]*)\s*:\s*([\s\S]*)$/.exec(p);
+        if (f && fields) fields.push({ name: f[1], omittedWhenEmpty: pendingSkip, ty: f[2].trim() });
         pendingSkip = false;
       }
       i = end + 1;
@@ -109,7 +109,7 @@ function rustVariants(): RustVariant[] {
   return out;
 }
 
-interface TsMember { tag: string; keys: Map<string, { optional: boolean }> }
+interface TsMember { tag: string; keys: Map<string, { optional: boolean; ty: string }> }
 
 function tsInterfaceKeys(name: string): string {
   const m = new RegExp(`export interface ${name}\\s*(?:extends[^{]*)?\\{`).exec(tsSrc);
@@ -139,7 +139,7 @@ function tsMembers(): TsMember[] {
     .join('\n');
   return splitTop(union, '|').map((member) => {
     const body = member.startsWith('{') ? member.slice(1, closing(member, 0)) : tsInterfaceKeys(member);
-    const keys = new Map<string, { optional: boolean }>();
+    const keys = new Map<string, { optional: boolean; ty: string }>();
     let tag = '';
     for (const part of splitTop(body.replace(/\/\*[\s\S]*?\*\//g, ''), ';').flatMap((p) => p.split('\n').length > 1 ? splitTop(p, '\n') : [p])) {
       const k = /^(?:readonly\s+)?([a-z_][a-z0-9_]*)(\?)?\s*:\s*([\s\S]*)$/.exec(part.trim());
@@ -148,7 +148,7 @@ function tsMembers(): TsMember[] {
         tag = /'([^']+)'/.exec(k[3])?.[1] ?? '';
         continue;
       }
-      keys.set(k[1], { optional: !!k[2] });
+      keys.set(k[1], { optional: !!k[2], ty: k[3].trim() });
     }
     assert.ok(tag, `OttoEvent member without a literal type tag: ${member.slice(0, 80)}`);
     return { tag, keys };
@@ -174,14 +174,34 @@ test('every Rust event is in OttoEvent and ws.md; OttoEvent has no stale tags', 
   const rustTags = new Set(variants.map((v) => v.tag));
   const missingTs = variants.filter((v) => !byTag.has(v.tag)).map((v) => v.tag);
   const stale = members.filter((m) => !rustTags.has(m.tag)).map((m) => m.tag);
-  const missingDoc = variants.filter((v) => !wsMd.includes(v.tag)).map((v) => v.tag);
+  // A whole wire frame, not a substring: `notification` used to pass only
+  // because `notifications_changed` is documented (S13-307).
+  const missingDoc = variants.filter((v) => !docTags.has(v.tag)).map((v) => v.tag);
   assert.deepEqual(missingTs, [], 'add these to OttoEvent in ui/src/lib/api/types.ts');
   assert.deepEqual(stale, [], 'OttoEvent members with no Rust variant');
   assert.deepEqual(missingDoc, [], 'document these in docs/contracts/ws.md');
 });
 
+// Event-stream section of ws.md: every `{"type":"…"}` frame it shows, and
+// every backticked tag in its headings.
+const wsEvents = wsMd.slice(wsMd.indexOf('## 2. Event stream'));
+const docTags = new Set([...wsEvents.matchAll(/"type"\s*:\s*"([a-z0-9_]+)"/g)].map((m) => m[1]));
+const headingTags = new Set(
+  [...wsEvents.matchAll(/^#+ .*$/gm)].flatMap((h) => [...h[0].matchAll(/`([a-z0-9_]+)`/g)].map((m) => m[1])),
+);
+/** /ws/events protocol frames that are not `Event` variants. */
+const PROTOCOL_FRAMES = new Set(['hello', 'hello_ack', 'presence', 'resync', 'subscribe', 'subscribe_ack', 'ui_command', 'ui_command_cancel']);
+
+test('ws.md documents no stale event tags', () => {
+  assert.ok(wsEvents.length > 1000, 'the "## 2. Event stream" section was found');
+  const rustTags = new Set(variants.map((v) => v.tag));
+  const stale = [...new Set([...docTags, ...headingTags])].filter((t) => !rustTags.has(t) && !PROTOCOL_FRAMES.has(t));
+  assert.deepEqual(stale, [], 'ws.md shows frames no Rust Event variant sends (remove them, or list a protocol frame above)');
+});
+
 test('each event\'s fields match its OttoEvent member (names + omitted-when-empty → optional)', () => {
   const problems: string[] = [];
+  let nullable = 0;
   for (const v of variants) {
     const m = byTag.get(v.tag);
     if (!m || v.fields === null) continue;
@@ -190,8 +210,13 @@ test('each event\'s fields match its OttoEvent member (names + omitted-when-empt
       const k = m.keys.get(f.name);
       if (!k) problems.push(`${v.tag}.${f.name}: in Rust, missing in TS`);
       else if (f.omittedWhenEmpty && !k.optional) problems.push(`${v.tag}.${f.name}: omitted when empty on the wire but required in TS`);
+      // `Option<T>` serialized without skip_serializing_if is a literal
+      // `null` on the wire: the TS type must admit it.
+      else if (/^Option\s*</.test(f.ty) && !f.omittedWhenEmpty && ++nullable && !/\bnull\b|\bunknown\b|\bany\b/.test(k.ty))
+        problems.push(`${v.tag}.${f.name}: Option<…> is sent as null but the TS type (${k.ty}) has no null`);
     }
     for (const key of m.keys.keys()) if (!rustNames.has(key)) problems.push(`${v.tag}.${key}: in TS, not sent by Rust`);
   }
   assert.deepEqual(problems, []);
+  assert.ok(nullable >= 5, `the Option→null check saw ${nullable} fields (scanner sanity)`);
 });
