@@ -121,3 +121,29 @@ export function latestByKey<K = string>(): {
     },
   };
 }
+
+/**
+ * Serialized "latest state wins" writes (S17-308). For a write that carries a
+ * WHOLE value (`PUT /settings { disabled_providers: [...] }`), ordering the
+ * responses is not enough: two concurrent PUTs can be APPLIED out of order, so
+ * the server ends on the older list. `serialLatest(send)` sends one write at a
+ * time; a request whose turn comes while a newer one is already queued is
+ * skipped (`{ ok: false }`) — the newer one will send — and `send` reads the
+ * state at SEND time, so the last write always carries the latest value.
+ *
+ *   const save = serialLatest(() => api.put('/settings', { list: [...current] }));
+ *   const r = await save();  // { ok: true, value } | { ok: false } (superseded)
+ */
+export function serialLatest<T>(send: () => Promise<T>): () => Promise<{ ok: true; value: T } | { ok: false }> {
+  let chain: Promise<unknown> = Promise.resolve();
+  let gen = 0;
+  return () => {
+    const mine = ++gen;
+    const run = chain.then(async () => {
+      if (mine !== gen) return { ok: false as const };
+      return { ok: true as const, value: await send() };
+    });
+    chain = run.catch(() => {});
+    return run;
+  };
+}

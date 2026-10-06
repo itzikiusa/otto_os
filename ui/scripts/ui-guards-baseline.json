@@ -32,6 +32,23 @@
   "color-literal": {},
   "danger-menu-ellipsis": {},
   "data-bar-transition": {},
+  "destructive-confirm": {
+    "src/lib/leaveGuard.ts": 1,
+    "src/lib/stores/workspace.svelte.ts": 1,
+    "src/modules/agents/WorkQueue.svelte": 1,
+    "src/modules/api/EnvironmentsView.svelte": 1,
+    "src/modules/assistant/cards/TaskCard.svelte": 1,
+    "src/modules/aws/AwsPage.svelte": 1,
+    "src/modules/aws/LogsView.svelte": 1,
+    "src/modules/database/DatabasePage.svelte": 2,
+    "src/modules/git/DiffViewer.svelte": 1,
+    "src/modules/git/GitPage.svelte": 1,
+    "src/modules/git/WipPanel.svelte": 1,
+    "src/modules/kubernetes/ClustersOverview.svelte": 1,
+    "src/modules/kubernetes/PodHttpPanel.svelte": 1,
+    "src/modules/usage/UsagePage.svelte": 1,
+    "src/shell/Navigator.svelte": 3
+  },
   "disabled-opacity": {},
   "e2e-wait-timeout": {
     "e2e/brokers-sweep.spec.ts": 1,
@@ -110,6 +127,7 @@
     "e2e/terminal-mobile.spec.ts": 1
   },
   "focus-accent": {},
+  "focus-ring-token": {},
   "font-size-literal": {},
   "font-size-small": {},
   "global-class": {
@@ -311,7 +329,6 @@
     "src/modules/vault/LiveContext.svelte": 1,
     "src/modules/vault/RecoveryView.svelte": 1,
     "src/modules/vault/Switcher.svelte": 1,
-    "src/modules/vault/TagsPanel.svelte": 1,
     "src/modules/vault/VaultPage.svelte": 1,
     "src/modules/workbench/HistoryPanel.svelte": 1,
     "src/modules/workbench/WorkbenchPage.svelte": 2,
@@ -335,7 +352,6 @@
     "src/modules/brokers/BrokersPage.svelte": 2,
     "src/modules/database/QueryEditor.svelte": 1,
     "src/modules/database/ResultsGrid.svelte": 1,
-    "src/modules/design-hall/studio3d/Studio3D.svelte": 1,
     "src/modules/git/GitTabs.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1,
     "src/modules/personal-agents/AgentPage.svelte": 1,

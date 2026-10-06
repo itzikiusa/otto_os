@@ -175,7 +175,7 @@
   async function remove(t: WorkflowTrigger): Promise<void> {
     const ok = await confirmer.ask(
       `Delete this ${t.kind} trigger (${describeSpec(t)})?${t.kind === 'webhook' ? ' Its webhook URL stops working.' : ''} To pause it instead, switch it off.`,
-      { title: 'Delete trigger', confirmLabel: 'Delete trigger' },
+      { title: 'Delete trigger', danger: true, confirmLabel: 'Delete trigger' },
     );
     if (!ok) return;
     try {

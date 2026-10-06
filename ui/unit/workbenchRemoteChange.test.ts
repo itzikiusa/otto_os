@@ -17,7 +17,7 @@ class ApiError extends Error {
   }
 }
 
-function setup(opts: { conflict?: boolean } = {}) {
+function setup(opts: { conflict?: boolean; trashed?: boolean } = {}) {
   const patches: Array<Record<string, unknown>> = [];
   let liveHandler: ((ev: Record<string, unknown>) => void) | null = null;
   const doc = { id: 'd1', rev: 2, content_hash: 'h-base', name: 'a.sql', content: 'base' };
@@ -32,6 +32,7 @@ function setup(opts: { conflict?: boolean } = {}) {
       trashWorkbenchDoc: async () => ({}),
       updateWorkbenchDoc: async (_ws: string, _id: string, body: Record<string, unknown>) => {
         patches.push(body);
+        if (opts.trashed) throw new ApiError(409, 'doc is in the trash — restore it first');
         if (opts.conflict && body.if_hash) throw new ApiError(409, 'stale');
         return { ...doc, rev: 3, content_hash: `h-${String(body.content)}` };
       },
@@ -93,4 +94,14 @@ test('an event with our own hash (or an older rev) is ignored', async () => {
   s.emit({ type: 'workbench_doc_changed', workspace_id: 'w1', doc_id: 'd1', action: 'updated', rev: 2, content_hash: 'h-base' });
   s.emit({ type: 'workbench_doc_changed', workspace_id: 'w1', doc_id: 'd1', action: 'updated', rev: 1, content_hash: 'h-old' });
   assert.equal(s.wb.open.d1.remoteChanged, false);
+});
+
+test('a save to a trashed doc says so instead of the "changed elsewhere" banner (S18-307)', async () => {
+  const s = setup({ trashed: true });
+  await opened(s);
+  s.wb.setBuffer('d1', 'mine');
+  await s.wb.save('d1', false);
+  assert.equal(s.wb.open.d1.remoteChanged, false, 'Keep mine could never resolve this');
+  assert.match(String(s.wb.open.d1.saveError), /trash/);
+  assert.equal(s.wb.isDirty('d1'), true, 'the buffer is kept');
 });

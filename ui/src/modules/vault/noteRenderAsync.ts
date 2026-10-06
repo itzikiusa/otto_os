@@ -6,6 +6,7 @@
 import type { VaultOutgoingLink } from '../../lib/api/types';
 import { sanitizeHtml } from '../../lib/sanitize';
 import { renderNote, resolverFrom, stripFrontmatter } from './mdRender';
+import { plainPreview, renderFailurePlan, type RenderFailure } from './noteRenderPlan';
 import type { NoteRenderIn, NoteRenderOut } from './noteRender.worker';
 
 let worker: Worker | null = null;
@@ -18,10 +19,20 @@ export function renderTimeoutMs(bytes: number): number {
   return 10_000 + Math.ceil(bytes / 1_048_576) * 2_000;
 }
 
-/** Kill the worker and fail every waiter (each falls back to the main-thread
- *  render); the next call starts a fresh worker. */
-function resetWorker(reason: string): void {
-  for (const p of pending.values()) p.reject(new Error(reason));
+class NoteRenderError extends Error {
+  readonly kind: RenderFailure;
+  constructor(kind: RenderFailure) {
+    super(`note render worker: ${kind}`);
+    this.kind = kind;
+  }
+}
+
+/** Kill the worker and fail every waiter; the waiter whose budget ran out
+ *  gets `timeout`, the others (queued behind it) `recycled`, a worker that
+ *  failed to load fails everyone with `load`. The next call starts a fresh
+ *  worker. */
+function resetWorker(kind: 'load' | 'timeout', hungId?: number): void {
+  for (const [id, p] of pending) p.reject(new NoteRenderError(kind === 'load' ? 'load' : id === hungId ? 'timeout' : 'recycled'));
   pending.clear();
   worker?.terminate();
   worker = null;
@@ -44,31 +55,54 @@ function getWorker(): Worker | null {
   };
   // A worker that failed to load: fail every waiter (callers fall back to
   // the main-thread render) and let the next call try a fresh one.
-  worker.onerror = () => resetWorker('note render worker failed');
+  worker.onerror = () => resetWorker('load');
   return worker;
 }
 
-/** Render a large note off the main thread; falls back to the synchronous
- *  renderer when workers are unavailable or the worker fails. Resolves with
- *  SANITIZED html. */
-export function renderNoteOffThread(raw: string, outgoing: VaultOutgoingLink[]): Promise<string> {
+/** The result of an off-thread render: SANITIZED html, or — when the note
+ *  hung the worker — the escaped plain preview plus `timedOut` so the view
+ *  can offer Retry (and must not cache it). */
+export interface NoteRenderResult {
+  html: string;
+  timedOut: boolean;
+}
+
+/** Render a large note off the main thread. Falls back to the synchronous
+ *  renderer only when workers are unavailable or fail to LOAD; a render that
+ *  times out resolves with the plain preview (`timedOut: true`) instead of
+ *  re-running the hanging parse on the main thread. */
+export function renderNoteOffThread(raw: string, outgoing: VaultOutgoingLink[], retried = false): Promise<NoteRenderResult> {
   const fallback = (): string =>
     renderNote(stripFrontmatter(raw), { resolve: resolverFrom(outgoing), assetUrl: () => null, lazyAssets: true });
   const w = getWorker();
-  if (!w) return Promise.resolve(fallback());
+  if (!w) return Promise.resolve({ html: fallback(), timedOut: false });
   const id = ++seq;
   return new Promise<string>((resolve, reject) => {
     // A hung worker used to leave the note on its plain preview forever (and
-    // the caller's in-flight key pinned): time out, recycle, fall back.
+    // the caller's in-flight key pinned): time out and recycle the worker.
     const timer = setTimeout(() => {
-      if (pending.has(id)) resetWorker('note render worker timed out');
+      if (pending.has(id)) resetWorker('timeout', id);
     }, renderTimeoutMs(raw.length));
     pending.set(id, {
       resolve: (html) => { clearTimeout(timer); resolve(html); },
       reject: (e) => { clearTimeout(timer); reject(e); },
     });
     w.postMessage({ id, raw, outgoing: plainLinks(outgoing) } satisfies NoteRenderIn);
-  }).catch(() => fallback());
+  }).then(
+    (html) => ({ html, timedOut: false }),
+    (e: unknown) => {
+      // A worker-side parse error (`{error}` reply) is not a hang: render here.
+      const kind: RenderFailure = e instanceof NoteRenderError ? e.kind : 'load';
+      switch (renderFailurePlan(kind, retried)) {
+        case 'main-thread':
+          return { html: fallback(), timedOut: false };
+        case 'retry':
+          return renderNoteOffThread(raw, outgoing, true);
+        default:
+          return { html: plainPreview(stripFrontmatter(raw)), timedOut: true };
+      }
+    },
+  );
 }
 
 /** Svelte state proxies can't be structured-cloned; copy the fields we use. */

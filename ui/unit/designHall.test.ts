@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   STUDIOS,
   buildLineage,
+  newerHeadAfterTypedLoad,
   brandColors,
   contrastRatio,
   epicTree,
@@ -229,4 +230,13 @@ test('small helpers: titles, authors, brand colours and contrast', () => {
   assert.equal(contrastRatio('#ffffff', '#000000'), 21);
   assert.equal(contrastRatio('#fff', '#fff'), 1);
   assert.equal(contrastRatio('nope', '#fff'), null);
+});
+
+test('a load that raced typing only flags a head that is really newer (S18-303)', () => {
+  // WS resync of an unchanged artifact: same head as the editor's base → no banner.
+  assert.equal(newerHeadAfterTypedLoad('v1', 'v1'), null);
+  assert.equal(newerHeadAfterTypedLoad(null, 'v1'), null);
+  // Someone saved in between → flagged.
+  assert.equal(newerHeadAfterTypedLoad('v2', 'v1'), 'v2');
+  assert.equal(newerHeadAfterTypedLoad('v2', null), 'v2');
 });

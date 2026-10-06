@@ -11,10 +11,22 @@
     grace?: boolean;
   }
   let { rows = 3, height = 36, label = '', announce = true, grace = true }: Props = $props();
+
+  // Live regions announce CHANGES to a region that already exists; one that
+  // is inserted together with its text is usually silent in VoiceOver/WebKit
+  // (S19-305). So the status region mounts empty and the "Loading …" text is
+  // added after the same ~150 ms grace the rows fade in with (LoadState does
+  // the same) — a fast load also never announces at all.
+  let speak = $state(false);
+  $effect(() => {
+    if (!announce) return;
+    const t = setTimeout(() => (speak = true), 150);
+    return () => clearTimeout(t);
+  });
 </script>
 
 <div class="skeleton-list" class:grace aria-busy="true" role={announce ? 'status' : undefined}>
-  {#if announce}<span class="sr-only">Loading{label ? ` ${label}` : ''}</span>{/if}
+  {#if announce && speak}<span class="sr-only">Loading{label ? ` ${label}` : ''}</span>{/if}
   {#each Array(rows) as _, i (i)}
     <div class="skeleton-row" style="height:{height}px; --stagger:{i * 90}ms"></div>
   {/each}

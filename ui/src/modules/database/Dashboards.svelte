@@ -227,10 +227,10 @@
       <textarea dir="ltr" id="w-stmt" class="input mono" rows="4" bind:value={wStatement} spellcheck="false"></textarea>
     </div>
     <div class="field">
-      <label for="w-viz">Visualization</label>
-      <div class="viz-row" id="w-viz">
+      <span class="field-label" id="w-viz-label">Visualization</span>
+      <div class="viz-row" role="group" aria-labelledby="w-viz-label">
         {#each VIZ as v (v)}
-          <button class="viz-chip" class:selected={wViz === v} onclick={() => (wViz = v)}>{v}</button>
+          <button type="button" class="viz-chip" class:selected={wViz === v} aria-pressed={wViz === v} onclick={() => (wViz = v)}>{v}</button>
         {/each}
       </div>
     </div>

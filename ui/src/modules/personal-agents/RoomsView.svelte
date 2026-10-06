@@ -157,7 +157,7 @@
         icon: 'trash',
         danger: true,
         action: async () => {
-          if (await confirmer.ask(`Delete room “${r.room.name}” and its transcript? Member agents stay; only the room and its messages go.`, { title: 'Delete room', confirmLabel: 'Delete' })) {
+          if (await confirmer.ask(`Delete room “${r.room.name}” and its transcript? Member agents stay; only the room and its messages go.`, { title: 'Delete room', danger: true, confirmLabel: 'Delete' })) {
             void personalAgents.deleteRoom(r.room.id).catch((e) => toasts.error('Couldn’t delete the room', loadErrorText(e)));
           }
         },

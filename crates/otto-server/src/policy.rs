@@ -145,9 +145,12 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     if p.starts_with("/plugin-host/") || p == "/plugins" {
         return Exempt;
     }
-    // Plugin management (install / enable / disable / remove) — admin only.
+    // Plugin management (install / enable / disable / remove): every handler
+    // is `require_root` (plugins.rs), so the policy tier matches the other
+    // root-only daemon settings — Settings:Admin, as the UI section gate is
+    // (S17-303; it said Users:Admin, a third gate for the same routes).
     if p == "/plugin-admin" || p.starts_with("/plugin-admin/") {
-        return Require(Users, Admin);
+        return Require(Settings, Admin);
     }
     // Auth / personal-access-token self-management + identity. Any authed user
     // manages their own session and tokens; never feature-gated.

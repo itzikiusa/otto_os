@@ -89,7 +89,7 @@
 {/each}</div>{/if}
 <style>
   .place-surface { position: absolute; inset: 0; pointer-events: none; border-radius: var(--radius-s); }
-  .place-surface:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: -2px; }
+  .place-surface:focus-visible { outline: 2px solid var(--accent-text); outline-offset: -2px; }
   .kb-cursor { stroke: var(--accent-solid); stroke-width: 2px; fill: var(--accent-soft); vector-effect: non-scaling-stroke; }
   .kb-rect { stroke-dasharray: 6 4; }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

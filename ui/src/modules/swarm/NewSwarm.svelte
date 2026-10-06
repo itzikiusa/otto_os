@@ -41,13 +41,13 @@
   </div>
 
   <p class="section-title">Start from a preset</p>
-  <div class="presets">
-    <button class="preset" class:sel={selected === ''} onclick={() => (selected = '')}>
+  <div class="presets" role="group" aria-label="Preset">
+    <button class="preset" class:sel={selected === ''} aria-pressed={selected === ''} onclick={() => (selected = '')}>
       <div class="p-name">Blank</div>
       <div class="p-desc dim">Start empty and recruit your own agents.</div>
     </button>
     {#each swarm.presets as p (p.slug)}
-      <button class="preset" class:sel={selected === p.slug} onclick={() => (selected = p.slug)}>
+      <button class="preset" class:sel={selected === p.slug} aria-pressed={selected === p.slug} onclick={() => (selected = p.slug)}>
         <div class="p-name">{p.name} <span class="dim">· {plural(p.agents.length, 'agent')}</span></div>
         <div class="p-desc dim">{p.description}</div>
       </button>

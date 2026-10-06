@@ -88,10 +88,10 @@ export async function createDesign(input: NewDesignInput): Promise<string> {
   return res.artifact.id;
 }
 
-/** Import a local file as a new artifact (format from its extension / mime). */
 /** The daemon's per-version cap (docs/features/design-hall.md: 25 MB raw). */
 export const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
 
+/** Import a local file as a new artifact (format from its extension / mime). */
 export async function importDesignFile(
   file: File,
   opts: { workspaceId: string; projectId?: string | null },

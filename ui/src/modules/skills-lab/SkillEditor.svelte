@@ -61,7 +61,7 @@
   $effect(() => guardUnsaved(() => dirty, { what: currentFile }));
 
   async function open(path: string): Promise<void> {
-    if (dirty && !(await confirmer.ask(`You have unsaved changes to ${currentFile}. Opening another file discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
+    if (dirty && !(await confirmer.ask(`You have unsaved changes to ${currentFile}. Opening another file discards them.`, { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' }))) return;
     const generation = ++loadGeneration;
     currentFile = path;
     loadError = null;

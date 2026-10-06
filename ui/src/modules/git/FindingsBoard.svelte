@@ -197,9 +197,9 @@
     {/snippet}
     <!-- Filters -->
     <div class="fb-filters">
-      <div class="fb-filter-row">
-        <span class="fb-filter-label">Status</span>
-        <button class="fb-pill" class:active={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>
+      <div class="fb-filter-row" role="group" aria-label="Filter by status">
+        <span class="fb-filter-label" aria-hidden="true">Status</span>
+        <button class="fb-pill" class:active={statusFilter === 'all'} aria-pressed={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>
           All
         </button>
         {#each STATUSES as s}
@@ -207,6 +207,7 @@
             <button
               class="fb-pill status-{s}"
               class:active={statusFilter === s}
+              aria-pressed={statusFilter === s}
               onclick={() => (statusFilter = statusFilter === s ? 'all' : s)}
             >
               {statusLabel(s)} {statusCounts[s]}
@@ -214,9 +215,9 @@
           {/if}
         {/each}
       </div>
-      <div class="fb-filter-row">
-        <span class="fb-filter-label">Severity</span>
-        <button class="fb-pill" class:active={sevFilter === 'all'} onclick={() => (sevFilter = 'all')}>
+      <div class="fb-filter-row" role="group" aria-label="Filter by severity">
+        <span class="fb-filter-label" aria-hidden="true">Severity</span>
+        <button class="fb-pill" class:active={sevFilter === 'all'} aria-pressed={sevFilter === 'all'} onclick={() => (sevFilter = 'all')}>
           All
         </button>
         {#each SEVERITIES as s}
@@ -224,6 +225,7 @@
             <button
               class="fb-pill sev2-{s}"
               class:active={sevFilter === s}
+              aria-pressed={sevFilter === s}
               onclick={() => (sevFilter = sevFilter === s ? 'all' : s)}
             >
               {s} {sevCounts[s]}

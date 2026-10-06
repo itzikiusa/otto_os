@@ -46,7 +46,15 @@ export function fillTargetOk(url: string | undefined, domain: string): boolean {
 
 /** The injected fill script. It re-checks the page's OWN origin before it
  *  touches a field — the last line of defence if the tab navigated between
- *  the host-side check and the eval — and returns 'origin-changed'. */
+ *  the host-side check and the eval — and returns 'origin-changed'.
+ *
+ *  The check runs inside a page the user doesn't control, so it uses no
+ *  page-overridable built-ins (`String`, `.replace`, `.slice`,
+ *  `.toLowerCase` — a hostile page can redefine all of them to make the
+ *  comparison pass; S18-307): only `location` (unforgeable), string
+ *  indexing, `.length` and `===`. `location.hostname` is already lower-case
+ *  ASCII (the URL parser folds it). The host-side `fillTargetOk` re-check
+ *  after every await stays the primary guard. */
 export function buildFillScript(domain: string, username: string, password: string): string {
   const d = JSON.stringify(domain.trim().replace(/\.$/, '').toLowerCase());
   const userJs = JSON.stringify(username);
@@ -54,10 +62,16 @@ export function buildFillScript(domain: string, username: string, password: stri
   return (
     '(function(){' +
     `var D = ${d};` +
-    "var h = String(location.hostname || '').replace(/\\.$/, '').toLowerCase();" +
-    "var p = location.protocol;" +
-    "var loop = h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || h === '::1';" +
-    "if (!(h === D || h.slice(-(D.length + 1)) === '.' + D)) return 'origin-changed';" +
+    'var h = location.hostname, p = location.protocol;' +
+    "if (typeof h !== 'string' || typeof p !== 'string') return 'origin-changed';" +
+    // n = host length without a trailing dot.
+    "var n = h.length; if (n > 0 && h[n - 1] === '.') n = n - 1;" +
+    // tailIs(off): h[off .. off+|D|) is exactly D, compared index-wise.
+    'function tailIs(off) { for (var i = 0; i < D.length; i++) { if (h[off + i] !== D[i]) return false; } return true; }' +
+    'var m = D.length > 0 && (n === D.length ? tailIs(0) : (n > D.length && h[n - D.length - 1] === \'.\' && tailIs(n - D.length)));' +
+    "if (!m) return 'origin-changed';" +
+    "var loop = false; var L = ['localhost', '127.0.0.1', '[::1]', '::1'];" +
+    'for (var k = 0; k < 4; k++) { var c = L[k]; if (c.length === n) { var same = true; for (var j = 0; j < n; j++) { if (h[j] !== c[j]) { same = false; break; } } if (same) loop = true; } }' +
     "if (!(p === 'https:' || (p === 'http:' && loop))) return 'origin-changed';" +
     'var pwd = document.querySelector(\'input[type="password"]\');' +
     "if (!pwd) return 'no-password-field';" +

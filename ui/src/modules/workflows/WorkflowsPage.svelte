@@ -698,7 +698,7 @@
     if ((!dirty && !instructionsDirty) || !current) return true;
     return confirmer.ask(`“${current.name}” has unsaved changes. Discard them?`, {
       title: 'Discard unsaved changes',
-      confirmLabel: 'Discard changes',
+      danger: true, confirmLabel: 'Discard changes',
     });
   }
   /** Sidebar row click: re-clicking the open workflow keeps its unsaved edits

@@ -101,7 +101,7 @@
     if (busy) return false;
     if (!isDirty()) return true;
     const discard = await confirmer.ask('You have unsaved work item changes. Leaving discards them.', {
-      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
     });
     if (discard) editing = false;
     return discard;

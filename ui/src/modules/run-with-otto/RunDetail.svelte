@@ -68,7 +68,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
+    if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', danger: true, confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {
@@ -365,7 +365,7 @@
     display: inline-flex;
     border-radius: 999px;
   }
-  .chip-btn:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; }
+  .chip-btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .gate-note { margin: 0; font-size: var(--fs-s); color: var(--text); line-height: 1.45; }
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .hint { font-size: var(--fs-s); }
