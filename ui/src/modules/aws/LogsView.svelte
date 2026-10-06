@@ -18,7 +18,7 @@
   import { confirmer } from '../../lib/confirm.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { copyTextOrThrow } from '../../lib/clipboard';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { adaptiveCadence, statusPollMs } from '../../lib/pollBackoff';
@@ -71,6 +71,10 @@
   // svelte-ignore state_referenced_locally
   let region = $state(linkRegion || account.region);
   let tab = $state<'events' | 'insights'>('events');
+  const VIEW_TABS: TabItem<'events' | 'insights'>[] = [
+    { id: 'events', label: 'Events' },
+    { id: 'insights', label: 'Insights' },
+  ];
 
   // ── groups ──
   let groupPrefix = $state(linkIsPrefix ? linkGroup : '');
@@ -510,10 +514,7 @@
       <input dir="ltr" class="mono" value={region} aria-label="Region" size={12} onchange={(e) => { const v = e.currentTarget.value.trim(); if (v) region = v; }} />
     {/if}
   </label>
-  <div class="seg" role="tablist" aria-label="Logs view">
-    <button role="tab" aria-selected={tab === 'events'} tabindex={tab === 'events' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'events'} onclick={() => (tab = 'events')}>Events</button>
-    <button role="tab" aria-selected={tab === 'insights'} tabindex={tab === 'insights' ? 0 : -1} onkeydown={onTabKey} class:on={tab === 'insights'} onclick={() => (tab = 'insights')}>Insights</button>
-  </div>
+  <Tabs label="Logs view" size="s" tabs={VIEW_TABS} value={tab} onchange={(id) => (tab = id)} />
 </ViewToolbar>
 
 <div class="logs">

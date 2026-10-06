@@ -2260,6 +2260,7 @@ impl Driver for ClickhouseDriver {
                 key: in_pk.then(|| "PRI".to_string()),
                 extra: None,
                 comment: (!comment.is_empty()).then(|| comment.to_string()),
+                collation: None,
             });
         }
 

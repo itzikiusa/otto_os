@@ -6020,6 +6020,9 @@ export interface DbColumnDef {
   key?: string | null;
   extra?: string | null;
   comment?: string | null;
+  /** Per-column collation when the engine reports one (MySQL string columns);
+   *  the Table Designer re-states it on CHANGE COLUMN. */
+  collation?: string | null;
 }
 
 export interface DbIndexDef {

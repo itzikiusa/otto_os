@@ -6,7 +6,7 @@
   // the daemon needs a row to run `sts get-caller-identity`, so the test runs
   // right after save and its result (identity / login required) is shown in a
   // final panel with a "Sign in" shortcut. Editing skips discovery.
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { untrack } from 'svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
@@ -38,7 +38,23 @@
   const init = account;
   const editing = init !== null;
 
-  const COLORS = ['#ff9900', '#3b82f6', '#22c55e', '#a855f7', '#ef4444', '#14b8a6', '#eab308', '#64748b'];
+  // Account colours are theme tokens (stored as the `var(--…)` reference and
+  // painted as a CSS background), so every swatch adapts to light / dark.
+  // Accounts saved with an older hex colour keep rendering it as-is.
+  const COLORS: readonly { value: string; name: string }[] = [
+    { value: 'var(--cat-2)', name: 'Amber' },
+    { value: 'var(--cat-1)', name: 'Blue' },
+    { value: 'var(--cat-3)', name: 'Green' },
+    { value: 'var(--cat-4)', name: 'Violet' },
+    { value: 'var(--danger)', name: 'Red' },
+    { value: 'var(--cat-6)', name: 'Teal' },
+    { value: 'var(--cat-5)', name: 'Pink' },
+    { value: 'var(--text-dim)', name: 'Slate' },
+  ];
+  const MODE_TABS: TabItem<AwsAuthMode>[] = [
+    { id: 'profile', label: 'Use an existing AWS profile' },
+    { id: 'access_keys', label: 'Enter access keys' },
+  ];
 
   let step = $state<1 | 2 | 3>(editing ? 2 : 1);
   let mode = $state<AwsAuthMode>(init?.auth_mode ?? 'profile');
@@ -54,7 +70,7 @@
   let advancedOpen = $state(Boolean(init?.endpoint_url));
   let name = $state(init?.name ?? '');
   let environment = $state<Environment>(init?.environment ?? 'dev');
-  let color = $state(init?.color ?? COLORS[0]);
+  let color = $state(init?.color ?? COLORS[0].value);
 
   let profiles = $state<DiscoveredProfile[]>([]);
   let profilesLoading = $state(false);
@@ -178,14 +194,7 @@
     </ol>
 
     {#if step === 1}
-      <div class="modes" role="tablist" aria-label="Credential source">
-        <button role="tab" aria-selected={mode === 'profile'} tabindex={mode === 'profile' ? 0 : -1} onkeydown={onTabKey} class:on={mode === 'profile'} onclick={() => (mode = 'profile')}>
-          Use an existing AWS profile
-        </button>
-        <button role="tab" aria-selected={mode === 'access_keys'} tabindex={mode === 'access_keys' ? 0 : -1} onkeydown={onTabKey} class:on={mode === 'access_keys'} onclick={() => (mode = 'access_keys')}>
-          Enter access keys
-        </button>
-      </div>
+      <Tabs label="Credential source" tabs={MODE_TABS} value={mode} onchange={(id) => (mode = id)} />
 
       {#if mode === 'profile'}
         <p class="hint">
@@ -295,15 +304,16 @@
         <div class="field">
           <span>Color</span>
           <div class="colors" role="radiogroup" aria-label="Color">
-            {#each COLORS as c (c)}
+            {#each COLORS as c (c.value)}
               <button
                 role="radio"
-                aria-checked={color === c}
+                aria-checked={color === c.value}
                 class="sw"
-                class:on={color === c}
-                style="background:{c}"
-                onclick={() => (color = c)}
-                aria-label={`Color ${c}`}
+                class:on={color === c.value}
+                style="background:{c.value}"
+                onclick={() => (color = c.value)}
+                aria-label={`Color ${c.name}`}
+                title={c.name}
               ></button>
             {/each}
           </div>
@@ -414,24 +424,6 @@
   }
   .steps li.done {
     color: var(--text);
-  }
-  .modes {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 6px;
-  }
-  .modes button {
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
-    background: var(--surface-2);
-    color: var(--text);
-    cursor: pointer;
-    font-size: var(--fs-m);
-  }
-  .modes button.on {
-    border-color: var(--accent);
-    background: var(--accent-soft);
   }
   .hint {
     margin: 0;
@@ -617,8 +609,7 @@
     color: var(--danger);
   }
   @media (max-width: 640px) {
-    .row2,
-    .modes {
+    .row2 {
       grid-template-columns: 1fr;
     }
   }

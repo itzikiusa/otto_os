@@ -1,13 +1,15 @@
 // The visual query builder's model + SQL generator + round-trip parser, for
-// the SQL engines (MySQL, PostgreSQL, ClickHouse). Pure and self-contained —
-// no Svelte, no relative value imports — so node:test runs it directly
-// (unit/dbQueryBuilder.test.ts).
+// the SQL engines (MySQL, PostgreSQL, ClickHouse). Pure — no Svelte; its only
+// value import is the dependency-free dialect module — so node:test runs it
+// directly (unit/dbQueryBuilder.test.ts).
 //
 // Safety model: every identifier goes through `quoteIdent` and every VALUE the
 // user types goes through `literal` (or `likeLiteral` for the contains /
 // starts-with / ends-with operators), escaped for the dialect. The only text
 // emitted verbatim is an explicit "expression" select item — raw SQL the user
 // writes on purpose, exactly like the editor.
+
+import { quoteIdent, stringLiteral } from '../sql-dialect.ts';
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -237,32 +239,10 @@ export function aggregatesFor(dialect: Dialect): AggInfo[] {
 
 // ── Quoting / escaping ───────────────────────────────────────────────────────
 
-/** Quote an identifier for the dialect. Postgres uses the standard double
- *  quotes; MySQL and ClickHouse backticks. The quote character is doubled; on
- *  ClickHouse (where `\` escapes inside quoted names too) backslashes and the
- *  backtick are backslash-escaped instead. */
-export function quoteIdent(dialect: Dialect, name: string): string {
-  if (dialect === 'postgres') return `"${name.replace(/"/g, '""')}"`;
-  if (dialect === 'clickhouse') return `\`${name.replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\``;
-  return `\`${name.replace(/`/g, '``')}\``;
-}
-
-/** A string literal. MySQL/ClickHouse treat `\` as an escape inside strings
- *  (MySQL's default sql_mode), so it is doubled there; the quote is doubled
- *  (MySQL, Postgres) or backslash-escaped (ClickHouse). Control characters that
- *  could terminate or confuse a literal (NUL, CR/LF) are escaped where the
- *  dialect has a spelling for them. */
-export function stringLiteral(dialect: Dialect, s: string): string {
-  if (dialect === 'postgres') {
-    // standard_conforming_strings (on since 9.1): only the quote is special.
-    // NUL cannot appear in a Postgres text value at all — drop it.
-    return `'${s.replace(/\0/g, '').replace(/'/g, "''")}'`;
-  }
-  let out = s.replace(/\\/g, '\\\\');
-  out = dialect === 'clickhouse' ? out.replace(/'/g, "\\'") : out.replace(/'/g, "''");
-  out = out.replace(/\0/g, '\\0');
-  return `'${out}'`;
-}
+// Identifier + string-literal quoting live in the ONE dialect module
+// (`../sql-dialect.ts`, itself dependency-free) — re-exported so the builder's
+// callers and tests keep importing them from here.
+export { quoteIdent, stringLiteral };
 
 const NUM_RE = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?$/;
 

@@ -49,7 +49,7 @@ test('identifiers: backticks for MySQL/ClickHouse, double quotes for Postgres, q
   assert.equal(quoteIdent('mysql', 'we`ird'), '`we``ird`');
   assert.equal(quoteIdent('postgres', 'Order'), '"Order"');
   assert.equal(quoteIdent('postgres', 'we"ird'), '"we""ird"');
-  assert.equal(quoteIdent('clickhouse', 'we`ird'), '`we\\`ird`');
+  assert.equal(quoteIdent('clickhouse', 'we`ird'), '`we``ird`');
   assert.equal(quoteIdent('clickhouse', 'back\\slash'), '`back\\\\slash`');
 });
 
@@ -58,7 +58,7 @@ test('string literals: quotes and backslashes escaped per dialect', () => {
   assert.equal(stringLiteral('mysql', 'a\\b'), "'a\\\\b'");
   assert.equal(stringLiteral('postgres', "O'Brien"), "'O''Brien'");
   assert.equal(stringLiteral('postgres', 'a\\b'), "'a\\b'"); // standard_conforming_strings
-  assert.equal(stringLiteral('clickhouse', "O'Brien"), "'O\\'Brien'");
+  assert.equal(stringLiteral('clickhouse', "O'Brien"), "'O''Brien'");
   assert.equal(stringLiteral('clickhouse', 'a\\b'), "'a\\\\b'");
   assert.equal(stringLiteral('mysql', 'nul\0byte'), "'nul\\0byte'");
   assert.equal(stringLiteral('postgres', 'nul\0byte'), "'nulbyte'");

@@ -53,6 +53,9 @@
     canEdit: boolean;
     /** Open the shell straight away (`s` shortcut). */
     autoExec?: boolean;
+    /** The Terminal tab acted on `autoExec` — the owner clears it (one-shot
+     *  per open, not per row: re-showing the tab must not open a new shell). */
+    onautoexec?: () => void;
     ontab: (t: K8sDrawerTab) => void;
     onclose: () => void;
     onaction: (def: ActionDef, row: K8sRow) => void;
@@ -64,7 +67,7 @@
     /** Open this workload’s row in the Monitor view (K-2). */
     onmonitor?: (ns: string, workload: string) => void;
   }
-  let { modal = false, width, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
+  let { modal = false, width, clusterId, kind, ns, name, row, tab, canEdit, autoExec = false, onautoexec, ontab, onclose, onaction, onopenpod, reloadNonce = 0, onmonitor }: Props = $props();
 
   $effect(() => {
     void resourceAccess.load('k8s_cluster', clusterId);
@@ -391,7 +394,7 @@
     {:else if tab === 'logs' && canLogs}
       <LogsView {clusterId} {ns} pod={name} {containers} />
     {:else if tab === 'terminal' && canExec}
-      <ExecView {clusterId} {ns} pod={name} {containers} autoOpen={autoExec} />
+      <ExecView {clusterId} {ns} pod={name} {containers} autoOpen={autoExec} onautoopened={onautoexec} />
     {:else if tab === 'metrics' && canOperation('metrics')}
       <MetricsView {clusterId} {ns} pod={name} workload={httpWorkload?.name ?? ''} />
     {:else if tab === 'http' && canHttp}

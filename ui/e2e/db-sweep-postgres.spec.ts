@@ -273,7 +273,7 @@ test.describe('DB Explorer · Postgres sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
     await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-postgres' }).first()).toBeVisible();
@@ -284,7 +284,7 @@ test.describe('DB Explorer · Postgres sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Schema' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Schema' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Schema' }).click();
     }
     await expect(page.locator('.side-switch')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });
