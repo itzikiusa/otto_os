@@ -147,6 +147,12 @@ async fn approving_a_declined_comment_is_a_conflict_until_restored() {
         .await
         .unwrap();
     assert_eq!(draft_mark.status(), 409, "a draft was never attempted");
-    assert!(!ctx.reviews_store.get_comment(&draft.id).await.unwrap().posted);
+    assert!(
+        !ctx.reviews_store
+            .get_comment(&draft.id)
+            .await
+            .unwrap()
+            .posted
+    );
     server.abort();
 }

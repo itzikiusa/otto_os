@@ -1434,8 +1434,14 @@ mod tests {
 
         let http = Http::new("github");
         let url = format!("{}{list}", server.uri());
-        assert_eq!(http.get_cached(http.client().get(&url)).await.unwrap(), "[]");
-        let post = http.client().post(&url).json(&serde_json::json!({ "body": "hi" }));
+        assert_eq!(
+            http.get_cached(http.client().get(&url)).await.unwrap(),
+            "[]"
+        );
+        let post = http
+            .client()
+            .post(&url)
+            .json(&serde_json::json!({ "body": "hi" }));
         assert!(http.send(post).await.is_err());
         assert_eq!(
             http.get_cached(http.client().get(&url)).await.unwrap(),

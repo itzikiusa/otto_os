@@ -4075,7 +4075,12 @@ impl LocalGit {
         {
             Ok(out) => out,
             // No commit yet: nothing can contain it.
-            Err(_) if self.run_read(&["rev-parse", "--verify", "-q", "HEAD"]).await.is_err() => {
+            Err(_)
+                if self
+                    .run_read(&["rev-parse", "--verify", "-q", "HEAD"])
+                    .await
+                    .is_err() =>
+            {
                 return Ok(Vec::new())
             }
             Err(e) => return Err(e),
@@ -5664,10 +5669,17 @@ mod tests {
         let git = LocalGit::new(&dir);
         assert!(git.head_remote_refs().await.unwrap().is_empty());
         // Pushed as `upstream/other-name`; the local branch has NO upstream.
-        sh_git(&dir, &["update-ref", "refs/remotes/upstream/other-name", "HEAD"]);
         sh_git(
             &dir,
-            &["symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/other-name"],
+            &["update-ref", "refs/remotes/upstream/other-name", "HEAD"],
+        );
+        sh_git(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/upstream/HEAD",
+                "refs/remotes/upstream/other-name",
+            ],
         );
         assert_eq!(
             git.head_remote_refs().await.unwrap(),
