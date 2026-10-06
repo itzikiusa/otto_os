@@ -76,7 +76,7 @@ connection library unusable for every non-root account.)
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
 | 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id` and the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` are **server-owned**: a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id`, `meta.delegated_by`, the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` and the confinement keys `meta.read_only` / `project_settings` / `allow_subagents` / `personal_agent` / `account_id` are **server-owned** (create-only): a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). An agent session's own credential may PATCH, DELETE, restart, resume, kill, archive or unarchive (and bulk-act on) only its own session or a worker whose `meta.delegated_by` is that session — `403` otherwise (bulk: `ok:false`). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, when the provider's active-conversation guard refuses a fork, or when an agent's folder no longer exists (`folder X no longer exists — restore it…`; every resume/restart path refuses rather than recreating it empty — the scratch home and Otto-managed folders under its data dir are still recreated). Resume errors propagate; this never falls back to an unconditional restart. |
@@ -649,7 +649,7 @@ same-workspace, so a scratch session hands over only to another scratch session.
 | POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
-| POST /app/kill-sessions | **root only** | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
+| POST /app/kill-sessions | **root only**, Admin-class (an agent credential → 403) | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
 
 ## Conversation view, History, Tasks board & Outputs
 
@@ -1424,8 +1424,8 @@ occurrence_count, created_at, updated_at`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/broadcast | ws editor | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` |
-| POST /workspaces/{id}/relay | ws editor | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
+| POST /workspaces/{id}/broadcast | ws editor; an agent session's credential reaches only its own session and the workers it opened (others are skipped, not delivered) | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` — text from an agent credential is recorded on the target's trail as agent-originated (`source: agent`, "from session …"), never as the person's message |
+| POST /workspaces/{id}/relay | ws editor; same agent-credential confinement as `/broadcast` | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
 | POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
 
 Relay delivers a **name-addressed** message: the leading token(s) of `text` may

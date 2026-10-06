@@ -2255,6 +2255,25 @@ impl SessionManager {
     /// orchestrator command). Surfaces the "by user" side of the trail for every
     /// provider. Best-effort; loads the session to resolve its workspace.
     pub async fn record_user_message(&self, session_id: &Id, text: &str) {
+        self.record_relayed_message(session_id, TrailSource::User, None, text)
+            .await;
+    }
+
+    /// Record a message another agent session sent into this one with its own
+    /// credential (`/message`, broadcast, relay — S11-305). Attributed to the
+    /// agent and the sending session, never to the person who owns both.
+    pub async fn record_agent_message(&self, session_id: &Id, from: &Id, text: &str) {
+        self.record_relayed_message(session_id, TrailSource::Agent, Some(from), text)
+            .await;
+    }
+
+    async fn record_relayed_message(
+        &self,
+        session_id: &Id,
+        source: TrailSource,
+        from: Option<&Id>,
+        text: &str,
+    ) {
         if self.activity.is_none() {
             return;
         }
@@ -2265,11 +2284,14 @@ impl SessionManager {
         if trimmed.is_empty() {
             return;
         }
-        let summary = trail_clip(trimmed, 200);
+        let summary = match from {
+            Some(from) => trail_clip(&format!("from session {from}: {trimmed}"), 200),
+            None => trail_clip(trimmed, 200),
+        };
         self.record_trail(
             session_id,
             &session.workspace_id,
-            TrailSource::User,
+            source,
             TrailKind::Prompt,
             TrailLevel::Info,
             summary,

@@ -92,6 +92,7 @@ struct Daemon {
     human: String,
     http: reqwest::Client,
     pool: DbPool,
+    ctx: ServerCtx,
     _tmp: tempfile::TempDir,
 }
 
@@ -221,7 +222,7 @@ async fn boot(tools: &[&str]) -> Daemon {
     let base = format!("http://{addr}");
     let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
-    let app = otto_server::build_router(ctx, api_extras, root_extras);
+    let app = otto_server::build_router(ctx.clone(), api_extras, root_extras);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -230,6 +231,7 @@ async fn boot(tools: &[&str]) -> Daemon {
         human,
         http: reqwest::Client::new(),
         pool,
+        ctx,
         _tmp: tmp,
     };
     let (st, body) = d
@@ -304,6 +306,86 @@ async fn agent_credentials_are_confined_on_files_and_root_routes() {
         d.ws_status(&format!("/ws/events?token={read_only}")).await,
         403
     );
+}
+
+/// S11-305 / S1-303: broadcast and relay are the fan-out twins of
+/// `/sessions/{id}/message`. An agent session's own token reaches only itself
+/// and the workers it opened through them — a live sibling (here a plain
+/// `/bin/cat` agent the same root user owns) receives nothing — while the
+/// person's own token still reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_token_broadcast_and_relay_never_reach_a_sibling() {
+    let d = boot(&[]).await;
+    let ws = d.ctx.workspaces.get(&"ws1".to_string()).await.unwrap();
+    let sibling = d
+        .ctx
+        .manager
+        .create(
+            &ws,
+            &"alice".to_string(),
+            otto_core::api::CreateSessionReq {
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: Some("shell".into()),
+                title: Some("Messi".into()),
+                cwd: None,
+                connection_id: None,
+                meta: None,
+                model: None,
+            },
+            Some(otto_pty::CommandSpec {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: Some(d._tmp.path().to_string_lossy().into()),
+                env: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+    let agent = d.agent_session(json!({})).await;
+    let targeted = json!({"text": "echo pwned", "session_ids": [sibling.id]});
+
+    let (st, body) = d
+        .send("POST", &agent, "/workspaces/ws1/broadcast", Some(targeted.clone()))
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "targeted broadcast: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            "/workspaces/ws1/broadcast",
+            Some(json!({"text": "echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "broadcast-all: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            "/workspaces/ws1/relay",
+            Some(json!({"text": "Messi: echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "relay: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            &format!("/sessions/{}/message", sibling.id),
+            Some(json!({"text": "echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 403, "direct message: {body}");
+
+    // The person's credential is unaffected.
+    let (st, body) = d
+        .send("POST", &d.human, "/workspaces/ws1/broadcast", Some(targeted))
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([sibling.id]), "human: {body}");
+    let _ = d.ctx.manager.remove(&sibling.id).await;
 }
 
 fn pr_args(title: &str) -> Value {
