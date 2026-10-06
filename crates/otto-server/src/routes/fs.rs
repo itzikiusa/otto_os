@@ -894,8 +894,7 @@ mod tests {
         let Some(home) = otto_core::secret_paths::home_dir() else {
             return;
         };
-        let fl = std::path::Path::new("/System/Volumes/Data")
-            .join(home.strip_prefix("/").unwrap());
+        let fl = std::path::Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
         for p in [
             fl.join("Library/Application Support/Otto/otto.db"),
             fl.join(".ssh/config"),
