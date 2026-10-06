@@ -72,8 +72,43 @@ function defaultBase(): string {
   return location.origin;
 }
 
+/** sessionStorage key of THIS tab's impersonation bearer (S13-303). It used
+ *  to overwrite the shared `localStorage.otto_token`, so every other window
+ *  and tab silently started acting as the impersonated user while still
+ *  rendering the admin. Per tab, like the admin token it overlays. */
+const IMP_TOKEN_KEY = 'otto_imp_token';
+let impTokenMem: string | null = null;
+
+function sessionItem(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** This tab's impersonation bearer, or null when not impersonating. */
+export function getImpersonationToken(): string | null {
+  return impTokenMem ?? sessionItem(IMP_TOKEN_KEY);
+}
+
+/** Start (token) or end (null) THIS tab's impersonation. Never touches the
+ *  shared `otto_token`, so other windows keep their own identity. */
+export function setImpersonationToken(token: string | null): void {
+  impTokenMem = token;
+  try {
+    if (token === null) sessionStorage.removeItem(IMP_TOKEN_KEY);
+    else sessionStorage.setItem(IMP_TOKEN_KEY, token);
+  } catch {
+    /* blocked storage: the in-memory copy still drives this document */
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
+}
+
+/** The bearer every request sends: this tab's impersonation token when one is
+ *  active, else the shared sign-in token. */
 export function getToken(): string | null {
-  return storedItem('otto_token');
+  return getImpersonationToken() ?? storedItem('otto_token');
 }
 
 export function setToken(token: string | null): void {

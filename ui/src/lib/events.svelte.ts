@@ -671,9 +671,12 @@ class EventsClient {
     if (this.stopped) return;
     this.wirePresence();
     this.state = 'connecting';
+    // The bearer THIS socket authenticated with (its 4401 is about that one).
+    let sockToken: string | null = null;
     try {
       // Bearer token travels in Sec-WebSocket-Protocol, not the URL query.
       this.socketToken = getToken();
+      sockToken = this.socketToken;
       this.sock = wsConnect('/ws/events');
     } catch {
       this.scheduleReconnect();
@@ -965,8 +968,14 @@ class EventsClient {
       liveEvents.setConnected(false);
       // 4401 = the daemon re-validated this socket's credential and it no
       // longer verifies (logout elsewhere, "revoke all", expired
-      // impersonation — ws.md). Re-boot: a rejected token lands on sign-in.
-      if (ev?.code === 4401) void auth.boot(true);
+      // impersonation — ws.md). Hand it to the 401 path WITH this socket's
+      // token (S13-302): an expired impersonation falls back to the admin's
+      // session; any other rejected token lands on sign-in. A plain re-boot
+      // signed the admin out instead.
+      if (ev?.code === 4401) {
+        if (sockToken && auth.phase === 'ready') void auth.handleUnauthorized(sockToken);
+        else void auth.boot(true);
+      }
       // The daemon may be restarting, and the next one may not hold the
       // alias: stop using it until the socket is back (resume / re-arm).
       suspendAltLoopback();
