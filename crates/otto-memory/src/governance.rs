@@ -143,6 +143,14 @@ impl MemoryService {
         self.repo().undo_forget(ws, undo_token).await
     }
 
+    /// [`Self::undo_forget`] that only restores memory `id` (the
+    /// `/memory/{mid}/forget/undo` route): a token naming another row is 404.
+    pub async fn undo_forget_id(&self, ws: &str, id: &str, undo_token: &str) -> Result<Memory> {
+        self.repo()
+            .undo_forget_scoped(ws, Some(id), undo_token)
+            .await
+    }
+
     /// Merge N source memories into one. The resulting memory inherits the
     /// collection, scope, and story_id of the first source. Source memories are
     /// marked `contradicted`. Returns the new merged memory.

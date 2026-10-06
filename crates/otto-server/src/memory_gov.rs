@@ -67,11 +67,15 @@ pub async fn forget(
 pub async fn forget_undo(
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
-    Path((ws, _mid)): Path<(Id, Id)>,
+    Path((ws, mid)): Path<(Id, Id)>,
     Json(req): Json<UndoForgetReq>,
 ) -> ApiResult<Json<Memory>> {
     require_ws_role(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
-    let m = ctx.memory.undo_forget(&ws, &req.undo_token).await?;
+    // Only `{mid}` — a token for another row is a 404 (S7-307).
+    let m = ctx
+        .memory
+        .undo_forget_id(&ws, &mid, &req.undo_token)
+        .await?;
     Ok(Json(m))
 }
 
