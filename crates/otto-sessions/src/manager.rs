@@ -7091,6 +7091,20 @@ mod tests {
             .await
             .unwrap();
         manager.kill_session(&s.id).await.unwrap();
+        // `kill_session` kills the PTY in place; the status task's exit arm
+        // evicts the handle from `live` and stamps `Exited` (+ last_active_at)
+        // later, under the resume lock. On a slow runner that lands after the
+        // stale stamp below — the session still looks live/fresh and the
+        // archive is (correctly) refused. Wait for the eviction, then take the
+        // lock once so the exit arm's status write is done too.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while manager.is_live(&s.id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("killed PTY is evicted from live");
+        drop(manager.resume_lock(&s.id).lock().await);
         let cutoff = chrono::Utc::now() - chrono::Duration::days(3);
         let set_active = |at: chrono::DateTime<chrono::Utc>| {
             let pool = repo.pool();
@@ -8117,17 +8131,24 @@ mod tests {
         // Static file → not actively written.
         assert!(!rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
         // A concurrent writer appending during the settle window → detected.
+        // It appends until told to stop (not a fixed 6×40 ms burst): on a
+        // slow CI runner the burst could finish before the walk + first stat
+        // even ran, leaving a static file inside the window.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = std::thread::spawn({
-            let p = p.clone();
+            let (p, stop) = (p.clone(), Arc::clone(&stop));
             move || {
-                for _ in 0..6 {
+                while !stop.load(Ordering::Relaxed) {
                     append_user_message(&p, "more output");
-                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
         });
-        assert!(rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
+        let detected =
+            rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await;
+        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
+        assert!(detected);
         // Unknown psid → never blocks a resume.
         assert!(!rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await);
     }
