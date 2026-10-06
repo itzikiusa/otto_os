@@ -2145,14 +2145,29 @@ async fn delete_trigger_h(
 
 /// Stop an in-flight plan/recruit for this swarm: kills the live agent
 /// session(s) and prevents further retries.
+#[derive(serde::Deserialize)]
+struct AgentStopQuery {
+    /// `plan` | `recruit` — stop only that turn (S17-307); absent stops both.
+    kind: Option<String>,
+}
+
 async fn agent_stop(
     State(ctx): State<SwarmRt>,
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
+    axum::extract::Query(q): axum::extract::Query<AgentStopQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    crate::runtime::agent_run::stop(&ctx, &sid).await;
-    Ok(Json(json!({ "ok": true })))
+    let kind = q.kind.as_deref().filter(|k| !k.is_empty());
+    if let Some(k) = kind {
+        if !crate::runtime::agent_run::AGENT_KINDS.contains(&k) {
+            return Err(ApiError(Error::Invalid(format!(
+                "unknown agent kind '{k}' (want plan|recruit)"
+            ))));
+        }
+    }
+    let stopped = crate::runtime::agent_run::stop(&ctx, &sid, kind).await;
+    Ok(Json(json!({ "ok": true, "stopped": stopped })))
 }
 
 async fn check(ctx: &SwarmRt, user: &AuthUser, ws: &Id, role: WorkspaceRole) -> ApiResult<()> {
@@ -2654,7 +2669,7 @@ async fn recruit(
                 .first()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "recruiter".to_string());
-            let cancel = crate::runtime::agent_run::begin(sid);
+            let cancel = crate::runtime::agent_run::begin(sid, "recruit");
             let (raw, rid) = crate::runtime::agent_run::run_swarm_agent(
                 &ctx,
                 &workspace,
@@ -2673,7 +2688,7 @@ async fn recruit(
                 &cancel,
             )
             .await;
-            crate::runtime::agent_run::end(sid);
+            crate::runtime::agent_run::end(sid, "recruit");
             let raw = raw.ok_or_else(|| {
                 ApiError(Error::Upstream(
                     "recruiter produced nothing (stopped or stuck)".into(),
@@ -2784,7 +2799,7 @@ async fn plan(
     // Multi-agent plan: run one planner per angle as a REAL, openable session
     // (watchable live in the Runs list, Stop-able), then a summarizer reconciles
     // the candidate task lists. Each turn has no wall-clock cap + stuck-retry.
-    let cancel = crate::runtime::agent_run::begin(&project.swarm_id);
+    let cancel = crate::runtime::agent_run::begin(&project.swarm_id, "plan");
     let mut candidates: Vec<String> = Vec::new();
     let angles = crate::recruiter::PLANNER_ANGLES;
     for (i, angle) in angles.iter().enumerate() {
@@ -2846,7 +2861,7 @@ async fn plan(
             .first()
             .and_then(|c| crate::recruiter::extract_json(c))
     };
-    crate::runtime::agent_run::end(&project.swarm_id);
+    crate::runtime::agent_run::end(&project.swarm_id, "plan");
     let v = final_json.ok_or_else(|| {
         ApiError(Error::Upstream(
             "planner produced no tasks (stopped or stuck)".into(),
@@ -2982,34 +2997,80 @@ mod waiting_tests {
 
 #[cfg(test)]
 mod row_workspace_guard {
-    /// Guard (S4-01 class): every handler that takes BOTH a path workspace and
-    /// a row id (`Path((ws, …))`) must tie the row to that workspace —
-    /// `swarm_in_ws(…)` or an explicit `workspace_id != ws` check — because
-    /// the role check alone only covers the path workspace. Handlers keyed by
-    /// the row alone derive the workspace from the row and are not matched.
-    #[test]
-    fn workspace_scoped_row_handlers_check_row_ownership() {
-        let src = include_str!("engine.rs");
-        let code = &src[..src.find("#[cfg(test)]\nmod row_workspace_guard").unwrap()];
+    /// Every handler in `code` whose path extractor is a TUPLE (`Path<(…`)
+    /// — i.e. a path workspace plus a row id, however the binding is spelled
+    /// (`Path((ws, sid))`, `Path((ws_id, pid))`, `Path((_ws, x))`,
+    /// `Path(p)`) — must tie the row to that workspace. Returns the names of
+    /// the offenders and the number of handlers checked.
+    fn scan(code: &str) -> (Vec<String>, usize) {
+        let mut bad = Vec::new();
         let mut checked = 0;
-        for (i, _) in code.match_indices("Path((ws, ") {
-            let fn_start = code[..i].rfind("async fn ").unwrap();
-            let name = code[fn_start + 9..].split('(').next().unwrap().to_string();
+        for (i, _) in code.match_indices("Path<(") {
+            let Some(fn_start) = code[..i].rfind("async fn ") else {
+                continue;
+            };
+            let name = code[fn_start + 9..]
+                .split(['(', '<'])
+                .next()
+                .unwrap()
+                .to_string();
             let body_end = ["\nasync fn ", "\nfn ", "\npub fn ", "\npub async fn "]
                 .iter()
                 .filter_map(|m| code[i..].find(m))
                 .min()
                 .map_or(code.len(), |e| i + e);
             let body = &code[i..body_end];
-            assert!(
-                body.contains("swarm_in_ws(") || body.contains("workspace_id != ws"),
-                "{name}: Path((ws, row)) handler never checks the row belongs to `ws`"
-            );
+            if !(body.contains("swarm_in_ws(") || body.contains("workspace_id != ")) {
+                bad.push(name);
+            }
             checked += 1;
+        }
+        (bad, checked)
+    }
+
+    /// Guard (S4-01 / S4-307): every handler that takes BOTH a path workspace
+    /// and a row id must tie the row to that workspace — `swarm_in_ws(…)` or
+    /// an explicit `workspace_id != …` check — because the role check alone
+    /// only covers the path workspace. Scans the runtime engine AND the CRUD
+    /// router; handlers keyed by the row alone derive the workspace from the
+    /// row and take a non-tuple `Path<Id>`.
+    #[test]
+    fn workspace_scoped_row_handlers_check_row_ownership() {
+        let engine = include_str!("engine.rs");
+        let engine = &engine[..engine
+            .find("#[cfg(test)]\nmod row_workspace_guard")
+            .unwrap()];
+        let http = include_str!("../http.rs");
+        let http = &http[..http.find("#[cfg(test)]").unwrap_or(http.len())];
+        let mut checked = 0;
+        for code in [engine, http] {
+            let (bad, n) = scan(code);
+            assert!(
+                bad.is_empty(),
+                "Path<(ws, row)> handler(s) never check the row belongs to the workspace: {bad:?}"
+            );
+            checked += n;
         }
         assert!(
             checked >= 6,
             "guard matched {checked} handlers — pattern drifted?"
         );
+    }
+
+    /// The scanner itself catches every binding spelling (S4-307).
+    #[test]
+    fn scanner_flags_unchecked_handlers_of_any_binding_shape() {
+        for sig in [
+            "Path((ws, sid)): Path<(Id, Id)>",
+            "Path((ws_id, sid)): Path<(Id, Id)>",
+            "Path((_ws, pid)): Path<(Id, Id)>",
+            "Path(p): Path<(Id, Id)>",
+        ] {
+            let bad = format!("async fn h(\n    {sig},\n) {{\n    get(p.1)\n}}\n");
+            assert_eq!(scan(&bad).0, vec!["h".to_string()], "{sig}");
+            let ok =
+                format!("async fn h(\n    {sig},\n) {{\n    swarm_in_ws(&rt, &p.0, &p.1)\n}}\n");
+            assert!(scan(&ok).0.is_empty(), "{sig}");
+        }
     }
 }

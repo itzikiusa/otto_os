@@ -126,12 +126,16 @@ pub async fn require_ws_role(
     ctx.roles.check(user, ws_id, min).await.map_err(ApiError)
 }
 
-/// Require the global root role.
+/// Require the global root role — as exercised by THIS request's credential:
+/// an agent credential writing outside the reviewed agent allow-list has its
+/// root authority withheld by the feature guard
+/// ([`otto_core::auth::root_authority`]), so every root-gated write is closed
+/// to agents by default (S11 "flip the default").
 pub fn require_root(user: &User) -> Result<(), ApiError> {
-    if user.is_root {
+    if otto_core::auth::root_authority(user) {
         Ok(())
     } else {
-        Err(ApiError(Error::Forbidden("requires root".into())))
+        Err(ApiError(otto_core::auth::root_refusal()))
     }
 }
 

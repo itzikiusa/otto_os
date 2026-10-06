@@ -273,6 +273,10 @@ pub fn protected_routes() -> Router<ServerCtx> {
         // Secret store status + confirmed "Secure secrets…" migration (root).
         .route("/admin/secrets/status", get(settings::secrets_status))
         .route("/admin/secrets/secure", post(settings::secrets_secure))
+        .route(
+            "/admin/secrets/reset-store",
+            post(settings::secrets_reset_store),
+        )
         // --- Dynamic model catalog (discovered per-provider model ids) ----
         .route("/providers/models", get(crate::model_catalog::list))
         // --- Walkthrough video redirect resolver (WebKit can't follow a
@@ -480,6 +484,7 @@ pub fn protected_routes() -> Router<ServerCtx> {
         )
         .route("/fs/browse", get(fs::browse))
         .route("/fs/read", get(fs::read_file))
+        .route("/fs/stat", get(fs::stat))
         .route("/logs/daemon", get(logs::daemon_logs))
         // UI last-resort error report (self-heal hook in ui/src/main.ts).
         .route("/client/errors", post(logs::client_error))

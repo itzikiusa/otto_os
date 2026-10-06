@@ -9,6 +9,7 @@
   import { toastError } from '../../lib/toastError';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { sftp } from '../../lib/stores/sftp.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { confirmProd, isProdEnv } from '../../lib/confirmProd';
@@ -124,6 +125,8 @@
     failed: 'Failed', timed_out: 'Timed out', outcome_unknown: 'Outcome unknown',
   };
   const WRITE_DENIED = "You don’t have write access to this connection’s files";
+  // Downloads/uploads read or write a file on the Otto host computer (S6-302).
+  const HOST_PATH_DENIED = "Only the root user can transfer files to or from the Otto host computer";
 
   function humanSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -320,7 +323,7 @@
       <button class="btn small" disabled={!canWrite} title={canWrite ? undefined : WRITE_DENIED} onclick={newFolder}>
         <Icon name="plus" size={12} /> New folder
       </button>
-      <button class="btn small primary" disabled={!canWrite} title={canWrite ? undefined : WRITE_DENIED} onclick={() => (uploadOpen = true)}>
+      <button class="btn small primary" disabled={!canWrite || !auth.isRoot} title={!auth.isRoot ? HOST_PATH_DENIED : canWrite ? undefined : WRITE_DENIED} onclick={() => (uploadOpen = true)}>
         <Icon name="arrowUp" size={12} /> Upload
       </button>
       <span class="grow"></span>
@@ -408,9 +411,9 @@
               {#if e.kind !== 'dir'}
                 <button
                   class="icon-btn"
-                  title="Download"
+                  title={auth.isRoot ? 'Download' : HOST_PATH_DENIED}
                   aria-label="Download"
-                  disabled={busy[e.name]}
+                  disabled={busy[e.name] || !auth.isRoot}
                   onclick={() => (downloadFor = e)}
                 >
                   <Icon name="fetch" size={13} />

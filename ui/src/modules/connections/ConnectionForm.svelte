@@ -278,9 +278,18 @@
     const rest = text.slice(authStart);
     const end = rest.search(/[/?#]/);
     const authority = end < 0 ? rest : rest.slice(0, end);
-    const at = authority.lastIndexOf('@');
+    let at = authority.lastIndexOf('@');
+    if (at < 0 && end >= 0) {
+      // An unencoded `/` in the password (`app:12/ss@h/db` — WHATWG parses
+      // it as host `app`, port `12`) ends the authority early. The real
+      // separator is then the first `@` past that cut which comes before any
+      // query: an `@` inside `?appName=a@b` is an option value, not userinfo.
+      const query = rest.search(/[?#]/);
+      const later = rest.indexOf('@', end);
+      if (later >= 0 && (query < 0 || later < query)) at = later;
+    }
     if (at < 0) return null;
-    const userinfo = authority.slice(0, at);
+    const userinfo = rest.slice(0, at);
     const colon = userinfo.indexOf(':');
     if (colon < 0) return null;
     return {
@@ -298,7 +307,14 @@
     try {
       url = new URL(s);
     } catch {
-      toasts.error('Invalid URI', 'Could not parse as a connection URL');
+      // The usual cause with credentials: an unencoded `/ ? # @` in the
+      // password cuts the authority short (`app:pa/ss@h` → port `pa`).
+      toasts.error(
+        'Invalid URI',
+        s.includes('@')
+          ? 'Could not parse as a connection URL — percent-encode / ? # @ in the password (e.g. %2F for /).'
+          : 'Could not parse as a connection URL',
+      );
       return;
     }
 

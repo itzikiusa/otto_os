@@ -210,7 +210,15 @@ const HTTP_DRAIN_CAP: std::time::Duration = std::time::Duration::from_secs(3);
 /// ClickHouse) shares this one deadline. Worst case from SIGTERM: the 3 s
 /// drain, 1 s of secondary listeners, this 18 s and the 2 s runtime shutdown
 /// make 24 s, leaving ≥6 s of launchd's 30 s `ExitTimeOut` for the log flush.
+/// The deadline is also capped at [`STOP_BUDGET`] after the SIGNAL (see
+/// [`teardown_deadline`]): a signal that landed mid-boot already spent part
+/// of launchd's clock before the teardown started.
 const TEARDOWN_BUDGET: std::time::Duration = std::time::Duration::from_secs(18);
+
+/// Signal → end of teardown, at most. launchd's `ExitTimeOut` (30 s) is
+/// measured from the SIGTERM, not from the end of boot; this plus
+/// [`RUNTIME_SHUTDOWN_CAP`] keeps ≥3 s of it for the log flush.
+const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(25);
 
 /// Reserved out of [`TEARDOWN_BUDGET`] for the ClickHouse stop (SIGTERM →
 /// flush → release the data-dir lock): the earlier steps can never eat it.
@@ -294,18 +302,29 @@ async fn run(cfg: Config) -> Result<(), String> {
     // installed FIRST, before any boot step: with the default action a
     // SIGTERM mid-boot (a deploy kickstart, the supervisor, a user quit)
     // killed the process inside the pre-migration snapshot or a compaction.
-    // A signal during boot is remembered; boot runs to its end and the
-    // listener below then drains at once and tears down normally.
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // A signal during boot is remembered WITH its instant: boot finishes
+    // only the step it is in (the snapshot / migration / compaction in
+    // `open_state` must never be cut short), then skips everything after —
+    // schedulers, channel bridges, serving — and tears down against a
+    // deadline anchored at the signal, since launchd's ExitTimeOut is too.
+    let (shutdown_tx, shutdown_rx) = watch::channel::<Option<std::time::Instant>>(None);
     let signals = ShutdownSignals::install();
     tokio::spawn(async move {
         signals.recv().await;
+        let at = std::time::Instant::now();
         tracing::info!("shutdown signal received");
         // Wake the long-poll handlers first so the drain below has nothing
         // left that would otherwise hold it for 25–30 s.
         otto_server::shutdown::begin();
-        let _ = shutdown_tx.send(true);
+        let _ = shutdown_tx.send(Some(at));
     });
+    let stop_requested = |phase: &str| -> Option<std::time::Instant> {
+        let at = *shutdown_rx.borrow();
+        if at.is_some() {
+            tracing::info!("shutdown requested during boot — stopping after {phase}");
+        }
+        at
+    };
 
     // Single-instance lock FIRST: holding the loopback port is what proves no
     // other ottod owns this data dir. Everything below mutates shared state —
@@ -345,10 +364,39 @@ async fn run(cfg: Config) -> Result<(), String> {
         pty_holders: pty_holder_config(&cfg.data_dir),
     };
     let pool = boot::open_state(&boot_cfg, &mut boot).await?;
+    if stop_requested("open_state").is_some() {
+        // Nothing but the pool exists yet (no ClickHouse, no sessions, no
+        // task): a clean stop is closing it and clearing the marker.
+        pool.writer().close().await;
+        pool.reader().close().await;
+        housekeeping::clear_running(&cfg.data_dir);
+        tracing::info!("ottod stopped");
+        return Ok(());
+    }
     let secrets = otto_keychain::from_env(&cfg.data_dir);
     let BuiltCtx { ctx, root_user_id } = boot::build_ctx(&boot_cfg, pool, secrets).await?;
     boot.mark("modules");
-    boot::recover_before_serve(&ctx, &mut boot).await?;
+    // Session restore (respawns, holder adoption) is skipped on a stop:
+    // holders keep running and the next start adopts them.
+    let mut early_stop = stop_requested("modules");
+    if early_stop.is_none() {
+        boot::recover_before_serve(&ctx, &mut boot).await?;
+        early_stop = stop_requested("recovery");
+    }
+    if let Some(signal_at) = early_stop {
+        let telemetry = ctx.telemetry.clone();
+        teardown(
+            &ctx.manager,
+            &ctx.browser,
+            telemetry.as_deref(),
+            &ctx.usage,
+            teardown_deadline(std::time::Instant::now(), Some(signal_at)),
+        )
+        .await;
+        housekeeping::clear_running(&cfg.data_dir);
+        tracing::info!("ottod stopped");
+        return Ok(());
+    }
     boot::spawn_post_listen_work(&ctx, post_listen_housekeeping);
     boot::recover_goal_loops(&ctx).await;
     let mut background = boot::spawn_background(&ctx, root_user_id).await;
@@ -368,9 +416,6 @@ async fn run(cfg: Config) -> Result<(), String> {
     #[cfg(not(feature = "embed-ui"))]
     let assets = None;
     let router = build_router_with_assets(ctx, api_extras, root_extras, assets);
-    if *shutdown_rx.borrow() {
-        tracing::info!("shutdown requested during boot — boot finished, stopping now");
-    }
 
     // (Bound at the very top of `run` — the single-instance lock.)
     tracing::info!("listening on http://127.0.0.1:{}", cfg.port);
@@ -391,7 +436,15 @@ async fn run(cfg: Config) -> Result<(), String> {
         }
     }
 
-    teardown(&manager, &browser_handle, telemetry.as_deref(), &usage).await;
+    let signal_at = *shutdown_rx.borrow();
+    teardown(
+        &manager,
+        &browser_handle,
+        telemetry.as_deref(),
+        &usage,
+        teardown_deadline(std::time::Instant::now(), signal_at),
+    )
+    .await;
     housekeeping::clear_running(&cfg.data_dir);
     tracing::info!("ottod stopped");
     drop(background);
@@ -468,7 +521,7 @@ async fn serve_network_listener(
     cfg: &Config,
     pool: &otto_state::DbPool,
     router: &axum::Router,
-    shutdown_rx: &watch::Receiver<bool>,
+    shutdown_rx: &ShutdownRx,
 ) -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     let Some(value) = SettingsRepo::new(pool.clone())
         .get("network_listener")
@@ -497,7 +550,28 @@ async fn serve_network_listener(
         }
     };
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    // Bind HERE (not inside `serve`) so a taken port is known before anything
+    // advertises the listener: share links read the recorded port, never the
+    // setting (S20-303).
+    let listener = match std::net::TcpListener::bind(addr).and_then(|l| {
+        l.set_nonblocking(true)?;
+        Ok(l)
+    }) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("network listener: bind {addr} failed: {e}");
+            return Ok(None);
+        }
+    };
+    let server = match axum_server::from_tcp_rustls(listener, tls) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::error!("network listener: {e}");
+            return Ok(None);
+        }
+    };
     tracing::info!("network listener on https://0.0.0.0:{port} (TLS)");
+    otto_server::transport::set_network_listener_port(Some(port));
     let router = router.clone();
     // axum-server drives shutdown via its own Handle; bridge the watch signal
     // into a graceful_shutdown so the TLS listener drains in step with the
@@ -513,13 +587,15 @@ async fn serve_network_listener(
         // `into_make_service_with_connect_info::<SocketAddr>` makes each
         // request's real socket peer available to handlers via
         // `ConnectInfo<SocketAddr>` (used by the login throttle, S5).
-        if let Err(e) = axum_server::bind_rustls(addr, tls)
+        if let Err(e) = server
             .handle(handle)
             .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
         {
             tracing::error!("network listener: {e}");
         }
+        // No longer serving: stop advertising it.
+        otto_server::transport::set_network_listener_port(None);
     })))
 }
 
@@ -528,7 +604,7 @@ fn serve_alt_loopback(
     listener: tokio::net::TcpListener,
     port: u16,
     router: &axum::Router,
-    shutdown_rx: &watch::Receiver<bool>,
+    shutdown_rx: &ShutdownRx,
 ) -> tokio::task::JoinHandle<()> {
     // Advertised as `localhost`, not `[::1]`: a distinct pool key from
     // `127.0.0.1` either way, CSP host-sources cannot express IPv6
@@ -561,7 +637,7 @@ fn serve_alt_loopback(
 async fn serve_loopback(
     loopback: tokio::net::TcpListener,
     router: axum::Router,
-    shutdown_rx: &watch::Receiver<bool>,
+    shutdown_rx: &ShutdownRx,
 ) -> Result<(), String> {
     let mut rx = shutdown_rx.clone();
     let shutdown = async move {
@@ -582,7 +658,7 @@ async fn serve_loopback(
     // teardown finishes inside launchd's ExitTimeOut.
     let mut drain_rx = shutdown_rx.clone();
     let drain_deadline = async move {
-        let _ = drain_rx.wait_for(|stop| *stop).await;
+        let _ = drain_rx.wait_for(|stop| stop.is_some()).await;
         tokio::time::sleep(HTTP_DRAIN_CAP).await;
     };
     tokio::select! {
@@ -600,17 +676,17 @@ async fn serve_loopback(
 /// holders (setting `session_persistence`, default on): those are detached
 /// and re-adopted, still running, by the next daemon start. Then stop the
 /// live browser, telemetry and the embedded ClickHouse.
-/// Every step shares one deadline ([`TEARDOWN_BUDGET`]) with the ClickHouse
-/// flush's slot reserved ([`CLICKHOUSE_RESERVE`]): a hung step can neither
-/// push the stop past launchd's SIGKILL nor cost the flush after it.
+/// Every step shares one `deadline` ([`teardown_deadline`]) with the
+/// ClickHouse flush's slot reserved ([`CLICKHOUSE_RESERVE`]): a hung step can
+/// neither push the stop past launchd's SIGKILL nor cost the flush after it.
 async fn teardown(
     manager: &otto_sessions::SessionManager,
     browser: &otto_server::routes::browser::BrowserEngineHandle,
     telemetry: Option<&otto_telemetry::TelemetryService>,
     usage: &otto_usage::UsageEngine,
+    deadline: std::time::Instant,
 ) {
     use std::time::Duration;
-    let deadline = std::time::Instant::now() + TEARDOWN_BUDGET;
     let slot = |cap: Duration, reserve: Duration| {
         step_budget(
             deadline.saturating_duration_since(std::time::Instant::now()),
@@ -674,6 +750,18 @@ async fn teardown(
             ch_slot.as_millis()
         );
     }
+}
+
+/// The shared teardown deadline: [`TEARDOWN_BUDGET`] from `now`, but never
+/// later than [`STOP_BUDGET`] after the shutdown signal (`None` = no signal,
+/// e.g. the listener died on its own). A signal at boot start followed by a
+/// 10 s boot leaves the teardown 15 s, not 18 — launchd counts from the signal.
+fn teardown_deadline(
+    now: std::time::Instant,
+    signal_at: Option<std::time::Instant>,
+) -> std::time::Instant {
+    let own = now + TEARDOWN_BUDGET;
+    signal_at.map_or(own, |at| own.min(at + STOP_BUDGET))
 }
 
 /// One teardown step's timeout: its own `cap`, but never more than what is
@@ -892,6 +980,9 @@ fn pem_cert_fingerprint(pem_bytes: &[u8]) -> Option<String> {
     certs.first().map(|c| cert_fingerprint(c.as_ref()))
 }
 
+/// The shutdown fan-out: `Some(instant the signal arrived)` once stopping.
+type ShutdownRx = watch::Receiver<Option<std::time::Instant>>;
+
 /// SIGTERM/SIGINT listeners, registered synchronously by [`install`] — the
 /// default (terminate) action is replaced the moment this returns, not when a
 /// spawned task first gets polled.
@@ -966,5 +1057,32 @@ mod shutdown_budget_tests {
             "worst-case stop {worst:?} leaves <5 s of ExitTimeOut"
         );
         assert!(CLICKHOUSE_RESERVE < TEARDOWN_BUDGET);
+        // Measured from the SIGNAL (however long boot ran): the teardown
+        // deadline is capped at STOP_BUDGET after it, then the runtime cap.
+        assert!(
+            STOP_BUDGET + RUNTIME_SHUTDOWN_CAP + Duration::from_secs(3) <= exit_timeout,
+            "signal-anchored stop leaves <3 s of ExitTimeOut"
+        );
+        assert!(STOP_BUDGET >= HTTP_DRAIN_CAP + Duration::from_millis(1000) + TEARDOWN_BUDGET);
+    }
+
+    #[test]
+    fn teardown_deadline_is_anchored_at_the_signal() {
+        let s = Duration::from_secs;
+        let t0 = std::time::Instant::now();
+        // No signal (listener ended by itself): the full budget from now.
+        assert_eq!(teardown_deadline(t0, None), t0 + TEARDOWN_BUDGET);
+        // Signal just now (a normal stop): the own budget is the tighter one.
+        assert_eq!(teardown_deadline(t0, Some(t0)), t0 + TEARDOWN_BUDGET);
+        // Signal at boot start, a 12 s boot (snapshot + migrations): the
+        // deadline is signal + 25 s, i.e. 13 s from now — not 18.
+        let now = t0 + s(12);
+        assert_eq!(teardown_deadline(now, Some(t0)), t0 + STOP_BUDGET);
+        assert_eq!(teardown_deadline(now, Some(t0)) - now, s(13));
+        // A boot that outlasted the whole stop budget: the deadline is already
+        // past, so every step but ClickHouse gets zero (step_budget saturates).
+        let late = t0 + s(40);
+        let d = teardown_deadline(late, Some(t0));
+        assert_eq!(d.saturating_duration_since(late), Duration::ZERO);
     }
 }

@@ -41,4 +41,13 @@ pub trait WorkflowCtx: Clone + Send + Sync + 'static {
     /// (the chat `skip` command). Consume-once; the engine's per-node poll
     /// picks it up.
     fn request_skip_current(&self, run_id: &str, node_id: &str);
+    /// S3-302: refuse a run whose caller-given location (`working_directory`,
+    /// `repos`, `repo_id`) leaves `ws` — the workflow's own workspace: only its
+    /// registered repos (and their linked worktrees) or its root, and paths
+    /// inside them. `Err` carries the user-facing reason.
+    fn check_run_location(
+        &self,
+        ws: &Workspace,
+        input: &Value,
+    ) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }

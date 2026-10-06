@@ -39,8 +39,12 @@ fn has_number(hay: &str, needle: &str) -> bool {
 /// OUR process-spawn errors only (otto-pty's `spawn <program>: …`, the session
 /// manager's `pty spawn task: …`, and "failed to spawn <provider cli>") — not
 /// any agent text that merely mentions spawning ("failed to spawn subagent").
+/// An absolute program path counts too (S3-304): with the process sandbox on
+/// otto-pty reports `spawn /usr/bin/sandbox-exec: …`, and a custom provider
+/// command reads `spawn /opt/homebrew/bin/claude: …` — exactly the fork-pressure
+/// (EAGAIN) case this class exists for.
 fn is_spawn_failure(e: &str) -> bool {
-    const PROGRAMS: [&str; 6] = ["claude", "codex", "agy", "gemini", "/bin/", "shell"];
+    const PROGRAMS: [&str; 6] = ["claude", "codex", "agy", "gemini", "/", "shell"];
     if e.contains("pty spawn") {
         return true;
     }
@@ -126,6 +130,10 @@ mod tests {
         }
         for err in [
             "spawn claude: Resource temporarily unavailable",
+            // S3-304: sandboxed and absolute-path programs.
+            "spawn /usr/bin/sandbox-exec: Resource temporarily unavailable",
+            "spawn /opt/homebrew/bin/claude: Cannot allocate memory (os error 12)",
+            "internal error: spawn /usr/bin/sandbox-exec: os error 35",
             "internal error: pty spawn task: join error",
             "HTTP 529",
             "error(529): overloaded",

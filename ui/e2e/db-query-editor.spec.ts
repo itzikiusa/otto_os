@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,11 +79,11 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function setEditor(page: Page, sql: string): Promise<void> {
   await ensureEditorOpen(page);
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
   const want = sql.replace(/\s+/g, ' ').trim();
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
-    await page.keyboard.press(`${mod}+A`);
+    await page.keyboard.press(selectAll);
     // insertText injects the whole string in ONE input event — char-by-char
     // typing would let auto-close-brackets double `(`/`{`/quotes and the
     // debounced autocomplete accept a suggestion mid-string, corrupting it.
@@ -221,10 +222,10 @@ test.describe('DB Explorer · query editor', () => {
     await ensureEditorOpen(page);
     const content = page.locator('.qe-edit .cm-content');
     const pop = page.locator('.cm-tooltip-autocomplete');
-    const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+    const selectAll = await editorSelectAll(page);
     const reset = async () => {
       await content.click();
-      await page.keyboard.press(`${mod}+A`);
+      await page.keyboard.press(selectAll);
       await page.keyboard.press('Delete');
     };
 

@@ -193,6 +193,12 @@ macOS-only.
   `docs/contracts/*.md` and `ui/src/lib/api/types.ts` in lockstep.
 - **Migrations are append-only.** Add a new numbered file under
   `crates/otto-state/migrations/`; never edit or renumber an existing migration.
+  Every migration **must stay compatible with the previous build**: a deploy
+  rollback boots the old binary on the new schema (`set_ignore_missing`), so
+  never drop or rename a table/column, never add a NOT NULL column without a
+  DEFAULT to an existing table, and only ever widen a CHECK. A table rebuild
+  (`t_new` → copy → drop → rename) is fine if it keeps every column.
+  `crates/otto-state/tests/migration_compat.rs` enforces this.
 - **Secrets never live in the repo.** Tokens/passwords go through the macOS
   Keychain (`otto-keychain`); the DB stores only opaque key references. Never
   commit `.env`, `*.pem`, `*.key`, `*.p12`, or local DBs (see `.gitignore`).

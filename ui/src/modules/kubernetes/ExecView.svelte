@@ -24,8 +24,12 @@
     containers: K8sContainer[];
     /** Open the shell immediately (the `s` shortcut). */
     autoOpen?: boolean;
+    /** Called once `autoOpen` was acted on, so the owner can consume the flag —
+     *  a later remount (switching back to the Terminal tab) must not open a
+     *  second shell unasked. */
+    onautoopened?: () => void;
   }
-  let { clusterId, ns, pod, containers, autoOpen = false }: Props = $props();
+  let { clusterId, ns, pod, containers, autoOpen = false, onautoopened }: Props = $props();
 
   $effect(() => { void resourceAccess.load('k8s_cluster', clusterId, `namespace:${ns}`); });
   const canExec = $derived(resourceAccess.can('k8s_cluster', clusterId, 'exec', 'kubernetes', 'edit', `namespace:${ns}`));
@@ -99,7 +103,12 @@
   // not re-run this and close a live shell); kill the session on unmount.
   $effect(() => {
     alive = true;
-    if (untrack(() => autoOpen)) untrack(() => void open());
+    if (untrack(() => autoOpen)) {
+      untrack(() => {
+        onautoopened?.();
+        void open();
+      });
+    }
     return () => {
       alive = false;
       untrack(() => void close());

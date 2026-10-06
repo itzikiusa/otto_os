@@ -197,6 +197,14 @@ mod recovery_tests {
     use super::*;
 
     #[test]
+    fn a_wedged_daemon_points_the_user_at_restart() {
+        // S10-310: the start path never kills a live process (no `-k`).
+        let d = not_answering_detail(Duration::from_secs(40));
+        assert!(d.contains("40 s"), "{d}");
+        assert!(d.contains("Restart daemon"), "{d}");
+    }
+
+    #[test]
     fn identical_binary_and_unhealthy_daemon_waits_instead_of_reinstalling() {
         assert_eq!(
             recovery_plan(&Ok(false), false, true),
@@ -477,13 +485,34 @@ async fn wait_healthy(budget: Duration) -> bool {
     }
 }
 
-/// Health-check; install + start when the daemon is down. Called at app start.
-pub async fn ensure_daemon() -> DaemonReport {
+/// `launchctl print` off the async runtime (it is a blocking process spawn).
+async fn service_loaded_async(target: &str) -> bool {
+    let t = target.to_string();
+    tokio::task::spawn_blocking(move || service_loaded(&t))
+        .await
+        .unwrap_or(false)
+}
+
+/// The final detail when a loaded daemon never answered: this path only
+/// kickstarts WITHOUT `-k` (never kills a live instance), so a live but
+/// wedged process needs the user's explicit Restart.
+fn not_answering_detail(waited: Duration) -> String {
+    format!(
+        "daemon loaded but not answering after {} s — use Restart daemon to replace a wedged process; see ~/Library/Logs/Otto/ottod.log",
+        waited.as_secs()
+    )
+}
+
+/// Health-check; install + start when the daemon is down. Called at app start
+/// and by the "Start daemon" command. `progress` receives an interim report
+/// before a long wait (up to [`BOOT_WAIT`] + 10 s for a booting daemon), so
+/// the UI can say "waiting for boot" instead of looking hung.
+pub async fn ensure_daemon(progress: impl Fn(&DaemonReport)) -> DaemonReport {
     let app_version = env!("CARGO_PKG_VERSION").to_string();
     let needs_install = daemon_needs_install();
     let target = format!("gui/{}/{LAUNCHD_LABEL}", libc_getuid());
     let healthy = health().await;
-    let loaded = !healthy && service_loaded(&target);
+    let loaded = !healthy && service_loaded_async(&target).await;
 
     match recovery_plan(&needs_install, healthy, loaded) {
         Recovery::Healthy => {
@@ -499,6 +528,16 @@ pub async fn ensure_daemon() -> DaemonReport {
             };
         }
         Recovery::WaitForBoot => {
+            progress(&DaemonReport {
+                healthy: false,
+                installed: installed_bin().exists(),
+                daemon_version: None,
+                app_version: app_version.clone(),
+                detail: format!(
+                    "daemon loaded — waiting for it to finish booting (up to {} s)",
+                    BOOT_WAIT.as_secs() + 10
+                ),
+            });
             let healthy = wait_healthy(BOOT_WAIT).await || {
                 // Still silent: start it if launchd isn't running it (no -k —
                 // never kill a live instance), then give it one more window.
@@ -523,10 +562,7 @@ pub async fn ensure_daemon() -> DaemonReport {
                 detail: if healthy {
                     "daemon healthy (waited for boot)".into()
                 } else {
-                    format!(
-                        "daemon loaded but not answering after {} s — see ~/Library/Logs/Otto/ottod.log",
-                        BOOT_WAIT.as_secs() + 10
-                    )
+                    not_answering_detail(BOOT_WAIT + Duration::from_secs(10))
                 },
             };
         }
@@ -577,8 +613,14 @@ pub async fn daemon_status() -> DaemonReport {
 }
 
 #[tauri::command]
-pub async fn daemon_start() -> Result<DaemonReport, String> {
-    Ok(ensure_daemon().await)
+pub async fn daemon_start(app: tauri::AppHandle) -> Result<DaemonReport, String> {
+    use tauri::Emitter;
+    let report = ensure_daemon(|interim| {
+        let _ = app.emit("otto://daemon-state", interim);
+    })
+    .await;
+    let _ = app.emit("otto://daemon-state", &report);
+    Ok(report)
 }
 
 #[tauri::command]
@@ -589,15 +631,19 @@ pub async fn daemon_restart() -> Result<String, String> {
     // label it just fails with "Could not find service". That is precisely the
     // state a user hits "Restart daemon" in, so fall back to a full (re)install,
     // which writes the plist and bootstraps.
-    if !service_loaded(&target) {
+    if !service_loaded_async(&target).await {
         return tokio::task::spawn_blocking(install_daemon)
             .await
             .map_err(|e| format!("install panicked: {e}"))?;
     }
-    let out = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &target])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .output()
+    })
+    .await
+    .map_err(|e| format!("kickstart panicked: {e}"))?
+    .map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok("restarted".into())
     } else {

@@ -10,6 +10,15 @@
   import Modal from '../../lib/components/Modal.svelte';
   import { database } from '../../lib/stores/database.svelte';
   import type { DbColumnDef } from '../../lib/api/types';
+  import { qualifiedName } from './sql-dialect';
+  import {
+    designerSql,
+    newRow,
+    rowsFromColumns,
+    type DesignerFk,
+    type DesignerIndex,
+    type DesignerRow,
+  } from './table-designer-sql';
 
   interface Props {
     table: string;
@@ -18,68 +27,6 @@
   }
   let { table, columns, onclose }: Props = $props();
 
-  interface Row {
-    orig: string | null; // existing column name, or null for a new column
-    name: string;
-    type: string;
-    notNull: boolean;
-    def: string;
-    drop: boolean;
-  }
-
-  // New indexes / foreign keys to ADD (this designer adds — it doesn't edit
-  // existing index/FK metadata, which isn't passed in).
-  interface IndexDef {
-    name: string;
-    cols: string; // comma-separated column names
-    unique: boolean;
-  }
-  interface FkDef {
-    name: string;
-    cols: string; // comma-separated local columns
-    refTable: string;
-    refCols: string; // comma-separated referenced columns
-  }
-
-  function rowsFromColumns(cols: DbColumnDef[]): Row[] {
-    return cols.map((c) => ({
-      orig: c.name,
-      name: c.name,
-      type: c.data_type,
-      notNull: !c.nullable,
-      def: c.default ?? '',
-      drop: false,
-    }));
-  }
-
-  // Editable working copy of the table's columns. Re-seeded from the incoming
-  // `columns` whenever the table being designed changes, so reopening the
-  // designer on a different table never carries over the previous edits.
-  let rows = $state<Row[]>([]);
-  let indexes = $state<IndexDef[]>([]);
-  let fks = $state<FkDef[]>([]);
-  let seededFor = $state<string | null>(null);
-  $effect(() => {
-    if (seededFor !== table) {
-      rows = rowsFromColumns(columns);
-      indexes = [];
-      fks = [];
-      seededFor = table;
-    }
-  });
-
-  function addColumn(): void {
-    rows = [
-      ...rows,
-      { orig: null, name: '', type: 'VARCHAR(255)', notNull: false, def: '', drop: false },
-    ];
-  }
-  function addIndex(): void {
-    indexes = [...indexes, { name: '', cols: '', unique: false }];
-  }
-  function addFk(): void {
-    fks = [...fks, { name: '', cols: '', refTable: '', refCols: '' }];
-  }
   // Engine of the active connection — decides quoting + ALTER dialect. The
   // designer is only reachable for SQL engines (StructureView gates the button).
   const engine = $derived(database.capabilities?.engine ?? 'mysql');
@@ -87,19 +34,30 @@
   // secondary indexes are data-skipping and need a TYPE) — hide those sections.
   const isClickhouse = $derived(engine === 'clickhouse');
 
-  function quoteIdent(s: string): string {
-    return engine === 'postgres'
-      ? '"' + s.replace(/"/g, '""') + '"'
-      : '`' + s.replace(/`/g, '``') + '`';
+  // Editable working copy of the table's columns. Re-seeded from the incoming
+  // `columns` whenever the table being designed changes, so reopening the
+  // designer on a different table never carries over the previous edits.
+  let rows = $state<DesignerRow[]>([]);
+  let indexes = $state<DesignerIndex[]>([]);
+  let fks = $state<DesignerFk[]>([]);
+  let seededFor = $state<string | null>(null);
+  $effect(() => {
+    if (seededFor !== table) {
+      rows = rowsFromColumns(engine, columns);
+      indexes = [];
+      fks = [];
+      seededFor = table;
+    }
+  });
+
+  function addColumn(): void {
+    rows = [...rows, newRow()];
   }
-  /** Quote a comma-separated identifier list: `a, b ` → `` `a`, `b` ``. */
-  function quoteCols(csv: string): string {
-    return csv
-      .split(',')
-      .map((c) => c.trim())
-      .filter(Boolean)
-      .map(quoteIdent)
-      .join(', ');
+  function addIndex(): void {
+    indexes = [...indexes, { name: '', cols: '', unique: false }];
+  }
+  function addFk(): void {
+    fks = [...fks, { name: '', cols: '', refTable: '', refCols: '' }];
   }
   // The prepared statement runs in a query tab against the ACTIVE db, which
   // need not be this table's db — qualify from the selected object's path
@@ -110,161 +68,11 @@
       .find((s) => s.startsWith('db:') || s.startsWith('schema:'));
     return seg ? seg.slice(seg.indexOf(':') + 1) : null;
   });
-  const tableRef = $derived(
-    objSchema ? `${quoteIdent(objSchema)}.${quoteIdent(table)}` : quoteIdent(table),
-  );
+  const tableRef = $derived(qualifiedName(engine, objSchema, table));
 
-  function colDef(r: Row, orig: DbColumnDef | null): string {
-    let s = `${quoteIdent(r.name)} ${r.type}`;
-    if (!isClickhouse) s += r.notNull ? ' NOT NULL' : ' NULL';
-    if (r.def.trim() !== '') s += ` DEFAULT ${r.def.trim()}`;
-    if (engine === 'mysql' && orig) {
-      // CHANGE COLUMN replaces the WHOLE definition — without re-stating the
-      // original attributes a rename silently drops AUTO_INCREMENT /
-      // ON UPDATE CURRENT_TIMESTAMP and the comment. (DEFAULT_GENERATED is
-      // information_schema bookkeeping, not valid DDL.)
-      const extra = (orig.extra ?? '').replace(/DEFAULT_GENERATED/gi, '').trim();
-      if (extra) s += ` ${extra}`;
-      if (orig.comment) s += ` COMMENT '${orig.comment.replace(/'/g, "''")}'`;
-    }
-    return s;
-  }
-
-  interface RowDiff {
-    r: Row;
-    orig: DbColumnDef;
-    renamed: boolean;
-    typeChanged: boolean;
-    nullChanged: boolean;
-    defChanged: boolean;
-  }
-  /** Diff one edited row against its original column (null = unchanged). */
-  function diffRow(r: Row): RowDiff | null {
-    const orig = columns.find((c) => c.name === r.orig);
-    if (!orig || !r.name.trim() || !r.type.trim()) return null;
-    const d: RowDiff = {
-      r,
-      orig,
-      renamed: r.name !== r.orig,
-      typeChanged: r.type !== orig.data_type,
-      nullChanged: r.notNull === orig.nullable,
-      defChanged: r.def !== (orig.default ?? ''),
-    };
-    return d.renamed || d.typeChanged || d.nullChanged || d.defChanged ? d : null;
-  }
-
-  /** MySQL: one ALTER with comma-separated clauses (CHANGE COLUMN carries all). */
-  function mysqlSql(): string {
-    const parts: string[] = [];
-    for (const r of rows) {
-      if (r.orig === null) {
-        if (!r.drop && r.name.trim() && r.type.trim())
-          parts.push(`ADD COLUMN ${colDef(r, null)}`);
-        continue;
-      }
-      if (r.drop) {
-        parts.push(`DROP COLUMN ${quoteIdent(r.orig)}`);
-        continue;
-      }
-      const d = diffRow(r);
-      if (d) parts.push(`CHANGE COLUMN ${quoteIdent(r.orig!)} ${colDef(r, d.orig)}`);
-    }
-    // New indexes: ADD [UNIQUE] INDEX [name] (cols).
-    for (const ix of indexes) {
-      const cols = quoteCols(ix.cols);
-      if (!cols) continue;
-      const kw = ix.unique ? 'UNIQUE INDEX' : 'INDEX';
-      const named = ix.name.trim() ? `${quoteIdent(ix.name.trim())} ` : '';
-      parts.push(`ADD ${kw} ${named}(${cols})`);
-    }
-    // New foreign keys: ADD [CONSTRAINT name] FOREIGN KEY (cols) REFERENCES t (refcols).
-    for (const fk of fks) {
-      const cols = quoteCols(fk.cols);
-      const refCols = quoteCols(fk.refCols);
-      if (!cols || !fk.refTable.trim() || !refCols) continue;
-      const named = fk.name.trim() ? `CONSTRAINT ${quoteIdent(fk.name.trim())} ` : '';
-      parts.push(
-        `ADD ${named}FOREIGN KEY (${cols}) REFERENCES ${quoteIdent(fk.refTable.trim())} (${refCols})`,
-      );
-    }
-    return parts.length ? `ALTER TABLE ${tableRef}\n  ${parts.join(',\n  ')};` : '';
-  }
-
-  /** Postgres: standard SQL has no CHANGE COLUMN — each change is its own
-   *  ALTER statement (rename first, then the rest address the new name). */
-  function postgresSql(): string {
-    const stmts: string[] = [];
-    const alter = (clause: string): void => {
-      stmts.push(`ALTER TABLE ${tableRef} ${clause};`);
-    };
-    for (const r of rows) {
-      if (r.orig === null) {
-        if (!r.drop && r.name.trim() && r.type.trim()) alter(`ADD COLUMN ${colDef(r, null)}`);
-        continue;
-      }
-      if (r.drop) {
-        alter(`DROP COLUMN ${quoteIdent(r.orig)}`);
-        continue;
-      }
-      const d = diffRow(r);
-      if (!d) continue;
-      if (d.renamed) alter(`RENAME COLUMN ${quoteIdent(r.orig)} TO ${quoteIdent(r.name)}`);
-      const col = quoteIdent(r.name);
-      if (d.typeChanged) alter(`ALTER COLUMN ${col} TYPE ${r.type}`);
-      if (d.nullChanged) alter(`ALTER COLUMN ${col} ${r.notNull ? 'SET' : 'DROP'} NOT NULL`);
-      if (d.defChanged) {
-        alter(
-          r.def.trim() !== ''
-            ? `ALTER COLUMN ${col} SET DEFAULT ${r.def.trim()}`
-            : `ALTER COLUMN ${col} DROP DEFAULT`,
-        );
-      }
-    }
-    for (const ix of indexes) {
-      const cols = quoteCols(ix.cols);
-      if (!cols) continue;
-      const named = ix.name.trim() ? `${quoteIdent(ix.name.trim())} ` : '';
-      stmts.push(`CREATE ${ix.unique ? 'UNIQUE ' : ''}INDEX ${named}ON ${tableRef} (${cols});`);
-    }
-    for (const fk of fks) {
-      const cols = quoteCols(fk.cols);
-      const refCols = quoteCols(fk.refCols);
-      if (!cols || !fk.refTable.trim() || !refCols) continue;
-      const named = fk.name.trim() ? `CONSTRAINT ${quoteIdent(fk.name.trim())} ` : '';
-      alter(
-        `ADD ${named}FOREIGN KEY (${cols}) REFERENCES ${quoteIdent(fk.refTable.trim())} (${refCols})`,
-      );
-    }
-    return stmts.join('\n');
-  }
-
-  /** ClickHouse: RENAME COLUMN + MODIFY COLUMN clauses; nullability is part of
-   *  the type (`Nullable(T)`), FKs don't exist, indexes need a skipping TYPE. */
-  function clickhouseSql(): string {
-    const parts: string[] = [];
-    for (const r of rows) {
-      if (r.orig === null) {
-        if (!r.drop && r.name.trim() && r.type.trim()) parts.push(`ADD COLUMN ${colDef(r, null)}`);
-        continue;
-      }
-      if (r.drop) {
-        parts.push(`DROP COLUMN ${quoteIdent(r.orig)}`);
-        continue;
-      }
-      const d = diffRow(r);
-      if (!d) continue;
-      if (d.renamed) parts.push(`RENAME COLUMN ${quoteIdent(r.orig!)} TO ${quoteIdent(r.name)}`);
-      if (d.typeChanged || d.defChanged) parts.push(`MODIFY COLUMN ${colDef(r, d.orig)}`);
-    }
-    return parts.length ? `ALTER TABLE ${tableRef}\n  ${parts.join(',\n  ')};` : '';
-  }
-
-  // Diff the edited rows against the originals → engine-correct ALTER SQL.
-  const sql = $derived.by(() => {
-    if (engine === 'postgres') return postgresSql();
-    if (engine === 'clickhouse') return clickhouseSql();
-    return mysqlSql();
-  });
+  // Diff the edited rows against the originals → engine-correct ALTER SQL
+  // (the generators live in `table-designer-sql.ts`, unit-tested).
+  const sql = $derived(designerSql({ engine, tableRef, columns, rows, indexes, fks }));
 
   function apply(): void {
     if (sql) void database.openInNewTab(sql);

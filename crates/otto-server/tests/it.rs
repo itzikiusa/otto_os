@@ -46,6 +46,8 @@ mod policy_coverage;
 mod provider_resolve;
 #[path = "rbac_matrix.rs"]
 mod rbac_matrix;
+#[path = "resume_missing_cwd.rs"]
+mod resume_missing_cwd;
 #[path = "review_agent_retry.rs"]
 mod review_agent_retry;
 #[path = "review_comment_states.rs"]

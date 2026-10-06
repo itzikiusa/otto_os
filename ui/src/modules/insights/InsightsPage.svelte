@@ -461,6 +461,8 @@
   // writing — the report then never appeared until a manual reload.
   const POLL_MAX = 100;
   let pollCount = $state(0);
+  /** Consecutive poll ticks the run was missing from the active-run list. */
+  let pollGoneTicks = 0;
   /** Seconds already elapsed when a run was picked up again (page re-opened). */
   let pollBaseSec = $state(0);
   let stoppingRun = $state(false);
@@ -473,6 +475,7 @@
       const r = runs[runs.length - 1];
       if (disposed || !r || pollRunId) return;
       pollRunId = r.run_id;
+      pollGoneTicks = 0;
       pollReportKey = r.report_key;
       reportBeforeRun = r.report_revision;
       pollCount = 0;
@@ -487,7 +490,7 @@
     const id = pollRunId;
     if (!id || stoppingRun) return;
     const ok = await confirmer.ask('Stop generating this insights report? The agent session is ended; nothing already published is removed.', {
-      title: 'Stop insights run', confirmLabel: 'Stop run',
+      title: 'Stop insights run', danger: true, confirmLabel: 'Stop run',
     });
     if (!ok) return;
     stoppingRun = true;
@@ -523,6 +526,7 @@
       if (resp.attached) toasts.info('Already generating this report', 'Showing the run in progress instead of starting another.');
       if (resp.run_id) {
         pollRunId = resp.run_id;
+        pollGoneTicks = 0;
         pollReportKey = resp.report_key ?? fallbackKey;
         reportBeforeRun = resp.report_revision;
         schedulePoll();
@@ -567,6 +571,26 @@
         if (status.report?.html_path && status.html_revision && status.html_revision !== reportBeforeRun) ready = status.report;
       } catch {
         /* keep polling; the next tick retries */
+      }
+      // The run itself ended (failed, or stopped from another window) without
+      // publishing: end the banner with why instead of polling ~5 min and
+      // blocking Run now (S17-311). Two consecutive sightings, so a run that
+      // finished between the report check and this one isn't misread.
+      if (!ready && pollRunId) {
+        try {
+          const active = await insightsApi.activeRuns();
+          if (disposed) return;
+          pollGoneTicks = active.some((r) => r.run_id === pollRunId) ? 0 : pollGoneTicks + 1;
+        } catch {
+          /* unknown — keep polling */
+        }
+        if (pollGoneTicks >= 2) {
+          pollRunId = null;
+          pollGoneTicks = 0;
+          runFailReason = 'The insights run ended without publishing a report — it failed or was stopped. Its session shows what happened.';
+          void load();
+          return;
+        }
       }
       if (ready) {
         pollRunId = null;

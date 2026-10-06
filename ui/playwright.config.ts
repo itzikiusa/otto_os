@@ -20,6 +20,14 @@ const FUNCTIONAL_ONLY = process.env.OTTO_E2E_FUNCTIONAL_ONLY === '1';
 // Desktop specs assume the ≥1025px 3-pane shell; most do not self-skip at
 // phone/tablet width, so the mobile projects never pick them up.
 const MOBILE_IGNORE = /desktop-.*\.spec\.ts/;
+// The BLOCKING smoke gate (ci.yml `e2e-gate`) sets OTTO_E2E_GATE=1: the SAME
+// `desktop-browser` / `iphone-portrait` projects then match only the
+// green-history subset in e2e/gate-specs.ts. Same project names on purpose —
+// specs guard on `info.project.name`, so a gate under its own project name
+// self-skipped ~90 tests and passed vacuously (S12-301). The gate step also
+// fails on any skipped test or an `expected` count below GATE_MIN_EXPECTED
+// (scripts/e2e-flaky-check.mjs --gate).
+const GATE = process.env.OTTO_E2E_GATE === '1';
 
 export default defineConfig({
   testDir: './e2e',
@@ -54,7 +62,12 @@ export default defineConfig({
     timeout: 90_000,
   },
   projects: [
-    { name: 'iphone-portrait', testIgnore: MOBILE_IGNORE, use: { ...devices['iPhone 14 Pro Max'], storageState: STATE } },
+    {
+      name: 'iphone-portrait',
+      testIgnore: MOBILE_IGNORE,
+      testMatch: GATE ? gateMatcher(MOBILE_GATE_SPECS) : undefined,
+      use: { ...devices['iPhone 14 Pro Max'], storageState: STATE },
+    },
     { name: 'iphone-landscape', testIgnore: MOBILE_IGNORE, use: { ...devices['iPhone 14 Pro Max landscape'], storageState: STATE } },
     { name: 'ipad-portrait', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11'], storageState: STATE } },
     { name: 'ipad-landscape', testIgnore: MOBILE_IGNORE, use: { ...devices['iPad Pro 11 landscape'], storageState: STATE } },
@@ -64,23 +77,9 @@ export default defineConfig({
     // mobile specs don't run at desktop width.
     {
       name: 'desktop-browser',
-      testMatch: /desktop-.*\.spec\.ts/,
+      testMatch: GATE ? gateMatcher(DESKTOP_GATE_SPECS) : /desktop-.*\.spec\.ts/,
       testIgnore: FUNCTIONAL_ONLY ? /desktop-.*perf.*\.spec\.ts/ : undefined,
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
-    },
-    // The BLOCKING smoke gate (ci.yml `e2e-gate`): a green-history subset of
-    // the specs above, listed in e2e/gate-specs.ts. Same devices/viewports as
-    // desktop-browser / iphone-portrait, so a gate spec behaves identically in
-    // the advisory shards.
-    {
-      name: 'desktop-gate',
-      testMatch: gateMatcher(DESKTOP_GATE_SPECS),
-      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 }, storageState: STATE },
-    },
-    {
-      name: 'iphone-gate',
-      testMatch: gateMatcher(MOBILE_GATE_SPECS),
-      use: { ...devices['iPhone 14 Pro Max'], storageState: STATE },
     },
     // Desktop WEBKIT: the perf gates (desktop-*perf*) on the engine closest to
     // the app's WKWebView, where style/layout/paint dominate (r3-10-02).

@@ -25,7 +25,16 @@ pub struct WalkResult {
 }
 
 /// Recursively list the vault. Blocking — call from `spawn_blocking`.
+///
+/// Never enters a protected dir (Otto's data/log dirs, credential dirs — S7-303)
+/// nor lists a key-like file, unless the root itself is protected (root put
+/// the vault there). A legacy vault rooted above `~/Library` therefore stops
+/// indexing the data dir's reports, and the next complete scan prunes the
+/// rows it indexed before.
 pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
+    use otto_core::secret_paths as sp;
+    let protected = sp::protected_set();
+    let filter = !protected.in_protected_dir(root);
     let mut complete = true;
     let mut notes = Vec::new();
     let mut files = Vec::new();
@@ -53,12 +62,14 @@ pub fn walk(root: &Path) -> std::io::Result<WalkResult> {
                 continue;
             };
             if meta.is_dir() {
-                if !is_skipped_dir(&name) {
+                if !is_skipped_dir(&name)
+                    && !(filter && protected.is_protected_dir(&path, sp::metadata_id(&meta)))
+                {
                     stack.push(path);
                 }
                 continue;
             }
-            if name.starts_with('.') {
+            if name.starts_with('.') || (filter && sp::is_denied_file(&path)) {
                 continue;
             }
             // `DirEntry::metadata` is an lstat on unix: a symlink (or a FIFO,

@@ -32,7 +32,7 @@
   import WorkItemList from './WorkItemList.svelte';
   import WorkGraphView from './WorkGraphView.svelte';
   import WorkItemDetail from './WorkItemDetail.svelte';
-  import NeedsYouLink from '../home/NeedsYouLink.svelte';
+  import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 
   let summary = $state<MissionSummary | null>(null);
   let items = $state<WorkItem[]>([]);

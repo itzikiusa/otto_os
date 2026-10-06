@@ -97,7 +97,7 @@ async function readScrollback(page: Page, id: string): Promise<string> {
         const token = localStorage.getItem('otto_token') ?? '';
         const u = new URL(base);
         const proto = u.protocol === 'https:' ? 'wss:' : 'ws:';
-        const sock = new WebSocket(`${proto}//${u.host}/ws/term/${sid}?token=${encodeURIComponent(token)}`);
+        const sock = new WebSocket(`${proto}//${u.host}/ws/term/${sid}`, ['otto-bearer', token]);
         sock.binaryType = 'arraybuffer';
         const dec = new TextDecoder();
         let acc = '';

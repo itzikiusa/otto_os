@@ -89,10 +89,13 @@
     previews = { ...previews, [sceneId]: { key, loading: true } };
     const renderId = `canvas-panel-${sceneId}`;
     const source = doc.source ?? '';
+    // Both renderers theme by scheme — a light Mermaid figure on the dark
+    // panel was unreadable (same defect as ActionCard, S18-307).
+    const dark = ui.resolvedScheme === 'dark';
     const out =
       format === 'd2'
-        ? await renderD2(renderId, source, { sketch: doc.sketch, dark: ui.resolvedScheme === 'dark' })
-        : await renderMermaid(renderId, source);
+        ? await renderD2(renderId, source, { sketch: doc.sketch, dark })
+        : await renderMermaid(renderId, source, { dark });
     previews = { ...previews, [sceneId]: { key, svg: out.svg, error: out.error } };
   }
 
@@ -101,7 +104,7 @@
     expanded = { ...expanded, [ref.id]: open };
     if (!open || ref.format === 'excalidraw') return;
 
-    const key = `${ref.id}:${ref.updated_at}`;
+    const key = `${ref.id}:${ref.updated_at}:${ui.resolvedScheme}`;
     if (previews[ref.id]?.key === key) return; // cached — same scene revision
 
     previews = { ...previews, [ref.id]: { key, loading: true } };
@@ -350,7 +353,7 @@
         </div>
       {/if}
       <div class="cp-footer-actions">
-        <button class="footer-btn" class:on={attachOpen} onclick={toggleAttachPicker}>
+        <button class="footer-btn" class:on={attachOpen} aria-expanded={attachOpen} onclick={toggleAttachPicker}>
           <Icon name="plug" size={12} /> Attach scene…
         </button>
         <button class="footer-btn" disabled={creating} onclick={createNewScene}>

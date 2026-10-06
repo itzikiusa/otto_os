@@ -3,8 +3,8 @@
 //! Auth: the bearer token is read from the `Sec-WebSocket-Protocol` header
 //! (the browser sends `["otto-bearer", "<token>"]`; we validate the token and
 //! echo back the `otto-bearer` subprotocol). This keeps the token out of the
-//! request URL, which is logged everywhere. A legacy `?token=` query parameter
-//! is still accepted as a fallback. Validation happens BEFORE the upgrade (401
+//! request URL, which is logged everywhere. The legacy `?token=` query
+//! parameter is NOT accepted (S11-312). Validation happens BEFORE the upgrade (401
 //! otherwise). Session-scoped events are delivered only to the session's
 //! **owner**, a workspace **Admin** of the session's workspace, or root — and
 //! only after the workspace-Viewer membership gate passes (so a non-member
@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
@@ -35,21 +35,15 @@ use crate::state::ServerCtx;
 /// on a successful upgrade so the handshake completes.
 pub(crate) const BEARER_SUBPROTOCOL: &str = "otto-bearer";
 
-#[derive(Debug, Deserialize)]
-pub struct TokenQuery {
-    token: Option<String>,
-}
-
 pub async fn events_ws(
     ws: WebSocketUpgrade,
-    Query(query): Query<TokenQuery>,
     headers: HeaderMap,
     State(ctx): State<ServerCtx>,
 ) -> Response {
-    // Prefer the bearer subprotocol; fall back to the legacy `?token=` query.
-    let subprotocol_token = token_from_subprotocol(&headers);
-    let used_subprotocol = subprotocol_token.is_some();
-    let Some(token) = subprotocol_token.or(query.token) else {
+    // The bearer travels ONLY in the `otto-bearer` subprotocol. The legacy
+    // `?token=` query fallback is gone (S11-312): a URL lands in proxy/tunnel
+    // access logs, and every Otto client uses the subprotocol.
+    let Some(token) = token_from_subprotocol(&headers) else {
         return ApiError(Error::Unauthorized).into_response();
     };
     match ctx.authenticator.authenticate(&token).await {
@@ -85,14 +79,9 @@ pub async fn events_ws(
             let ws = ws
                 .max_message_size(crate::ui_bridge::MAX_CLIENT_FRAME)
                 .max_frame_size(crate::ui_bridge::MAX_CLIENT_FRAME);
-            // Echo `otto-bearer` only when the client used the subprotocol path,
-            // otherwise the browser would reject an unsolicited subprotocol.
-            if used_subprotocol {
-                ws.protocols([BEARER_SUBPROTOCOL])
-                    .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
-            } else {
-                ws.on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
-            }
+            // Echo `otto-bearer` so the browser completes the handshake.
+            ws.protocols([BEARER_SUBPROTOCOL])
+                .on_upgrade(move |socket| handle_events(socket, ctx, user, ui_capable, token))
         }
         Err(_) => ApiError(Error::Unauthorized).into_response(),
     }

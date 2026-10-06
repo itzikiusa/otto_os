@@ -267,6 +267,40 @@ esac
         self.assertIn("previous daemon was NOT verified", out)
         self.assertNotIn("previous daemon verified", out)
 
+    def test_shell_only_rollback_accepts_the_unchanged_daemon_pid(self):
+        # S10-302: the failed build's ottod is byte-identical to the previous
+        # one, so no supervisor restarts it — the same pid is the RIGHT daemon.
+        def prepare(root):
+            for path in ("built/Otto.app/Contents/MacOS/ottod", "Library/Application Support/Otto/bin/ottod"):
+                (root / path).write_text("previous daemon")
+
+        result = self.run_finish("placeholder_shell_only_same_pid", previous_app=True, prepare=prepare)
+        out = result.stdout + result.stderr
+        self.assertNotEqual(result.returncode, 0, out)
+        self.assertIn("previous daemon verified (pid 333, daemon binary unchanged by this deploy", out)
+        self.assertNotIn("NOT verified", out)
+
+    def test_present_app_with_one_aside_copy_promotes_it(self):
+        # S10-303: killed after the swap but before verify — Otto.app is the
+        # unverified build, .old.<pid> the last known-good app: kept, not deleted.
+        seen = {}
+
+        def prepare(root):
+            old = root / "installed/.Otto.app.old.4242/Contents/MacOS"
+            old.mkdir(parents=True)
+            (old / "otto-desktop").write_text("known-good desktop")
+
+        def inspect(root, result):
+            kept = root / "installed/.Otto.app.previous/Contents/MacOS/otto-desktop"
+            seen["kept"] = kept.read_text() if kept.exists() else None
+            seen["old"] = (root / "installed/.Otto.app.old.4242").exists()
+
+        # A failing verify keeps .previous untouched by keep_previous_app.
+        result = self.run_finish("placeholder", previous_app=True, prepare=prepare, inspect=inspect)
+        self.assertIn("promoted", result.stdout, result.stdout + result.stderr)
+        self.assertEqual(seen["kept"], "known-good desktop")
+        self.assertFalse(seen["old"])
+
     def test_killed_mid_swap_restores_the_aside_app_first(self):
         # S10-09: the finish job died between the two renames — no Otto.app,
         # the previous app at .Otto.app.old.<pid>.
@@ -430,7 +464,27 @@ class LiveSessionCounts(unittest.TestCase):
             {"kind": "agent", "provider": "claude", "status": "exited", "meta": {}},
         ]
         result = self.classify(rows)
-        self.assertEqual(result.stdout.split(), ["5", "2", "1", "2"], result.stderr)
+        self.assertEqual(result.stdout.split(), ["5", "2", "1", "2", "0"], result.stderr)
+
+    def test_unheld_user_sessions_are_counted_as_lost(self):
+        # S10-307: with persistence off (or no holder) the daemon sends
+        # held=false — those user sessions die with the restart.
+        rows = [
+            {"kind": "agent", "provider": "shell", "status": "running", "meta": {}, "held": True},
+            {"kind": "agent", "provider": "claude", "status": "idle", "meta": {}, "held": False},
+            {"kind": "agent", "provider": "codex", "status": "working", "meta": {}, "held": False},
+        ]
+        result = self.classify(rows)
+        self.assertEqual(result.stdout.split(), ["3", "1", "0", "0", "2"], result.stderr)
+
+    def test_confirm_reports_unheld_sessions_as_terminated(self):
+        body = (
+            "live_session_counts() { echo '2 0 0 0 2'; }\n"
+            "ASSUME_YES=1 confirm_session_loss"
+        )
+        result = run_snippet(body)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 user agent/shell session(s) are NOT in a PTY holder", result.stdout)
 
     def test_background_list_matches_otto_core(self):
         domain = (REPO / "crates/otto-core/src/domain.rs").read_text()

@@ -54,6 +54,14 @@ pub(crate) fn indexable_rel(root: &Path, abs: &Path) -> Option<String> {
         }
         parts.push(s);
     }
+    // Same protected-dir filter as the walk (S7-303).
+    {
+        use otto_core::secret_paths as sp;
+        let set = sp::protected_set();
+        if !set.in_protected_dir(root) && (set.in_protected_dir(abs) || sp::is_denied_file(abs)) {
+            return None;
+        }
+    }
     (!parts.is_empty()).then(|| parts.join("/"))
 }
 

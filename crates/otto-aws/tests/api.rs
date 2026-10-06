@@ -978,11 +978,14 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
 
 /// A peek is a `receive-message`: it never hides messages (visibility timeout
 /// pinned to 0 whatever the body asks) but bumps their receive count, so it is
-/// gated at Edit tier on its own `sqs_receive` operation (S6-12) — a View-tier
-/// user holding `sqs_receive` is refused, and `sqs_send` (publishing) is
-/// neither needed nor sufficient.
+/// gated on its own `sqs_receive` operation (S6-12) — `sqs_send` (publishing)
+/// is neither needed nor sufficient. The account here is Enforced, so the
+/// per-resource grant decides: a global-View user granted `sqs_receive`
+/// peeks (S6-303 — the handler used to add a global `aws_sqs:Edit` check the
+/// guard deliberately lowers for Enforced accounts). Legacy accounts get Edit
+/// from the policy table (`policy_decisions.txt`).
 #[tokio::test]
-async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
+async fn sqs_peek_needs_receive_grant_and_pins_visibility_timeout_to_zero() {
     let ctx = TestCtx::new().await;
     let root = seed_user(&ctx.pool, "root", true).await;
     let (_, a, _) = call(
@@ -1001,21 +1004,6 @@ async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
         "visibility_timeout": 43200
     });
 
-    let viewer = seed_user(&ctx.pool, "sqs-viewer", false).await;
-    grant(&ctx.pool, &viewer, "aws", "view").await;
-    grant(&ctx.pool, &viewer, "aws_sqs", "view").await;
-    allow_account(&ctx, &root, &viewer, &id, "discover").await;
-    allow_account(&ctx, &root, &viewer, &id, "sqs_view").await;
-    allow_account(&ctx, &root, &viewer, &id, "sqs_receive").await;
-    let (st, e, _) = call(&ctx, &viewer, "POST", &uri, Some(body.clone())).await;
-    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
-    assert!(
-        !calls_log()
-            .lines()
-            .any(|l| l.contains("PROFILE=sqs-peek-profile") && l.contains("receive-message")),
-        "a refused peek must not reach the CLI"
-    );
-
     // `sqs_send` does not stand in for `sqs_receive`, even at Edit tier.
     let sender = seed_user(&ctx.pool, "sqs-sender", false).await;
     grant(&ctx.pool, &sender, "aws", "view").await;
@@ -1025,13 +1013,21 @@ async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
     allow_account(&ctx, &root, &sender, &id, "sqs_send").await;
     let (st, e, _) = call(&ctx, &sender, "POST", &uri, Some(body.clone())).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+    assert!(
+        !calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=sqs-peek-profile") && l.contains("receive-message")),
+        "a refused peek must not reach the CLI"
+    );
 
-    // Edit tier + the `sqs_receive` grant peeks — no publish right needed.
-    sqlx::query("UPDATE user_feature_grants SET capability = 'edit' WHERE user_id = ? AND feature = 'aws_sqs'")
-        .bind(&viewer.id)
-        .execute(&ctx.pool)
-        .await
-        .expect("raise grant");
+    // Global View + the account's `sqs_receive` grant peeks — no publish
+    // right and no global Edit needed on an Enforced account.
+    let viewer = seed_user(&ctx.pool, "sqs-viewer", false).await;
+    grant(&ctx.pool, &viewer, "aws", "view").await;
+    grant(&ctx.pool, &viewer, "aws_sqs", "view").await;
+    allow_account(&ctx, &root, &viewer, &id, "discover").await;
+    allow_account(&ctx, &root, &viewer, &id, "sqs_view").await;
+    allow_account(&ctx, &root, &viewer, &id, "sqs_receive").await;
     let (st, r, _) = call(&ctx, &viewer, "POST", &uri, Some(body)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
     assert_eq!(r["messages"][0]["message_id"], "m-1");

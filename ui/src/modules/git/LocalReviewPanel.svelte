@@ -24,6 +24,8 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { reviewBus } from '../../lib/events.svelte';
   import { appLive } from '../../lib/live';
+  import { routeReviewId } from './deepLink';
+  import { runWithOtto } from '../../lib/stores/runWithOtto.svelte';
 
   interface Props {
     repoId: string;
@@ -74,6 +76,42 @@
   // history[0]; start/poll/retry all write history[0]), so drop it; on a clean
   // slate (review === null) every stored run is "past".
   const pastRuns = $derived(review ? history.slice(1) : history);
+
+  // ---------------------------------------------------------------------------
+  // Deep link to ONE review (S20-301): `#/git/<repo>/review/<review_id>` —
+  // Run with Otto's "Open findings". That review is shown read-only on its own
+  // (findings board with severities, the run it came from), instead of the
+  // clean-slate panel where the run's findings hid in "Past reviews".
+  // ---------------------------------------------------------------------------
+  const focusId = $derived(routeReviewId(router.parts, repoId));
+  let pinned: Review | null = $state(null);
+  let pinnedLoading = $state(false);
+  let pinnedError = $state<string | null>(null);
+  /** The run that produced the linked review, when the run list knows it. */
+  const pinnedRun = $derived(focusId ? (runWithOtto.list.find((r) => r.review_id === focusId) ?? null) : null);
+  $effect(() => {
+    const id = focusId;
+    pinned = null;
+    pinnedError = null;
+    if (id) void loadPinned(id);
+  });
+
+  async function loadPinned(id: string): Promise<void> {
+    pinnedLoading = true;
+    try {
+      const r = await api.get<Review>(`/reviews/${encodeURIComponent(id)}`);
+      if (focusId === id) pinned = r;
+    } catch (e) {
+      if (focusId === id) pinnedError = e instanceof ApiError && e.status === 404 ? 'This review no longer exists.' : loadErrorText(e);
+    } finally {
+      if (focusId === id) pinnedLoading = false;
+    }
+  }
+
+  /** Leave the linked review for the normal local-review panel. */
+  function closePinned(): void {
+    router.go(`git/${encodeURIComponent(repoId)}/review`);
+  }
 
   // Reviewer providers from the live registry (built-ins + custom, e.g. grok).
   const PROVIDER_OPTIONS = $derived(agentProviders());
@@ -362,6 +400,40 @@
 </script>
 
 <div class="lrp">
+  {#if focusId}
+    <!-- One linked review, read-only (S20-301). -->
+    <section class="lrp-pinned" data-testid="linked-review" aria-label="Linked review">
+      <header class="lrp-pinned-head">
+        <div class="lrp-pinned-title">
+          <h3>Review findings</h3>
+          <p class="dim">
+            {#if pinnedRun}
+              From run <button type="button" class="link" onclick={() => router.go(`run-with-otto/${encodeURIComponent(pinnedRun.id)}`)}>“{pinnedRun.title}”</button>{pinnedRun.branch ? ` on ${pinnedRun.branch}` : ''} · read-only
+            {:else}
+              A review linked from another page · read-only
+            {/if}
+          </p>
+        </div>
+        <button type="button" class="btn small" onclick={closePinned}>Show local reviews</button>
+      </header>
+      {#if pinnedLoading && !pinned}
+        <div style="padding: 16px"><Skeleton rows={3} height={36} /></div>
+      {:else if pinnedError}
+        <LoadState what="the review" error={pinnedError} empty onretry={() => focusId && void loadPinned(focusId)} />
+      {:else if pinned}
+        <p class="lrp-pinned-meta dim">
+          <StatusBadge status={runStatus(pinned.status)} />
+          <span>{timeAgo(pinned.created_at)}</span>
+          {#if pinned.summary_fallback}<span>· findings ranked mechanically (summarizer unavailable)</span>{/if}
+        </p>
+        {#if pinned.status === 'running'}
+          <p class="dim">This review is still running — findings appear here when it finishes.</p>
+        {:else if ws.currentId}
+          <FindingsBoard reviewId={pinned.id} workspaceId={ws.currentId} />
+        {/if}
+      {/if}
+    </section>
+  {:else}
   <!-- Base selector + run button -->
   <div class="lrp-toolbar">
     <label class="lrp-label" for="lrp-base">Compare to</label>
@@ -559,9 +631,33 @@
       {/if}
     </div>
   {/if}
+  {/if}
 </div>
 
 <style>
+  .lrp-pinned { display: flex; flex-direction: column; gap: 8px; }
+  .lrp-pinned-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .lrp-pinned-title { flex: 1; min-width: 0; }
+  .lrp-pinned-title h3 { margin: 0; font-size: var(--fs-m); }
+  .lrp-pinned-title p { margin: 2px 0 0; font-size: var(--fs-s); overflow-wrap: anywhere; }
+  .lrp-pinned-meta { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--fs-s); }
+  .lrp-pinned .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .lrp-pinned .link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   .lrp-idle-note { margin: 4px 0; color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
   .lrp-idle-note strong { color: var(--text); font-weight: 500; }
   .lrp {

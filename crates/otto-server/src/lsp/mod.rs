@@ -4,7 +4,7 @@
 //! Routes exposed:
 //!   GET  /api/v1/lsp/capabilities              → LspCapabilities (authed)
 //!   POST /api/v1/workspaces/{id}/lsp/install   → Session (Editor role)
-//!   GET  /ws/lsp?lang=&root=&token=            → WebSocket bridge (token auth)
+//!   GET  /ws/lsp?lang=&root=                   → WebSocket bridge (`otto-bearer` subprotocol auth)
 //!
 //! The bridge does NOT spawn a server per socket: sockets attach to the shared
 //! [`pool::LspPool`] (one process per `(lang, root)`, ref-counted, reaped
@@ -207,7 +207,6 @@ struct LspWsState {
 struct LspWsQuery {
     lang: Option<String>,
     root: Option<String>,
-    token: Option<String>,
 }
 
 fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
@@ -218,24 +217,19 @@ fn ws_problem(status: StatusCode, code: &str, message: &str) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// `GET /ws/lsp?lang=<lang>&root=<path>&token=<token>`
+/// `GET /ws/lsp?lang=<lang>&root=<path>` (bearer in `Sec-WebSocket-Protocol`)
 async fn lsp_ws(
     ws: WebSocketUpgrade,
     Query(q): Query<LspWsQuery>,
     State(st): State<LspWsState>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // 1. Token auth before upgrade (mirrors term_ws). The `otto-bearer`
-    //    subprotocol is preferred — it keeps the token out of the URL (and so
-    //    out of trace spans and tunnel/proxy access logs, S11-11); `?token=`
-    //    stays as a fallback for older clients.
-    let subprotocol_token = crate::ws_events::token_from_subprotocol(&headers);
-    let ws = if subprotocol_token.is_some() {
-        ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL])
-    } else {
-        ws
-    };
-    let token = match subprotocol_token.or(q.token) {
+    // 1. Token auth before upgrade (mirrors term_ws). The bearer travels only
+    //    in the `otto-bearer` subprotocol — never the URL, which lands in
+    //    trace spans and tunnel/proxy access logs (S11-11); the legacy
+    //    `?token=` fallback is gone (S11-312).
+    let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
+    let token = match crate::ws_events::token_from_subprotocol(&headers) {
         Some(t) => t,
         None => {
             return ws_problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing token");
@@ -482,7 +476,7 @@ pub fn api_router() -> Router<ServerCtx> {
         .route("/workspaces/{id}/lsp/install", post(install_servers))
 }
 
-/// Root-level WS router (self-authenticates via `?token=`).
+/// Root-level WS router (self-authenticates via the `otto-bearer` subprotocol).
 pub fn ws_router(authenticator: Arc<dyn TokenAuthenticator>, ctx: ServerCtx) -> Router {
     Router::new()
         .route("/ws/lsp", get(lsp_ws))

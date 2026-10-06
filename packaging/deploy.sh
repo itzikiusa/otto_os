@@ -360,7 +360,7 @@ rollback_install() {
     rm -rf "$failed"
     open "$INSTALLED_APP" || true
     if verify_rollback "$failed_pid"; then
-        echo "    ROLLED BACK: previous app relaunched; previous daemon verified (pid $ROLLBACK_PID, healthy)"
+        echo "    ROLLED BACK: previous app relaunched; previous daemon verified (pid $ROLLBACK_PID${ROLLBACK_NOTE}, healthy)"
     else
         echo "    ROLLED BACK: previous app restored, but the previous daemon was NOT verified" \
              "(still the failed build's pid, a different binary, or unhealthy) — check ~/Library/Logs/Otto/ and packaging/README.md#recovery-rolling-back-a-bad-deploy" >&2
@@ -371,17 +371,33 @@ rollback_install() {
 
 # The restored app's supervisor must have put ITS sidecar in place and that
 # daemon must be the one answering: a pid other than the failed build's, at
-# the deployed path, with the restored bundle's bytes, and healthy. Health
-# alone used to pass against the failed daemon before the supervisor booted it out.
+# the deployed path, with the restored bundle's bytes, and healthy — and the
+# restored app itself must be running. Health alone used to pass against the
+# failed daemon before the supervisor booted it out.
+# Exception: when the failed build's daemon is byte-identical to the restored
+# one AND to what ran before the deploy (a desktop-shell-only change), no
+# supervisor ever restarts it — the SAME pid is then the correct daemon.
 ROLLBACK_PID=""
+ROLLBACK_NOTE=""
+PRE_DEPLOY_DAEMON_HASH=""
+daemon_never_changed() {
+    local restored_side="$1" h
+    [[ -n "$PRE_DEPLOY_DAEMON_HASH" && -f "$restored_side" && -f "${side:-}" ]] || return 1
+    h="$(sha256 "$restored_side")"
+    [[ "$h" == "$PRE_DEPLOY_DAEMON_HASH" && "$(sha256 "$side")" == "$h" ]]
+}
 verify_rollback() {
-    local failed_pid="$1" pid restored_side="$INSTALLED_APP/Contents/MacOS/ottod"
+    local failed_pid="$1" pid restored_side="$INSTALLED_APP/Contents/MacOS/ottod" same_ok=0
+    if daemon_never_changed "$restored_side"; then same_ok=1; fi
     for _ in $(seq 1 30); do
         pid="$(daemon_pid)" || pid=""
-        if [[ -n "$pid" && "$pid" != "$failed_pid" && -f "$dep" ]] &&
+        if [[ -n "$pid" && -f "$dep" ]] &&
+            [[ "$pid" != "$failed_pid" || "$same_ok" == 1 ]] &&
             [[ "$(process_path "$pid")" == "$dep" ]] &&
-            cmp -s "$restored_side" "$dep" && health_ok; then
-            ROLLBACK_PID="$pid"; return 0
+            cmp -s "$restored_side" "$dep" && health_ok && app_pid >/dev/null; then
+            ROLLBACK_PID="$pid"
+            [[ "$pid" != "$failed_pid" ]] || ROLLBACK_NOTE=", daemon binary unchanged by this deploy"
+            return 0
         fi
         sleep 2
     done
@@ -401,8 +417,11 @@ finish_cleanup() {
 
 # A finish job SIGKILLed between swap_app's two renames (no EXIT trap) leaves
 # no $INSTALLED_APP and the previous app at .Otto.app.old.<pid>. Put a lone
-# such copy back before anything else, so this run has a real rollback target
-# — and prune .old copies orphaned next to a present app.
+# such copy back before anything else, so this run has a real rollback target.
+# Killed AFTER the swap but before verify / keep_previous_app, the present
+# app is the UNVERIFIED build and the .old copy the last known-good one: the
+# newest such copy is promoted to .Otto.app.previous (it is newer than the
+# kept one), never deleted; only extras are pruned.
 recover_interrupted_swap() {
     local olds=() o
     for o in "$(apps_dir)"/.Otto.app.old.*; do [[ -d "$o" ]] && olds+=("$o"); done
@@ -417,7 +436,18 @@ recover_interrupted_swap() {
         fail_verify "$INSTALLED_APP is missing and several .Otto.app.old.* copies exist — mv the right one back by hand"
         return 1
     fi
+    local newest keep
+    newest="$(ls -1dt "${olds[@]}" | head -1)"
+    keep="$(apps_dir)/.Otto.app.previous"
+    rm -rf "$keep"
+    if [[ ! -e "$keep" ]] && mv "$newest" "$keep"; then
+        echo "    promoted $newest to $keep (an earlier deploy was killed before verifying;" \
+             "$INSTALLED_APP may be that unverified build)"
+    else
+        echo "    WARN: could not promote $newest to $keep — left in place" >&2
+    fi
     for o in "${olds[@]}"; do
+        [[ "$o" != "$newest" ]] || continue
         rm -rf "$o" && echo "    pruned orphaned $o"
     done
 }
@@ -440,6 +470,7 @@ dep="$(deployed_daemon_path)"
 side="$APP/Contents/MacOS/ottod"
 old_hash=""
 [[ ! -f "$dep" ]] || old_hash="$(sha256 "$dep")"
+PRE_DEPLOY_DAEMON_HASH="$old_hash"
 echo "==> 6/7  Stage, install & relaunch"
 # Sweep stale siblings a killed earlier run may have left (never .previous).
 rm -rf "$(apps_dir)"/.Otto.app.staging.* "$(apps_dir)"/.Otto.app.failed.* 2>/dev/null || true
@@ -557,7 +588,12 @@ lock_release() {
 # `Session::is_foreground_agent`; BACKGROUND_SOURCES must match
 # otto-core BACKGROUND_SESSION_SOURCES (a test pins it). Read-only GET; needs
 # a token (OTTO_API_TOKEN, else the session's OTTO_MCP_TOKEN) — without one
-# the count is unknown. Prints "<total> <held> <connections> <background>".
+# the count is unknown. Survival also needs the session to actually run in a
+# holder with persistence on: the daemon reports that per row as `held`
+# (holder present AND `session_persistence` on). A user session with
+# `held: false` dies too ("unheld"); a daemon too old to send `held` is
+# counted as surviving, as before.
+# Prints "<total> <held> <connections> <background> <unheld>".
 BACKGROUND_SOURCES="channel review review_summarizer skilleval skillreview product-analysis product_refine swarm canvas_assist canvas_assist_preview mockup_assist db_assist workflow vault-docs vault-docs-review pr-draft commit-draft insights run_with_otto goal_loop discovery_chat scheduled_task finding assistant design_assist browser_summarize"
 classify_live_sessions() {
     BACKGROUND_SOURCES="$BACKGROUND_SOURCES" /usr/bin/python3 -c '
@@ -565,7 +601,7 @@ import json, os, sys
 background = set(os.environ["BACKGROUND_SOURCES"].split())
 rows = json.load(sys.stdin)
 live = [r for r in rows if r.get("status") in ("running", "working", "idle")]
-held = conn = bg = 0
+held = conn = bg = unheld = 0
 for r in live:
     meta = r.get("meta") or {}
     if r.get("kind") == "connection":
@@ -574,9 +610,11 @@ for r in live:
         bg += 1
     elif ((meta.get("work") or {}).get("origin") or "manual") != "manual":
         bg += 1
+    elif r.get("held", True) is False:
+        unheld += 1
     else:
         held += 1
-print(len(live), held, conn, bg)
+print(len(live), held, conn, bg, unheld)
 '
 }
 live_session_counts() {
@@ -587,16 +625,21 @@ live_session_counts() {
     printf '%s' "$body" | classify_live_sessions 2>/dev/null
 }
 confirm_session_loss() {
-    local counts total held conn bg answer
+    local counts total held conn bg unheld answer
     if counts="$(live_session_counts)" && [[ -n "$counts" ]]; then
-        read -r total held conn bg <<< "$counts"
+        read -r total held conn bg unheld <<< "$counts"
+        unheld="${unheld:-0}"
         echo "==> This deploy restarts the daemon: $total live session(s) visible to this token."
         echo "    $held user agent/shell session(s) survive in PTY holders;" \
              "$conn connection terminal(s) (ssh/db/k8s exec) and $bg background/workflow agent(s) are terminated."
-        [[ $((conn + bg)) -gt 0 ]] || return 0
+        [[ "$unheld" == 0 ]] ||
+            echo "    $unheld user agent/shell session(s) are NOT in a PTY holder (session persistence off," \
+                 "or started before it was on) and are terminated too."
+        [[ $((conn + bg + unheld)) -gt 0 ]] || return 0
     else
         echo "==> This deploy restarts the daemon (live session count unavailable — no token or daemon down)."
-        echo "    User agent and shell sessions survive in PTY holders; connection terminals (ssh/db/k8s exec)" \
+        echo "    User agent and shell sessions survive in PTY holders (when session persistence is on);" \
+             "connection terminals (ssh/db/k8s exec)" \
              "and background/workflow agents are terminated."
     fi
     [[ "$ASSUME_YES" != 1 && -t 0 ]] || return 0

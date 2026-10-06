@@ -387,6 +387,13 @@ impl JiraClient {
     /// empty page), capped at [`PROJECT_PAGES_MAX`] pages — a single request
     /// used to silently truncate instances with more than 100 projects.
     pub async fn list_projects(&self) -> Result<Vec<IssueProject>> {
+        Ok(self.list_projects_paged().await?.0)
+    }
+
+    /// [`Self::list_projects`] plus whether the walk stopped at
+    /// [`PROJECT_PAGES_MAX`] (`true` = later projects exist but are not
+    /// shown — the picker says so).
+    pub async fn list_projects_paged(&self) -> Result<(Vec<IssueProject>, bool)> {
         const PAGE: usize = 100;
         let search_url = format!("{}/rest/api/3/project/search", self.base_url);
         let mut all: Vec<serde_json::Value> = Vec::new();
@@ -478,7 +485,7 @@ impl JiraClient {
                 results.push(IssueProject { key, name });
             }
         }
-        Ok(results)
+        Ok((results, !complete))
     }
 
     /// Search for issues. Uses `/rest/api/3/search/jql` first; falls back to
@@ -3461,6 +3468,30 @@ mod tests {
             .unwrap();
         assert_eq!(projects.len(), 230, "no silent truncation at 100");
         assert_eq!(projects[229].key, "P229");
+    }
+
+    /// S5-22: a walk that hits the page cap reports `truncated`.
+    #[tokio::test]
+    async fn list_projects_reports_truncation_at_the_cap() {
+        use axum::extract::Query;
+        use std::collections::HashMap;
+        let router = axum::Router::new().route(
+            "/rest/api/3/project/search",
+            axum::routing::get(|Query(q): Query<HashMap<String, String>>| async move {
+                let start: usize = q.get("startAt").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let values: Vec<_> = (start..start + 100)
+                    .map(|i| serde_json::json!({"key": format!("P{i}"), "name": format!("p{i}")}))
+                    .collect();
+                axum::Json(serde_json::json!({"values": values, "startAt": start, "isLast": false}))
+            }),
+        );
+        let base = fixture(router).await;
+        let (projects, truncated) = JiraClient::new(&base, "e", "t")
+            .list_projects_paged()
+            .await
+            .unwrap();
+        assert!(truncated);
+        assert_eq!(projects.len(), 100 * PROJECT_PAGES_MAX);
     }
 
     #[tokio::test]

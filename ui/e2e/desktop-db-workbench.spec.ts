@@ -41,7 +41,7 @@ test.beforeEach(async ({ page }, testInfo) => {
 /** Open a connection from the sidebar picker. Opening the first connection flips
  *  the sidebar to the schema view, so re-show the "Connections" tab first. */
 async function openConnFromList(page: Page, name: string): Promise<void> {
-  const connTab = page.locator('.side-switch .ss', { hasText: 'Connections' });
+  const connTab = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' });
   if (await connTab.first().isVisible().catch(() => false)) await connTab.first().click();
   const c = page.locator('.conn-list .conn-name', { hasText: name });
   await expect(c.first()).toBeVisible({ timeout: 30_000 });

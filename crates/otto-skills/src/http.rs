@@ -65,8 +65,10 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Installs into the shared Otto library are root-only.
 fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
-    if user.0.is_root {
+    if otto_core::auth::root_authority(&user.0) {
         Ok(())
+    } else if user.0.is_root {
+        Err(otto_core::auth::root_refusal().into())
     } else {
         Err(Error::Forbidden("installing skills requires root".into()).into())
     }
@@ -101,6 +103,10 @@ pub struct InstallResult {
     pub installed: bool,
     pub backed_up: bool,
     pub backup_path: Option<String>,
+    /// Provider skill dirs (`~/.claude/skills`, …) left untouched because they
+    /// already hold a user-owned skill of this name (S7-304).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_owned: Vec<String>,
 }
 
 /// Result of a bulk install (all bundled skills, or one category).
@@ -113,6 +119,10 @@ pub struct InstallAllResult {
     pub skipped: Vec<String>,
     /// Skills whose install failed; the rest of the batch still ran.
     pub failed: Vec<InstallFailure>,
+    /// `<provider skills dir>/<name>` entries left untouched because a
+    /// user-owned skill of that name already lives there (S7-304).
+    #[serde(default)]
+    pub user_owned: Vec<String>,
 }
 
 /// One skill a bulk install could not install.
@@ -290,6 +300,7 @@ fn install_many(
         backed_up: Vec::new(),
         skipped: Vec::new(),
         failed: Vec::new(),
+        user_owned: Vec::new(),
     };
     for b in list_bundled() {
         if category.is_some_and(|c| b.category != c) {
@@ -308,6 +319,7 @@ fn install_many(
         }
         match install_one(library, &b.name, backup) {
             Ok(r) => {
+                out.user_owned.extend(r.user_owned.iter().cloned());
                 if r.installed {
                     out.installed.push(r.name.clone());
                 }
@@ -341,6 +353,7 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
             installed: false,
             backed_up: false,
             backup_path: None,
+            user_owned: Vec::new(),
         });
     };
     let installed_dir = library.root.join("skills").join(name);
@@ -366,9 +379,14 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
     // ~/.gemini/skills) so the CLIs discover it globally — not just inside Otto's
     // per-session bundle. Clean-overwrite + per-dir manifest, so this doubles as
     // the update path. Skipped when `name` isn't a bundled skill (installed=false).
+    // A provider dir already holding a user-owned `<name>` is left alone.
+    let mut user_owned = Vec::new();
     if installed {
-        user_skills::install(name, &installed_dir)
-            .map_err(|e| Error::Internal(format!("materialize user-level skill '{name}': {e}")))?;
+        user_owned = user_skills::install(name, &installed_dir)
+            .map_err(|e| Error::Internal(format!("materialize user-level skill '{name}': {e}")))?
+            .into_iter()
+            .map(|d| d.join(name).to_string_lossy().into_owned())
+            .collect();
     }
 
     Ok(InstallResult {
@@ -376,6 +394,7 @@ fn install_one(library: &Library, name: &str, backup: bool) -> Result<InstallRes
         installed,
         backed_up: backup_path.is_some(),
         backup_path,
+        user_owned,
     })
 }
 

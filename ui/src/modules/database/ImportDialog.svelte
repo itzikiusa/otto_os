@@ -14,9 +14,11 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { postNdjsonStream } from '../../lib/api/client';
   import type { ImportFormat, ImportReq, ImportResult } from '../../lib/api/types';
+  import { lsGet, lsSet } from '../../lib/storage';
 
   // Format select — the four import formats (the mirror of the export formats).
   const IMPORT_FORMATS: { value: ImportFormat; label: string }[] = [
@@ -30,11 +32,11 @@
   const LS_FORMAT = 'otto_db_import_format';
   const LS_DIR = 'otto_db_import_dir';
   function loadFormat(): ImportFormat {
-    const v = (typeof localStorage !== 'undefined' && localStorage.getItem(LS_FORMAT)) || 'csv';
+    const v = lsGet(LS_FORMAT) || 'csv';
     return IMPORT_FORMATS.some((f) => f.value === v) ? (v as ImportFormat) : 'csv';
   }
   function loadDir(): string {
-    return (typeof localStorage !== 'undefined' && localStorage.getItem(LS_DIR)) || '~/Downloads';
+    return lsGet(LS_DIR) || '~/Downloads';
   }
 
   let format = $state<ImportFormat>(loadFormat());
@@ -48,7 +50,8 @@
   // In-flight stream controller — the footer Cancel aborts it while importing.
   let importAbort: AbortController | null = null;
 
-  const canImport = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
+  // Reading a daemon-host file is the host owner's power: root only (S6-302).
+  const canImport = $derived(auth.isRoot && !!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   const connName = $derived(database.selectedConn?.name ?? 'this connection');
 
@@ -134,11 +137,11 @@
         return;
       }
       if (res.done) {
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(LS_FORMAT, importFormat);
-          const dir = path.replace(/\/[^/]*$/, '');
-          if (dir) localStorage.setItem(LS_DIR, dir);
-        }
+        // Guarded: a blocked storage write must not turn a finished import
+        // into "Couldn’t import" (and skip ondone / onclose).
+        lsSet(LS_FORMAT, importFormat);
+        const dir = path.replace(/\/[^/]*$/, '');
+        if (dir) lsSet(LS_DIR, dir);
         const rows = res.rows ?? 0;
         const batches = res.batches ?? 0;
         toasts.success(
@@ -188,6 +191,12 @@
       <strong>batched INSERTs</strong>, through the same write guard as a query — so a Prod/read-only
       connection asks you to type its name first. v1 supports SQL engines (MySQL/ClickHouse).
     </p>
+    {#if !auth.isRoot}
+      <p class="imp-hint" role="note">
+        Only the root user can read files on the Otto host computer. Ask the root user to run this
+        import.
+      </p>
+    {/if}
 
     <label class="imp-row">
       <span class="imp-label">Format</span>

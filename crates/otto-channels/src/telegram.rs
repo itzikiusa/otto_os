@@ -150,6 +150,21 @@ fn inbound_text(msg: &TgMessage) -> Option<String> {
 #[derive(Debug, Deserialize)]
 struct TgUser {
     id: i64,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
+}
+
+impl TgUser {
+    /// `@handle`, else the first name — shown beside a rejected sender.
+    fn display(&self) -> Option<String> {
+        self.username
+            .as_deref()
+            .filter(|u| !u.is_empty())
+            .map(|u| format!("@{u}"))
+            .or_else(|| self.first_name.clone().filter(|n| !n.is_empty()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -667,6 +682,7 @@ pub async fn run(
                         chat,
                         thread,
                         user,
+                        user_name: msg.from.as_ref().and_then(TgUser::display),
                         text: text.clone(),
                         edited: false,
                     };

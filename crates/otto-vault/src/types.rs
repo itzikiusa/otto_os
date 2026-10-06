@@ -37,6 +37,12 @@ pub struct VaultStatus {
     pub unresolved: i64,
     pub tags: i64,
     pub attachments: i64,
+    /// Recovery dirs (`.otto-history`, `.trash`) the vault's git repo ALREADY
+    /// tracks: the `.gitignore` Otto writes only stops NEW files, so private
+    /// note history committed before it keeps being pushed (S7-07). The UI
+    /// shows `git rm --cached -r <dir>`. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_recovery: Vec<String>,
 }
 
 /// One entry of a lazy directory listing (folders first, then notes/files).

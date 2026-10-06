@@ -55,14 +55,14 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid bearer (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid full-account bearer — a share link (verified or OTP-pending) and an MCP token do not count (S8-308) — (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
-| 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
+| 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled; 429 + `Retry-After` when the client (`ip\|user`, or `ip:<ip or IPv6 /64>` across all usernames — 20 failures) or the username is locked, or when the throttle map is saturated and the attempt can't be tracked (fail closed; never the desktop); 503 `busy` + `Retry-After: 1` when the bounded argon2 verifier (4 concurrent, off the async workers) stays saturated for 2 s) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
 | 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
 | 7 | GET /api/v1/users | root | — | `User[]` |
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
-| 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq | User |
+| 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq `{display_name?, password?, disabled?, current_password?}` | User. Changing your OWN password requires `current_password` (400 when missing, 403 when wrong — counted on the login throttle's username key; never 401). Root resetting another user's password does not. |
 | 10 | DELETE /api/v1/users/{id} | root | — | 204 (soft: sets disabled; root user cannot be disabled → 400) |
 | 11 | GET /api/v1/workspaces | member | — | `WorkspaceWithRole[]` (root sees all as admin) |
 | 12 | POST /api/v1/workspaces | member | CreateWorkspaceReq | Workspace (creator becomes admin member) |
@@ -72,11 +72,11 @@ connection library unusable for every non-root account.)
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
 | 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
-| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
+| 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number` + `held: bool` (the live PTY runs in a PTY holder AND `session_persistence` is on, so a daemon restart leaves it running; `false` otherwise). Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
-| 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
-| 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers`) |
-| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id` and the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` are **server-owned**: a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
+| 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session — an agent session's `cwd` may not be `/`, `$HOME` or a parent of it (except a workspace rooted at `$HOME`, at that root), nor Otto's data dir or a non-work-area path inside it (400). An agent session's own credential may only use a `cwd` inside the workspace root, its own folder, or a worktree of the same repo (403) |
+| 19 | GET /api/v1/sessions/{id} | ws viewer + **session owner-or-admin** | — | Session (with transient `live` + `viewers` + `held`) |
+| 20 | PATCH /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | UpdateSessionReq | Session — `meta.ui_control`, `meta.client_id`, `meta.delegated_by`, the nested-agent capture `meta.nested_provider` / `nested_cwd` / `nested_pid` and the confinement keys `meta.read_only` / `project_settings` / `allow_subagents` / `personal_agent` / `account_id` are **server-owned** (create-only): a PATCH that changes any of them is `403` (an unchanged round-trip is accepted and dropped). An agent session's own credential may PATCH, DELETE, restart, resume, kill, archive or unarchive (and bulk-act on) only its own session or a worker whose `meta.delegated_by` is that session — `403` otherwise (bulk: `ok:false`). The grant is written only by `POST /sessions/{id}/ui-control`; session creation strips any client-supplied `meta.ui_control` |
 | 21 | DELETE /api/v1/sessions/{id} | ws editor + **session owner-or-admin** | — | 204 (kills PTY, removes row) |
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, when the provider's active-conversation guard refuses a fork, or when an agent's folder no longer exists (`folder X no longer exists — restore it…`; every resume/restart path refuses rather than recreating it empty — the scratch home and Otto-managed folders under its data dir are still recreated). Resume errors propagate; this never falls back to an unconditional restart. |
@@ -94,9 +94,9 @@ connection library unusable for every non-root account.)
 | 30b | POST /api/v1/workspaces/{id}/connections/import/scan | ws editor | `{source: ImportSource}` | ImportScanResult — locates + reads + parses the chosen tool's default config into `ParsedConnection[]` (ready-to-create Otto params; unsupported engines listed with `supported:false`) |
 | 30c | POST /api/v1/workspaces/{id}/connections/import/create | ws editor | ImportCreateReq | ImportCreateResult `{created: Connection[], updated: Connection[], skipped: string[], failed: {name,error}[]}` — best-effort batch create through the normal create path with `secret:null` (tools keep passwords encrypted/in an OS keychain — unrecoverable; the user adds them later via edit) |
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
-| 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
+| 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount — `api_base_url` (here, on PATCH when changed, and on `/git/accounts/test`) must be an `https` URL with no credentials, query or fragment, whose host is not loopback / link-local (cloud metadata) / unspecified, literally or by DNS — `400` otherwise. Private ranges are allowed (self-hosted forges); plain `http` only when the daemon runs with `OTTO_GIT_ALLOW_HTTP_API=1` |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
-| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret, empty/absent keeps it | GitAccount |
+| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret (the old secret is deleted only after the row points at the new one), empty/absent keeps it | GitAccount |
 | 34 | GET /api/v1/workspaces/{id}/repos | ws viewer | — | `Repo[]` |
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |
@@ -125,7 +125,7 @@ connection library unusable for every non-root account.)
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
-| 58 | PUT /api/v1/settings | root | same shape | same shape |
+| 58 | PUT /api/v1/settings | root | same shape | same shape. `trusted_client_ip_header` (string): which forwarded-client header the Host guard trusts for a loopback request that named a non-loopback DNS host (a tunnel on this Mac) — e.g. `"CF-Connecting-IP"` trusts it for every allowed tunnel host; `""`/`"none"` trusts none; **unset** = `CF-Connecting-IP` only for the `share_base_url` host and never when that host is a Tailscale Funnel `*.ts.net` name. Comma lists use the last entry. |
 
 Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
 `Usage:View`: **root sees every session (`scope:"all"`); a non-root caller sees only the
@@ -233,12 +233,25 @@ Notes:
   a working / streaming / engine-held / open-turn session is reloaded once it goes
   idle (re-checked every 30 s for up to 12 h; skipped if its process was already
   replaced). Restarts are staggered.
-- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", providers:str[]}`
+- `process_sandbox` `{enabled:bool, network:"full"|"loopback"|"none", exempt_providers?:str[], providers?:str[]}`
   — opt-in **OS-level confinement** for spawned agent/shell sessions (macOS Apple
-  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, each
-  agent CLI runs under a Seatbelt profile that denies filesystem **writes** outside
-  the workspace cwd, the resolved git dir (so worktree commits still work), the
-  agent CLIs' own config/cache dirs and temp — while leaving reads global. Otto's
+  Seatbelt / `sandbox-exec`; no-op elsewhere). Default **off**. When enabled, EVERY
+  agent session is confined — user-added providers included — except providers a
+  person lists in `exempt_providers`; the legacy `providers` list still exempts the
+  built-in `claude`/`codex`/`agy`/`shell` it leaves out, but never a provider it
+  doesn't know. Each confined agent CLI runs under a Seatbelt profile that denies
+  filesystem **writes** outside the workspace cwd (never one at or above `$HOME`),
+  the resolved git dir (so worktree commits still work), the agent CLIs' own
+  STATE dirs (an allow-list: `~/.claude/{projects,todos,statsig,sessions,…}`,
+  `~/.codex/{sessions,log,sqlite,tmp,…}`, `~/.gemini/{antigravity-cli,tmp,history}`
+  plus the top-level state files of those homes, never a script) and temp — while
+  leaving reads global. The shared package caches (`~/.npm`, `~/.cache`,
+  `~/Library/Caches`) and `~/.otto` are NOT writable; the session's
+  `npm_config_cache` / `UV_CACHE_DIR` / `XDG_CACHE_HOME` / `PRE_COMMIT_HOME` /
+  `PIP_CACHE_DIR` / `GOCACHE` / `YARN_CACHE_FOLDER` / `BUN_INSTALL_CACHE_DIR` point
+  at a private `<tmp>/otto-agent-cache/<session id>/` instead (a codex session's
+  shadow `CODEX_HOME` in its context bundle is re-opened, minus its config, skills
+  and instruction files). Otto's
   own data dir is write-denied even under those roots (only its agent work areas —
   `workflow-runs`, `workflow-context`, `scheduled`, `personal`, `goal-loops`,
   `otto-runs`, `swarm`, `insights`, `db_assist`, `canvas`, `browser_summarize`,
@@ -250,14 +263,21 @@ Notes:
   is the daemon's configured one — `$OTTO_DATA_DIR`-aware). Files that make
   unsandboxed programs run agent-chosen code are write-denied
   (`~/.claude.json`, `~/.claude/settings.json`, `~/.claude/settings.local.json`,
-  `~/.claude/{plugins,hooks,agents,commands}/`, `~/.codex/config.toml`,
-  `~/.gemini/settings.json`, `~/.config/git/`, `~/.config/gh/`; the same claude/codex
-  files inside the session's own account home; a repo's `.git/config`,
+  `~/.claude/CLAUDE.md`, `~/.claude/{plugins,hooks,agents,commands,skills,output-styles}/`,
+  `~/.codex/{config.toml,AGENTS.md,AGENTS.override.md}`,
+  `~/.codex/{prompts,skills,plugins,rules,packages}/`, `~/.gemini/{settings.json,GEMINI.md}`,
+  `~/.gemini/{extensions,skills}/`, `~/.otto/context/`, `~/.config/git/`, `~/.config/gh/`,
+  any `*.sh`/`*.py`/`*.js`… directly in a CLI home; the same claude/codex
+  files + `CLAUDE.md`/`AGENTS.md`/`skills/`/`prompts/`/`rules/` inside the session's own account home; a repo's `.git/config`,
   `config.worktree`, `commondir`, `hooks/` and `worktrees/*/gitdir`); of `~/.config`
   only `configstore/` is writable. A `meta.read_only` session (always confined)
   additionally cannot write its own folder's `.claude/settings*.json`,
-  `.claude/{hooks,agents,commands}/` or `.mcp.json`. A scheduled `shell` task runs
-  under the same profile when `providers` covers `shell`. `/bin/launchctl` cannot be executed,
+  `.claude/{hooks,agents,commands,skills,output-styles}/`, `.mcp.json`, `CLAUDE.md`,
+  `CLAUDE.local.md`, `AGENTS.md`, `GEMINI.md`, `.agents/skills/`, `.codex/` or `.gemini/`,
+  nor claude's per-project auto-memory (`~/.claude/projects/*/memory/`), and cannot
+  even READ `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.netrc`,
+  `~/.git-credentials`, `~/.docker/config.json`, `~/.config/gcloud` or `~/.azure`. A scheduled `shell` task runs
+  under the same profile unless `shell` is exempt. `/bin/launchctl` cannot be executed,
   and mach lookups are limited to an allow-list (directory/logging/prefs/fsevents,
   network configuration + DNS, TLS trust and the keychain) — LaunchServices and
   AppleEvents are unreachable, so `open -a …` can't start an unsandboxed process. `network`
@@ -334,7 +354,7 @@ workspace from the row.
 | — | POST /api/v1/ingest/swarm/product | session token | `{title?,body_md}` | 204 |
 | — | POST /api/v1/ingest/swarm/mockup | session token | `{title,format,content}` | 204 |
 | — | POST /api/v1/ingest/swarm/discovery-report | session token | `{report_md}` | 204 |
-| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | — | `{ok:true}` |
+| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | `?kind=plan\|recruit` (optional; absent stops both, unknown → 400) | `{ok:true, stopped:bool}` — `stopped` false when no such turn was running |
 
 Notes:
 - `config.max_parallel_sessions` is the per-swarm concurrency cap (the Coordinator's
@@ -381,7 +401,8 @@ Notes:
   supplies a story/run id); if no discovery run resolves, nothing is written. Fire-and-forget
   (always 204).
 - `POST /workspaces/{id}/swarm/swarms/{sid}/agent-stop` (ws editor) stops a single running
-  swarm-agent turn for `{sid}` without pausing the whole swarm; returns `{ok:true}`.
+  swarm-agent turn for `{sid}` without pausing the whole swarm; `?kind=plan|recruit` stops only
+  that turn (a concurrent recruit survives "Stop planning"); returns `{ok:true, stopped}`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
   that decomposes it into subtasks for the reports.
 - `SwarmRun.tokens_input` / `tokens_output` / `cost_usd` are backfilled on the run's
@@ -416,7 +437,24 @@ therefore also reads a **credential class** for each `(method, route)`
   and the approval decisions `/mcp/approvals/{id}/decide`,
   `/workflow-runs/{id}/approve`, `/runs/{id}/approve`,
   `/database-changes/{id}/approve`,
-  `/workspaces/{wid}/workgraph/approvals/{aid}/decide`.
+  `/workspaces/{wid}/workgraph/approvals/{aid}/decide` — and, structurally,
+  EVERY write whose last segment is `approve` / `decide` / `reject` /
+  `rollback` except the Outward `/repos/{id}/prs/{number}/approve`
+  (S11-308, S8-304: e.g. `/improvement/edits/{eid}/{approve,reject,rollback}`,
+  `/findings/{id}/approve`, `/pr-review-comments/{cid}/approve`,
+  `/product/testcase-runs/{rid}/approve`, `/design/artifacts/{id}/approve`,
+  `/database-changes/{id}/reject`). Also the MCP control-plane registry
+  (`/workspaces/{wid}/mcp/servers`, `/mcp/servers/{id}`,
+  `/mcp/tools/{tool_id}`, `/workspaces/{wid}/mcp/allowlist`,
+  `/mcp/otto-server/enabled` — S11-301), the kubeconfig registry
+  (`/k8s/clusters`, `/k8s/clusters/{id}`, `/k8s/clusters/import`,
+  `/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig` — S11-303),
+  channel bridges (`/workspaces/{id}/integrations`,
+  `/workspaces/{id}/integrations/{channel}`, `…/seed-from-loom`; the
+  `…/{channel}/test` send stays Outward — S11-306),
+  `/workspaces/{id}/self-improvement`, `/email-sender*`,
+  `/notifications/settings`, `DELETE /auth/tokens/{id}`,
+  `/auth/shares/revoke-all` and `/skill-reviews/{id}/apply` (S8-304).
 - **`Secret`** — plaintext credentials or credential minting (any method):
   `/browser/credentials/{id}/reveal`, `/state/connections/export`,
   `/state/archive`, `/admin/secrets/*`; writes to `/auth/tokens`,
@@ -433,6 +471,33 @@ On an `Admin` or `Secret` route every credential that is not a person's own
 link) gets `403`. The handlers repeat the check (`auth::require_human`) next
 to `require_root` as a second layer.
 
+**Root authority is withheld from agent credentials on writes by default**
+(S11 "flip the default"). On every non-GET request from a non-human
+credential, the feature guard publishes an
+`otto_core::auth::RequestCredential { agent, root_withheld }` task-local
+around the handler; `root_withheld` is true unless the route is on the
+reviewed allow-list `otto_server::policy::agent_root_write_allowed` (today:
+exactly the `Outward` routes). Every root-gated write helper —
+`require_root`, `require_setup_authority` (AWS / k8s) and
+`otto_core::auth::root_authority` — then answers `403` ("an agent session's
+credential cannot use root authority here"), so a new `require_root` write
+route is closed to agents without being tagged. `rbac_matrix::
+every_write_route_refuses_agent_root_authority_unless_allow_listed` replays
+every registered route × POST/PUT/PATCH/DELETE with both agent credentials
+to pin this.
+
+Body-flag confirmations are a person's (S6-304): `confirm: true` on
+`POST /aws/accounts/{id}/athena/query` (prod DDL/DML) and `confirm_write:
+true` on the database query / multi-run / import routes are refused with
+`403` when the request carries an agent credential (reads are unaffected).
+
+Workflows (S3-301): an agent credential gets `403` on
+`PATCH /workflows/{id}` with a `graph`, on
+`POST /workflows/{id}/versions/{v}/restore`, on `POST /workflows/{id}/run`
+whose `start_node` has a `human_approval` node upstream, and on
+`POST /workflow-runs/{id}/retry-node` when an upstream `human_approval` node
+did not succeed in that run.
+
 Agent session tokens are also confined on the terminal's REST twins:
 `POST /sessions/{id}/input` reaches only the caller's own session (as
 `/ws/term` already did), and `POST /sessions/{id}/message` reaches only the
@@ -446,7 +511,8 @@ change it). Anything else → `403`.
 Long-lived personal access tokens for driving the daemon over HTTP from scripts/CLIs
 (skills, CI, automation). They are issued per-user and flow through the same bearer-auth
 path as login tokens — use as `Authorization: Bearer <token>` on any route, or as
-`?token=<token>` on the WebSocket endpoints. The raw secret is shown exactly once at
+`Sec-WebSocket-Protocol: otto-bearer, <token>` on the WebSocket endpoints (`?token=` is
+refused). The raw secret is shown exactly once at
 creation (only its SHA-256 hash is stored); `kind='api'` tokens have a ~10-year fixed
 lifetime whose expiry is never slid (unlike the 30-day sliding login token). A token is
 scoped to its owner's roles: a token created by a root user has root; otherwise it has
@@ -459,6 +525,7 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 | 88 | GET /api/v1/auth/tokens | member | — | `ApiTokenInfo[]` (never the secret; newest first) |
 | 89 | DELETE /api/v1/auth/tokens/{id} | member | — | 204 (404 if not found / not owned) |
 | 90 | GET /api/v1/repos/{id}/stashes | ws viewer | — | `StashInfo[]` (read-only `git stash list`) |
+| 90a | GET /api/v1/repos/{id}/head/remotes | ws viewer | — | `HeadRemotesResp` `{remotes: string[]}` — remote-tracking refs that already contain HEAD (`git branch -r --contains HEAD`, symbolic `*/HEAD` aliases skipped, ≤ 20; `[]` for an unborn HEAD). Asked when the user ticks Amend: non-empty ⇒ amending rewrites a published commit, whatever the branch's upstream is. |
 | 148 | GET /api/v1/repos/{id}/worktrees | ws viewer | — | `WorktreeInfo[]` (`git worktree list`; first entry = main) |
 | 149 | POST /api/v1/repos/{id}/worktrees/remove | ws editor | `{path, force?}` | `WorktreeInfo[]` (refreshed list; 400 on main/unknown path; git refuses dirty/locked without `force`) |
 | 150 | POST /api/v1/repos/{id}/worktrees/prune | ws editor | — | `WorktreeInfo[]` (drops stale registrations whose dir is gone) |
@@ -496,7 +563,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo, reachable_remotely}` (token shown once). Origin: `share_base_url` setting → non-loopback request Host → `https://<lan-ip>:<port>` when the network listener is on → the request Host. `reachable_remotely=false` ⇔ the origin is loopback/empty. With `recipient_email` on a loopback origin → 409 (set a Public link domain first) |
+| POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo, reachable_remotely, reach}` (token shown once). Origin: `share_base_url` setting → non-loopback request Host → `https://<lan-ip>:<port>` when the network listener is actually serving (the port `ottod` bound — not the saved setting, which applies only after a restart and is ignored when TLS setup/bind failed) → the request Host. `reach`: `"remote"` (routable), `"lan"` (RFC 1918 / link-local / ULA / `.local` — same network only, self-signed cert) or `"local"` (loopback/empty); `reachable_remotely = reach != "local"`. With `recipient_email` → 409 unless `reach == "remote"` or a Public link domain is configured (set a Public link domain first) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
 | GET /api/v1/auth/shares | member (self-owned) | — | `MyShare[]` = `ShareInfo` fields + `session_title: string \| null` (null when the session is gone) — the caller's live (non-revoked, non-expired) links across ALL sessions, newest first, capped at 500. Never another user's links, never the secret |
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
@@ -574,7 +641,14 @@ is the auth. It is **IP rate-limited** (the share throttle; `429` with
 `Retry-After` when locked), checks `otp_hash == sha256(otp)` AND `otp_expires_at >
 now`, and on success sets `verified_at` and **clears `otp_hash`** (single-use — a
 fresh code requires a resend). A wrong / expired / reused code records a throttle
-failure and returns `401`. After verification the guest may attach (`/ws/term`)
+failure and returns `401`. Every WRONG guess at a live code also counts on the
+share itself (`otp_failures`): the 5th burns the code (`otp_hash` cleared) and is
+answered `401 {code: "otp_burned"}` — even the right code fails afterwards until
+`POST /share/extend` mails a fresh one (the hard, IP-independent bound; S8-301).
+`503 {code: "busy"}` + `Retry-After: 1` when the bounded argon2 verifier is
+saturated (nothing is counted). The throttle key is the tunnel-aware client IP
+with IPv6 bucketed by /64, and a throttle map full of live keys fails closed
+(`429` for an untracked client). After verification the guest may attach (`/ws/term`)
 and `GET` the session until `max_expires_at` (≤12h); once the window elapses the
 share re-pends and must be re-verified (Task 7.4 extension re-emails the LOCKED
 original recipient only).
@@ -588,7 +662,12 @@ new 6-digit OTP (`OsRng`), stores only its `sha256` (`otp_hash`, ~10-min expiry)
 **clears `verified_at`** (re-pending the share so the guest must re-verify), and
 opens a fresh **≤12h** window (`max_expires_at`, the bearer-token `expires_at`
 tracks it). Only `kind='share'` rows **with** a `recipient_email` are extendable —
-a plain (non-OTP) / missing / revoked share returns `400`. The code is emailed via
+a plain (non-OTP) / missing / revoked share returns `400`; a share that is
+**verified and still inside its window** returns `409` (a link holder must not be
+able to kick the verified guest back to OTP-pending; S8-307); past the 7-day
+lifetime → `403`. The per-share budget (3 extends/hour → `429`) is keyed on the
+share id and only taken once the token resolved to an extendable share, so junk
+tokens can't spend or saturate it; a failed send gives the slot back (S8-306). The code is emailed via
 the **share owner's** verified email sender; if the owner no longer has a verified
 sender → `400`. The guest then re-verifies the new code via
 `POST /api/v1/share/verify` to re-open the window.
@@ -600,8 +679,8 @@ sender → `400`. The guest then re-verifies the new code via
 The tables above (#1–#89) are the original frozen core. The sections below complete the
 contract by documenting every other route the daemon actually registers (mounted via the
 module routers in `crates/otto-server/src/modules.rs::module_routers`). They follow the same
-conventions: all live under `/api/v1` with bearer auth (`Authorization: Bearer <token>` or
-`?token=` on WS), JSON snake_case, ULID ids, RFC3339 timestamps, `Problem{code,message}`
+conventions: all live under `/api/v1` with bearer auth (`Authorization: Bearer <token>`, or
+the `otto-bearer` subprotocol on WS), JSON snake_case, ULID ids, RFC3339 timestamps, `Problem{code,message}`
 errors. Role column meaning is identical (`member`, `ws viewer/editor/admin`, `root`).
 Item routes (those keyed by a row id, e.g. `/sessions/{id}`) resolve the owning workspace
 from the row and role-check against it. This surface is a completion of the frozen contract,
@@ -609,7 +688,7 @@ not a redesign — no path here may change shape without a contract bump.
 
 Mounting summary (all paths below are under `/api/v1` unless the section says "root-level"):
 the `/api/v1` nest carries the bearer-auth middleware; root-level WS/proxy routers
-self-authenticate via `?token=` and are merged at the server root by `build_router`.
+self-authenticate (the `otto-bearer` WS subprotocol) and are merged at the server root by `build_router`.
 
 ## Activity trail & task tracker (live agent telemetry)
 
@@ -643,13 +722,13 @@ same-workspace, so a scratch session hands over only to another scratch session.
 | POST /sessions/{id}/unarchive | session owner-or-admin | — | Session (restore an archived session; it becomes `reconnectable`) |
 | POST /sessions/{id}/kill | session owner-or-admin | — | Session (kill the PTY but KEEP the row un-archived; resumable providers can be reopened) |
 | POST /sessions/bulk | per-id session owner-or-admin | `BulkSessionsReq {action: "archive"\|"delete"\|"kill", ids}` (≤200 ids) | `BulkSessionResult[]` — non-owned/missing ids come back `ok:false` instead of failing the batch |
-| POST /sessions/{id}/input | ws editor + **session owner-or-admin**; an agent session's credential only its own session (`403` otherwise) | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 |
+| POST /sessions/{id}/input | ws editor + **session owner-or-admin**; an agent session's credential only its own session (`403` otherwise) | `SendInputReq{text, submit?}` — `submit` omitted/true: bracketed paste + a real Enter (`SessionManager::submit_text`, the path that actually sends in Claude Code / Codex); `submit: false`: the text verbatim, no newline | 200 — `409` with "input delivery unknown" when a held (holder-backed) PTY lost its holder connection after the input was sent but before it was acknowledged: the text may already be in the terminal, so do not resend it blindly |
 | POST /sessions/{id}/message | ws editor + **session owner-or-admin**; an agent session's credential only its own session or a worker whose `meta.delegated_by` is that session (`403` otherwise) | `SessionMessageReq{text}` | `SessionMessageResp{session_id, delivered}` — one message to ONE live **agent** session via `submit_text` (paste + Enter), recorded on its trail; 400 for a connection session, 409 when the session is not live. The targeted counterpart of `/workspaces/{id}/broadcast`, for a lead agent driving a worker |
 | GET /sessions/{id}/wait?status=&timeout_secs= | session owner-or-admin | — | `WaitSessionResp{session, reached}` — blocks until the session's status is one of `status` (comma-separated, default `idle,exited`) or `timeout_secs` (default 20, cap 25) passes; `reached:false` at the deadline. `idle` = the agent's turn ended |
 | POST /sessions/{id}/handover | ws editor + **owner-or-admin of the source (and of an existing target)** | — | starts a handover; progress via `SessionMetaUpdated` |
 | POST /sessions/{id}/handover/brief | ws editor + **session owner-or-admin** (the brief digests the session's transcript) | — | generates a handover brief for the session |
 | POST /sessions/{session_id}/attach-product | ws editor | `{story_id}` | attaches a product story to the session |
-| POST /app/kill-sessions | **root only** | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
+| POST /app/kill-sessions | **root only**, Admin-class (an agent credential → 403) | — | terminate every live PTY (desktop quit hook); non-root receives 403 |
 
 ## Conversation view, History, Tasks board & Outputs
 
@@ -848,8 +927,8 @@ existing directory, the remote file's basename is used.
 |---|---|---|---|
 | GET /connections/{id}/sftp/list?path= | ws viewer | — | SftpListResp `{path, entries: SftpEntry[], truncated?}` — empty/absent `path` ⇒ remote `pwd` then list; at most 20,000 entries, `truncated: true` (omitted when false) when the directory held more |
 | GET /connections/{id}/sftp/read?path= | ws viewer | — | SftpReadResp `{text, truncated}` — downloads to a temp file, returns up to 1 MiB of UTF-8 text |
-| POST /connections/{id}/sftp/download | ws editor | SftpDownloadReq `{remote_path, local_path}` | SftpDownloadResp `{local_path, bytes}` |
-| POST /connections/{id}/sftp/upload | ws editor | SftpUploadReq `{local_path, remote_path}` | 200 |
+| POST /connections/{id}/sftp/download | ws editor **and root** (the local path is on the daemon host — every connection, Legacy included; non-root → 403) | SftpDownloadReq `{remote_path, local_path}` | SftpDownloadResp `{local_path, bytes}` |
+| POST /connections/{id}/sftp/upload | ws editor **and root** (reads a daemon-host file — every connection; non-root → 403) | SftpUploadReq `{local_path, remote_path}` | 200 |
 | POST /connections/{id}/sftp/mkdir | ws editor | SftpMkdirReq `{path}` | 200 |
 | POST /connections/{id}/sftp/remove | ws editor | SftpRemoveReq `{path, dir?}` | 200 — `dir:true` ⇒ `rmdir`, else `rm` |
 | POST /connections/{id}/sftp/rename | ws editor | SftpRenameReq `{from, to}` | 200 |
@@ -876,7 +955,7 @@ only the controlled field. `rediss` and `clickhouse+https` enable required TLS.
 
 | Method & path | Authorization | Request | Response |
 |---|---|---|---|
-| POST /connections/{id}/sftp/transfers | Connections Edit, sftp_read for download or sftp_write for upload; governed daemon-local paths require current root | `SftpTransferReq {direction:"download"|"upload",local_path,remote_path,timeout_secs?:1..600}` | 202 JSON `SftpTransfer` |
+| POST /connections/{id}/sftp/transfers | Connections Edit, sftp_read for download or sftp_write for upload; daemon-local paths require current root on every connection (Legacy included; non-root → 403) | `SftpTransferReq {direction:"download"|"upload",local_path,remote_path,timeout_secs?:1..600}` | 202 JSON `SftpTransfer` |
 | GET /connections/{id}/sftp/transfers | Connections Edit plus each transfer's operation | Current actor's jobs for this connection only | `SftpTransfer[]` |
 | POST /connections/{id}/sftp/transfers/{transfer_id}/cancel | Initiating actor only; remains allowed to stop own work after resource revocation | `{}` | 204; idempotent when terminal/finalizing; 404 for another actor/connection |
 
@@ -925,7 +1004,7 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | GET /connections/{id}/db/schema | ws viewer | — | top-level schema tree (roots) |
 | POST /connections/{id}/db/search-objects | ws viewer | `{q, schema?, scope?:"schema"\|"all", kinds?, limit?}` | `ObjectSearchResult{hits[{schema,name,kind,path}], truncated, scanned, supported}` — find tables/views/collections by NAME without expanding the tree (the tree's own filter is client-side over loaded nodes only). `scope="all"` is ONE catalog query on MySQL/Postgres/ClickHouse but one `listCollections` round trip PER database on MongoDB, so `scanned` reports the real cost; Postgres cannot cross databases, so "all" means every schema in the CONNECTED database. Redis has no object namespace → `supported:false`. `limit` default 200, capped 1000; a blank `q` returns no hits. `kinds` reserved for later column search. |
 | POST /connections/{id}/db/schema/children | ws viewer | `{node, filter?, counts?}` | child schema nodes (lazy expand). `counts:true` fills each node's `detail` with an engine-native ROW ESTIMATE (`information_schema.table_rows` / `reltuples` / `system.parts` / `estimatedDocumentCount` — never `COUNT(*)`); opt-in because collecting it is the slow part of expanding a database on a large server. MySQL databases expose `Tables`/`Views` folders always, plus `Procedures`/`Functions`/`Triggers` folders (with a count) when the database has any; routine leaves carry `kind:"procedure"`/`"function"`, trigger leaves `kind:"trigger"` |
-| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body. For a trigger (MySQL): `ddl` is `SHOW CREATE TRIGGER` and `extra` = `{timing, event, table}`. `indexes[].definition` carries the full engine-native index definition when available (Mongo: raw `listIndexes` doc incl. `partialFilterExpression`; Postgres: `pg_get_indexdef` string). For a Mongo **collection** `columns` is empty and the field list lives in `extra`: `sampled_fields` = `{topLevelField: bsonType}`, `sampled_paths` = dotted paths incl. embedded ones (`meta.brand_id`, depth ≤ 3, capped at 400), and `sampled_path_types` = `{path: bsonType}` for those same paths; plus `sample` (one whole document) and `stats` |
+| POST /connections/{id}/db/object | ws viewer | `{ref}` | object detail (columns/DDL/etc.). For a procedure/function: `columns` are its parameters and `ddl` is the `SHOW CREATE` body. For a trigger (MySQL): `ddl` is `SHOW CREATE TRIGGER` and `extra` = `{timing, event, table}`. `columns[].collation` is the per-column collation where the engine reports one (MySQL string columns; absent elsewhere). `indexes[].definition` carries the full engine-native index definition when available (Mongo: raw `listIndexes` doc incl. `partialFilterExpression`; Postgres: `pg_get_indexdef` string). For a Mongo **collection** `columns` is empty and the field list lives in `extra`: `sampled_fields` = `{topLevelField: bsonType}`, `sampled_paths` = dotted paths incl. embedded ones (`meta.brand_id`, depth ≤ 3, capped at 400), and `sampled_path_types` = `{path: bsonType}` for those same paths; plus `sample` (one whole document) and `stats` |
 | POST /connections/{id}/db/schema-graph | ws viewer | `{schema, max_tables?}` | DbSchemaGraph — read-only ERD: tables (+PK/FK-flagged columns) and FK edges, walked from the schema tree; `max_tables` default 60, clamped 1..200; engines without FK metadata (Redis/Mongo) return `relationships:false` |
 | POST /connections/{id}/db/query | ws editor | RunQueryReq | query result rows / affected count. An engine failure is a `502 upstream` whose message is the cleaned engine text plus optional tagged trailer lines (`DETAIL:`, `HINT:`, `SQLSTATE:`, `POSITION:`, `ERRNO:`, `CODE:`, `STREAMED_ROWS:`, `SUGGEST:`) — see database-explorer.md §11 "Engine error text". |
 | POST /connections/{id}/db/query-plan | ws **viewer** | `{statement, node?}` | `DbQueryPlan` — a normalized query plan from the engine's native EXPLAIN (MySQL `EXPLAIN FORMAT=JSON`, Postgres `EXPLAIN (FORMAT JSON)`, ClickHouse `EXPLAIN json=1` w/ plain-text fallback, Mongo `explain` queryPlanner). The statement is **EXPLAIN-wrapped, never executed raw** — read-only by construction, hence `viewer`. Redis → 400 (no plan surface). |
@@ -939,9 +1018,9 @@ profile's `ws viewer`; queries that hit the live DB use `ws editor`.
 | GET /connections/{id}/db/history/{entry} | ws viewer | — | one `DbHistoryEntry` with its FULL `statement` (no `statement_len`). 404 when the row belongs to another connection or (non-root) another user. |
 | GET /db/mongosh | member (Database:View) | — | `MongoshInfo {available, version?}` — whether the `mongosh` CLI (used to run pasted mongosh **scripts** and by Mongo terminal sessions) is on the daemon's PATH; probed via `mongosh --version`, cached ~60s. The query editor calls this when it detects a script so a missing binary is an inline install hint before the run |
 | POST /connections/{id}/db/explain-with-agent | ws editor | `{sql}` | AI explanation of a query (spawns an agent) |
-| POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | **Uncapped, streamed** CSV/JSON browser download (`Content-Disposition: attachment`). Bytes are produced by the driver's streaming exporter and piped straight to the response body — no row cap and no full-result buffering (fixes the prior silent truncation at the driver default). `format`: `csv` (header + rows) or `json` (array of objects). A write/DDL on a guarded connection is rejected up front. If the driver errors mid-stream the response body terminates early (truncated download + connection reset) rather than reporting success. |
-| POST /connections/{id}/db/export-to-path | ws editor | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format. Response is a **streamed `application/x-ndjson`** progress feed (see below). |
-| POST /connections/{id}/db/import | ws editor | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing table/collection, **guarded** (a Prod/read-only connection refuses it without `confirm_write`). SQL engines (MySQL/ClickHouse/**PostgreSQL**) → batched `INSERT`s via the `run` path (identifier quoting is engine-aware — Postgres double-quotes, MySQL/CH backtick); **MongoDB** → `insertMany` batches (`table` = collection; CSV/TSV cells coerced to numbers/bools/null; NDJSON/JSON keep their types). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). Redis is unsupported (no bulk-load). |
+| POST /connections/{id}/db/export | ws editor | `{statement, format?, node?}` | **Uncapped, streamed** CSV/JSON browser download (`Content-Disposition: attachment`). Bytes are produced by the driver's streaming exporter and piped straight to the response body — no row cap and no full-result buffering (fixes the prior silent truncation at the driver default). `format`: `csv` (header + rows) or `json` (array of objects). An export RE-RUNS its statement, so only a read may be exported on ANY connection (guarded or not): a write/DDL (incl. `UPDATE/INSERT … RETURNING`, a data-changing CTE, a side-effect built-in) is refused up front with 403 `read_only: an export re-runs the statement…`; ClickHouse exports also run `readonly=2`, MySQL/PostgreSQL inside a READ ONLY transaction. If the driver errors mid-stream the response body terminates early (truncated download + connection reset) rather than reporting success. |
+| POST /connections/{id}/db/export-to-path | ws editor **and root** (writes a daemon-host file — every connection, Legacy included; non-root → 403 before any dir is created; use the browser export) | ExportToPathReq | Stream an uncapped result to a **local file** on the daemon host, selectable format. Same read-only rule as `/db/export` (403 `read_only: …` for a write on any connection). Response is a **streamed `application/x-ndjson`** progress feed (see below). |
+| POST /connections/{id}/db/import | ws editor **and root** (reads a daemon-host file — every connection; non-root → 403 before streaming) | ImportReq | Import a **local file** (CSV/TSV/NDJSON/JSON) into an existing table/collection, **guarded** (a Prod/read-only connection refuses it without `confirm_write`). SQL engines (MySQL/ClickHouse/**PostgreSQL**) → batched `INSERT`s via the `run` path (identifier quoting is engine-aware — Postgres double-quotes, MySQL/CH backtick); **MongoDB** → `insertMany` batches (`table` = collection; CSV/TSV cells coerced to numbers/bools/null; NDJSON/JSON keep their types). Response is a **streamed `application/x-ndjson`** line: `{ done, rows, batches }` or `{ error }` (text starting `write_blocked:` ⇒ typed confirmation needed). Redis is unsupported (no bulk-load). |
 | POST /connections/{id}/db/nl-to-sql | ws editor | NlToSqlReq | Draft a **read** query from natural language, **validated with `EXPLAIN`** against the live schema before returning. Plain JSON → `NlToSqlOutcome`. Never emits a write/DDL. 400 starting "NL-to-SQL is not configured" ⇒ no drafter wired; 400 starting "could not produce a valid read query" ⇒ retry loop exhausted (message carries the last engine error). Unavailable for Redis. |
 
 `ExportToPathReq` = `{ statement, node?, format?, local_path, max_rows? }`. `format`
@@ -1312,7 +1391,7 @@ run keeps its status and counts but `result_dropped: true`.
 | GET /repos/{id}/commit-config | ws viewer | — | `{gpgsign, format, signing_key}` — the repo's signing configuration (`commit.gpgsign`, `gpg.format` limited to `openpgp\|ssh\|x509`, `user.signingkey`); unset keys are `null`. Drives the WIP composer's sign toggle. |
 | GET /repos/{id}/blame?path=&rev=HEAD | ws viewer | — | `BlameResp {path, rev, lines: BlameLine[]}` — `git blame --porcelain <rev> -- <path>` grouped into RUNS: one `BlameLine {sha, short_sha, author, at, orig_line, line_start, count, summary, text: string[], previous?: {sha, path}}` per consecutive run of lines from the same commit. `text` = the run's source lines (each capped at 1000 chars); `previous` = porcelain `previous` (parent sha + the path there, following renames; absent on a root commit) — blaming it is "blame before this change". `rev` is `guard_ref`'d, `path` rides after `--` (a leading `-` is a legal filename). |
 | GET /repos/{id}/conflict | ws viewer | — | conflict listing |
-| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp — `content` is written ONLY to a path that is conflicted right now (exact index match; else 409) and only inside the working tree: 400 for `.git` components (any case), `..`, absolute paths, a symlink as the final component, or a parent that resolves (symlinks followed) outside the tree or into the git dir. `GET /conflict` never reads through such a path (it reports `is_binary:true`; resolve by taking a side). |
+| POST /repos/{id}/conflict/resolve | ws editor | ResolveConflictReq (`content`, or `side:"ours"\|"theirs"` to take a whole side via `git checkout --ours/--theirs` + stage) | RepoStatusResp — `content` is written ONLY to a path that is conflicted right now (exact index match; else 409) and only inside the working tree: 400 for `.git` components (any case), `..`, absolute paths, a symlink as the final component, or a parent that resolves (symlinks followed) outside the tree or into the git dir. `GET /conflict` never reads through such a path (it reports `is_binary:true`; resolve by taking a side). A `content` write is also refused (400) when the working file is BINARY (any body) or ABSENT (an empty body) — those resolve via `side` only, so a recomposed `""` can never truncate a blob or resurrect a deleted file as empty. |
 | POST /repos/{id}/cherry-pick | ws editor | `{sha}` | RepoStatusResp — a CONFLICTING pick is a normal 200: CHERRY_PICK_HEAD is left in place and the status carries `op_in_progress:"cherry_pick"` + the conflicted paths (finish via merge/commit, abort via merge/abort) |
 | POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp — a conflicting revert is a normal 200 (see cherry-pick; `op_in_progress:"revert"`) |
 | POST /repos/{id}/branch | ws editor | `{name, start_point?, checkout?}` | RepoStatusResp (create a branch, optionally from `start_point` and checking it out) |
@@ -1342,11 +1421,11 @@ run keeps its status and counts but `result_dropped: true`.
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
 | POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. **409** when the comment is `declined` (also re-checked under the post claim, so a decline racing a "Post all" wins) — restore it to draft via `PATCH … {restore_draft:true}` first. |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
-| PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). |
+| PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool, mark_posted?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). `mark_posted: true` (alone) records an **approved, unposted** comment as posted without sending it — the client found the copy an earlier failed (5xx) attempt created on the PR; claimed atomically (409 otherwise). |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
-| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. `409` unless the agent is settled (`done` / `error` / `skipped`) — stop a live one first. A branch review (pr #0) retries in the run's recorded checkout (or a throwaway worktree at its recorded head), never the user's main checkout. Budget-gated like a new review (`400` when blocked). |
+| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. `409` unless the agent is settled (`done` / `error` / `skipped`) — stop a live one first — and `409` while the REVIEW is still `running` (the run's end-of-review sweep would delete the retried agent's diff/prompt/findings files). A branch review (pr #0) retries in the run's recorded checkout (or a throwaway worktree at its recorded head), never the user's main checkout. Budget-gated like a new review (`400` when blocked). |
 | POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. Budget-gated (`400` when blocked); a branch review anchors on its recorded checkout/head. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
 
@@ -1360,7 +1439,9 @@ fallback; cancellation does not produce fallback or overwrite `cancelled`.
 `pending · running · waiting · done · error · skipped`; `lens` (optional, absent
 on the summarizer row and on pre-field reviews) is the configured reviewer name
 the row expanded from, so rows sharing a `lens` are the same lens on different
-providers. Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
+providers. `lens_slugs` (optional, orchestrator rows only) lists the lenses the
+row delegates to sub-agents; a Retry re-spawns the row as the same orchestrator.
+Recovery policy for a failed agent: up to `ReviewConfig.max_attempts`
 (default 3) fresh sessions, EXCEPT that once a sibling row with the same `lens`
 is `done` no further retry is spawned — the row ends `skipped` ("skipped — <provider>
 already covered this lens"). The per-agent grace timeout (`timeout_secs` or the
@@ -1424,9 +1505,9 @@ occurrence_count, created_at, updated_at`.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/broadcast | ws editor | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` |
-| POST /workspaces/{id}/relay | ws editor | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
-| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait` |
+| POST /workspaces/{id}/broadcast | ws editor; an agent session's credential reaches only its own session and the workers it opened (others are skipped, not delivered) | BroadcastReq `{text, session_ids?}` | BroadcastResp `{session_ids}` — text from an agent credential is recorded on the target's trail as agent-originated (`source: agent`, "from session …"), never as the person's message |
+| POST /workspaces/{id}/relay | ws editor; same agent-credential confinement as `/broadcast` | RelayReq `{text}` | RelayResp `{session_ids, broadcast, unaddressed, text}` |
+| POST /workspaces/{id}/sessions/open | ws editor | OpenAgentSessionReq `{provider, title?, cwd?, model?, prompt?, meta?}` | OpenAgentSessionResp `{session, prompt_dispatch}` — creates an **agent** session (`meta.work.origin = "delegation"` unless the caller supplied `work`; `meta.delegated_by` = the calling agent session, stamped from the credential — a body value is dropped) and, when `prompt` is set, submits it as the first user message on a background task once the TUI has drawn (`prompt_dispatch: "queued"`, else `"none"`); poll `GET /sessions/{id}/wait`. Same `cwd` rules as #18: an agent credential's `cwd` must lie inside the workspace root, the caller's own folder or a worktree of the same repo (403) |
 
 Relay delivers a **name-addressed** message: the leading token(s) of `text` may
 name session handles (`ronaldo: …`, `ronaldo, messi: …`, bare `ronaldo do X`) or
@@ -1690,10 +1771,10 @@ configured Jira/Confluence account.
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
 | PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq (absent fields keep their value; `token_expires_at` is tri-state — absent keeps, `null` clears, an ISO timestamp sets) | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
-| GET /issue/projects | member | — | available projects |
+| GET /issue/projects | member | — | available projects (`IssueProject[]`). `?meta=1` → `ListingPage<IssueProject>` `{items, truncated}` — `truncated` = the walk stopped at its page cap (20 × 100) and later projects are not shown |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
 | GET /issue/my-work?account_id= | member | — | `MyWorkIssue[]` — the caller's open assigned issues (`assignee = currentUser()`, statusCategory != Done, newest first, one page of 100) with parent/project context for the Focus view hierarchy |
-| GET /issue/confluence/spaces | member | — | Confluence spaces |
+| GET /issue/confluence/spaces | member | — | Confluence spaces (`ConfluenceSpace[]`). `?meta=1` → `{items, truncated}` (`truncated` = stopped at the 20-page cap) |
 | GET /issue/confluence/search | member | — | Confluence page search |
 | GET /issue/confluence/pages/{page_id}?account_id= | member | — | `ConfluencePageResp` |
 | POST /issue/confluence/pages?account_id= | member | CreateConfluencePageReq (`body_md` Markdown **or** `body_html` storage XHTML) | `ConfluencePageResp` (created) |
@@ -1764,7 +1845,7 @@ state already exists, logging a warning — its status reads `conflict`.)
 `ListenerStatus` per **enabled** Slack / Telegram integration (webhooks have no
 listener; a disabled integration has no entry):
 `{workspace_id, channel, state, detail?, since, connected_at?, last_event_at?,
-last_error?, last_error_at?, failures}`. `state` is one of
+last_error?, last_error_at?, failures, rejected_senders?}`. `state` is one of
 `waiting_for_token` (a token isn't saved / the Keychain isn't readable yet — retried
 every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram poll),
 `reconnecting` (dropped or a failed attempt; retrying with 3 s → 60 s backoff),
@@ -1773,7 +1854,12 @@ every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram p
 at the backoff ceiling, but it needs the user), or `conflict` (another enabled
 workspace already listens with this token; not started). `detail` is the user-facing
 reason (secret-bearing URLs redacted, ≤300 chars); `failures` counts consecutive failed
-attempts since the last good connection. Times are RFC 3339.
+attempts since the last good connection. `rejected_senders` (omitted when empty) lists the
+last 10 senders the allow-list dropped, newest first, one per user:
+`{user, name?, at}` — `user` is the channel-native id to add to `allowed_users`
+(a Telegram numeric id is not visible in the Telegram app), `name` the platform's
+@handle / display name when sent (untrusted, display only). In-memory; kept across
+listener restarts. Times are RFC 3339.
 
 ### Inbound webhook trigger
 
@@ -2057,8 +2143,8 @@ choices. The UI surfaces this distinction in the preview.
 |---|---|---|---|
 | GET /library/bundled | root | — | bundled skill catalog |
 | GET /library/bundled/{name} | root | — | BundledSkillContent (SKILL.md body + file list; view without installing) |
-| POST /library/bundled/{name}/install | root | — | install/update one bundled skill |
-| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}]}`. Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
+| POST /library/bundled/{name}/install | root | — | install/update one bundled skill → `{name, installed, backed_up, backup_path, user_owned?}`. Also mirrors it into `~/.claude/skills`, `$CODEX_HOME/skills`, `~/.gemini/skills`, but never replaces an entry Otto's `.otto-managed.json` does not own (or any symlink) — those paths come back in `user_owned` |
+| POST /library/bundled/install-all | root | `?category=&backup=&force=` | install all bundled skills (optionally one category) → `{installed, backed_up, skipped, failed: [{name, error}], user_owned}` (`user_owned`: provider skill paths left untouched because a user-owned skill of that name lives there). Skips skills already up to date, and ones whose installed copy is ahead of the bundled version unless `force=true`; a failing skill is reported in `failed` and the rest still install. Runs off the async workers; keeps the newest 3 `skills-backup/<name>-<secs>` per skill |
 
 Each catalog entry carries `{name, category, version, description, installed_version,
 state, update_available}`. `state` is `not_installed | up_to_date | update_available
@@ -2094,7 +2180,7 @@ workspace from the workflow/run row.
 | GET /workflows/{id} | ws viewer | — | Workflow |
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
 | DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver) |
-| POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`) |
+| POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`). **Run location (S3-302):** `input.working_directory` (comma-separated paths, `~` ok), `input.repos[]` (each `repo` a registered id/name/path, a `worktree`-type `name` path, `worktree`, `repo_id`) and `input.repo_id` must stay in the workflow's OWN workspace — one of its registered repos (or a linked git worktree of one) or the workspace root, and paths inside them; a relative path, a `..` escape or anything else is **400** naming the value, and no run row is created. The same rule refuses a chat `Working Directory:` / repos: nothing starts and the reply in the thread says why (`⚠️ Can't start **<workflow>**: <reason>.`) |
 | POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
 | GET /workflows/{id}/runs | ws viewer | — | `WorkflowRun[]` |
@@ -2411,7 +2497,7 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/oauth2/authorize | ws editor | `{request_id}` | `{flow_id,authorization_url,redirect_uri,expires_in:600}` |
 | GET /workspaces/{wid}/api-client/oauth2/flows/{id} | initiating user + ws editor | — | `{status:pending\|exchanging\|completed\|failed,error?,request_id}`; expired/foreign flow is 404 |
 | GET /api-client/oauth2/callback?state=&code=&error= | one-use state | provider redirect | static HTML; code exchanged with PKCE, tokens stored in Keychain |
-| GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed), `?token=` legacy fallback | relay; scoped/share and MCP-only tokens rejected |
+| GET /ws/api-client/stream?workspace_id= *(root path, outside /api/v1)* | ws editor + API Client Edit | WS upgrade; bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (echoed) only — `?token=` → 401 | relay; scoped/share and MCP-only tokens rejected |
 | POST /workspaces/{wid}/api-client/postman/sync | ws editor | `{api_key?, remember?}` | fetch EVERY collection + environment from the user's Postman account (api.getpostman.com) → `{collections: PostmanV21[], environments: PostmanEnv[], failed: [{name,error}], remembered}`. `api_key` optional when a prior sync stored one (`remember: true` → Keychain, ref `apiclient-postman`; only persisted after the key proved valid). Caps at 200 items per kind (Postman rate limits). The UI imports the returned docs through its normal import pipeline. |
 | POST /api-client/import-curl | member | `{curl}` | parsed Request from a curl command. Understands attached short flags (`-XPOST`, `-HName:v`, `-uuser:pw`), `-F`/`--form`/`--form-string` (→ `body_mode:"multipart"`, a `[{key,type,value,filename}]` row array; `name=@path` becomes a `file` row with only the file name), `--json` (body + JSON Content-Type/Accept), `--data-urlencode` (encoded like curl), `-A`/`-e`/`-b name=v` (User-Agent/Referer/Cookie headers), `-I` (HEAD), `--oauth2-bearer` (bearer auth); value-taking flags it doesn't model (`--cacert`, `--resolve`, `-c`, …) consume their value |
 
@@ -2721,6 +2807,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /admin/secrets/status | root | — | `SecretsStatus {mode: plaintext\|encrypted\|keychain, plaintext_file, plaintext_entries, key_state: unlocked\|locked\|not_loaded\|error, migration_available, migrating, backup_present}` · 404 when the daemon has no managed store |
 | POST /admin/secrets/secure | root | `{confirm: true}` | `SecretsMigrationReport {migrated, total, duration_ms}` · 400 without `confirm` · 409 when not in plaintext mode / already running / a key differs between the files · 502 when the Keychain is locked or a prompt is waiting (nothing changed) |
+| POST /admin/secrets/reset-store | root (human credential) | `{confirm: true}` | `{set_aside: string\|null}` — moves an UNREADABLE `secrets.enc` (master key missing from the Keychain, or the file no longer decrypts) aside to `secrets.enc.orphaned-<secs>` (kept, never deleted) so secrets can be saved again · 400 without `confirm` · 409 when the store is readable or not in encrypted mode · audited `secrets.reset_store`. A `Missing` master key is also re-probed every 30 s, so restoring the Keychain item needs no restart |
 
 - Stores (`otto_keychain`): `encrypted` = `secrets.enc` (AES-256-GCM, 0600,
   atomic writes) sealed with ONE random master key in a single Keychain item
@@ -2766,7 +2853,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
 | GET /insights/report | Insights:View | — | one report's HTML |
 | GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive, its HTML unchanged, inside the 15-min timeout) the request starts nothing and returns that run with `attached: true` |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive and not idle for more than 10 min, its HTML unchanged, inside a 2-hour hard cap — liveness follows the session, not a fixed window) the request starts nothing and returns that run with `attached: true` |
 | GET /insights/runs/active | View | — | `ActiveRun[]` = `{ run_id, report_key, report_revision, started_at }`, oldest first — runs still generating; finished/killed/timed-out runs are pruned. Lets the page restore its progress banner after it was left |
 | POST /insights/runs/{id}/cancel | root | — | 204 — kills and archives the run's session and drops it from the active list; 404 when no such active run |
 
@@ -2789,6 +2876,7 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 |---|---|---|---|
 | GET /fs/browse?path= | root, or Agents Edit | — | non-root callers get 403 inside Otto's data dir (`$OTTO_DATA_DIR` and the default `~/Library/Application Support/Otto`), `~/.ssh`/`~/.aws`/`~/.gnupg`/… and for key-like file names. Complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
 | GET /fs/read?path= | root, or Agents Edit | — | same non-root deny list as `/fs/browse` (403). Regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
+| GET /fs/stat?path= | root, or Agents Edit | — | same non-root deny list as `/fs/browse` (403); agent-session credentials 403 (host-files guard). `FsStat {path, is_dir, is_git_repo}` for ONE path — no listing, no per-child `.git` probe: the typed-folder pre-checks (New Session, first-run coach) use it instead of `/fs/browse`. `path` is canonical (`~`, `..`, symlinks resolved); a file is 200 with `is_dir:false`; a missing path 404; empty `path` 400. Its own pool of eight admitted stats (never waits behind picker listings), 5-second deadline; 409 when busy, 502 on timeout. |
 | GET /logs/daemon | root | `?file=&mode=all\|tail\|since&lines=&offset=` | `DaemonLogs {log_dir, files[], selected, mode, content, offset, next_offset, truncated}` — see below |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
 
@@ -2923,18 +3011,18 @@ existing `PATCH /api/v1/swarm/projects/{pid}` (#72) as a top-level `skills` arra
 `integration_branch?`, `origin_channel?`, `origin_chat?`, `origin_thread?` (set when a
 project was launched from a channel trigger).
 
-## Root-level routers (NOT under /api/v1; `?token=` auth)
+## Root-level routers (NOT under /api/v1; self-authenticating)
 
-These self-authenticate via the `?token=` query parameter and are merged at the server root
+These self-authenticate (WS: the `otto-bearer` subprotocol; `/browser/proxy`: a single-use `?ticket=`) and are merged at the server root
 (not under the `/api/v1` nest). The two terminal/event WebSockets are specified in detail in
 `ws.md`.
 
 | Method & path | Auth | Purpose |
 |---|---|---|
-| GET /ws/term/{session_id} | `?token=`; ws viewer attach, editor input | terminal stream (see ws.md) |
-| GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
-| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
-| GET /ws/api-client/stream | `otto-bearer` subprotocol (preferred, echoed) or legacy `?token=`; ws editor | API-client streaming-response bridge |
+| GET /ws/term/{session_id} | `otto-bearer` subprotocol only (`?token=` → 401); ws viewer attach, editor input | terminal stream (see ws.md) |
+| GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` only — keeps the token out of the URL (`?token=` → 401); member | daemon event stream (see ws.md) |
+| GET /ws/lsp?lang=&root= | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
+| GET /ws/api-client/stream | `otto-bearer` subprotocol only (echoed; `?token=` → 401); ws editor | API-client streaming-response bridge |
 | GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)
@@ -3017,7 +3105,7 @@ DTOs (`Vault`, `VaultStatus`, `VaultDirListing`, `VaultNote`, `VaultNoteMeta`,
 | PATCH /workspaces/{ws}/vault/vaults/{id} | ws editor | `{name?, okf?}` | `Vault` |
 | DELETE /workspaces/{ws}/vault/vaults/{id} | ws editor | — | 204 — unregister ONLY (files on disk untouched) |
 | POST /workspaces/{ws}/vault/vaults/{id}/rescan | ws editor | — | `VaultStatus` — full incremental rescan (awaited) |
-| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; the first probe starts the vault's FSEvents watcher (external changes kick a debounced, signature-checked incremental scan). Stale probes kick a background scan — stale = >30 s without a watcher, >10 min with a healthy one. `unresolved`/`tags`/`attachments` are cached per index generation |
+| GET /workspaces/{ws}/vault/vaults/{id}/status | ws viewer | — | `VaultStatus{scan_state, last_scan_at, generation, graph_generation, notes, links, unresolved, tags, attachments}`; the first probe starts the vault's FSEvents watcher (external changes kick a debounced, signature-checked incremental scan). Stale probes kick a background scan — stale = >30 s without a watcher, >10 min with a healthy one. `unresolved`/`tags`/`attachments` are cached per index generation. `tracked_recovery?: string[]` lists `.otto-history` / `.trash` when the vault's git repo already tracks files in them (committed before Otto's `.gitignore`; untrack with `git rm --cached -r <dir>`) — probed with `git ls-files`, cached 5 min per root, omitted when empty |
 | GET /workspaces/{ws}/vault/vaults/{id}/dir | ws viewer | `?path=` | `VaultDirListing` — one level: dirs (with child counts), notes, attachments |
 | GET /workspaces/{ws}/vault/vaults/{id}/note | ws viewer | `?path=` | `VaultNote{meta, raw, outgoing}` |
 | PUT /workspaces/{ws}/vault/vaults/{id}/note | ws editor | `{path, content, if_hash?, autosave?}` | `VaultNoteMeta` — create/update; parent folders auto-created; `if_hash` mismatch → 409 (optimistic concurrency; `""` = must-not-exist). `autosave: true` (editor autosave) lets the write's history revision coalesce with the same note's open autosave revision for up to 5 min (its `after` moves forward, `before` stays); agent writes, restores and renames always get their own revision. Revision bodies are deduped (`.otto-history/.blobs/<sha>`). |
@@ -3318,7 +3406,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workspaces/{wid}/agents/{sid}/context-packet/preview | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{redacted, redactions, size_bytes}` (preview only) |
 | POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
 | GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
-| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
+| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level, `orphaned_workflow_runs_swept` — runs the workflow orphan sweep errored since daemon start) |
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
@@ -3347,10 +3435,17 @@ result goes and where agents run; which trigger may set them:
 | `origin_*` (e.g. `origin_workspace_id`), `channel`, `chat`, `thread` | yes | — | dropped | dropped |
 | `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
 | `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
+| `repo_id`, `base`, `pr`, `pr_branch` | — | webhook spec | yes (`repo_id` must be in the workflow's workspace, else **400**) | dropped |
 
 Results always post through the **workflow's own** workspace integration: an
 `origin_workspace_id` naming another workspace is ignored (chat triggers only
 resolve workflows of the receiving workspace).
+
+Repos are **workspace-scoped** for every run: an explicit `repo_id` (run input or node
+params), a `repos[]` declaration (by id or name) and a `working_directory`/worktree path
+all resolve only to repos registered in the workflow's own workspace. A path whose
+deepest registered repo lives in another workspace resolves to nothing (the step fails
+with "no repo_id") rather than borrowing that repo's checkout or git account.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
 `otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
@@ -3381,7 +3476,9 @@ candidate's workflow is re-checked against the inbound `workspace_id` before bei
 channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
 channel's messages) into workspace A. The name-addressed commands above (1 and 2) apply the
 same gate: `find_by_name` resolves only within the message's own workspace, so a member of
-workspace A's channel can never start workspace B's workflow.
+workspace A's channel can never start workspace B's workflow. Net effect: only the trigger
+*listing* is global — every path (1–3) can start only workflows of the receiving workspace, and
+the run reports through that same workspace's integration.
 
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
@@ -3526,6 +3623,7 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
 | 106c | GET /api/v1/canvas/files/{sha} | ws viewer of any workspace holding a scene (live or in history) that references the file | — | `text/plain` — the file's `data:` URL (what Excalidraw's `addFiles` takes). `ETag: "<sha>"`, `Cache-Control: private, max-age=31536000, immutable`; `If-None-Match` → 304. 400 on a non-sha256 id; 404 when missing OR not visible to the caller (a hash never reveals another workspace's image) |
 | 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a. **409** while another assist turn runs on the same scene |
+| 107a | POST /api/v1/canvas/scenes/{id}/assist/stop | ws editor | — | `{stopping: bool}` — flags the scene's running assist turn (#107) as stopped (`false` when none runs). The UI interrupts the agent's PTY separately; when the turn settles it commits NOTHING: the backing file is reset, the pre-turn doc is re-broadcast as `canvas_updated` (undoing live previews) and #107 returns the pre-turn source with a "Stopped" note |
 | 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas"). Runs a throwaway session in a per-call scratch dir under `<data>/canvas/preview/` (never the workspace repo); the session is killed and the dir removed afterwards, also when the request is dropped |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
@@ -4018,7 +4116,7 @@ enforce the entity's workspace role.
 | CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` — additive `requested_by_session_id?` (the agent session that raised it). A retried governed call reuses its still-pending approval (same tool + args hash + workspace + requester) instead of filing a duplicate |
 | CP20a | GET /api/v1/mcp/approvals/count | mcp:view (ws-filtered) | `?status=` | `McpApprovalCount` `{count}` — the number of approvals CP20 would show (same workspace scoping and per-(server, tool) visibility), uncapped, from one grouped count. The MCP page's pending badge reads it instead of fetching up to 200 rows |
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
-| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200), `offset` | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows; the Audit tab's "Load more" advances `offset` by `limit` |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200, max 1000), `offset`, `paged?` | `McpCallLogRow[]`; with `paged=true` the envelope `McpAuditPage {rows, next_offset, has_more}` instead — `has_more` is true when the LEDGER read filled `limit` and `next_offset` = `offset` + ledger rows read, so a page the visibility check shortened (even to empty) still pages on (the Audit tab uses it) — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows |
 | CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
 
 ### Otto as an MCP server (outward) + live-agent gateway
@@ -4028,7 +4126,7 @@ enforce the entity's workspace role.
 | CP24 | GET /api/v1/mcp/otto-server | mcp:view | — | `{enabled, tools, has_token, token_prefix?, require_approval_dangerous, approval_exempt_tools}` — each tool `{name, description, mutating, category, enabled, approval_exempt, irreversible, auto_approved_by: McpAutoApproveRef[]}` |
 | CP24a | GET /api/v1/mcp/otto-server/enabled | mcp:view (or the restricted mcp token) | — | `McpOttoServerEnabled` `{enabled: string[], outward_enabled, ui_granted}` — the ENABLED full `otto.*` names in catalog order, the master switch, and whether the CALLING session holds the "Allow UI control" grant (`false` for a credential not bound to a session). The light read the stdio bridges poll per `tools/list` / governed call instead of CP24 (no descriptions, rule badges or token prefix). Never a gate: CP26 re-checks the enable list per call |
 | CP25 | PATCH /api/v1/mcp/otto-server | mcp:admin | `{enabled?, tools?, approval_exempt_tools?, rotate_token?}` | status + `token?` (shown once) |
-| CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result — additive `ui_granted?: boolean` on an `otto.ui_*` call from a session credential: the calling session's "Allow UI control" grant AFTER the call, so the stdio bridge re-lists its tools without a CP24a read |
+| CP26 | POST /api/v1/mcp/otto-tools/invoke | mcp:edit (or the restricted mcp token) | `{tool, arguments, dry_run?, wait_seconds?}` | governed result — additive `ui_granted?: boolean` on an `otto.ui_*` call from a session credential: the calling session's "Allow UI control" grant AFTER the call, so the stdio bridge re-lists its tools without a CP24a read. **Self-call credential (S8-305):** an executed tool replays its REST call with the CALLER's credential class — an agent session's call (its API token or internal MCP credential) with a credential bound to that session, so the target route applies every agent-credential rule (Admin/Secret class gate, root withholding, session-ownership rules); a person's own call with a person token. The person-only tools `approve_improvement_edit` / `reject_improvement_edit` / `rollback_improvement_edit` (Admin-class targets) ALWAYS need a person's approval when a non-human credential calls them — no auto-approve rule or token write grant skips it — and only the approved call replays as the person |
 | CP26a | POST /api/v1/mcp/tool-calls | session credential only (`403` otherwise); not feature-gated, allowed for read-only sessions and the restricted mcp token | `{tool, arguments?, ok, rows?}` | `204` — appends one row to the stdio bridge's tool-call ledger (`mcp_tool_calls`), stamped with the CALLING session and its workspace (never body fields); arguments redacted and capped. The bridge's audit path — it holds no database connection of its own |
 | CP27 | GET /api/v1/mcp/gateway/tools | mcp:view | `?workspace_id=` | `{tools}` (namespaced `mcp__server__tool`) |
 | CP28 | POST /api/v1/mcp/gateway/invoke | mcp:edit | `{server_id, tool, arguments, dry_run?, workspace_id, session_id?}` | InvokeResp (governed) |
@@ -5029,7 +5127,7 @@ a workspace Admin, or root may see, attach to or drive it; everyone else gets
 | POST /api/v1/browser/tabs/{id}/live/nav | ws editor · Browser Edit | `BrowserLiveNavReq` `{action:"goto"\|"back"\|"forward"\|"reload"\|"stop", url?}` | `BrowserLiveSession` — `goto` requires `url` (netguard-checked → 400) |
 | POST /api/v1/browser/tabs/{id}/live/control | ws editor · Browser Edit | `{action:"take_over"\|"hand_back"}` | `BrowserLiveSession` |
 | POST /api/v1/browser/tabs/{id}/live/screenshot | ws editor · Browser Edit | `BrowserScreenshotReq` `{mode?:"viewport"\|"full_page"\|"element", selector?, format?:"png"\|"jpeg", quality?}` | the image bytes (`image/png` / `image/jpeg`); `X-Otto-Page-Url` header carries the page URL. `element` requires `selector` (404 when it matches nothing). Full-page captures are capped at 16 384 px tall |
-| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (or `?token=`) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
+| WS /ws/browser/{tab_id}/live | bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` only (`?token=` → 401) · Browser View + owner/ws-Admin/root to watch; ws editor · Browser Edit to drive | — | screencast + input channel (ws.md §1b) |
 
 `BrowserLiveSession {tab_id, workspace_id, owner_id, engine:"remote", build,
 version, profile, headed, state:"starting"|"ready"|"crashed"|"closed", url,
@@ -5146,7 +5244,7 @@ the cache.
 |---|---|---|---|
 | GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
 | GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
-| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_receive`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_receive`; an Enforced account lowers the tier to View and the grant decides) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
 | POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
 | POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
 | POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |
@@ -5183,7 +5281,7 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 |---|---|---|---|
 | GET /aws/accounts/{id}/eks/clusters | AwsEks:View | `?region=` (`all` ⇒ every enabled region, rows carry `region`, plus `region_errors?`) | `{ clusters: { name, status, version, endpoint, arn, created_at }[] }` (`list-clusters` + `describe-cluster` fan-out, first 20) |
 | GET /aws/accounts/{id}/eks/clusters/{name} | AwsEks:View | `?region=` | `{ cluster: Value, nodegroups: { name, status, desired, min, max, instance_types, ami_type }[] }` |
-| POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig` |
+| POST /aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig | AwsEks:Edit **and** `kubernetes:Admin` (checked in the handler) | `{ cluster_name_override?, default_namespace? }` (`?region=`) | 201 `K8sCluster` — `aws eks update-kubeconfig --kubeconfig <data_dir>/kube/<new_id>.yaml --alias <name>` (file 0600), then a `k8s_clusters` row `source: "eks"`, `aws_account_id: id`; emits `k8s_cluster_updated`; audited `aws.eks.import_kubeconfig`. The generated file must pass the **exec-plugin allow-list** (S11-303) or it is removed and nothing is registered |
 
 ### RDS (read-only — every route is `AwsRds:View`)
 
@@ -5270,8 +5368,8 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | POST /k8s/install | kubernetes:Admin | `{ tool: "kubectl"\|"k9s" }` | 202 `InstallJob` — background job (brew if present, else direct download into `<data_dir>/bin`); idempotent while `running`; progress via `/k8s/status` + WS `k8s_install_updated` |
 | GET /k8s/discover | kubernetes:View | — | `{ contexts: DiscoveredContext[] }` from `~/.kube/config` + every `$KUBECONFIG` entry via `kubectl config view -o json` (only `contexts[]` + `clusters[].cluster.server` are read — never key/cert/token material) |
 | GET /k8s/clusters | kubernetes:View | — | `K8sCluster[]` (name-sorted global library) |
-| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color?, known_namespaces?: string[] }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400 |
-| POST /k8s/clusters/import | kubernetes:Admin | `{ name, kubeconfig_yaml, context_name?, default_namespace?, environment?, color? }` | 201 `K8sCluster` (`source: "imported"`) — writes `<data_dir>/kube/<id>.yaml` 0600, validates with `kubectl --kubeconfig <file> config view -o json`; `context_name` defaults to the file's `current-context`, `default_namespace` to that context's namespace; 1 MiB cap (413) |
+| POST /k8s/clusters | kubernetes:Admin | `UpsertK8sClusterReq { name, source?: "kubeconfig", kubeconfig_path?, context_name, default_namespace?, environment?, color?, known_namespaces?: string[] }` | 201 `K8sCluster` — `kubeconfig_path` (`~` ok) must exist; `source` other than `kubeconfig` ⇒ 400; the context's user must pass the **exec-plugin allow-list** (see below) ⇒ 400 naming the plugin |
+| POST /k8s/clusters/import | kubernetes:Admin | `{ name, kubeconfig_yaml, context_name?, default_namespace?, environment?, color? }` | 201 `K8sCluster` (`source: "imported"`) — writes `<data_dir>/kube/<id>.yaml` 0600, validates with `kubectl --kubeconfig <file> config view -o json`; `context_name` defaults to the file's `current-context`, `default_namespace` to that context's namespace; 1 MiB cap (413); EVERY user must pass the **exec-plugin allow-list** ⇒ 400 naming the plugin, nothing written |
 | GET /k8s/clusters/{id} | kubernetes:View | — | `K8sCluster` |
 | PATCH /k8s/clusters/{id} | kubernetes:Admin | partial `{ name?, kubeconfig_path?, context_name?, default_namespace?, environment?, color?, known_namespaces?: string[] }` (`""` clears nullable strings; `known_namespaces` replaces the persisted list — namespaces offered in the picker even when the cluster forbids listing them; lowercased + deduped) | `K8sCluster` — `kubeconfig_path` is refused (400) for `imported`/`eks` rows (Otto-managed) |
 | DELETE /k8s/clusters/{id} | kubernetes:Admin | — | 204 — also removes the Otto-owned kubeconfig file for `imported`/`eks` sources (user files are never touched) |
@@ -5288,6 +5386,8 @@ Admin = cluster registry + installs (see `crates/otto-server/src/policy.rs`).
 | POST /k8s/clusters/{id}/exec | kubernetes:Edit | `{ workspace_id, ns, pod, container?, command?: string[] }` | 201 `Session` — PTY via `Spawner::spawn_command(provider="k8s")`: `kubectl [--kubeconfig ..] --context .. -n <ns> exec -it <pod> [-c <c>] -- sh -c 'command -v bash >/dev/null && exec bash \|\| exec sh'` (or `command`); title `"<pod> · <ns>"`, meta `{ k8s: { cluster_id, cluster_name, ns, pod, container, mode: "exec" } }`; audited as `k8s.exec` |
 | POST /k8s/clusters/{id}/k9s | kubernetes:Edit | `{ workspace_id, ns? }` | 201 `Session` — `k9s [--kubeconfig ..] --context .. [-n <ns \| default_namespace>]`; 400 `k9s not installed …` when missing; audited as `k8s.k9s` |
 | POST /k8s/clusters/{id}/actions | kubernetes:Edit | `K8sActionReq { action, kind, ns, name, params? }` | `{ ok, message, output? }` — see the action table below; audited as `k8s.action.<action>` (success AND failure, with `params`); `rollout_status` returns `ok:false` + output when the rollout has not finished within 5 s instead of failing |
+
+**Kubeconfig exec-plugin allow-list (S11-303).** A kubeconfig user's credential plugin runs on the daemon host, so Otto runs only `aws`, `aws-iam-authenticator`, `gke-gcloud-auth-plugin` and `kubelogin` — matched on the command's basename (a bare name, or an absolute path whose basename and symlink-resolved target's basename are on the list; a relative path with a slash, a shell or any other program is refused). The plugin's `env` may not set `PATH`, `HOME`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `NODE_OPTIONS`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR` or any `DYLD_*` / `LD_*` / `PYTHON*` / `CLOUDSDK_PYTHON*` name, and a legacy `auth-provider` block with a `cmd-path` / `cmd-args` is refused. Checked on `POST /k8s/clusters/import` (every user), `POST /k8s/clusters` and `PATCH /k8s/clusters/{id}` when a `kubeconfig_path` / `context_name` is set (that context's user), the EKS import, and again whenever Otto derives a context's credential for kubectl (the file's mtime is part of the cache key, so an edit on disk is re-checked): a refused cluster's every kubectl / k9s call fails with 400 naming the plugin, and the plugin never runs.
 
 **Pod HTTP actions (K-3).** One HTTP request to a pod's container port, or to every running pod of a workload, through the API-server pod proxy (`pods/{pod}:{port}/proxy{path}` via a pooled per-cluster `kubectl proxy` on a private Unix socket that admits pod-proxy paths only) with a `kubectl port-forward` fallback when the proxy cannot start, fails at transport level or the API server refuses `pods/proxy`. Auth: a `GET` is graded like a read (cluster op `workloads_view`); any other method needs the `exec` op (Edit). Audited `k8s.pod_http` (success, failure and confirm refusals): cluster, context, environment, ns, pod/workload, method, port, path, redacted headers, `body_sha256` (never the body), per-pod status codes and transport.
 
@@ -5406,7 +5506,7 @@ includes that scope).
 | POST /k8s/clusters/{id}/monitor/test | Edit | `{ ns?, pod? }` (defaults: first configured namespace, first Running non-excluded pod) | `{ namespace, pod, workload, transport, metrics_server, probes: [{ name, ok, status?, ms?, port?, samples: [{metric, labels, value}] (≤50), sample_count, labels, parse_errors, capped, body_preview, error? }] }` |
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
-| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
+| GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` — for a namespace-scoped caller (no cluster-wide `metrics`) `namespaces`/`workloads` are limited to the grant and `status` is redacted (pod counts and `cycle_ms` 0, `last_error` "", `metrics_server` reduced to its status word, `restricted: true`; `last_cycle_at`/`last_ok_at` kept) |
 | GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&ns=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
 | GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&ns=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
 | GET /k8s/clusters/{id}/monitor/health?window=1h | View + cluster-wide `metrics` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |

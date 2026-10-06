@@ -32,7 +32,14 @@ pub struct MemoryService {
     /// Single-flight for the probe: `ensure_fts` reconciles the whole index
     /// under the write lock, so concurrent first callers wait for one run.
     fts_probe: tokio::sync::Mutex<()>,
+    /// When the last probe failed TRANSIENTLY (S7-308): searches fall back to
+    /// LIKE until [`FTS_RETRY_AFTER`] has passed, then probe again — a busy
+    /// boot no longer pins the fallback for the daemon's lifetime.
+    fts_failed_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// Back-off between FTS probes after a transient failure.
+const FTS_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl MemoryService {
     /// Internal: assemble a service from its parts (all constructors funnel here
@@ -44,6 +51,7 @@ impl MemoryService {
             vault: None,
             fts: AtomicU8::new(FTS_UNKNOWN),
             fts_probe: tokio::sync::Mutex::new(()),
+            fts_failed_at: std::sync::Mutex::new(None),
         }
     }
 
@@ -74,7 +82,11 @@ impl MemoryService {
     /// Re-index a (possibly externally edited / git-synced) vault directory into
     /// the store. Returns the number of notes ingested.
     pub async fn reindex_vault(&self, ws: &str, by: &str, dir: &std::path::Path) -> Result<usize> {
-        let notes = crate::vault::read_dir_notes(dir)?;
+        // A directory walk + a read per note: off the async workers (S9-305).
+        let owned = dir.to_path_buf();
+        let notes = tokio::task::spawn_blocking(move || crate::vault::read_dir_notes(&owned))
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("vault reindex task: {e}")))??;
         let n = notes.len();
         self.save(ws, by, notes).await?;
         Ok(n)
@@ -114,10 +126,28 @@ impl MemoryService {
                     FTS_NO => return false,
                     _ => {}
                 }
-                let ok = self.repo.ensure_fts().await.unwrap_or(false);
-                self.fts
-                    .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
-                ok
+                let failed_recently = self
+                    .fts_failed_at
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some_and(|at| at.elapsed() < FTS_RETRY_AFTER);
+                if failed_recently {
+                    return false;
+                }
+                match self.repo.ensure_fts().await {
+                    Ok(ok) => {
+                        self.fts
+                            .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);
+                        ok
+                    }
+                    Err(e) => {
+                        // Transient: stay UNKNOWN (LIKE for now), retry later.
+                        tracing::warn!(error = %e, "memory FTS probe failed; retrying later");
+                        *self.fts_failed_at.lock().unwrap_or_else(|p| p.into_inner()) =
+                            Some(std::time::Instant::now());
+                        false
+                    }
+                }
             }
         }
     }

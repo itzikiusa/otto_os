@@ -1,6 +1,7 @@
 <script lang="ts">
   import { plural } from '../lib/plural';
   import Skeleton from '../lib/components/Skeleton.svelte';
+  import LoadState from '../lib/components/LoadState.svelte';
   // Notification center bell: unread badge + an anchored popover of notices.
   //
   // It lives in the Navigator header / collapsed Rail (`side`: the panel opens
@@ -385,7 +386,7 @@
                   <Icon name="refresh" size={12} /> Retry
                 </button>
               </div>
-            {:else if !notifications.loaded}
+            {:else if !notifications.settled}
               <div class="panel-empty" aria-busy="true">
                 <span class="spinner" style="--spinner-size: 18px" aria-hidden="true"></span>
                 <Skeleton rows={3} height={36} label="notifications" />
@@ -396,6 +397,15 @@
                 <p>You’re all caught up</p>
               </div>
             {:else}
+              <!-- A refresh failed but rows are here (kept, or ingested live
+                   from /ws/events): LoadState shows them under its slim
+                   "Couldn’t refresh" bar + Retry (S12-305). -->
+              <LoadState
+                what="notifications"
+                error={notifications.error}
+                loading={notifications.loading}
+                onretry={() => notifications.load()}
+              >
               {#each sections as sec (sec.bucket)}
                 {#if sections.length > 1}
                   <div class="nb-section">{SECTION[sec.bucket]}</div>
@@ -477,6 +487,7 @@
                   </div>
                 {/each}
               {/each}
+              </LoadState>
             {/if}
           </div>
         </div>

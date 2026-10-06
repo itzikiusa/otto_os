@@ -217,6 +217,11 @@ class NotificationStore {
   /** Last load failure (null once a load succeeds) — the bell shows it with a
    *  Retry instead of an empty "all caught up" that would be a lie. */
   error: string | null = $state(null);
+  /** A load has FINISHED for this identity — succeeded or failed. The bell's
+   *  spinner keys on this, not `loaded`: a failed first load while the event
+   *  stream ingested rows left `loaded` false with rows present and no error
+   *  pane, so the panel spun forever (S12-305). */
+  settled = $state(false);
 
   /** Number of unread notices. */
   unread: number = $derived(this.notices.filter((n) => !n.read).length);
@@ -317,6 +322,7 @@ class NotificationStore {
         /* a best-effort re-derivation — never fail the load over it */
       }
       this.error = null;
+      this.settled = true;
     } catch (e) {
       // A previous identity's answer (or failure) is dropped; the queued
       // reload below runs for the new one.
@@ -324,6 +330,7 @@ class NotificationStore {
         // Backend may not be ready yet (the events WS reloads on connect) — keep
         // whatever we had and surface the failure so the bell can offer Retry.
         this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+        this.settled = true;
       }
     } finally {
       this.loading = false;
@@ -348,6 +355,7 @@ class NotificationStore {
     this.notices = [];
     this.ingestLog = [];
     this.loaded = false;
+    this.settled = false;
     this.error = null;
   }
   /** Event-stream ingests, in order, for {@link load}'s in-flight merge. */

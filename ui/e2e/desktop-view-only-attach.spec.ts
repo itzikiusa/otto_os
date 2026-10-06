@@ -23,8 +23,9 @@ interface Sock {
 }
 
 async function attach(id: string, view: boolean): Promise<Sock> {
-  const url = `${base.replace('http', 'ws')}/ws/term/${id}?token=${encodeURIComponent(token)}${view ? '&view=1' : ''}`;
-  const ws = new WebSocket(url);
+  const url = `${base.replace('http', 'ws')}/ws/term/${id}${view ? '?view=1' : ''}`;
+  // The bearer rides in the otto-bearer subprotocol — `?token=` is refused.
+  const ws = new WebSocket(url, ['otto-bearer', token]);
   const frames: Array<Record<string, unknown>> = [];
   ws.onmessage = (ev) => {
     if (typeof ev.data === 'string') frames.push(JSON.parse(ev.data) as Record<string, unknown>);

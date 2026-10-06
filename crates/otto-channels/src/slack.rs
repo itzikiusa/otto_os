@@ -1025,6 +1025,11 @@ async fn handle_event(
         chat: channel,
         thread,
         user,
+        user_name: ["display_name", "real_name"]
+            .iter()
+            .find_map(|k| content["user_profile"][*k].as_str())
+            .filter(|n| !n.trim().is_empty())
+            .map(str::to_string),
         text: combined,
         edited: subtype == Some("message_changed"),
     };

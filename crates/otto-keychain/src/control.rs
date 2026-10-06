@@ -128,6 +128,29 @@ impl SecretsControl {
         }
     }
 
+    /// Recovery for an orphaned encrypted store (S7-305): when `secrets.enc`
+    /// can't be opened (its Keychain master key is gone, or the file doesn't
+    /// decrypt under the current one) move it aside to
+    /// `secrets.enc.orphaned-<secs>` — never deleted — so new secrets can be
+    /// saved again. `Conflict` when the store is not encrypted or the file is
+    /// still readable; `Ok(None)` when there is no file. Blocking.
+    pub fn reset_store(&self) -> Result<Option<PathBuf>> {
+        // Writers wait for the move (the store lookup takes this lock).
+        let active = self.active.write().unwrap_or_else(|p| p.into_inner());
+        if active.0 != SecretsMode::Encrypted {
+            return Err(Error::Conflict(
+                "secrets are not in the encrypted store — nothing to reset".into(),
+            ));
+        }
+        let aside =
+            EncryptedFileStore::new(&self.data_dir, self.key.clone()).set_aside_unreadable();
+        drop(active);
+        if let Ok(Some(p)) = &aside {
+            tracing::warn!(set_aside = %p.display(), "secrets: unreadable secrets.enc moved aside");
+        }
+        aside
+    }
+
     /// Move every `secrets.json` entry into `secrets.enc`, verify, then wipe
     /// and delete the plaintext file and switch this process to the encrypted
     /// store. Blocking (Keychain + file I/O) — call it on a blocking thread.
@@ -546,6 +569,49 @@ mod tests {
             store.set_aside_unreadable().unwrap_err(),
             Error::Conflict(_)
         ));
+    }
+
+    /// S7-305: a `Missing` key is re-probed after the retry interval, so a
+    /// restored Keychain item works without a restart; and the control-level
+    /// reset moves an orphaned file aside (kept) so saves work again.
+    #[test]
+    fn missing_key_is_reprobed_and_reset_store_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = Arc::new(MemKey::default());
+        let store = EncryptedFileStore::new(dir.path(), cell(src.clone(), 2_000));
+        store.put("conn-1", "hunter2").unwrap();
+        let saved = *src.key.lock().unwrap();
+        *src.key.lock().unwrap() = None;
+        let key = Arc::new(
+            MasterKeyCell::new(src.clone(), Duration::from_millis(2_000))
+                .with_retry_after(Duration::from_millis(50)),
+        );
+        let store = EncryptedFileStore::new(dir.path(), key.clone());
+        assert!(matches!(store.get("conn-1"), Err(Error::Conflict(_))));
+        // The user restores the Keychain item: picked up after the interval.
+        *src.key.lock().unwrap() = saved;
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(store.get("conn-1").unwrap().as_deref(), Some("hunter2"));
+
+        // Reset path: the key is gone for good.
+        let dir = tempfile::tempdir().unwrap();
+        let src = Arc::new(MemKey::default());
+        EncryptedFileStore::new(dir.path(), cell(src.clone(), 2_000))
+            .put("conn-1", "hunter2")
+            .unwrap();
+        *src.key.lock().unwrap() = None;
+        let control =
+            SecretsControl::new(dir.path(), cell(src.clone(), 2_000), SecretsMode::Encrypted);
+        let aside = control.reset_store().unwrap().expect("moved aside");
+        assert!(aside.exists(), "kept, not deleted");
+        assert!(!dir.path().join(ENCRYPTED_FILE).exists());
+        control.put("conn-2", "x").unwrap();
+        assert!(
+            matches!(control.reset_store(), Err(Error::Conflict(_))),
+            "readable now"
+        );
+        let plain = SecretsControl::new(dir.path(), cell(src, 2_000), SecretsMode::Plaintext);
+        assert!(matches!(plain.reset_store(), Err(Error::Conflict(_))));
     }
 
     #[test]

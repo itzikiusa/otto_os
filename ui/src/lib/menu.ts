@@ -8,7 +8,7 @@ import { startSnip } from './snip';
 import { selectAllInFocus } from './selectall';
 import { sidePane } from './stores/sidePane.svelte';
 import { nativePane } from './nativePane';
-import { isEmbedded } from './desktop';
+import { isEmbedded, closePopoutWindow } from './desktop';
 import { dismissTopDialog, modalKeyVerdict } from './keys';
 import { sessionVerbsApply } from './stores/sessionScope';
 
@@ -48,7 +48,8 @@ export function handleMenu(id: string): void {
       ui.newWorkspaceOpen = true;
       break;
     case 'close-tab':
-      ws.closeActiveTab();
+      // Off the Agents page there is no tab to close: a pop-out closes itself.
+      if (!ws.closeActiveTab()) void closePopoutWindow();
       break;
     case 'toggle-rail':
       ui.toggleRail();

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { editorSelectAll } from './helpers';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,13 +84,13 @@ async function ensureResultsOpen(page: Page): Promise<void> {
 async function typeStatement(page: Page, sql: string): Promise<void> {
   await ensureEditorOpen(page);
   const content = page.locator('.qe-edit .cm-content');
-  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const selectAll = await editorSelectAll(page);
 
   const want = sql.replace(/\s+/g, ' ').trim();
   for (let attempt = 0; attempt < 3; attempt++) {
     await content.click();
     await expect(content).toBeFocused({ timeout: 5_000 });
-    await page.keyboard.press(`${mod}+A`);
+    await page.keyboard.press(selectAll);
     await page.keyboard.press('Delete');
     await content.pressSequentially(sql, { delay: 8 });
     await page.keyboard.press('Escape');
@@ -272,7 +273,7 @@ test.describe('DB Explorer · Postgres sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Connections' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
     await expect(page.locator('.conn-list .conn-name', { hasText: 'e2e-postgres' }).first()).toBeVisible();
@@ -283,7 +284,7 @@ test.describe('DB Explorer · Postgres sweep', () => {
         await page.locator('.acc-toggle', { hasText: 'Schema' }).click();
       }
     } else {
-      await page.locator('.side-switch .ss', { hasText: 'Schema' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Schema' }).click();
     }
     await expect(page.locator('.side-switch')).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.schema-tree')).toBeVisible({ timeout: 15_000 });

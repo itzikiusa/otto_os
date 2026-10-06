@@ -556,6 +556,7 @@ mod tests {
             findings: Vec::new(),
             fallback: false,
             lens: String::new(),
+            lens_slugs: Vec::new(),
         }
     }
 

@@ -1,7 +1,8 @@
 //! `GET /api/v1/fs/browse` — daemon-side filesystem browser for folder pickers.
 //! `GET /api/v1/fs/read`   — read a file's contents (read-only, ~400KB cap).
+//! `GET /api/v1/fs/stat`   — does a path exist, and is it a folder (no listing).
 //!
-//! Both endpoints require root or Agents/Edit (see `policy.rs`) and use the
+//! All three require root or Agents/Edit (see `policy.rs`) and use the
 //! filesystem permissions of the OS account running ottod. Paths are
 //! canonicalized; non-root callers are additionally refused Otto's data dir and
 //! the credential locations in [`sandbox`] (see `non_root_fs_denied`). Existing token
@@ -69,6 +70,21 @@ pub struct FsBrowse {
     pub is_git_repo: bool,
     /// Directory entries (sorted: dirs first, then files, case-insensitively).
     pub entries: Vec<FsEntry>,
+}
+
+/// `GET /api/v1/fs/stat` — one path's existence and kind, WITHOUT listing it.
+/// The typed-folder pre-checks (New Session, first-run coach, onboarding) only
+/// need "is this an existing folder?": `/fs/browse` read every entry and probed
+/// `<entry>/.git` per child for that, seconds on `~` or a monorepo root, and
+/// held one of the four picker listing permits meanwhile (S14-306).
+#[derive(Debug, Clone, Serialize)]
+pub struct FsStat {
+    /// The canonical path (symlinks and `..` resolved, `~` expanded).
+    pub path: String,
+    /// True for a directory (a symlink to one counts, as on open).
+    pub is_dir: bool,
+    /// True when the directory is itself a git repo (has a `.git` directory).
+    pub is_git_repo: bool,
 }
 
 #[derive(Deserialize)]
@@ -337,6 +353,49 @@ fn browse_sync(
         parent,
         is_git_repo,
         entries: dirs,
+    })
+}
+
+/// `GET /api/v1/fs/stat?path=<abs-or-~-path>` — see [`FsStat`]. A missing
+/// path is 404 (like `/fs/browse`), a file is 200 with `is_dir: false`.
+pub async fn stat(
+    CurrentUser(user): CurrentUser,
+    Query(params): Query<ReadParams>,
+) -> ApiResult<Json<FsStat>> {
+    let restricted = !user.is_root;
+    // Its own pool: a stat never waits behind (or starves) picker listings.
+    static ADMISSION: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let admission = ADMISSION
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(8)))
+        .clone();
+    filesystem_work(admission, std::time::Duration::from_secs(5), move |_| {
+        if restricted {
+            non_root_fs_denied(&params.path)?;
+        }
+        stat_sync(&params.path)
+    })
+    .await
+    .map(Json)
+}
+
+#[allow(clippy::disallowed_methods)] // sync helper: stat runs it via filesystem_work (blocking pool)
+fn stat_sync(raw: &str) -> ApiResult<FsStat> {
+    if raw.trim().is_empty() {
+        return Err(ApiError(Error::Invalid("path is required".into())));
+    }
+    let expanded = expand_home(raw.trim());
+    let target = std::path::Path::new(&expanded);
+    let canonical = target
+        .canonicalize()
+        .map_err(|e| filesystem_error("access", target, e))?;
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|e| filesystem_error("access", &canonical, e))?;
+    let is_dir = metadata.is_dir();
+    Ok(FsStat {
+        path: canonical.to_string_lossy().into_owned(),
+        is_dir,
+        is_git_repo: is_dir && canonical.join(".git").is_dir(),
     })
 }
 
@@ -709,6 +768,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stat_sync_answers_existence_and_kind_without_listing() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let file = temp.path().join("note.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        let dir = super::stat_sync(&repo.display().to_string()).unwrap();
+        assert!(dir.is_dir);
+        assert!(dir.is_git_repo);
+        assert_eq!(dir.path, repo.canonicalize().unwrap().to_string_lossy());
+
+        let plain = super::stat_sync(&temp.path().display().to_string()).unwrap();
+        assert!(plain.is_dir && !plain.is_git_repo);
+
+        let f = super::stat_sync(&file.display().to_string()).unwrap();
+        assert!(!f.is_dir && !f.is_git_repo);
+
+        let missing = super::stat_sync(&temp.path().join("nope").display().to_string());
+        assert!(matches!(
+            missing,
+            Err(crate::error::ApiError(otto_core::Error::NotFound(_)))
+        ));
+        assert!(matches!(
+            super::stat_sync("  "),
+            Err(crate::error::ApiError(otto_core::Error::Invalid(_)))
+        ));
+    }
+
     #[tokio::test]
     async fn filesystem_routes_retain_share_and_mcp_endpoint_scopes() {
         use axum::{
@@ -748,7 +837,8 @@ mod tests {
                     "/api/v1",
                     Router::new()
                         .route("/fs/read", get(super::read_file))
-                        .route("/fs/browse", get(super::browse)),
+                        .route("/fs/browse", get(super::browse))
+                        .route("/fs/stat", get(super::stat)),
                 )
                 .route_layer(middleware::from_fn_with_state(
                     ScopeState,
@@ -759,6 +849,7 @@ mod tests {
             for uri in [
                 "/api/v1/fs/read?path=/synthetic/not-opened",
                 "/api/v1/fs/browse?path=/synthetic/not-opened",
+                "/api/v1/fs/stat?path=/synthetic/not-opened",
             ] {
                 let response = app
                     .clone()
@@ -885,6 +976,28 @@ mod tests {
         }
         let other = tempfile::tempdir().unwrap();
         assert!(super::non_root_canonical_denied(&other.path().canonicalize().unwrap()).is_ok());
+    }
+
+    /// S7-301: the `/System/Volumes/Data` firmlink spelling of the data dir,
+    /// `~/.ssh` or `/private/etc` is refused like the short one.
+    #[test]
+    fn non_root_deny_covers_firmlink_spellings() {
+        let Some(home) = otto_core::secret_paths::home_dir() else {
+            return;
+        };
+        let fl = std::path::Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
+        for p in [
+            fl.join("Library/Application Support/Otto/otto.db"),
+            fl.join(".ssh/config"),
+            fl.join(".codex/auth.json"),
+            std::path::PathBuf::from("/System/Volumes/Data/private/etc/hosts"),
+        ] {
+            assert!(
+                super::non_root_canonical_denied(&p).is_err(),
+                "{} must be denied",
+                p.display()
+            );
+        }
     }
 
     #[test]

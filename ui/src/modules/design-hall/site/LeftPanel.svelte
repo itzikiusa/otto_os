@@ -156,18 +156,18 @@
 
 <div class="panel">
   <div class="tabs segmented" role="tablist" aria-label="Site panels">
-    <button role="tab" aria-selected={tab === 'pages'} tabindex={tab === 'pages' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'pages'} onclick={() => (tab = 'pages')} data-testid="site-tab-pages">
+    <button role="tab" id="site-tab-pages" aria-controls="site-panel" aria-selected={tab === 'pages'} tabindex={tab === 'pages' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'pages'} onclick={() => (tab = 'pages')} data-testid="site-tab-pages">
       <Icon name="file" size={12} /> Pages
     </button>
-    <button role="tab" aria-selected={tab === 'layers'} tabindex={tab === 'layers' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'layers'} onclick={() => (tab = 'layers')} data-testid="site-tab-layers">
+    <button role="tab" id="site-tab-layers" aria-controls="site-panel" aria-selected={tab === 'layers'} tabindex={tab === 'layers' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'layers'} onclick={() => (tab = 'layers')} data-testid="site-tab-layers">
       <Icon name="layers" size={12} /> Layers
     </button>
-    <button role="tab" aria-selected={tab === 'blocks'} tabindex={tab === 'blocks' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'blocks'} onclick={() => (tab = 'blocks')} data-testid="site-tab-blocks">
+    <button role="tab" id="site-tab-blocks" aria-controls="site-panel" aria-selected={tab === 'blocks'} tabindex={tab === 'blocks' ? 0 : -1} onkeydown={onTabKey} class:active={tab === 'blocks'} onclick={() => (tab = 'blocks')} data-testid="site-tab-blocks">
       <Icon name="grid" size={12} /> Blocks
     </button>
   </div>
 
-  <div class="body" role="tabpanel">
+  <div class="body" role="tabpanel" id="site-panel" aria-labelledby="site-tab-{tab}">
     {#if tab === 'pages'}
       <ul class="list" aria-label="Pages">
         {#each doc.pages as p, i (p.id)}

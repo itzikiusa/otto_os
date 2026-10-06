@@ -698,7 +698,7 @@ impl AwsService {
     ) -> Result<AwsAccount> {
         crate::access::check(&self.pool, user, id, "configure", None).await?;
         let cur = self.repo.get(id).await?;
-        if !user.is_root {
+        if !otto_core::auth::root_authority(user) {
             let current = AwsAccount::from_row(&cur);
             let changed = |value: &Option<String>, existing: Option<&str>| {
                 value

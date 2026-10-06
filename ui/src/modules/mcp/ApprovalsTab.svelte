@@ -31,7 +31,7 @@
   import McpPill from './McpPill.svelte';
   import AutoApproveForm from './AutoApproveForm.svelte';
   import { mcpCpExtraApi } from './cp-api';
-  import NeedsYouLink from '../home/NeedsYouLink.svelte';
+  import NeedsYouLink from '../home/LazyNeedsYouLink.svelte';
 
   let approvals = $state<McpApproval[]>([]);
   const AGENT_REQUESTER_KINDS = ['mcp_server', 'gateway', 'agent'];
@@ -406,7 +406,7 @@
     text-decoration: underline;
   }
   .link:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: 2px;
   }
   .decided {

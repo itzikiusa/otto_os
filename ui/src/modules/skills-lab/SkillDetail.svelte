@@ -66,7 +66,7 @@
   }
   async function confirmDiscard(): Promise<boolean> {
     if (!editorDirty) return true;
-    const ok = await confirmer.ask(`You have unsaved changes to ${group.name}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
+    const ok = await confirmer.ask(`You have unsaved changes to ${group.name}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
     if (ok) setDirty(false);
     return ok;
   }

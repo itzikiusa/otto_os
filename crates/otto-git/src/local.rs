@@ -3643,6 +3643,18 @@ impl LocalGit {
     /// other's ref mid-checkout. A fetch that failed for a reason other than
     /// a missing ref (expired token, network) is reported as that upstream
     /// error instead of the misleading "no pull/merge-request ref".
+    /// Delete a `refs/otto/pr-review/*` ref [`Self::fetch_pr_head`] created
+    /// (S2-309: one per reviewed head, each pinning a fork head's objects
+    /// against gc forever). Refuses any other ref — this never touches a
+    /// user's branch or tag.
+    pub async fn delete_pr_review_ref(&self, name: &str) -> Result<()> {
+        if !name.starts_with("refs/otto/pr-review/") || name.contains("..") {
+            return Err(Error::Invalid(format!("not a PR review ref: {name}")));
+        }
+        Self::guard_ref(name)?;
+        self.run(&["update-ref", "-d", name]).await.map(|_| ())
+    }
+
     pub async fn fetch_pr_head(
         &self,
         pr_number: u64,
@@ -4055,6 +4067,45 @@ impl LocalGit {
             return Ok(out.trim().to_string());
         }
         Err(upstream_err(&err, &out, code))
+    }
+
+    /// Remote-tracking refs that already contain HEAD (`git branch -r
+    /// --contains HEAD`), at most [`HEAD_REMOTES_CAP`]. Non-empty ⇒ amending
+    /// HEAD rewrites a pushed commit — whatever the branch's upstream says: a
+    /// HEAD pushed under another name, or a branch with no upstream at all,
+    /// is still published (S15-28). An unborn HEAD has none.
+    pub async fn head_remote_refs(&self) -> Result<Vec<String>> {
+        let out = match self
+            .run_read(&[
+                "branch",
+                "-r",
+                "--contains",
+                "HEAD",
+                "--format=%(refname:short)%00%(symref)",
+            ])
+            .await
+        {
+            Ok(out) => out,
+            // No commit yet: nothing can contain it.
+            Err(_)
+                if self
+                    .run_read(&["rev-parse", "--verify", "-q", "HEAD"])
+                    .await
+                    .is_err() =>
+            {
+                return Ok(Vec::new())
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(out
+            .lines()
+            .filter_map(|l| l.split_once('\0'))
+            // `origin/HEAD` is a symbolic alias of a real ref listed anyway.
+            .filter(|(_, symref)| symref.is_empty())
+            .map(|(name, _)| name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .take(HEAD_REMOTES_CAP)
+            .collect())
     }
 
     /// `git stash list` → parsed entries (read-only). Empty list when there are
@@ -4688,9 +4739,29 @@ impl LocalGit {
     /// [`Self::confined_worktree_file`] rejects `.git` components, `..`,
     /// absolute paths, a symlinked final component and any parent that
     /// resolves (symlinks followed) outside the tree or into the git dir.
+    ///
+    /// Data-loss boundary: a recomposed text body never replaces a BINARY
+    /// working file (its segments are empty, so the body would be `""` — one
+    /// click truncated `logo.png` to 0 bytes), and an empty body never
+    /// recreates an ABSENT working file (a modify/delete conflict would come
+    /// back as an empty file instead of a deletion). Both are resolved by
+    /// [`Self::resolve_take_side`], which preserves bytes / removes the path.
     pub async fn write_resolution(&self, path: &str, content: &str) -> Result<()> {
         self.conflict_sides(path).await?;
         let abs = self.confined_worktree_file(path, true).await?;
+        match tokio::fs::read(&abs).await {
+            Ok(bytes) if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() => {
+                return Err(Error::Invalid(format!(
+                    "{path} is a binary conflict — take a whole side or keep the working file"
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && content.is_empty() => {
+                return Err(Error::Invalid(format!(
+                    "{path} is absent from the working tree — take a side or delete it"
+                )));
+            }
+            _ => {}
+        }
         tokio::fs::write(&abs, content)
             .await
             .map_err(|e| Error::Internal(format!("write {path}: {e}")))?;
@@ -5435,6 +5506,9 @@ pub async fn clone_repo(
 // Tests — real throwaway repos under the system temp dir
 // ---------------------------------------------------------------------------
 
+/// Cap on [`LocalGit::head_remote_refs`] — the UI only names a few.
+pub const HEAD_REMOTES_CAP: usize = 20;
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5557,6 +5631,80 @@ mod tests {
                 "stale action cannot delete a resolved file"
             );
         }
+    }
+
+    /// S15-301: "Mark file resolved" on a binary conflict posted `""`; the
+    /// daemon truncated the blob and staged it. On a deleted-by-us conflict
+    /// it resurrected the file as empty. Both writes are refused now and
+    /// leave the conflict (and the bytes) untouched.
+    #[tokio::test]
+    async fn write_resolution_refuses_binary_and_absent_working_files() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        std::fs::write(dir.join("blob"), b"base\0bytes").unwrap();
+        write(&dir, "gone.txt", "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "test: base"]);
+        sh_git(&dir, &["checkout", "-b", "other"]);
+        std::fs::write(dir.join("blob"), b"other\0bytes").unwrap();
+        write(&dir, "gone.txt", "theirs changed\n");
+        sh_git(&dir, &["commit", "-am", "test: other"]);
+        sh_git(&dir, &["checkout", "main"]);
+        std::fs::write(dir.join("blob"), b"ours\0bytes").unwrap();
+        sh_git(&dir, &["rm", "-q", "gone.txt"]);
+        sh_git(&dir, &["commit", "-am", "test: ours"]);
+        let _ = git.run(&["merge", "other"]).await;
+
+        let blob = git.conflict_file("blob").await.unwrap();
+        assert!(blob.is_binary && blob.segments.is_empty());
+        for body in ["", "text\n"] {
+            let err = git.write_resolution("blob", body).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        }
+        assert_eq!(std::fs::read(dir.join("blob")).unwrap(), b"ours\0bytes");
+
+        // git leaves the modified side in the tree; the conflict this guards
+        // is one whose working file is gone (removed by hand / a tool).
+        let _ = std::fs::remove_file(dir.join("gone.txt"));
+        let gone = git.conflict_file("gone.txt").await.unwrap();
+        assert!(!gone.worktree_present && gone.segments.is_empty());
+        let err = git.write_resolution("gone.txt", "").await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(!dir.join("gone.txt").exists());
+
+        let conflicted = git.conflicted_paths().await.unwrap();
+        assert_eq!(conflicted.len(), 2, "both stay conflicted: {conflicted:?}");
+    }
+
+    /// S15-28: the amend warning keyed on `upstream && ahead == 0` missed a
+    /// HEAD pushed under another name and a branch with no upstream.
+    #[tokio::test]
+    async fn head_remote_refs_lists_any_remote_ref_containing_head() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        assert!(git.head_remote_refs().await.unwrap().is_empty());
+        // Pushed as `upstream/other-name`; the local branch has NO upstream.
+        sh_git(
+            &dir,
+            &["update-ref", "refs/remotes/upstream/other-name", "HEAD"],
+        );
+        sh_git(
+            &dir,
+            &[
+                "symbolic-ref",
+                "refs/remotes/upstream/HEAD",
+                "refs/remotes/upstream/other-name",
+            ],
+        );
+        assert_eq!(
+            git.head_remote_refs().await.unwrap(),
+            vec!["upstream/other-name".to_string()],
+            "the symbolic upstream/HEAD alias is not listed"
+        );
+        write(&dir, "new.txt", "unpushed\n");
+        sh_git(&dir, &["add", "new.txt"]);
+        sh_git(&dir, &["commit", "-m", "test: unpushed"]);
+        assert!(git.head_remote_refs().await.unwrap().is_empty());
     }
 
     #[tokio::test]

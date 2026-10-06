@@ -1157,6 +1157,13 @@ pub struct ReviewAgentState {
     /// persisted before this field existed.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub lens: String,
+    /// Orchestrator reviewer only: the lens slugs it delegates to sub-agents
+    /// (one per-lens findings file each). Persisted so a Retry re-spawns the
+    /// row as the SAME orchestrator — with its sub-agent tool and per-lens
+    /// file check — instead of a fan-out reviewer that cannot follow its own
+    /// prompt. Empty for fan-out rows, the summarizer and pre-field rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lens_slugs: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2913,6 +2920,10 @@ mod tests {
             "gate",
             "someday-new",
             "Review",
+            // Workflow-graph edge fixtures (secgate's human_approval tests).
+            "implement",
+            "approve",
+            "approve2",
         ];
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()

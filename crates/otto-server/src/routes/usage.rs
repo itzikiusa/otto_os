@@ -466,13 +466,39 @@ pub(crate) async fn load_budgets_pub(ctx: &ServerCtx) -> UsageBudgetConfig {
     load_budgets(ctx).await
 }
 
-/// Crate-public accessor for the budget status computation; used by the budget
-/// sampler in `monitor.rs`.
+/// Crate-public accessor for the budget status computation (a foreground
+/// read: Mission Control's budget card).
 pub(crate) async fn budget_status_pub(
     ctx: &ServerCtx,
     cfg: UsageBudgetConfig,
 ) -> otto_core::api::UsageBudgetStatus {
     budget_status(ctx, cfg).await
+}
+
+/// [`budget_status`] for BACKGROUND checks — the budget sampler in
+/// `monitor.rs` and [`check_budget`] (S9-303). Reads spend without resetting
+/// ClickHouse's idle clock and without waking a parked server (it serves the
+/// last spend it saw); `None` when there is no spend to judge yet.
+pub(crate) async fn budget_status_background(
+    ctx: &ServerCtx,
+    mut cfg: UsageBudgetConfig,
+) -> Option<UsageBudgetStatus> {
+    let window_days = budget_window(&cfg);
+    cfg.window_days = window_days;
+    let totals = ctx
+        .usage
+        .session_totals_background(window_days, true)
+        .await?;
+    Some(fold_budget_status(ctx, cfg, &totals).await)
+}
+
+/// The configured budget window in days (0 = the 30-day default).
+fn budget_window(cfg: &UsageBudgetConfig) -> u32 {
+    if cfg.window_days == 0 {
+        30
+    } else {
+        cfg.window_days.clamp(1, 3650)
+    }
 }
 
 /// Load the persisted budget config (defaults: enforcement off).
@@ -530,22 +556,28 @@ const BUDGET_WARN_FRACTION: f64 = 0.8;
 /// Compute spend vs. cap for every configured budget over the window. Best-effort
 /// — on any engine error spend reads as `0` (so the UI still renders the caps).
 async fn budget_status(ctx: &ServerCtx, mut cfg: UsageBudgetConfig) -> UsageBudgetStatus {
-    let window_days = if cfg.window_days == 0 {
-        30
-    } else {
-        cfg.window_days.clamp(1, 3650)
-    };
+    let window_days = budget_window(&cfg);
     cfg.window_days = window_days;
-
-    // One pass over per-session totals folds spend into both buckets.
     let totals = ctx
         .usage
         .session_totals(window_days, true)
         .await
         .unwrap_or_default();
+    fold_budget_status(ctx, cfg, &totals).await
+}
+
+/// Fold per-session totals into spend-vs-cap rows (`cfg.window_days` already
+/// normalised).
+async fn fold_budget_status(
+    ctx: &ServerCtx,
+    cfg: UsageBudgetConfig,
+    totals: &[otto_usage::SessionTotals],
+) -> UsageBudgetStatus {
+    let window_days = cfg.window_days;
+    // One pass over per-session totals folds spend into both buckets.
     let mut by_ws: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     let mut by_provider: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    for t in &totals {
+    for t in totals {
         *by_ws.entry(t.workspace_id.clone()).or_default() += t.cost_usd;
         *by_provider.entry(t.provider.clone()).or_default() += t.cost_usd;
     }
@@ -633,7 +665,14 @@ pub async fn check_budget(ctx: &ServerCtx, workspace_id: &str, provider: &str) -
     if !cfg.enforce {
         return BudgetVerdict::default();
     }
-    let status = budget_status(ctx, cfg.clone()).await;
+    // A background read (S9-303): a gate consulted per swarm turn / workflow
+    // step must not keep ClickHouse awake. Only when there is no spend to
+    // judge at all (parked before any scan) does it fall back to a foreground
+    // read — failing open on a cap could let a blocked run through.
+    let status = match budget_status_background(ctx, cfg.clone()).await {
+        Some(status) => status,
+        None => budget_status(ctx, cfg.clone()).await,
+    };
     for row in &status.rows {
         let relevant = (row.scope == "workspace" && row.key == workspace_id)
             || (row.scope == "provider" && row.key == provider);

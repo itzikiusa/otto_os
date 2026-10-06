@@ -14,6 +14,9 @@ pub struct Inbound {
     pub thread: Option<String>,
     /// Channel-native user identifier (numeric id string).
     pub user: String,
+    /// The sender's display name / @handle when the platform sends one — only
+    /// shown to the owner beside a rejected sender (S5-308). Never trusted.
+    pub user_name: Option<String>,
     /// The user's message text.
     pub text: String,
     /// A human EDIT of an earlier message (Slack `message_changed`), not a new

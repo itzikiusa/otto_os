@@ -444,7 +444,8 @@ impl Driver for MysqlDriver {
                     CAST(column_default AS CHAR) AS column_default, \
                     CAST(column_key AS CHAR) AS column_key, \
                     CAST(extra AS CHAR) AS extra, \
-                    CAST(column_comment AS CHAR) AS column_comment \
+                    CAST(column_comment AS CHAR) AS column_comment, \
+                    CAST(collation_name AS CHAR) AS collation_name \
              FROM information_schema.columns \
              WHERE table_schema = ? AND table_name = ? \
              ORDER BY ordinal_position",
@@ -486,6 +487,7 @@ impl Driver for MysqlDriver {
                 key: c.column_key.filter(|s| !s.is_empty()),
                 extra: c.extra.filter(|s| !s.is_empty()),
                 comment: c.column_comment.filter(|s| !s.is_empty()),
+                collation: c.collation_name.filter(|s| !s.is_empty()),
             });
         }
 
@@ -1362,6 +1364,7 @@ impl MysqlDriver {
                     p.parameter_mode.filter(|s| !s.is_empty())
                 },
                 comment: None,
+                collation: None,
             });
         }
 
@@ -2566,6 +2569,7 @@ struct ColumnRow {
     column_key: Option<String>,
     extra: Option<String>,
     column_comment: Option<String>,
+    collation_name: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

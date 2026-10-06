@@ -11,11 +11,14 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import type { DbExportFormat, ExportToPathResp } from '../../lib/api/types';
   import { postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { fmtBytes } from './results-format';
+  import { obviousWriteVerb } from './sql-dialect';
+  import { lsGet, lsSet } from '../../lib/storage';
 
   interface Props {
     /** The statement to run uncapped (the tab's ran statement). */
@@ -72,13 +75,21 @@
   const LS_FORMAT = 'otto_db_export_format';
   const LS_DIR = 'otto_db_export_dir';
 
+  // Guarded storage: a blocked accessor must not break the dialog, and a
+  // throwing post-success write must not report a finished export as failed.
   function loadFormat(): DbExportFormat {
-    const v = (typeof localStorage !== 'undefined' && localStorage.getItem(LS_FORMAT)) || 'csv';
+    const v = lsGet(LS_FORMAT) || 'csv';
     return EXPORT_FORMATS.some((f) => f.value === v) ? (v as DbExportFormat) : 'csv';
   }
   function loadDir(): string {
-    return (typeof localStorage !== 'undefined' && localStorage.getItem(LS_DIR)) || '~/Downloads';
+    return lsGet(LS_DIR) || '~/Downloads';
   }
+
+  // Export RE-RUNS the statement uncapped. For an obvious write
+  // (`UPDATE … RETURNING *`, `INSERT … RETURNING`) that would apply it a second
+  // time — refuse here (the daemon also runs exports read-only; this is the
+  // early, explained refusal, incl. for an agent's prefilled dialog).
+  const writeVerb = $derived(obviousWriteVerb(statement ?? ''));
 
   // Default a filename from the statement (a leading table-ish token) or 'result'.
   function defaultExportName(): string {
@@ -121,7 +132,7 @@
   }
 
   async function runPathExport(): Promise<void> {
-    if (!canExport) return;
+    if (!canExport || writeVerb || !auth.isRoot) return;
     if (!connectionId || !statement || exportingPath) return;
     const name = exportName.trim() || defaultExportName();
     const dir = exportDir.trim() || '~/Downloads';
@@ -160,10 +171,8 @@
       if (failed) throw new Error(failed);
       if (done) {
         const r: ExportToPathResp = done;
-        if (typeof localStorage !== 'undefined') {
-          localStorage.setItem(LS_FORMAT, exportFormat);
-          localStorage.setItem(LS_DIR, dir);
-        }
+        lsSet(LS_FORMAT, exportFormat);
+        lsSet(LS_DIR, dir);
         ondone?.(r);
         onclose();
         toasts.success(
@@ -201,11 +210,23 @@
         <Icon name="sparkle" size={12} />{requestedBy} asked for this export — you choose where it goes.
       </p>
     {/if}
+    {#if writeVerb}
+      <p class="exp-write" role="alert">
+        <Icon name="warning" size={12} />This statement is a write ({writeVerb}). Export re-runs the
+        statement, so it would apply the change again — run a SELECT and export that instead.
+      </p>
+    {/if}
     <p class="exp-hint">
       Runs the statement on the daemon host and <strong>streams</strong> the full result to a local
       file — for sets too large to pull into the browser. Choose the format, destination folder,
       and an optional row limit.
     </p>
+    {#if !auth.isRoot}
+      <p class="exp-hint" role="note">
+        Only the root user can write files on the Otto host computer. Download the rows from the
+        results toolbar in your browser instead.
+      </p>
+    {/if}
 
     <label class="exp-row">
       <span class="exp-label">Format</span>
@@ -265,7 +286,12 @@
     >
       {exportingPath ? 'Cancel export' : 'Cancel'}
     </button>
-    <button class="btn primary" onclick={() => void runPathExport()} disabled={exportingPath}>
+    <button
+      class="btn primary"
+      onclick={() => void runPathExport()}
+      disabled={exportingPath || !!writeVerb || !auth.isRoot}
+      title={writeVerb ? 'Export re-runs the statement — not available for a write' : undefined}
+    >
       {exportingPath ? 'Exporting…' : 'Export all'}
     </button>
   {/snippet}
@@ -300,6 +326,18 @@
     background: var(--accent-soft);
     color: var(--accent-text);
     font-size: var(--fs-s);
+  }
+  .exp-write {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0;
+    padding: 6px 8px;
+    border-radius: var(--radius-s);
+    background: var(--danger-soft);
+    color: var(--danger);
+    font-size: var(--fs-s);
+    line-height: 1.5;
   }
   .exp-hint {
     margin: 0;

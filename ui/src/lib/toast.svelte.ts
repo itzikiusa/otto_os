@@ -7,12 +7,19 @@
 // • An optional `action` adds one button ("Undo", "Open"): running it
 //   dismisses the toast. patterns.md §7 prefers an undo over a confirm for
 //   reversible actions.
+// • An optional `onClose(reason)` learns how the toast went away — its timer
+//   ran out (honouring the hover/focus pause), the user dismissed it, its
+//   action ran, or a burst pushed it out. A deferred commit ("Always delete")
+//   hangs off it, so a paused toast pauses the commit too (S13-301).
 // • At most MAX_VISIBLE stay up; a burst drops the oldest non-error first.
 
 export interface ToastAction {
   label: string;
   run: () => void | Promise<void>;
 }
+
+/** Why a toast left the stack. */
+export type ToastCloseReason = 'expired' | 'dismissed' | 'action' | 'dropped';
 
 export interface Toast {
   id: number;
@@ -44,10 +51,11 @@ class ToastStore {
     title: string,
     body?: string,
     ttlMs = 4500,
-    opts: { action?: ToastAction } = {},
+    opts: { action?: ToastAction; onClose?: (reason: ToastCloseReason) => void } = {},
   ): number {
     const dup = this.toasts.find(
-      (t) => t.level === level && t.title === title && (t.body ?? '') === (body ?? '') && !t.action && !opts.action,
+      (t) =>
+        t.level === level && t.title === title && (t.body ?? '') === (body ?? '') && !t.action && !opts.action && !opts.onClose && !this.onClose.has(t.id),
     );
     if (dup) {
       this.toasts = this.toasts.map((t) => (t.id === dup.id ? { ...t, count: t.count + 1 } : t));
@@ -55,11 +63,13 @@ class ToastStore {
       return dup.id;
     }
     const id = nextId++;
+    if (opts.onClose) this.onClose.set(id, opts.onClose);
     let next = [...this.toasts, { id, level, title, body, count: 1, action: opts.action }];
     while (next.length > MAX_VISIBLE) {
       const drop = next.find((t) => t.level !== 'error') ?? next[0];
       this.clearTimer(drop.id);
       next = next.filter((t) => t.id !== drop.id);
+      this.notifyClose(drop.id, 'dropped');
     }
     this.toasts = next;
     this.arm(id, ttlMs);
@@ -86,7 +96,7 @@ class ToastStore {
   async runAction(id: number): Promise<void> {
     const t = this.toasts.find((x) => x.id === id);
     if (!t?.action) return;
-    this.dismiss(id);
+    this.dismiss(id, 'action');
     try {
       await t.action.run();
     } catch (e) {
@@ -110,14 +120,29 @@ class ToastStore {
     this.arm(id, Math.max(tm.left, 1500));
   }
 
-  dismiss(id: number): void {
+  dismiss(id: number, reason: ToastCloseReason = 'dismissed'): void {
     this.clearTimer(id);
     this.toasts = this.toasts.filter((t) => t.id !== id);
+    this.notifyClose(id, reason);
+  }
+
+  private onClose = new Map<number, (reason: ToastCloseReason) => void>();
+
+  /** Fire (once) the toast's `onClose`; a throwing callback never breaks the stack. */
+  private notifyClose(id: number, reason: ToastCloseReason): void {
+    const cb = this.onClose.get(id);
+    if (!cb) return;
+    this.onClose.delete(id);
+    try {
+      cb(reason);
+    } catch (e) {
+      console.error('toast onClose failed', e);
+    }
   }
 
   private arm(id: number, ms: number): void {
     this.clearTimer(id);
-    this.timers.set(id, { handle: setTimeout(() => this.dismiss(id), ms), left: ms, startedAt: Date.now() });
+    this.timers.set(id, { handle: setTimeout(() => this.dismiss(id, 'expired'), ms), left: ms, startedAt: Date.now() });
   }
 
   private clearTimer(id: number): void {

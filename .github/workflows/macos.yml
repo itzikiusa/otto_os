@@ -1,32 +1,101 @@
 name: macOS
 
-# macOS-only behavior the Linux CI never exercises: the Seatbelt sandbox
-# (`sandbox-exec` profiles in otto-sandbox), the PTY/session manager on Darwin
-# (otto-sessions, which confines spawned shells through otto-sandbox), the
-# PTY + holder semantics (otto-pty: SIGHUP on master close, TIOCSWINSZ, unix
-# socket path limits), the
-# Keychain store, and the standalone Tauri desktop workspace
-# (apps/desktop/src-tauri — not part of the root workspace).
+# The shipping platform, compiled, linted and tested on Darwin. Linux CI
+# (ci.yml) never compiles the `cfg(target_os = "macos")` branches: the
+# Seatbelt sandbox (otto-sandbox, and the sessions + scheduled tasks it
+# confines), the objc2 Vision FFI and Darwin resource probes (otto-server,
+# otto-telemetry), ottod's launchd/Keychain wiring, otto-pty's Darwin PTY
+# semantics, the Keychain store, otto-ssh's real-OpenSSH SFTP test, and the
+# standalone Tauri desktop workspace (apps/desktop/src-tauri — not part of the
+# root workspace).
 #
-# On PRs only when those paths change; nightly + on demand otherwise.
+# ONE workflow, one cargo cache (S12-310): the old macos.yml + macos-server.yml
+# both cold-built the pty/sessions/sandbox chain on separate caches.
+#
+# Which crates (scripts/macos-ci-crates.py; `--check` in ci.yml's Rust job
+# fails when this file drifts):
+#   * the `-p` lists below = every crate whose code mentions
+#     `target_os = "macos"`, plus otto-pty / ottod (Darwin behaviour without a
+#     cfg). A macOS-only test in a crate missing here would never run (S12-306).
+#   * the `crates/<dir>/**` trigger paths = those crates plus their reverse
+#     dependents. A forward-dependency change that breaks macOS-only code is
+#     caught by the nightly run and the push to main.
+# The desktop job runs only when apps/desktop/ (or this file) changed.
 
 on:
   pull_request:
     paths:
-      - 'crates/otto-sandbox/**'
+      - 'crates/otto-agent-run/**'
+      - 'crates/otto-apiclient/**'
+      - 'crates/otto-assistant/**'
+      - 'crates/otto-automation/**'
+      - 'crates/otto-aws/**'
+      - 'crates/otto-brokers/**'
+      - 'crates/otto-browser/**'
+      - 'crates/otto-channels/**'
+      - 'crates/otto-connections/**'
+      - 'crates/otto-dbviewer/**'
+      - 'crates/otto-design-assist/**'
+      - 'crates/otto-git/**'
+      - 'crates/otto-improve/**'
+      - 'crates/otto-insights/**'
+      - 'crates/otto-k8s/**'
       - 'crates/otto-keychain/**'
-      - 'crates/otto-sessions/**'
+      - 'crates/otto-orchestrator/**'
+      - 'crates/otto-product/**'
       - 'crates/otto-pty/**'
+      - 'crates/otto-review/**'
+      - 'crates/otto-sandbox/**'
+      - 'crates/otto-server/**'
+      - 'crates/otto-sessions/**'
+      - 'crates/otto-ssh/**'
+      - 'crates/otto-swarm/**'
+      - 'crates/otto-telemetry/**'
+      - 'crates/otto-vault/**'
+      - 'crates/otto-workflows/**'
+      - 'crates/ottod/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.config/nextest.toml'
       - 'apps/desktop/**'
       - '.github/workflows/macos.yml'
   push:
     branches: [main]
     paths:
-      - 'crates/otto-sandbox/**'
+      - 'crates/otto-agent-run/**'
+      - 'crates/otto-apiclient/**'
+      - 'crates/otto-assistant/**'
+      - 'crates/otto-automation/**'
+      - 'crates/otto-aws/**'
+      - 'crates/otto-brokers/**'
+      - 'crates/otto-browser/**'
+      - 'crates/otto-channels/**'
+      - 'crates/otto-connections/**'
+      - 'crates/otto-dbviewer/**'
+      - 'crates/otto-design-assist/**'
+      - 'crates/otto-git/**'
+      - 'crates/otto-improve/**'
+      - 'crates/otto-insights/**'
+      - 'crates/otto-k8s/**'
       - 'crates/otto-keychain/**'
-      - 'crates/otto-sessions/**'
+      - 'crates/otto-orchestrator/**'
+      - 'crates/otto-product/**'
       - 'crates/otto-pty/**'
+      - 'crates/otto-review/**'
+      - 'crates/otto-sandbox/**'
+      - 'crates/otto-server/**'
+      - 'crates/otto-sessions/**'
+      - 'crates/otto-ssh/**'
+      - 'crates/otto-swarm/**'
+      - 'crates/otto-telemetry/**'
+      - 'crates/otto-vault/**'
+      - 'crates/otto-workflows/**'
+      - 'crates/ottod/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.config/nextest.toml'
       - 'apps/desktop/**'
+      - '.github/workflows/macos.yml'
   schedule:
     - cron: '53 3 * * *'
   workflow_dispatch:
@@ -45,10 +114,42 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
-  crates:
-    name: Sandbox · sessions · keychain (macOS)
+  # Cheap Linux router: which macOS jobs this change needs. Non-PR events
+  # (push to main, nightly, dispatch) run both.
+  changes:
+    name: Route (what changed)
+    runs-on: ubuntu-latest
+    outputs:
+      daemon: ${{ steps.route.outputs.daemon }}
+      desktop: ${{ steps.route.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - id: route
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "daemon=true" >> "$GITHUB_OUTPUT"; echo "desktop=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "$BASE...$HEAD")
+          printf '%s\n' "$changed"
+          # The workflow only triggers on the paths above, so anything outside
+          # apps/desktop/ is daemon-relevant.
+          if printf '%s\n' "$changed" | grep -qvE '^apps/desktop/'; then d=true; else d=false; fi
+          if printf '%s\n' "$changed" | grep -qE '^(apps/desktop/|\.github/workflows/macos\.yml$)'; then t=true; else t=false; fi
+          echo "daemon=$d" >> "$GITHUB_OUTPUT"
+          echo "desktop=$t" >> "$GITHUB_OUTPUT"
+
+  daemon:
+    name: Daemon crates (macOS)
+    needs: changes
+    if: needs.changes.outputs.daemon == 'true'
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -60,23 +161,39 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.2
         with:
-          shared-key: macos-crates
+          shared-key: macos-daemon
 
       - name: Install nextest
         uses: taiki-e/install-action@v2.87.25
         with:
           tool: cargo-nextest@0.9.146
 
-      - name: cargo clippy (macOS cfg)
-        run: cargo clippy -p otto-sandbox -p otto-pty -p otto-sessions -p otto-keychain --all-targets -- -D warnings
+      # otto-server links otto-brokers → rdkafka-sys, which builds librdkafka
+      # with CMake (libcurl headers ship in the macOS SDK).
+      - name: Ensure cmake
+        run: command -v cmake || brew install cmake
 
-      # The Keychain-touching cases are #[ignore]d / opt-in; the default set
-      # still runs the macOS cfg branches (file secret store, ACL helpers).
+      - name: cargo clippy (macOS cfg)
+        run: >-
+          cargo clippy
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          --all-targets -- -D warnings
+
+      # Unit tests plus each crate's integration binaries — except
+      # otto-server's `it`, platform-neutral HTTP/DB coverage that Linux CI
+      # already runs in full. The Keychain-touching cases are #[ignore]d /
+      # opt-in; the default set still runs the macOS cfg branches.
       - name: cargo nextest
-        run: cargo nextest run -p otto-sandbox -p otto-pty -p otto-sessions -p otto-keychain --profile ci --no-fail-fast
+        run: >-
+          cargo nextest run
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          --profile ci --no-fail-fast
+          -E 'not (package(otto-server) & binary(it))'
 
   desktop:
     name: Desktop app (Tauri, macOS)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     defaults:

@@ -142,7 +142,7 @@
   async function approveDraftLeave(): Promise<boolean> {
     if (!draftDirty) return true;
     const allowed = await confirmer.ask('You have unsaved changes to this draft. Leaving now discards them.', {
-      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
     });
     if (allowed) { draftTitle = story?.title ?? ''; draftBody = source?.body_md ?? ''; }
     return allowed;
@@ -545,7 +545,8 @@
   }
 
   // ── Live Jira writes ────────────────────────────────────────────────────
-  // Status, assignee and comments change the real issue that the whole team
+  // Status, assignee, comments, the title and every custom field (story
+  // points, sprint, labels…) change the real issue that the whole team
   // sees (and may fire Jira notifications / automations), so each one goes
   // through `confirmOutward` naming the issue key and the new value. The
   // pickers are global `ctxMenu` menus (viewport-clamped, height-capped, Esc
@@ -818,13 +819,42 @@
     }
   }
 
+  /** Human-readable form of the working draft, for the outward confirm. */
+  function draftLabel(ef: EditableField, draft: unknown): string {
+    const opt = (id: string) => ef.allowed_values.find((o) => o.id === id)?.label ?? id;
+    const user = (id: string) => assignables.find((u) => u.account_id === id)?.display_name ?? id;
+    if (ef.schema_type === 'array' && ef.items !== 'string') {
+      const ids = Array.isArray(draft) ? (draft as string[]) : [];
+      return ids.map(ef.items === 'user' ? user : opt).join(', ');
+    }
+    const raw = String(draft ?? '').trim();
+    if (!raw) return '';
+    if (ef.schema_type === 'user') return user(raw);
+    if (['option', 'priority', 'version', 'component'].includes(ef.schema_type)) return opt(raw);
+    return raw;
+  }
+
   /** PUT a single field then swap in the refreshed issue returned by the server. */
   async function saveField(ef: EditableField): Promise<void> {
     if (!story) return;
     const s = story;
+    const draft = fieldDraft;
+    // A custom field is a live Jira write like status / title (S18-302): it
+    // notifies watchers and can fire Jira automations, so name the issue and
+    // show old → new before sending.
+    const before = rawFieldValue(ef.key).trim() || '(empty)';
+    const after = draftLabel(ef, draft) || '(empty)';
+    const ok = await confirmOutward({
+      verb: 'Update field',
+      title: `Update ${ef.name} on ${s.source_key}?`,
+      where: jiraWhere(),
+      what: `${ef.name}: “${before}” → “${after}”`,
+      who: `Everyone with access to ${s.source_key} sees the change; watchers are notified and Jira automations may run.`,
+    });
+    if (!ok || !onStory(s) || editingField !== ef.key) return;
     fieldSaving = true;
     try {
-      const value = buildFieldValue(ef, fieldDraft);
+      const value = buildFieldValue(ef, draft);
       const full = await api.put<IssueFull>(
         `/issue/${s.account_id}/${s.source_key}/fields`,
         { fields: { [ef.key]: value } },

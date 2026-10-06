@@ -71,7 +71,12 @@ fn codex_home() -> PathBuf {
 /// Library copy). Records `name` in each dir's Otto manifest so a later
 /// uninstall/update only ever touches skills Otto owns. Used for both first
 /// install and updates — the clean-overwrite makes an update replace cleanly.
-pub fn install(name: &str, src: &Path) -> io::Result<()> {
+///
+/// A provider dir that already holds a `name` entry Otto does NOT own (absent
+/// from its manifest — a hand-authored skill, or a symlink into the user's own
+/// synced skill repo) is left untouched (S7-304); those dirs are returned so
+/// the caller can report them.
+pub fn install(name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
     install_into_dirs(&provider_skill_dirs(), name, src)
 }
 
@@ -87,14 +92,22 @@ pub fn uninstall(name: &str) -> io::Result<()> {
 // Core (dir-explicit, so the home/CODEX_HOME resolution stays out of tests)
 // ---------------------------------------------------------------------------
 
-fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<()> {
+fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<Vec<PathBuf>> {
     // `name` arrives from the HTTP layer — refuse anything that is not a
     // single path component before it is joined under the provider dirs.
     let name = otto_core::paths::safe_component(name)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unsafe skill name"))?;
+    let mut user_owned = Vec::new();
     for dir in dirs {
         let dest = dir.join(name);
-        if dest.exists() {
+        // `symlink_metadata`: a dangling or live symlink is "present" too, and
+        // is never followed or replaced.
+        if let Ok(meta) = fs::symlink_metadata(&dest) {
+            let owned = merge::read_manifest(dir).iter().any(|n| n == name);
+            if !owned || meta.file_type().is_symlink() || !meta.is_dir() {
+                user_owned.push(dir.clone());
+                continue; // the user's own skill of this name — never clobber it
+            }
             fs::remove_dir_all(&dest)?; // clean-overwrite so updates replace cleanly
         }
         copy_tree(src, &dest)?;
@@ -106,7 +119,7 @@ fn install_into_dirs(dirs: &[PathBuf], name: &str, src: &Path) -> io::Result<()>
             merge::write_manifest(dir, &owned)?;
         }
     }
-    Ok(())
+    Ok(user_owned)
 }
 
 fn uninstall_from_dirs(dirs: &[PathBuf], name: &str) -> io::Result<()> {
@@ -192,6 +205,54 @@ mod tests {
         assert!(!d.join("grill/STALE.md").exists());
         assert!(d.join("grill/SKILL.md").is_file());
         assert_eq!(merge::read_manifest(&d), vec!["grill".to_string()]);
+    }
+
+    #[test]
+    fn install_never_replaces_an_unmanaged_or_symlinked_provider_skill() {
+        // S7-304: a hand-authored skill of the same name survives install.
+        let tmp = TempDir::new().unwrap();
+        let src = src_skill(tmp.path());
+        let mine = tmp.path().join("claude").join("skills");
+        let linked = tmp.path().join("codex").join("skills");
+        let fresh = tmp.path().join("gemini").join("skills");
+        fs::create_dir_all(mine.join("grill")).unwrap();
+        fs::write(mine.join("grill/SKILL.md"), "my own grill\n").unwrap();
+        let repo = tmp.path().join("ai_skills/grill");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("SKILL.md"), "synced\n").unwrap();
+        fs::create_dir_all(&linked).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&repo, linked.join("grill")).unwrap();
+        // Even a manifest claim does not make Otto replace a symlink.
+        merge::write_manifest(&linked, &["grill".to_string()]).unwrap();
+
+        let skipped = install_into_dirs(
+            &[mine.clone(), linked.clone(), fresh.clone()],
+            "grill",
+            &src,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(mine.join("grill/SKILL.md")).unwrap(),
+            "my own grill\n"
+        );
+        assert!(merge::read_manifest(&mine).is_empty(), "not claimed");
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(linked.join("grill"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                fs::read_to_string(repo.join("SKILL.md")).unwrap(),
+                "synced\n"
+            );
+            assert!(skipped.contains(&linked));
+        }
+        assert!(skipped.contains(&mine));
+        assert!(fresh.join("grill/references/notes.md").is_file());
+        assert!(!skipped.contains(&fresh));
     }
 
     #[test]

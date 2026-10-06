@@ -26,6 +26,8 @@
   // it expanded in a sheet (AutomateGuideButton), so a user with one item
   // still finds it.
   import { router } from '../router.svelte';
+  import { auth } from '../stores/auth.svelte';
+  import { routeAllowed } from '../sidebar';
 
   let {
     current,
@@ -38,12 +40,18 @@
     /** Called before navigating (the sheet closes itself). */
     onnavigate?: () => void;
   } = $props();
+
+  // Only the entries this user can actually open (S20-307): the same RBAC /
+  // feature gate the sidebar applies — the current page always stays listed.
+  const entries = $derived(
+    AUTOMATE_GUIDE.filter((m) => m.id === current || routeAllowed(m.route, (f) => auth.can(f, 'view'))),
+  );
 </script>
 
 <details class="automate-guide" data-testid="automate-guide" {open}>
   <summary>Which one do I want?</summary>
   <ul>
-    {#each AUTOMATE_GUIDE as m (m.id)}
+    {#each entries as m (m.id)}
       <li class:here={m.id === current}>
         {#if m.id === current}
           <strong>{m.label}</strong> <span class="here-tag">(this page)</span>
@@ -69,7 +77,7 @@
     color: var(--accent-text);
     text-align: center;
   }
-  summary:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
+  summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   ul {
     margin: 8px 0 0;
     padding: 0;
@@ -90,5 +98,5 @@
     text-decoration: underline;
     text-underline-offset: 2px;
   }
-  .link:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
+  .link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
 </style>

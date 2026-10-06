@@ -24,7 +24,7 @@ test('section ids are unique and labels are sentence case', () => {
   assert.equal(new Set(ids).size, ids.length);
   // Sentence case: no word after the first starts upper-case unless it is a
   // proper noun / acronym on the allow-list.
-  const proper = new Set(['MCP', 'Jira', 'Git']);
+  const proper = new Set(['MCP', 'Jira', 'Git', 'Telegram']);
   for (const s of SETTINGS_SECTIONS) {
     const [, ...rest] = s.label.split(/\s+/);
     for (const w of rest) {
@@ -102,4 +102,31 @@ test('sections backed by root-only handlers are gated on root, not settings:admi
   }
   // Sections whose handlers accept settings admins stay open to them.
   assert.ok(ids.includes('skills'));
+});
+
+// S17-303: a section's UI gate must match its handlers' real gate. These
+// sections' handlers are all `require_root`; gating them `settings:admin`
+// showed a non-root settings admin a page where every action 403'd.
+const ROOT_ONLY_HANDLERS: Record<string, string[]> = {
+  plugins: ['crates/otto-server/src/plugins.rs'],
+  backup: [
+    'crates/otto-server/src/routes/backup.rs',
+    'crates/otto-server/src/routes/backup_git.rs',
+    'crates/otto-server/src/routes/connection_export.rs',
+  ],
+};
+
+test('root-only handlers ↔ root-gated sections (S17-303)', () => {
+  const settingsAdmin: SettingsAccess = { can: (f, level) => f === 'settings' && level === 'admin', isRoot: false };
+  const visible = availableSections(settingsAdmin).map((s) => s.id);
+  for (const [id, files] of Object.entries(ROOT_ONLY_HANDLERS)) {
+    const section = findSection(id);
+    assert.ok(section, id);
+    assert.equal((section as { gate?: unknown }).gate, 'root', `${id} must be gated 'root'`);
+    assert.ok(!visible.includes(id as never), `a non-root settings admin must not see ${id}`);
+    for (const f of files) {
+      const src = readFileSync(new URL(`../../${f}`, import.meta.url), 'utf8');
+      assert.match(src, /require_root\(/, `${f} is root-gated`);
+    }
+  }
 });

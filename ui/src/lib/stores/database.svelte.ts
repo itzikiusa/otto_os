@@ -55,7 +55,7 @@ import {
   type VarSpec,
 } from '../../modules/database/sql-util';
 import { condToSql, parseFilterValText, toFilterVal, type FilterCond } from '../../modules/database/filter-chips';
-import { obviousWriteVerb } from '../../modules/database/sql-dialect';
+import { obviousWriteVerb, tableRefFromNodeId } from '../../modules/database/sql-dialect';
 export { condLabel, condToSql, filterValMatches, parseFilterValText, toFilterVal } from '../../modules/database/filter-chips';
 export type { FilterCond, FilterVal } from '../../modules/database/filter-chips';
 import { normalizeDbError } from '../../modules/database/error-normalize';
@@ -3618,27 +3618,14 @@ class DatabaseStore {
 
   // ── Table actions (schema-tree context menu) ──────────────────────────────
 
-  /** Backtick-quote a SQL identifier (works for MySQL + ClickHouse). */
-  private quoteIdent(name: string): string {
-    return '`' + name.replace(/`/g, '``') + '`';
-  }
-
   /**
    * Build a qualified SQL table reference from a tree node id like
-   * `db:configserver/table:props`. Returns the quoted `db`.`table` ref plus the
-   * raw parts, or null when the node isn't a SQL table/view.
+   * `db:configserver/table:props`, quoted for the selected connection's engine
+   * (`"public"."orders"` on Postgres, backticks on MySQL / ClickHouse). Returns
+   * the ref plus the raw parts, or null when the node isn't a SQL table/view.
    */
   tableRefFromNode(node: SchemaNode): { ref: string; db: string | null; table: string } | null {
-    const segs = node.id.split('/').map((s) => {
-      const i = s.indexOf(':');
-      return i < 0 ? ([s, ''] as const) : ([s.slice(0, i), s.slice(i + 1)] as const);
-    });
-    const find = (k: string) => segs.find(([kk]) => kk === k)?.[1];
-    const table = find('table') ?? find('view');
-    if (!table) return null;
-    const db = find('db') ?? find('schema') ?? null;
-    const ref = db ? `${this.quoteIdent(db)}.${this.quoteIdent(table)}` : this.quoteIdent(table);
-    return { ref, db, table };
+    return tableRefFromNodeId(this.selectedConn?.kind, node.id);
   }
 
   /** Open a statement in a new query tab; optionally run it immediately. `node`

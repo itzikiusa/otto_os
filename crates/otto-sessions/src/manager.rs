@@ -102,34 +102,62 @@ fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
 /// `curl -X POST`; file edits stay (the agent writes its memory + report) and
 /// are confined to its folder by the forced Seatbelt profile
 /// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
-/// daemon (otto-server `personal_agent_policy`). Claude-only flag; other
-/// providers rely on the sandbox + the daemon-side policy.
+/// daemon (otto-server `personal_agent_policy`). Claude gets tool flags; codex
+/// gets the untrusted-checkout refinements below (and [`read_only_strip`]);
+/// other providers rely on the sandbox + the daemon-side policy.
 ///
-/// Two review-only refinements (code review runs against PR checkouts whose
+/// Review-only refinements (code review runs against PR checkouts whose
 /// content an outsider wrote):
 /// - `meta.allow_subagents = true` keeps the sub-agent tool (an orchestrator
 ///   reviewer delegates each lens to one) while the shell stays removed;
-/// - `meta.project_settings = false` adds `--setting-sources user`, so the
-///   checkout's `.claude/settings*.json` (hooks, MCP servers, permission
-///   rules) never loads — a repo hook would otherwise run on SessionStart.
+/// - `meta.project_settings = false` marks an UNTRUSTED checkout. For claude it
+///   adds `--setting-sources user`, so the checkout's `.claude/settings*.json`
+///   (hooks, MCP servers, permission rules) never loads — a repo hook would
+///   otherwise run on SessionStart — plus `--strict-mcp-config` (no MCP server
+///   at all: a reviewer only reads files and writes its findings JSON, and a
+///   user-scope MCP is an exfiltration channel) and removes WebFetch /
+///   WebSearch (an injected "fetch https://x/?k=<secret>" is the other one).
+///   For codex it adds `-c project_doc_max_bytes=0`, so the checkout's
+///   AGENTS.md is never loaded as INSTRUCTIONS (it is still readable as code).
 fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if provider != "claude" || meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
+    if meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
         return vec![];
     }
-    let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
-    let mut args = vec![
-        "--disallowed-tools".to_string(),
-        if subagents {
-            "Bash NotebookEdit".to_string()
-        } else {
-            "Bash NotebookEdit Task".to_string()
-        },
-    ];
-    if meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false) {
-        args.push("--setting-sources".to_string());
-        args.push("user".to_string());
+    let untrusted = meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false);
+    match provider {
+        "claude" => {
+            let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
+            let mut denied = vec!["Bash", "NotebookEdit"];
+            if !subagents {
+                denied.push("Task");
+            }
+            if untrusted {
+                denied.extend(["WebFetch", "WebSearch"]);
+            }
+            let mut args = vec!["--disallowed-tools".to_string(), denied.join(" ")];
+            if untrusted {
+                args.push("--setting-sources".to_string());
+                args.push("user".to_string());
+                args.push("--strict-mcp-config".to_string());
+            }
+            args
+        }
+        "codex" if untrusted => vec!["-c".to_string(), "project_doc_max_bytes=0".to_string()],
+        _ => vec![],
     }
-    args
+}
+
+/// Removes provider flags a **read-only** session must not carry, from argv the
+/// provider registry built. Codex's `--search` (the model-side live web-search
+/// tool) is dropped: a read-only run has no business browsing, and on an
+/// untrusted checkout it is an exfiltration channel a prompt injection can
+/// steer. (codex keeps its approvals bypass: its own Seatbelt cannot nest
+/// inside Otto's forced read-only profile, which confines its whole process
+/// tree instead.)
+fn read_only_strip(provider: &str, meta: &serde_json::Value, args: &mut Vec<String>) {
+    if provider == "codex" && meta.get("read_only").and_then(|v| v.as_bool()) == Some(true) {
+        args.retain(|a| a != "--search");
+    }
 }
 
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
@@ -2122,6 +2150,16 @@ impl SessionManager {
         self
     }
 
+    /// [`missing_cwd_refusal_in`] against this daemon's data dir: the
+    /// configured one (`with_data_dir` / `$OTTO_DATA_DIR`), never a hard-coded
+    /// default (S1-306).
+    fn missing_cwd_refusal(&self, session: &Session) -> Option<String> {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        missing_cwd_refusal_in(session, &self.sandbox_data_dir(&home))
+    }
+
     /// The data dir the sandbox protects: the configured one, else resolved
     /// exactly like `ottod::config` (`$OTTO_DATA_DIR`, then the default).
     fn sandbox_data_dir(&self, home: &std::path::Path) -> std::path::PathBuf {
@@ -2255,6 +2293,25 @@ impl SessionManager {
     /// orchestrator command). Surfaces the "by user" side of the trail for every
     /// provider. Best-effort; loads the session to resolve its workspace.
     pub async fn record_user_message(&self, session_id: &Id, text: &str) {
+        self.record_relayed_message(session_id, TrailSource::User, None, text)
+            .await;
+    }
+
+    /// Record a message another agent session sent into this one with its own
+    /// credential (`/message`, broadcast, relay — S11-305). Attributed to the
+    /// agent and the sending session, never to the person who owns both.
+    pub async fn record_agent_message(&self, session_id: &Id, from: &Id, text: &str) {
+        self.record_relayed_message(session_id, TrailSource::Agent, Some(from), text)
+            .await;
+    }
+
+    async fn record_relayed_message(
+        &self,
+        session_id: &Id,
+        source: TrailSource,
+        from: Option<&Id>,
+        text: &str,
+    ) {
         if self.activity.is_none() {
             return;
         }
@@ -2265,11 +2322,14 @@ impl SessionManager {
         if trimmed.is_empty() {
             return;
         }
-        let summary = trail_clip(trimmed, 200);
+        let summary = match from {
+            Some(from) => trail_clip(&format!("from session {from}: {trimmed}"), 200),
+            None => trail_clip(trimmed, 200),
+        };
         self.record_trail(
             session_id,
             &session.workspace_id,
-            TrailSource::User,
+            source,
             TrailKind::Prompt,
             TrailLevel::Info,
             summary,
@@ -2583,7 +2643,26 @@ impl SessionManager {
         if let Some(account_home) = self.provider_home(session) {
             extra.push(account_home);
         }
-        let policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
+        let mut policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
+        // Codex runs with `CODEX_HOME` = the shadow home in its context bundle
+        // (`~/.otto/context/codex/<cwd>/codex-home`), which the profile
+        // otherwise write-denies with the rest of `~/.otto/context`: re-open
+        // that one home, minus its config / skills / instruction files.
+        if let Some(shadow) = spec
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "CODEX_HOME")
+            .map(|(_, v)| std::path::PathBuf::from(v))
+            .filter(|p| p.is_absolute() && !p.starts_with(&data_dir))
+        {
+            policy = policy.allow_provider_home(&shadow);
+        }
+        // Package managers / build tools cache into a private per-session dir
+        // (under temp, which is writable): the user's shared caches hold code
+        // unsandboxed programs run later, so they are not writable roots.
+        spec.env
+            .extend(otto_sandbox::agent_cache_env(&agent_cache_dir(&session.id)));
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -2904,6 +2983,86 @@ impl SessionManager {
         self.networks.status(id)
     }
 
+    /// S11-302: refuse an agent session whose folder is `/`, `$HOME` or one of
+    /// its parents, or Otto's data dir (or a non-work-area path inside it) —
+    /// the session's cwd becomes a Seatbelt write grant and is pre-trusted,
+    /// so `$HOME` would hand a "confined" agent `~/.zshrc` and
+    /// `~/Library/LaunchAgents`. The one exception is a workspace a person
+    /// rooted at `$HOME` itself, opened at that root (its sandbox profile
+    /// simply carries no cwd grant — `SandboxPolicy::for_agent` never grants
+    /// a root covering `$HOME`).
+    fn check_session_cwd(&self, ws: &Workspace, cwd: &str) -> Result<()> {
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let path = std::path::Path::new(cwd);
+        let Some(why) = otto_sandbox::unsafe_session_cwd(path, &home, &data_dir) else {
+            return Ok(());
+        };
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+        let workspace_home_root = !home.as_os_str().is_empty()
+            && canon(path).is_some()
+            && canon(path) == canon(&home)
+            && canon(path) == canon(std::path::Path::new(&ws.root_path));
+        if workspace_home_root {
+            return Ok(());
+        }
+        Err(Error::Invalid(format!(
+            "refusing to start an agent session in {cwd}: it is {why}"
+        )))
+    }
+
+    /// S11-302: where an agent's OWN credential (`caller` = its session) may
+    /// open another session. Inside the workspace root, inside the caller's
+    /// own folder, or in a worktree of the same repository as either (same
+    /// git common dir) — never an arbitrary folder, whose tree the new
+    /// session's sandbox would make writable and its trust pre-seeding would
+    /// trust. `None` (the workspace root) is always fine. A person's
+    /// credential never comes here.
+    pub async fn check_agent_cwd(
+        &self,
+        ws: &Workspace,
+        caller: &Id,
+        cwd: Option<&str>,
+    ) -> Result<()> {
+        let Some(cwd) = cwd.map(str::trim).filter(|c| !c.is_empty()) else {
+            return Ok(());
+        };
+        let want = std::path::Path::new(cwd);
+        if !want.is_absolute() {
+            return Err(Error::Forbidden(
+                "an agent may only open sessions at an absolute folder".into(),
+            ));
+        }
+        let want = std::fs::canonicalize(want)
+            .map_err(|_| Error::Forbidden(format!("an agent may not open a session in {cwd}")))?;
+        let mut bases: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&ws.root_path)];
+        if let Ok(own) = self.get(caller).await {
+            if !own.cwd.trim().is_empty() {
+                bases.push(std::path::PathBuf::from(own.cwd));
+            }
+        }
+        let bases: Vec<std::path::PathBuf> = bases
+            .iter()
+            .filter_map(|b| std::fs::canonicalize(b).ok())
+            .collect();
+        if bases.iter().any(|b| want.starts_with(b)) {
+            return Ok(());
+        }
+        if let Some(common) = resolve_git_common_dir(&want).await {
+            for b in &bases {
+                if resolve_git_common_dir(b).await.as_ref() == Some(&common) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Forbidden(format!(
+            "an agent may only open sessions inside the workspace, its own folder \
+             or a worktree of the same repository (not {cwd})"
+        )))
+    }
+
     /// Create a session row, spawn its PTY and start the status task.
     ///
     /// `spec_override` is used by connection sessions (the connections crate
@@ -2942,6 +3101,9 @@ impl SessionManager {
             }
         }
         let cwd = req.cwd.clone().unwrap_or_else(|| ws.root_path.clone());
+        if req.kind == SessionKind::Agent {
+            self.check_session_cwd(ws, &cwd)?;
+        }
 
         let (provider, mut spec, provider_session_id) = match spec_override {
             Some(spec) => {
@@ -2972,6 +3134,7 @@ impl SessionManager {
                     &meta_val,
                 ));
                 spec.args.extend(lean_turn_args(&provider, &meta_val));
+                read_only_strip(&provider, &meta_val, &mut spec.args);
                 spec.args.extend(read_only_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
@@ -3464,6 +3627,14 @@ impl SessionManager {
     /// True when the session has a live PTY in this daemon process.
     pub fn is_live(&self, id: &Id) -> bool {
         self.live.contains_key(id)
+    }
+
+    /// True when `id`'s live PTY runs in a PTY holder (it is detached, not
+    /// killed, by [`Self::shutdown_for_restart`] — when persistence is on).
+    pub fn runs_in_holder(&self, id: &Id) -> bool {
+        self.live
+            .get(id)
+            .is_some_and(|e| e.value().holder().is_some())
     }
 
     /// Register a WS terminal viewer for `id` (called on attach). Returns an
@@ -5312,11 +5483,20 @@ impl SessionManager {
     /// Kill every live PTY and mark the sessions exited. Used when the app
     /// closes (no orphaned agent processes left running) and on daemon
     /// shutdown. Returns the number of sessions terminated.
+    ///
+    /// The app closing is NOT the daemon exiting (under launchd it keeps
+    /// running for the next window): spawns are refused only while the kill
+    /// sweep runs, so a resume racing it can't fork a fresh CLI, and the flag
+    /// is cleared again afterwards — left set, every later resume/restart
+    /// answered "the daemon is shutting down" until a daemon restart.
     pub async fn shutdown_all(&self) -> usize {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
-        self.shutdown_ids(ids).await
+        let killed = self.shutdown_ids(ids).await;
+        self.shutting_down
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        killed
     }
 
     /// Kill `ids`' live PTYs and mark them exited (see [`Self::shutdown_all`]).
@@ -5587,7 +5767,7 @@ impl SessionManager {
         }
         // Checked BEFORE the old process is retired: a refusal leaves it as is.
         if session.kind == SessionKind::Agent {
-            if let Some(msg) = missing_cwd_refusal(&session) {
+            if let Some(msg) = self.missing_cwd_refusal(&session) {
                 return Err(Error::Conflict(msg));
             }
         }
@@ -5614,6 +5794,7 @@ impl SessionManager {
                         .as_deref(),
                     &session.meta,
                 ));
+                read_only_strip(&session.provider, &session.meta, &mut spec.args);
                 spec.args
                     .extend(read_only_args(&session.provider, &session.meta));
                 spec
@@ -5867,6 +6048,7 @@ impl SessionManager {
         let sid = sid.clone();
         if handle.has_exited() {
             tracing::info!(session = %sid, "session's process exited while the daemon was down");
+            self.deferred_holders.remove(&sid);
             drop(handle);
             return false;
         }
@@ -5884,6 +6066,7 @@ impl SessionManager {
             Ok(s) => s,
             Err(Error::NotFound(_)) => {
                 tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                self.deferred_holders.remove(&sid);
                 drop(handle);
                 return false;
             }
@@ -5905,6 +6088,7 @@ impl SessionManager {
         };
         if session.archived || !is_user_started(&session) || self.is_live(&sid) {
             tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
+            self.deferred_holders.remove(&sid);
             drop(handle);
             return false;
         }
@@ -5971,7 +6155,17 @@ impl SessionManager {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         let mut adopted = Vec::new();
-        for (sid, path) in pending {
+        for (sid, _) in pending {
+            // Under the session's resume lock, like `ensure_live` (S1-305):
+            // otherwise a user opening the session mid-lookup finds no
+            // deferred entry and nothing live, resumes a second CLI, and this
+            // adoption then "ends" the original holder mid-turn. Re-read the
+            // entry under the lock — an open may have decided it already.
+            let lock = self.resume_lock(&sid);
+            let _guard = lock.lock().await;
+            let Some(path) = self.deferred_holders.get(&sid).map(|p| p.clone()) else {
+                continue;
+            };
             if self.adopt_deferred(&sid, path).await {
                 adopted.push(sid);
             }
@@ -5980,6 +6174,9 @@ impl SessionManager {
     }
 
     /// One deferred holder: adopt it if its session can be decided now.
+    /// Callers hold the session's resume lock. The `deferred_holders` entry is
+    /// kept until the holder is decided (adopted, gone, or ended), so the
+    /// dormant pass and the credential sweep keep skipping it meanwhile.
     async fn adopt_deferred(&self, sid: &Id, path: std::path::PathBuf) -> bool {
         if self.is_live(sid) {
             self.deferred_holders.remove(sid);
@@ -5993,9 +6190,8 @@ impl SessionManager {
                     drop(handle);
                     return false;
                 }
-                // Not deferred any more unless this lookup fails again
-                // (`adopt_one` re-records it then).
-                self.deferred_holders.remove(sid);
+                // `adopt_one` drops the entry once it has decided, and keeps
+                // it when this lookup fails again.
                 self.adopt_one(sid, handle).await
             }
             Ok(Err(otto_pty::AdoptError::Failed(e))) => {
@@ -6427,10 +6623,17 @@ fn evict_if_same(live: &DashMap<Id, Arc<PtyHandle>>, id: &Id, handle: &Arc<PtyHa
     live.remove_if(id, |_, h| Arc::ptr_eq(h, handle)).is_some()
 }
 
+/// The providers the legacy `process_sandbox.providers` allow-list defaulted to.
+const SANDBOX_BUILTIN_PROVIDERS: &[&str] = &["claude", "codex", "agy", "shell"];
+
 /// Decide whether a session should be sandboxed and with what network posture,
 /// from the `process_sandbox` setting JSON. `None` means "do not sandbox". Pure
-/// (no I/O) so the gating is unit-testable: only `Agent` sessions whose provider
-/// is in the configured set (default: all agent providers) when `enabled`.
+/// (no I/O) so the gating is unit-testable. When `enabled`, EVERY `Agent`
+/// session is confined — a user-added provider (`opencode`, a custom CLI)
+/// included — unless a person exempted its provider: `exempt_providers`, or
+/// (legacy) a `providers` list that leaves out one of the built-in
+/// [`SANDBOX_BUILTIN_PROVIDERS`]. A provider the legacy list never knew about
+/// is never exempt by omission (S11-309).
 fn sandbox_decision(
     cfg: &serde_json::Value,
     kind: SessionKind,
@@ -6446,22 +6649,21 @@ fn sandbox_decision(
     {
         return None;
     }
-    let providers: Vec<String> = cfg
-        .get("providers")
-        .and_then(|v| v.as_array())
-        .map(|a| {
+    let list = |key: &str| -> Option<Vec<String>> {
+        cfg.get(key).and_then(|v| v.as_array()).map(|a| {
             a.iter()
                 .filter_map(|x| x.as_str().map(String::from))
                 .collect()
         })
-        .unwrap_or_else(|| {
-            ["claude", "codex", "agy", "shell"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        });
-    if !providers.iter().any(|p| p == provider) {
+    };
+    if list("exempt_providers").is_some_and(|ex| ex.iter().any(|p| p == provider)) {
         return None;
+    }
+    if let Some(legacy) = list("providers") {
+        let builtin = SANDBOX_BUILTIN_PROVIDERS.contains(&provider);
+        if builtin && !legacy.iter().any(|p| p == provider) {
+            return None;
+        }
     }
     Some(
         match cfg
@@ -6476,11 +6678,6 @@ fn sandbox_decision(
     )
 }
 
-/// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
-/// the sandbox can grant write access to it. For a linked worktree this is the
-/// main repo's `.git` (which holds the objects + the worktree's gitdir), which
-/// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
-/// commit. Best-effort: `None` when `cwd` isn't a git repo.
 /// The Seatbelt policy for one agent session. A read-only session (untrusted
 /// input, always confined) additionally may not plant project-scope claude
 /// config (`.claude/settings*.json`, hooks, `.mcp.json`) in its own folder —
@@ -6496,12 +6693,25 @@ fn sandbox_policy(
 ) -> otto_sandbox::SandboxPolicy {
     let policy = otto_sandbox::SandboxPolicy::for_agent(cwd, home, data_dir, extra, network);
     if read_only {
-        policy.deny_project_agent_config(cwd)
+        policy.harden_read_only(cwd, home)
     } else {
         policy
     }
 }
 
+/// A sandboxed session's private package / build cache dir
+/// (`<tmp>/otto-agent-cache/<session id>`; see [`otto_sandbox::agent_cache_env`]).
+fn agent_cache_dir(session_id: &Id) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("otto-agent-cache")
+        .join(session_id.as_str())
+}
+
+/// Resolve a repo's git **common dir** (absolute, canonicalized) for `cwd`, so
+/// the sandbox can grant write access to it. For a linked worktree this is the
+/// main repo's `.git` (which holds the objects + the worktree's gitdir), which
+/// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
+/// commit. Best-effort: `None` when `cwd` isn't a git repo.
 async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let out = otto_git::hardened_command()
         .arg("-C")
@@ -6532,14 +6742,8 @@ async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::Path
 /// project had been wiped and could start recreating files. A moved/deleted
 /// repo is the user's to restore — say so instead (409). Exempt (still
 /// recreated on spawn): the scratch ("No workspace") home and Otto-managed
-/// folders under its data dir, which are Otto's to rebuild.
-fn missing_cwd_refusal(session: &Session) -> Option<String> {
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default();
-    missing_cwd_refusal_in(session, &home.join("Library/Application Support/Otto"))
-}
-
+/// folders under its data dir (the CONFIGURED one — S1-306), which are
+/// Otto's to rebuild.
 fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Option<String> {
     let cwd = std::path::Path::new(&session.cwd);
     if session.cwd.trim().is_empty()
@@ -6590,6 +6794,80 @@ mod tests {
                 .is_none()
         );
         assert!(missing_cwd_refusal_in(&mk("ws", &data.join("db-assist/x")), &data).is_none());
+    }
+
+    /// S1-305: a deferred-adoption retry serializes with `ensure_live` on the
+    /// session's resume lock — while an open holds it, the retry waits rather
+    /// than deciding the holder underneath it — and re-reads the entry under
+    /// the lock, so a holder the open already decided is not touched again.
+    #[tokio::test]
+    async fn deferred_adoption_retry_waits_for_the_resume_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let mgr = Arc::new(SessionManager::new(
+            SessionsRepo::new(pool),
+            events,
+            ProviderRegistry::new(None),
+        ));
+        let sid: Id = "deferred-1".into();
+        mgr.deferred_holders
+            .insert(sid.clone(), dir.path().join("gone.sock"));
+        let lock = mgr.resume_lock(&sid);
+        let guard = lock.lock().await;
+        let retry = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.retry_deferred_adoptions().await }
+        });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!retry.is_finished(), "the retry must wait for the open");
+        assert!(
+            mgr.deferred_holders.contains_key(&sid),
+            "nothing decided while the open holds the lock"
+        );
+        // The open decided it (e.g. adopted the holder) and dropped the entry.
+        mgr.deferred_holders.remove(&sid);
+        drop(guard);
+        assert!(retry.await.unwrap().is_empty());
+    }
+
+    /// S1-306: the "Otto-managed, recreate on spawn" exemption follows the
+    /// CONFIGURED data dir — a daemon on `$OTTO_DATA_DIR` (e2e, dev, custom
+    /// installs) still recreates a cleaned workflow/db-assist scratch dir.
+    #[tokio::test]
+    async fn missing_cwd_exemption_uses_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let custom = dir.path().join("custom-data");
+        let mgr = SessionManager::new(SessionsRepo::new(pool), events, ProviderRegistry::new(None))
+            .with_data_dir(custom.clone());
+        let mk = |cwd: &std::path::Path| Session {
+            id: "s".into(),
+            workspace_id: "ws".into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Exited,
+            cwd: cwd.to_string_lossy().into_owned(),
+            provider_session_id: Some("p".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({}),
+        };
+        assert!(
+            mgr.missing_cwd_refusal(&mk(&custom.join("workflow-runs/r1")))
+                .is_none(),
+            "an Otto-managed dir under the configured data dir is recreated"
+        );
+        assert!(
+            mgr.missing_cwd_refusal(&mk(&dir.path().join("user-repo")))
+                .is_some(),
+            "a user's moved repo is still refused"
+        );
     }
     use otto_state::NewSession;
 
@@ -7050,9 +7328,18 @@ mod tests {
         for id in &ids {
             assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Exited);
         }
+        // The app closing is not the daemon exiting: later resumes must work.
+        assert!(
+            !manager
+                .shutting_down
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "an app-close kill sweep must not leave spawns refused"
+        );
         assert_eq!(manager.live_count(), 0);
         drop(guards);
-        // A resume that reaches its spawn after shutdown began must not spawn.
+        // A resume that reaches its spawn after the DAEMON's shutdown began
+        // must not spawn.
+        let _ = manager.shutdown_for_restart().await;
         let spec = CommandSpec {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec /bin/sleep 60".into()],
@@ -8134,18 +8421,25 @@ mod tests {
         // It appends until told to stop (not a fixed 6×40 ms burst): on a
         // slow CI runner the burst could finish before the walk + first stat
         // even ran, leaving a static file inside the window.
+        // The writer must really be running before the window opens, and the
+        // window is wide (1 s vs a 20 ms cadence) so a starved writer thread
+        // on a loaded macOS runner can't leave the file static inside it.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let writer = std::thread::spawn({
-            let (p, stop) = (p.clone(), Arc::clone(&stop));
+            let (p, stop, writes) = (p.clone(), Arc::clone(&stop), Arc::clone(&writes));
             move || {
                 while !stop.load(Ordering::Relaxed) {
                     append_user_message(&p, "more output");
+                    writes.fetch_add(1, Ordering::Relaxed);
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
         });
-        let detected =
-            rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await;
+        while writes.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let detected = rollout_actively_written(tmp.path(), "PSID1", Duration::from_secs(1)).await;
         stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         assert!(detected);
@@ -9481,8 +9775,11 @@ mod tests {
         assert!(read_only_args("claude", &serde_json::json!({})).is_empty());
         assert!(read_only_args("claude", &serde_json::json!({ "read_only": "yes" })).is_empty());
         assert!(read_only_args("codex", &on).is_empty());
-        // No project settings unless the caller opts out of them.
+        // No project settings / MCP / web lockdown unless the caller marks the
+        // checkout untrusted (a personal agent keeps its MCP + web tools).
         assert!(!args.iter().any(|a| a == "--setting-sources"));
+        assert!(!args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args[1].split(' ').any(|t| t == "WebFetch"));
     }
 
     /// A review session: shell gone, sub-agents kept for orchestrator lenses,
@@ -9498,10 +9795,63 @@ mod tests {
         assert!(!args[1].split(' ').any(|t| t == "Task"));
         let at = args.iter().position(|a| a == "--setting-sources").unwrap();
         assert_eq!(args[at + 1], "user");
+        // S2-301(b): no web tools and no MCP server at all on an untrusted checkout.
+        assert!(args[1].split(' ').any(|t| t == "WebFetch"));
+        assert!(args[1].split(' ').any(|t| t == "WebSearch"));
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args.iter().any(|a| a == "--mcp-config"));
         // project_settings without read_only does nothing (never a silent opt-in).
         assert!(
             read_only_args("claude", &serde_json::json!({ "project_settings": false })).is_empty()
         );
+    }
+
+    /// S2-301(a)(d): the full spawn argv a REVIEWER gets, per provider. codex
+    /// loses live web search and never loads the checkout's AGENTS.md as
+    /// instructions; claude loses shell + web tools + every MCP server.
+    #[test]
+    fn review_argv_per_provider_is_locked_down() {
+        let reg = crate::providers::ProviderRegistry::new(None);
+        let meta = serde_json::json!({
+            "source": "review", "read_only": true, "project_settings": false
+        });
+        let argv = |provider: &str| {
+            let mut spec = reg.build_spec(provider, "sid-1", "/tmp/co", false).unwrap();
+            read_only_strip(provider, &meta, &mut spec.args);
+            spec.args.extend(read_only_args(provider, &meta));
+            spec.args
+        };
+        let codex = argv("codex");
+        assert!(!codex.iter().any(|a| a == "--search"), "{codex:?}");
+        let at = codex
+            .iter()
+            .position(|a| a == "-c")
+            .expect("project-doc override");
+        assert_eq!(codex[at + 1], "project_doc_max_bytes=0");
+        let claude = argv("claude");
+        let at = claude
+            .iter()
+            .position(|a| a == "--disallowed-tools")
+            .unwrap();
+        for tool in ["Bash", "Task", "WebFetch", "WebSearch", "NotebookEdit"] {
+            assert!(
+                claude[at + 1].split(' ').any(|t| t == tool),
+                "{tool}: {claude:?}"
+            );
+        }
+        assert!(claude.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!claude.iter().any(|a| a == "--mcp-config"));
+
+        // A read-only personal agent (trusted folder) keeps codex web search
+        // stripped but its project docs; a normal codex session keeps --search.
+        let personal = serde_json::json!({ "read_only": true });
+        let mut spec = reg.build_spec("codex", "sid-2", "/tmp/co", false).unwrap();
+        read_only_strip("codex", &personal, &mut spec.args);
+        assert!(!spec.args.iter().any(|a| a == "--search"));
+        assert!(read_only_args("codex", &personal).is_empty());
+        let mut spec = reg.build_spec("codex", "sid-3", "/tmp/co", false).unwrap();
+        read_only_strip("codex", &serde_json::json!({}), &mut spec.args);
+        assert!(spec.args.iter().any(|a| a == "--search"));
     }
 
     /// claude with a model set → ["--model", name].
@@ -9689,6 +10039,60 @@ mod tests {
             None
         );
         assert!(sandbox_decision(&on, SessionKind::Agent, "shell").is_some());
+    }
+
+    /// S11-309: with the sandbox on, a provider nobody listed (a user-added
+    /// CLI) is confined; only a person's explicit exemption (or the legacy
+    /// list leaving out a BUILT-IN provider) lets one run unconfined.
+    #[test]
+    fn sandbox_decision_confines_unlisted_providers_by_default() {
+        let on = serde_json::json!({ "enabled": true });
+        for p in ["opencode", "grok", "gemini", "my-cli"] {
+            assert!(
+                sandbox_decision(&on, SessionKind::Agent, p).is_some(),
+                "{p}"
+            );
+        }
+        let legacy = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        assert!(sandbox_decision(&legacy, SessionKind::Agent, "opencode").is_some());
+        assert!(sandbox_decision(&legacy, SessionKind::Agent, "claude").is_some());
+        assert_eq!(sandbox_decision(&legacy, SessionKind::Agent, "codex"), None);
+        let exempt = serde_json::json!({ "enabled": true, "exempt_providers": ["opencode"] });
+        assert_eq!(
+            sandbox_decision(&exempt, SessionKind::Agent, "opencode"),
+            None
+        );
+        assert!(sandbox_decision(&exempt, SessionKind::Agent, "claude").is_some());
+    }
+
+    /// S11-302: no agent session at `/`, a parent of `$HOME`, or Otto's data
+    /// dir — refused before anything spawns; an ordinary folder is fine.
+    #[tokio::test]
+    async fn create_refuses_unsafe_session_folders() {
+        let (mgr, _repo, ws, _user) = test_manager().await;
+        let data = tempfile::tempdir().unwrap();
+        let mgr = Arc::try_unwrap(mgr)
+            .ok()
+            .expect("sole owner")
+            .with_data_dir(data.path());
+        for cwd in ["/", data.path().to_str().unwrap()] {
+            let err = mgr.check_session_cwd(&ws, cwd).unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{cwd}: {err:?}");
+        }
+        let bin = data.path().join("bin");
+        assert!(mgr.check_session_cwd(&ws, bin.to_str().unwrap()).is_err());
+        let run = data.path().join("workflow-runs/r1");
+        assert!(mgr.check_session_cwd(&ws, run.to_str().unwrap()).is_ok());
+        assert!(mgr.check_session_cwd(&ws, "/tmp").is_ok());
+        if let Ok(home) = std::env::var("HOME") {
+            if std::path::Path::new(&home).is_dir() {
+                assert!(mgr.check_session_cwd(&ws, &home).is_err(), "$HOME");
+                // …unless the workspace itself is rooted there.
+                let mut home_ws = ws.clone();
+                home_ws.root_path = home.clone();
+                assert!(mgr.check_session_cwd(&home_ws, &home).is_ok());
+            }
+        }
     }
 
     #[test]

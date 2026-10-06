@@ -746,7 +746,7 @@ impl PtyHandle {
             })
             .map_err(|_| input_closed())?;
         match rx.recv() {
-            Ok(res) => res.map_err(|e| Error::Internal(format!("pty write: {e}"))),
+            Ok(res) => res.map_err(write_error),
             Err(_) => Err(input_closed()),
         }
     }
@@ -787,13 +787,7 @@ impl PtyHandle {
             Err(TrySendError::Disconnected(_)) => return Err(input_closed()),
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(res)) => res.map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    Error::Forbidden("terminal control changed".into())
-                } else {
-                    Error::Internal(format!("pty write: {e}"))
-                }
-            }),
+            Ok(Ok(res)) => res.map_err(write_error),
             Ok(Err(_)) => Err(input_closed()),
             Err(_) => Err(Error::Conflict(format!(
                 "session is not accepting input (not drained within {}s; still queued)",
@@ -859,8 +853,10 @@ impl PtyHandle {
                 .map_err(|e| Error::Internal(format!("pty resize: {e}"))),
             // The holder applies TIOCSWINSZ to the real PTY and reflows its
             // own emulator (the one future adoptions are rebuilt from).
-            Backend::Held(conn) => conn
-                .resize(cols, rows)
+            // A blocking socket write (5 s timeout) under the holder write
+            // lock: hand the worker's other tasks to the pool meanwhile
+            // (S1-22), like the reflow above.
+            Backend::Held(conn) => off_worker(multi_thread, || conn.resize(cols, rows))
                 .map_err(|e| Error::Internal(format!("pty resize (holder): {e}"))),
         };
         if res.is_err() {
@@ -892,7 +888,10 @@ impl PtyHandle {
         }
         drop(parser);
         if let Backend::Held(conn) = &self.backend {
-            conn.set_history_cap(lines);
+            // Same blocking holder write as `resize` (S1-22).
+            let multi_thread = tokio::runtime::Handle::try_current()
+                .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+            off_worker(multi_thread, || conn.set_history_cap(lines));
         }
     }
 
@@ -1142,6 +1141,18 @@ impl PtyHandle {
     }
 }
 
+/// Run a blocking holder write without stalling the calling async worker's
+/// other tasks: `block_in_place` on a multi-thread runtime (the worker hands
+/// them to the pool), a plain call elsewhere (current-thread runtimes and
+/// sync callers, where `block_in_place` would panic).
+fn off_worker<T>(multi_thread: bool, f: impl FnOnce() -> T) -> T {
+    if multi_thread {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /// Daemon-unique spawn counter (see [`PtyHandle::spawn_seq`]).
 fn next_spawn_seq() -> u64 {
     static SPAWN_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -1152,9 +1163,10 @@ fn next_spawn_seq() -> u64 {
 /// (child gone → EIO) ends it; queued and later jobs then fail fast with
 /// "input closed" instead of blocking. Two error kinds do NOT end it: a
 /// revoked room authority (`PermissionDenied`) rejects only that job, and a
-/// held PTY's transient loss of its holder connection (`ConnectionReset`)
-/// fails only the in-flight job — the connection is re-established and later
-/// input flows again.
+/// held PTY's transient loss of its holder connection (`ConnectionReset`, or
+/// [`held::DELIVERY_UNKNOWN`] once the frame was sent) fails only the
+/// in-flight job — the connection is re-established and later input flows
+/// again.
 fn spawn_writer(
     writer: Box<dyn std::io::Write + Send>,
     echo: Arc<echo::EchoClock>,
@@ -1175,7 +1187,7 @@ fn spawn_writer(
                 !matches!(
                     e.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ConnectionReset
-                )
+                ) && e.kind() != held::DELIVERY_UNKNOWN
             });
             match job.done {
                 WriteDone::Blocking(tx) => {
@@ -1191,6 +1203,21 @@ fn spawn_writer(
         }
     });
     input_tx
+}
+
+/// A failed input job as the API reports it. A revoked room authority is a
+/// 403; a held write whose ack was lost with the holder connection is a
+/// distinct `Conflict` saying delivery is UNKNOWN (S1-23) — the bytes may
+/// already be in the terminal, so the caller must not blindly resend them —
+/// unlike a plain failure (`Internal`), where nothing was delivered.
+fn write_error(e: std::io::Error) -> Error {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => Error::Forbidden("terminal control changed".into()),
+        k if k == held::DELIVERY_UNKNOWN => Error::Conflict(format!(
+            "input delivery unknown — check the terminal before resending ({e})"
+        )),
+        _ => Error::Internal(format!("pty write: {e}")),
+    }
 }
 
 fn input_closed() -> Error {
@@ -1234,6 +1261,51 @@ impl Drop for PtyHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S1-23: a held write whose ack was lost reports a distinct "delivery
+    /// unknown" `Conflict` (not the `Internal` of a failed write), and — like
+    /// a reconnect — fails only that job: the writer keeps serving input.
+    #[test]
+    fn delivery_unknown_is_a_distinct_conflict_and_keeps_the_writer() {
+        struct LosesFirstAck(bool);
+        impl std::io::Write for LosesFirstAck {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Err(std::io::Error::new(held::DELIVERY_UNKNOWN, "ack lost"));
+                }
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let tx = spawn_writer(
+            Box::new(LosesFirstAck(true)),
+            Arc::new(echo::EchoClock::new()),
+        );
+        let job = |data: &[u8]| {
+            let (done, rx) = sync_channel(1);
+            tx.send(WriteJob {
+                data: data.to_vec(),
+                authorization: None,
+                done: WriteDone::Blocking(done),
+            })
+            .unwrap();
+            rx.recv().unwrap()
+        };
+        let err = job(b"first").unwrap_err();
+        assert_eq!(err.kind(), held::DELIVERY_UNKNOWN);
+        let mapped = write_error(err);
+        assert!(
+            matches!(&mapped, Error::Conflict(m) if m.contains("delivery unknown")),
+            "{mapped:?}"
+        );
+        assert!(job(b"second").is_ok(), "the writer survives the lost ack");
+        assert!(matches!(
+            write_error(std::io::Error::other("eio")),
+            Error::Internal(_)
+        ));
+    }
 
     #[test]
     fn backdate_moves_the_last_output_clock_not_the_feed() {

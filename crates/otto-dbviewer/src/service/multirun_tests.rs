@@ -354,7 +354,13 @@ async fn guarded_writes_are_refused_up_front_without_confirmation() {
     let mut ok = start(s);
     ok.confirm_write = true;
     ok.plan_hash = Some(plan.plan_hash.clone());
-    let (job, _) = fx.svc.multi_run_start(&fx.user, &ok).await.unwrap();
+    // A person's request (the feature guard's scope): only that confirms.
+    let (job, _) = otto_core::auth::with_request_credential(
+        otto_core::auth::RequestCredential::default(),
+        fx.svc.multi_run_start(&fx.user, &ok),
+    )
+    .await
+    .unwrap();
     let done = fx.wait(&job.id).await;
     if fx.svc.is_enforced(&prod).await.unwrap() {
         // An access-enforced production connection still refuses the direct

@@ -7,6 +7,11 @@
 
 [graph]
 all-features = false
+# Only the platforms Otto ships on / CI builds (S12-309): without this the
+# graph included every cfg(windows)/UEFI dependency and 14 skips below were
+# for windows-* crates that never compile for this product. `cargo tree
+# --target <each>` shows no windows-* / r-efi crate in these graphs.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 
 [advisories]
 # Owned by the cargo-audit job; don't double-report here.
@@ -19,8 +24,17 @@ ignore = []
 # upstream crate to move. When an upstream catches up, delete its entry — an
 # entry that no longer matches only warns. Prefer aligning a workspace pin to
 # the ecosystem's version (as dirs 6 / tokio-tungstenite 0.29
-# were) over adding a skip; syn 1/2 and the windows-* families are ecosystem
-# transitions and stay skipped.
+# were) over adding a skip; syn 1/2 is an ecosystem transition and stays skipped.
+#
+# AHEAD-OF-ECOSYSTEM workspace pins (we pick the NEWER copy, the dep tree
+# keeps the older): each costs a duplicate family until it is realigned —
+#   sha2 0.11  vs sqlx-core's 0.10   (+ digest, block-buffer, crypto-common, cpufeatures)
+#   rand 0.10  vs bson/mongodb/tungstenite's 0.9  (+ rand_core, getrandom)
+#   tower-http 0.7 vs reqwest's 0.6
+# Realigning (sha2 = "0.10", rand = "0.9", tower-http = "0.6") touches 18 / 2 / 1
+# crates' code and needs a workspace build; it is tracked as S12-309 follow-up.
+# base64 is a genuine split (reqwest/hyper-util/lettre/pem on 0.23, eight
+# others on 0.22) — one copy stays either way.
 multiple-versions = "deny"
 wildcards = "allow"
 highlight = "all"
@@ -51,7 +65,6 @@ skip = [
   { crate = "phf_macros@0.13.1", reason = "ecosystem lag; newest is 0.14.0" },
   { crate = "phf_shared@0.12.1", reason = "ecosystem lag; newest is 0.14.0" },
   { crate = "phf_shared@0.13.1", reason = "ecosystem lag; newest is 0.14.0" },
-  { crate = "r-efi@5.3.0", reason = "ecosystem lag; newest is 6.0.0" },
   { crate = "rand@0.9.5", reason = "ecosystem lag; newest is 0.10.3" },
   { crate = "rand_core@0.9.5", reason = "ecosystem lag; newest is 0.10.1" },
   { crate = "sha1@0.10.7", reason = "ecosystem lag; newest is 0.11.0" },
@@ -63,17 +76,6 @@ skip = [
   { crate = "tower-http@0.6.11", reason = "ecosystem lag; newest is 0.7.1" },
   { crate = "unicode-width@0.1.14", reason = "ecosystem lag; newest is 0.2.2" },
   { crate = "webpki-roots@0.26.11", reason = "ecosystem lag; newest is 1.0.9" },
-  { crate = "windows-sys@0.52.0", reason = "ecosystem lag; newest is 0.61.2" },
-  { crate = "windows-sys@0.60.2", reason = "ecosystem lag; newest is 0.61.2" },
-  { crate = "windows-targets@0.52.6", reason = "ecosystem lag; newest is 0.53.5" },
-  { crate = "windows_aarch64_gnullvm@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_aarch64_msvc@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_i686_gnu@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_i686_gnullvm@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_i686_msvc@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_x86_64_gnu@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_x86_64_gnullvm@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
-  { crate = "windows_x86_64_msvc@0.52.6", reason = "ecosystem lag; newest is 0.53.1" },
 ]
 
 [licenses]

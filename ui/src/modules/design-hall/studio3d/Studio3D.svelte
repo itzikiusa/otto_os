@@ -15,7 +15,7 @@
   // Image→3D / Refine in Blender — each lands as a reviewable `agent` version),
   // or a local export. Cloud 3D providers are opt-in and disabled without a
   // Keychain key; nothing is sent anywhere without an explicit click.
-  import { onTabKey } from '../../../lib/tabKeys';
+  import Tabs, { type TabItem } from '../../../lib/components/Tabs.svelte';
   import { toastError } from '../../../lib/toastError';
   import type { Snippet } from 'svelte';
   import { untrack } from 'svelte';
@@ -102,7 +102,14 @@
   /** Show the scene JSON beside a plain viewport (hand edits, agent diffs). */
   let showSource = $state(false);
   let turntable = $state(false);
-  let rightTab = $state<'inspector' | 'otto' | 'links' | 'references'>(untrack(() => (openOtto ? 'otto' : 'inspector')));
+  type RightTab = 'inspector' | 'otto' | 'links' | 'references';
+  const rightTabs = $derived<TabItem<RightTab>[]>([
+    { id: 'inspector', label: 'Inspector', testid: 's3d-tab-inspector' },
+    { id: 'otto', label: 'Otto', testid: 'design-tab-otto' },
+    { id: 'links', label: 'Links', count: linkCount, testid: 'design-tab-links' },
+    { id: 'references', label: 'References', testid: 'design-tab-references' },
+  ]);
+  let rightTab = $state<RightTab>(untrack(() => (openOtto ? 'otto' : 'inspector')));
   $effect(() => {
     if (openOtto) untrack(() => (rightTab = 'otto'));
   });
@@ -650,15 +657,8 @@
     </section>
 
     <aside class="right" aria-label="Details">
-      <div class="tabs" role="tablist" aria-label="Details panel">
-        <button role="tab" aria-selected={rightTab === 'inspector'} tabindex={rightTab === 'inspector' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'inspector'} onclick={() => (rightTab = 'inspector')} data-testid="s3d-tab-inspector">Inspector</button>
-        <button role="tab" aria-selected={rightTab === 'otto'} tabindex={rightTab === 'otto' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'otto'} onclick={() => (rightTab = 'otto')} data-testid="design-tab-otto">Otto</button>
-        <button role="tab" aria-selected={rightTab === 'links'} tabindex={rightTab === 'links' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'links'} onclick={() => (rightTab = 'links')} data-testid="design-tab-links">
-          Links <span class="count">{linkCount}</span>
-        </button>
-        <button role="tab" aria-selected={rightTab === 'references'} tabindex={rightTab === 'references' ? 0 : -1} onkeydown={onTabKey} class:active={rightTab === 'references'} onclick={() => (rightTab = 'references')} data-testid="design-tab-references">References</button>
-      </div>
-      <div class="panel" role="tabpanel">
+      <Tabs label="Details panel" idBase="s3d" tabs={rightTabs} value={rightTab} onchange={(id) => (rightTab = id)} />
+      <div class="panel" role="tabpanel" id="s3d-panel-{rightTab}" aria-labelledby="s3d-tab-{rightTab}">
         {#if rightTab === 'inspector'}
           <Inspector {doc} bind:selectedId onchange={edit} {readonly} {swatches} brandName={kit?.label ?? null} {colors} {editState} />
           {#if usedIn.length}
@@ -945,39 +945,6 @@
     inset-block-end: 12px;
     inset-inline-start: 12px;
     max-width: calc(100% - 24px);
-  }
-  .tabs {
-    display: flex;
-    gap: 16px;
-    padding: 0 16px;
-    border-block-end: 1px solid var(--border);
-    min-height: 40px;
-    align-items: stretch;
-  }
-  .tabs button {
-    appearance: none;
-    border: 0;
-    border-block-end: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-m);
-    padding: 0 2px;
-    cursor: pointer;
-  }
-  .tabs button.active {
-    color: var(--text);
-    border-block-end-color: var(--accent);
-    font-weight: 600;
-  }
-  .tabs button:focus-visible {
-    outline: 2px solid var(--accent-text);
-    outline-offset: -2px;
-  }
-  .count {
-    color: var(--text-dim);
-    font-weight: 400;
-    margin-inline-start: 2px;
   }
   .panel {
     flex: 1;

@@ -73,8 +73,9 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
         Box::pin(async { None })
     }
-    /// Stop every live analysis agent of `story_id` (trip its cancel flag so
-    /// the recovery loop does not retry, then kill its session) — called by
+    /// Stop every live agent of `story_id` — analysis agents AND the
+    /// rewrite / test-generation / plan sessions (trip their cancel flags so
+    /// the recovery loop does not retry, then kill the sessions) — called by
     /// `DELETE /product/stories/{sid}` BEFORE the rows go (S4-23), so deleted
     /// stories don't keep agents burning budget until the next restart.
     /// Default: no-op (hosts without sessions).

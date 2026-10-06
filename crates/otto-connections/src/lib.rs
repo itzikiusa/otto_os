@@ -20,4 +20,5 @@ mod access;
 
 mod sftp_pool;
 
+pub mod stream_guard;
 mod transfers;

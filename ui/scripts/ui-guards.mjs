@@ -109,6 +109,13 @@
 //                     (`:disabled`, `[disabled]`, `[aria-disabled…]`,
 //                     `.disabled`) → var(--disabled-opacity) (0.45, tokens.css);
 //                     `node scripts/codemods/disabled-opacity.mjs` rewrites them.
+//   focus-ring-token  a :focus / :focus-visible ring (`outline` / `outline-color`)
+//                     drawn in var(--accent-solid): the darkened fill colour is
+//                     under 3:1 on dark grounds (WCAG 1.4.11) → var(--accent-text),
+//                     the global :focus-visible token (app.css), or no local rule.
+//   destructive-confirm  `confirmer.ask(…)` whose `confirmLabel` starts with
+//                     Delete / Remove / Revoke / Stop / Discard / … but passes no
+//                     `danger:` → `danger: true` (the red confirm button).
 //   local-spinner     a component rule set spinning its own ring (`animation:
 //                     … spin …`, incl. otto-spin) → the global `.spinner`
 //                     (`--spinner-size` for the diameter).
@@ -156,8 +163,9 @@
 //                     switch is exempt only when it is keyboard-complete
 //                     (onTabKey / tabKeys wired in it — components.md §3); the
 //                     class alone no longer is.
-//   segmented-state   a button inside a `.segmented` group that marks its
-//                     selection with `active` but carries no `aria-pressed`,
+//   segmented-state   a button inside a `.segmented` / `.seg*` group, a
+//                     `role="group"` or a `<nav>` that marks its selection
+//                     with `active|on|selected|sel|current` but carries no `aria-pressed`,
 //                     `aria-selected`/`aria-checked` or `role="tab|radio"` —
 //                     VoiceOver reads identical buttons with no state. Plain
 //                     action groups (no `active`) are fine.
@@ -338,7 +346,9 @@ const RULES = {
   'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
-  'segmented-state': '.segmented value picker whose selected button (class:active) has no aria-pressed / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
+  'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
+  'destructive-confirm': 'confirmer.ask whose confirmLabel deletes / removes / revokes / stops without danger: true — destructive confirms use the red button (components.md)',
+  'segmented-state': 'picker / view-switch button (in .segmented, .seg*, role="group" or <nav>) marked active|on|selected without aria-pressed / aria-current / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
@@ -578,6 +588,11 @@ for (const f of files) {
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
+    if (/:focus/.test(s.sel)) {
+      for (const d of s.decls) {
+        if ((d.prop === 'outline' || d.prop === 'outline-color') && /var\(\s*--accent-solid\s*\)/.test(d.value)) hit('focus-ring-token', f, d.at, `"${s.sel}" ${d.prop}: ${d.value}`);
+      }
+    }
     const ol = s.decls.find((d) => d.prop === 'outline' && /^(none|0)\b/.test(d.value));
     if (ol && !/:focus/.test(s.sel) && !sets2(s, ['border-color', 'box-shadow'])) {
       const bare = s.sel.split(',').filter((part) => !hasRingFor(part));
@@ -739,22 +754,40 @@ for (const f of files) {
       hit('local-tablist', f, m.index, m[0].slice(0, 80));
     }
   }
-  // A `.segmented` group (up to its first closing </div>; segments don't nest
-  // divs) whose `active`-marked buttons expose no state.
-  for (const g of markup.matchAll(/<div\b[^>]*\bclass="[^"]*\bsegmented\b[^"]*"[^>]*>([\s\S]*?)<\/div>/g)) {
-    const body = g[1];
-    for (const b of body.matchAll(/<button\b/g)) {
-      const end = tagEnd(body, b.index + 7);
-      if (end === -1) continue;
-      const tag = body.slice(b.index, end);
-      if (!/\bclass:active\b|\bclass="[^"]*\bactive\b|\{[^}]*'active'/.test(tag)) continue;
-      if (/\baria-(?:pressed|selected|checked)\b|\brole="(?:tab|radio|menuitemradio)"/.test(tag)) continue;
-      hit('segmented-state', f, g.index + g[0].indexOf(body) + b.index, tag.slice(0, 80));
+  // A value picker / view switch — a `.segmented` or `.seg*` group, a
+  // `role="group"`, or a `<nav>` (up to its first closing tag; segments don't
+  // nest) — whose state-marked buttons (`active|on|selected|sel|current`)
+  // expose no state (S19-302). Row-selection lists use aria-current and pane
+  // toggles aria-expanded; both count as exposed state.
+  const STATE_MARK = /\bclass:(?:active|on|selected|sel|current)(?![\w-])|\bclass="[^"]*(?<![\w-])(?:active|on|selected|sel|current)(?![\w-])|\{[^}]*'(?:active|on|selected|sel|current)'/;
+  const GROUPS = [
+    /<div\b[^>]*\bclass="[^"]*\b(?:segmented|seg[\w-]*)\b[^"]*"[^>]*>([\s\S]*?)<\/div>/g,
+    /<div\b[^>]*\brole="group"[^>]*>([\s\S]*?)<\/div>/g,
+    /<nav\b[^>]*>([\s\S]*?)<\/nav>/g,
+  ];
+  const seenState = new Set();
+  for (const re of GROUPS) {
+    for (const g of markup.matchAll(re)) {
+      const body = g[1];
+      for (const b of body.matchAll(/<button\b/g)) {
+        const at = g.index + g[0].indexOf(body) + b.index;
+        if (seenState.has(at)) continue;
+        const end = tagEnd(body, b.index + 7);
+        if (end === -1) continue;
+        const tag = body.slice(b.index, end);
+        if (!STATE_MARK.test(tag)) continue;
+        // A menu button names its current pick in its label (aria-haspopup).
+        if (/\baria-(?:pressed|selected|checked|current|expanded|haspopup)\b|\brole="(?:tab|radio|menuitemradio|option)"/.test(tag)) continue;
+        seenState.add(at);
+        hit('segmented-state', f, at, tag.slice(0, 80));
+      }
     }
   }
 }
 
-// script-code rules: setInterval / document-level style writes / smooth scroll.
+// script-code rules: setInterval / document-level style writes / smooth scroll
+// / destructive confirms.
+const DESTRUCTIVE_LABEL = /^(?:Delete|Remove|Revoke|Stop|Discard|Purge|Erase|Wipe|Drop|Uninstall|Reset|Disconnect|Kill|Terminate|Cancel run|Force)\b/;
 const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
 const BODY_STYLE =
   /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
@@ -770,6 +803,26 @@ for (const f of files) {
   }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
+  }
+  // destructive-confirm: a confirm whose button deletes / removes / revokes /
+  // stops / discards must be the red `danger` variant (S17-305).
+  for (const m of code.matchAll(/\bconfirmer\.ask\s*\(/g)) {
+    let depth = 0;
+    let end = -1;
+    for (let i = m.index + m[0].length - 1; i < code.length; i++) {
+      const ch = code[i];
+      if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    if (end === -1) continue;
+    const call = code.slice(m.index, end + 1);
+    const label = /\bconfirmLabel\s*:\s*[`'"]([^`'"]*)/.exec(call);
+    if (!label || !DESTRUCTIVE_LABEL.test(label[1].trim())) continue;
+    if (/\bdanger\s*:/.test(call)) continue;
+    hit('destructive-confirm', f, m.index, `confirmLabel: '${label[1].trim()}' without danger`);
   }
 }
 

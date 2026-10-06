@@ -654,6 +654,8 @@ pub fn binding_matches(
 /// each candidate on the owning workflow's `workspace_id` before trusting it
 /// — otherwise a channel bound by one workspace's Slack/Telegram integration
 /// could leak that channel's content into another workspace's workflow runs.
+/// Net effect: only the LISTING is global — the candidates that can fire are
+/// the receiving workspace's own, the same rule as name-addressed commands.
 fn binding_candidates<'a>(
     triggers: &'a [WorkflowTrigger],
     channel: &str,
@@ -694,6 +696,18 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
         chat: &str,
     ) -> Option<WorkflowChatAck> {
         let repo = WorkflowsRepo::new(self.ctx.pool().clone());
+        let ws = self.ctx.workspaces().get(&wf.workspace_id).await.ok()?;
+        // S3-302: a chat `Working Directory:` (or repos) outside the
+        // workflow's workspace never starts a run — say why in the thread.
+        if let Err(reason) = self.ctx.check_run_location(&ws, &input).await {
+            tracing::info!(
+                "workflow chat: refused to start '{}' from {channel}/{chat}: {reason}",
+                wf.name
+            );
+            return Some(WorkflowChatAck {
+                reply: format!("⚠️ Can't start **{}**: {reason}.", wf.name),
+            });
+        }
         tracing::info!(
             "workflow chat: starting workflow '{}' (id {}, ws {}) from {channel}/{chat}",
             wf.name,
@@ -704,7 +718,6 @@ impl<C: WorkflowCtx> WorkflowChatTriggerImpl<C> {
             .create_run(&wf.id, &wf.workspace_id, &input, None)
             .await
             .ok()?;
-        let ws = self.ctx.workspaces().get(&wf.workspace_id).await.ok()?;
         self.ctx.spawn_run(
             ws,
             wf.clone(),

@@ -310,18 +310,55 @@ async fn transport_permit() -> Result<tokio::sync::OwnedSemaphorePermit, String>
 
 /// Parent variables a stdio MCP server inherits — the MCP SDK's
 /// `getDefaultEnvironment` set (what a program needs to find binaries, a home,
-/// a temp dir and a locale). Everything else ottod holds (provider API keys,
+/// a temp dir and a locale), plus the machine's network/runtime
+/// CONFIGURATION a server cannot reach anything without: the proxy
+/// variables (either case), the CA bundles a TLS-intercepting corporate
+/// proxy needs, and `DOCKER_HOST` / `DOCKER_CONTEXT` (colima, OrbStack) for
+/// `docker run …` servers. Everything else ottod holds (provider API keys,
 /// AWS credentials, tokens under `cargo run` / a shell launch) stays out of a
-/// third-party `npx` server; it gets only its configured env + secrets.
+/// third-party `npx` server; it gets only its configured env + secrets (the
+/// server editor says so).
 pub(crate) const STDIO_BASE_ENV: &[&str] = &[
-    "HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
+    "HOME",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
 ];
 
-/// The allow-listed parent environment (see [`STDIO_BASE_ENV`]).
+/// Prefixes of inherited parent variables: the XDG base directories
+/// (`XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR`, …) — paths, never secrets.
+const STDIO_BASE_ENV_PREFIXES: &[&str] = &["XDG_"];
+
+/// Whether a parent variable is passed to a stdio server. Pure — unit-tested.
+pub(crate) fn is_stdio_base_env(key: &str) -> bool {
+    STDIO_BASE_ENV.contains(&key) || STDIO_BASE_ENV_PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// The allow-listed parent environment (see [`is_stdio_base_env`]).
 pub(crate) fn stdio_base_env() -> Vec<(String, String)> {
-    STDIO_BASE_ENV
-        .iter()
-        .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_string(), v)))
+    std::env::vars()
+        .filter(|(k, _)| is_stdio_base_env(k))
         .collect()
 }
 
@@ -962,13 +999,45 @@ mod tests {
     #[test]
     fn stdio_servers_inherit_only_the_base_environment() {
         let base = stdio_base_env();
-        assert!(base
-            .iter()
-            .all(|(k, _)| STDIO_BASE_ENV.contains(&k.as_str())));
+        assert!(base.iter().all(|(k, _)| is_stdio_base_env(k)));
         assert!(base.iter().any(|(k, _)| k == "PATH"), "PATH is passed");
         // cargo sets this for the test process; it must not leak through.
         assert!(std::env::var("CARGO_MANIFEST_DIR").is_ok());
         assert!(!base.iter().any(|(k, _)| k == "CARGO_MANIFEST_DIR"));
+    }
+
+    /// S5-307: proxy, CA-bundle, Docker and XDG configuration still reach a
+    /// stdio server (a corporate proxy / colima user upgrading must not lose
+    /// them); credentials and arbitrary variables do not.
+    #[test]
+    fn network_configuration_reaches_stdio_servers_but_credentials_do_not() {
+        for k in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "NO_PROXY",
+            "no_proxy",
+            "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "DOCKER_HOST",
+            "XDG_CONFIG_HOME",
+            "XDG_RUNTIME_DIR",
+            "PATH",
+        ] {
+            assert!(is_stdio_base_env(k), "{k}");
+        }
+        for k in [
+            "AWS_SECRET_ACCESS_KEY",
+            "ANTHROPIC_API_KEY",
+            "GITHUB_TOKEN",
+            "OTTO_TOKEN",
+            "CARGO_MANIFEST_DIR",
+            "XDG",
+            "DOCKER_CONFIG",
+        ] {
+            assert!(!is_stdio_base_env(k), "{k}");
+        }
     }
 
     /// S5-09: a server→client request on the SSE stream is answered (-32601,

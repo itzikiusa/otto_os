@@ -1238,3 +1238,88 @@ async fn history_and_trash_directories_are_gitignored() {
         .all(|e| !e.stored_path.contains(".gitignore")));
     assert!(!eng.revisions(WS, id, None).await.unwrap().is_empty());
 }
+
+/// S7-303: a (legacy / root-registered) vault whose root CONTAINS a protected
+/// dir neither indexes it (search, dir, switcher stay blind, and rows indexed
+/// before are pruned) nor lets the ancestor folder be renamed or trashed.
+#[tokio::test(flavor = "multi_thread")]
+async fn vault_above_a_protected_dir_neither_indexes_nor_moves_it() {
+    let eng = engine().await;
+    let (td, id) = fixture_vault(&eng).await;
+    let state = td.path().join("Support/OttoState");
+    std::fs::create_dir_all(state.join("reports")).unwrap();
+    std::fs::write(
+        state.join("reports/run.md"),
+        "# Secret report\n\nzanzibarquux\n",
+    )
+    .unwrap();
+    // Indexed while still unprotected (a pre-fix scan)…
+    eng.scan(id).await.unwrap();
+    let hit = |eng: Arc<VaultEngine>| async move {
+        eng.search(
+            WS,
+            id,
+            &SearchReq {
+                query: "zanzibarquux".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len()
+    };
+    assert_eq!(hit(eng.clone()).await, 1, "precondition: indexed");
+    // …then it becomes Otto's data dir: the next scan prunes it.
+    otto_core::secret_paths::protect_dir_for_tests(&state.canonicalize().unwrap());
+    eng.scan(id).await.unwrap();
+    assert_eq!(hit(eng.clone()).await, 0, "protected rows pruned");
+    if let Ok(support) = eng.dir(WS, id, "Support").await {
+        assert!(
+            support.entries.iter().all(|e| e.name != "OttoState"),
+            "{:?}",
+            support.entries.iter().map(|e| &e.name).collect::<Vec<_>>()
+        );
+    }
+    assert!(eng
+        .note(WS, id, "Support/OttoState/reports/run.md")
+        .await
+        .is_err());
+    // Moving / trashing an ANCESTOR of the protected dir is refused.
+    for err in [
+        eng.rename(WS, id, "Support", "Moved").await.unwrap_err(),
+        eng.delete_note(WS, id, "Support").await.unwrap_err(),
+        eng.rename(WS, id, "Support/OttoState", "Stolen")
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(matches!(err, otto_core::Error::Forbidden(_)), "{err:?}");
+    }
+    assert!(state.join("reports/run.md").is_file(), "data dir untouched");
+}
+
+/// S7-301: a non-root caller cannot register `$HOME`, the data dir or
+/// `/private/etc` through the `/System/Volumes/Data` firmlink spelling.
+#[test]
+fn firmlink_spelled_roots_are_refused_for_non_root() {
+    let mut roots = vec![
+        "/System/Volumes/Data".to_string(),
+        "/System/Volumes/Data/private/etc".to_string(),
+        "/private/etc".to_string(),
+    ];
+    if let Some(h) = otto_core::secret_paths::home_dir() {
+        let fl = format!("/System/Volumes/Data{}", h.display());
+        roots.push(fl.clone());
+        roots.push(format!("{fl}/Library/Application Support/Otto"));
+        roots.push(format!("{fl}/.codex"));
+        roots.push(format!("{}/.claude", h.display()));
+    }
+    for r in roots {
+        assert!(
+            matches!(
+                VaultEngine::vet_shared_root(&r),
+                Err(otto_core::Error::Forbidden(_))
+            ),
+            "{r} must be refused"
+        );
+    }
+}

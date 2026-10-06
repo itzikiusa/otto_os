@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { apiCtx, seedWorkspace, seedDockerConnection } from './seed';
-import { ensureGridView } from './helpers';
+import { ensureGridView, editorSelectAll } from './helpers';
 
 // ── DB Explorer sweep — MongoDB engine, mobile + tablet, both orientations ──────
 //
@@ -135,7 +135,7 @@ async function setEditorText(page: Page, statement: string): Promise<void> {
   // result the calling test asserts on.
   await content.click();
   await page.waitForTimeout(60);
-  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.press(await editorSelectAll(page));
   await page.waitForTimeout(40);
   await page.keyboard.insertText(statement);
   await page.waitForTimeout(300);

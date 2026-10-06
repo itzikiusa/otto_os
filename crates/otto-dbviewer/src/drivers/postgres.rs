@@ -459,6 +459,7 @@ impl Driver for PostgresDriver {
                     key: is_pk.then(|| "PRI".to_string()),
                     extra: None,
                     comment: None,
+                    collation: None,
                 }
             })
             .collect();
@@ -1303,6 +1304,7 @@ impl PostgresDriver {
                     key: None,
                     extra: Some("IN".into()),
                     comment: None,
+                    collation: None,
                 });
             }
             columns.push(ColumnDef {
@@ -1313,6 +1315,7 @@ impl PostgresDriver {
                 key: None,
                 extra: Some("RETURNS".into()),
                 comment: None,
+                collation: None,
             });
         }
 

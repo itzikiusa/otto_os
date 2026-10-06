@@ -47,6 +47,10 @@ const ours = (page: Page) => list(page).getByRole('region', { name: `Classroom $
 /** Show the visible list (List view) — a no-op without WebGL (already a list). */
 async function listView(page: Page): Promise<void> {
   const toggle = box(page).getByRole('button', { name: 'List', exact: true });
+  // Decide only once the box has SETTLED (3D stage or a real list): an
+  // instant `toggle.count()` before the box mounts read 0, skipped the
+  // switch, and the hover then hit the 3D overlay (S12-304, classrooms:100).
+  await expect(box(page).locator('.stage, .list:not(.sr-only)').first()).toBeVisible({ timeout: 30_000 });
   if (await toggle.count()) {
     // Wait for the switch to TAKE: the 3D view keeps the same list as an
     // sr-only companion (still "visible" to Playwright) under the box's bar,

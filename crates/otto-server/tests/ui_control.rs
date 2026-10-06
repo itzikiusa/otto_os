@@ -105,6 +105,11 @@ struct Daemon {
 /// device `dev1`; `human` is alice's own API token, `agent` the session's
 /// managed token, `bob` another (non-root) user's token.
 async fn boot() -> Daemon {
+    boot_with(false).await
+}
+
+/// [`boot`], optionally with the daemon's cached authenticator (S8-302).
+async fn boot_with(cached_auth: bool) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let pool = file_pool(tmp.path()).await;
     seed_user(&pool, "alice", true).await;
@@ -141,7 +146,10 @@ async fn boot() -> Daemon {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
-    let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    let mut ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    if cached_auth {
+        ctx = ctx.with_cached_auth(&pool);
+    }
     otto_server::ui_bridge::spawn_session_watch(ctx.clone());
     // The production module composition (sessions, connections, dbviewer, …).
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
@@ -163,10 +171,19 @@ async fn boot() -> Daemon {
 
 impl Daemon {
     async fn ws(&self, token: &str) -> Ws {
-        let (ws, _) =
-            tokio_tungstenite::connect_async(format!("{}/ws/events?token={token}", self.ws_base))
-                .await
-                .expect("ws connect");
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        // The bearer rides in the `otto-bearer` subprotocol — the only place
+        // `/ws/events` accepts it (S11-312).
+        let mut req = format!("{}/ws/events", self.ws_base)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            format!("otto-bearer, {token}").parse().unwrap(),
+        );
+        let (ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("ws connect");
         ws
     }
 
@@ -624,6 +641,52 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
 }
 
+/// S8-302: the same, with the daemon's auth cache ENABLED and primed. Logout
+/// revokes through a cache-less repo; the shared cache must still be evicted,
+/// so REST refuses the token at once and the socket closes within ~2 s (not
+/// at the 60 s re-check, which a stale cache hit used to defer it to).
+#[tokio::test]
+async fn events_socket_closes_on_revoke_with_the_auth_cache_on() {
+    let d = boot_with(true).await;
+    let me = |tok: &str| {
+        d.http
+            .get(format!("{}/api/v1/auth/me", d.base))
+            .bearer_auth(tok.to_string())
+            .send()
+    };
+    // Prime the cache with a REST hit, then open the socket.
+    assert_eq!(me(&d.bob).await.unwrap().status().as_u16(), 200);
+    let mut ws = d.ws(&d.bob).await;
+    let status = d
+        .http
+        .post(format!("{}/api/v1/auth/logout", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204);
+    assert_eq!(
+        me(&d.bob).await.unwrap().status().as_u16(),
+        401,
+        "a revoked token must not be served from the auth cache"
+    );
+    let closed = tokio::time::timeout(Duration::from_millis(2500), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("the revoked socket must close within ~2 s with the cache on");
+    assert_eq!(closed, Some(4401));
+}
+
 /// S8-03: an open `/ws/events` socket is re-validated — revoking its token
 /// (here: a logout with it) closes the socket with 4401 promptly, instead of
 /// streaming events as that identity forever.
@@ -714,4 +777,49 @@ async fn nested_resume_meta_is_server_owned() {
             );
         }
     }
+}
+
+/// S11-302: an agent's own credential cannot open a worker whose folder (a
+/// Seatbelt write grant, pre-trusted) lies outside the workspace, its own
+/// folder or a worktree of the same repo — and nobody can start an agent
+/// session at `/` (or `$HOME`, a parent of it).
+#[tokio::test]
+async fn agent_credential_cannot_open_sessions_outside_its_workspace() {
+    let d = boot().await;
+    let outside = env!("CARGO_TARGET_TMPDIR");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut outside_dirs = vec!["/".to_string(), outside.to_string()];
+    if !home.is_empty() && std::path::Path::new(&home).is_dir() {
+        outside_dirs.push(home);
+    }
+    for cwd in &outside_dirs {
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions/open",
+                json!({"provider": "claude", "cwd": cwd, "prompt": "hi"}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent opened a worker in {cwd}: {body}");
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions",
+                json!({"kind": "agent", "provider": "claude", "cwd": cwd}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent created a session in {cwd}: {body}");
+    }
+    // A person may pick any ordinary folder, but never `/` itself.
+    let (st, body) = d
+        .post(
+            &d.human,
+            "/workspaces/ws1/sessions",
+            json!({"kind": "agent", "provider": "claude", "cwd": "/"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400, "a session at / must be refused: {body}");
 }
