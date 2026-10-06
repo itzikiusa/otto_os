@@ -324,17 +324,25 @@ jobs:
         working-directory: ui
         run: npx playwright install --with-deps chromium webkit
 
-      - name: E2E smoke gate (desktop-gate + iphone-gate)
+      # OTTO_E2E_GATE narrows the REAL desktop-browser / iphone-portrait
+      # projects to ui/e2e/gate-specs.ts, so every spec's project guard
+      # behaves exactly as in the advisory shards.
+      - name: E2E smoke gate (gate specs on desktop-browser + iphone-portrait)
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
           OTTO_E2E_FUNCTIONAL_ONLY: '1'
-        run: npx playwright test --project=desktop-gate --project=iphone-gate --retries=0
+          OTTO_E2E_GATE: '1'
+        run: npx playwright test --project=desktop-browser --project=iphone-portrait --retries=0
 
-      - name: Fail on flaky tests
+      # Fails on flaky, on ANY skipped test, and on fewer passes than
+      # GATE_MIN_EXPECTED — a self-skipping gate spec can't pass vacuously.
+      - name: Fail on flaky / skipped / missing gate tests
         if: success() || failure()
         working-directory: ui
-        run: node scripts/e2e-flaky-check.mjs
+        env:
+          OTTO_E2E_SUMMARY_LABEL: E2E smoke gate
+        run: node scripts/e2e-flaky-check.mjs --gate --summary
 
       - name: Upload the Playwright report
         if: failure()
@@ -484,10 +492,24 @@ jobs:
           --project=desktop-browser --project=iphone-portrait
           --shard=${{ matrix.shard }}/4 --retries=0
 
+      # Writes this shard's pass/fail/skip counts (and failed test names) to
+      # the step summary — the job itself is continue-on-error, so this is
+      # where an advisory red shows up. e2e-advisory-ratchet sums the shards.
       - name: Fail on flaky tests
         if: success() || failure()
         working-directory: ui
-        run: node scripts/e2e-flaky-check.mjs
+        env:
+          OTTO_E2E_SUMMARY_LABEL: E2E functional shard ${{ matrix.shard }}/4
+        run: node scripts/e2e-flaky-check.mjs --summary
+
+      - name: Upload the shard's JSON results
+        if: success() || failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-functional-results-${{ matrix.shard }}
+          path: ui/e2e/.results-0.json
+          include-hidden-files: true
+          retention-days: 7
 
       - name: Upload the Playwright report
         if: failure()
@@ -504,6 +526,44 @@ jobs:
         run: |
           docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
           docker compose -f dev/brokers/docker-compose.yml logs --tail 200
+
+  # The advisory suite's RED COUNT ratchet (S12-304): sums the four shards'
+  # failed tests and fails when it rises above ui/e2e/advisory-red-baseline.json
+  # (lower the baseline in the PR that fixes failures; never raise it to land a
+  # regression). Advisory like the shards (continue-on-error): it makes a
+  # rising red count visible on the run page instead of a silent `success`.
+  e2e-advisory-ratchet:
+    name: E2E advisory red-count ratchet
+    needs: e2e-functional
+    if: always() && needs.e2e-functional.result != 'skipped'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the shards' JSON results
+        uses: actions/download-artifact@v7.0.0
+        with:
+          pattern: e2e-functional-results-*
+          path: shard-results
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+
+      - name: Red count vs baseline
+        working-directory: ui
+        run: |
+          shopt -s globstar nullglob
+          files=(../shard-results/**/.results-*.json)
+          if [ "${#files[@]}" -ne 4 ]; then
+            echo "::error::expected 4 shard reports, found ${#files[@]} — a shard never produced results"
+            exit 1
+          fi
+          OTTO_E2E_SUMMARY_LABEL='E2E functional (all shards)' \
+            node scripts/e2e-flaky-check.mjs --summary --ratchet "${files[@]}"
 
   # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
   # closest to the app's WKWebView — against an isolated debug daemon
