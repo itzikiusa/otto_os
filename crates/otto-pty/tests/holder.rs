@@ -219,7 +219,18 @@ fn exit_while_detached_is_reported_on_adoption() {
     // Detach BEFORE the input that makes the child exit: its EXITED report can
     // then race the hang-up without the detached handle releasing the holder.
     h.detach();
-    h.write(b"z\n").expect("write");
+    // A held handle can be mid-reconnect for a moment (its send path reports
+    // "connection lost" until the reader re-attaches) — that is the designed
+    // behaviour, so retry the input briefly instead of failing on the first try.
+    let mut wrote = Err(otto_core::error::Error::Internal("not attempted".into()));
+    for _ in 0..100 {
+        wrote = h.write(b"z\n");
+        if wrote.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wrote.expect("write");
     drop(h);
     std::thread::sleep(Duration::from_millis(800));
     assert!(
