@@ -18,6 +18,7 @@ pub mod expr;
 pub mod finding;
 pub mod hooks;
 pub mod id;
+pub mod kubeconfig_policy;
 pub mod paths;
 pub mod proof;
 pub mod provider;

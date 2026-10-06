@@ -57,6 +57,10 @@ struct Entry {
     fresh_until: SystemTime,
     /// The cluster fields the overlay was derived from; an edit invalidates it.
     fingerprint: String,
+    /// S11-303: the context's credential plugin is not allow-listed — every
+    /// kubectl call for the cluster is refused with this reason (until the
+    /// kubeconfig changes), so neither Otto nor kubectl ever runs it.
+    refused: Option<String>,
 }
 
 /// Why minting did not produce an overlay.
@@ -65,12 +69,17 @@ enum MintError {
     NotApplicable(String),
     /// Anything else: retry after [`RETRY_AFTER`].
     Failed(String),
+    /// The credential plugin is not allow-listed
+    /// (`otto_core::kubeconfig_policy`): refuse the cluster outright.
+    Refused(String),
 }
 
 impl std::fmt::Display for MintError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MintError::NotApplicable(w) | MintError::Failed(w) => f.write_str(w),
+            MintError::NotApplicable(w) | MintError::Failed(w) | MintError::Refused(w) => {
+                f.write_str(w)
+            }
         }
     }
 }
@@ -165,16 +174,18 @@ pub fn cached(cluster: &K8sCluster) -> Option<PathBuf> {
 
 /// The token overlay for a cluster whose context authenticates with an exec
 /// plugin: cached, or minted now by running the plugin with `env` (for `eks`
-/// rows the linked AWS account's credentials; empty otherwise). `None` ⇒ use
-/// the original kubeconfig (no exec plugin, or minting failed recently).
+/// rows the linked AWS account's credentials; empty otherwise). `Ok(None)` ⇒
+/// use the original kubeconfig (no exec plugin, or minting failed recently).
+/// `Err` ⇒ the context's credential plugin is not allow-listed (S11-303):
+/// the caller must not run kubectl for it at all.
 pub async fn overlay_for(
     program: &str,
     cluster: &K8sCluster,
     env: &[(String, String)],
     data_dir: &Path,
-) -> Option<PathBuf> {
+) -> otto_core::Result<Option<PathBuf>> {
     if let Some(e) = fresh_entry(cluster) {
-        return e.path;
+        return e.outcome();
     }
     let gate = MINT
         .lock()
@@ -184,15 +195,22 @@ pub async fn overlay_for(
         .clone();
     let _g = gate.lock().await;
     if let Some(e) = fresh_entry(cluster) {
-        return e.path;
+        return e.outcome();
     }
     let entry = match mint(program, cluster, env, data_dir).await {
         Ok(entry) => entry,
         Err(why) => {
             // `why` never carries the token (see `mint`).
             let hold = match &why {
-                MintError::NotApplicable(_) => NOT_APPLICABLE_FOR,
+                MintError::NotApplicable(_) | MintError::Refused(_) => NOT_APPLICABLE_FOR,
                 MintError::Failed(_) => RETRY_AFTER,
+            };
+            let refused = match &why {
+                MintError::Refused(reason) => {
+                    tracing::warn!(cluster = %cluster.id, "k8s: credential plugin refused: {reason}");
+                    Some(reason.clone())
+                }
+                _ => None,
             };
             // An eks row always has a plugin; for the rest "no exec plugin" is
             // the common, expected case — not worth a debug line per cluster.
@@ -203,15 +221,25 @@ pub async fn overlay_for(
                 path: None,
                 fresh_until: SystemTime::now() + hold,
                 fingerprint: fingerprint(cluster),
+                refused,
             }
         }
     };
-    let path = entry.path.clone();
+    let outcome = entry.outcome();
     CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert(cluster.id.as_str().to_string(), entry);
-    path
+    outcome
+}
+
+impl Entry {
+    fn outcome(&self) -> otto_core::Result<Option<PathBuf>> {
+        match &self.refused {
+            Some(reason) => Err(otto_core::Error::Invalid(reason.clone())),
+            None => Ok(self.path.clone()),
+        }
+    }
 }
 
 /// Drop the cache entry and delete the overlay file (cluster deleted).
@@ -273,7 +301,14 @@ async fn mint(
     let mut cfg: Value =
         serde_json::from_str(out.stdout.trim()).map_err(|_| "config view: not JSON".to_string())?;
 
-    // 2. The context's user must authenticate through an exec plugin.
+    // 2. S11-303: the context's credential plugin must be allow-listed —
+    //    checked on EVERY derivation (a kubeconfig edited on disk after it was
+    //    registered re-derives here: the fingerprint carries its mtime).
+    //    `--minify` leaves only this context's user.
+    if let Err(why) = otto_core::kubeconfig_policy::check_kubeconfig(&cfg, None) {
+        return Err(MintError::Refused(why));
+    }
+    // 3. The context's user must authenticate through an exec plugin.
     let exec = cfg
         .pointer("/users/0/user/exec")
         .cloned()
@@ -339,6 +374,7 @@ async fn mint(
         path: Some(path),
         fresh_until,
         fingerprint: fp,
+        refused: None,
     })
 }
 
@@ -491,6 +527,7 @@ mod tests {
                 path: None,
                 fresh_until: SystemTime::now() + NOT_APPLICABLE_FOR,
                 fingerprint: fingerprint(&c),
+                refused: None,
             },
         );
         assert!(cached(&c).is_none());
@@ -498,6 +535,7 @@ mod tests {
         // (the program would fail to spawn if it were run).
         assert!(overlay_for("/nonexistent/kubectl", &c, &[], dir.path())
             .await
+            .unwrap()
             .is_none());
         assert!(fresh_entry(&c).is_some(), "still remembered");
         // Editing the kubeconfig invalidates the entry.
@@ -509,6 +547,45 @@ mod tests {
             .unwrap();
         assert!(fresh_entry(&c).is_none());
         forget("neg-1", dir.path());
+    }
+
+    /// S11-303: a context whose exec plugin is not allow-listed is refused
+    /// at derivation — the plugin never runs, and the refusal sticks (cached)
+    /// so kubectl is never handed the original kubeconfig either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_disallowed_exec_plugin_is_refused_and_never_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let plugin = dir.path().join("evil.sh");
+        std::fs::write(&plugin, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let view = json!({
+            "contexts": [{"name": "ctx", "context": {"cluster": "k", "user": "u"}}],
+            "users": [{"name": "u", "user": {"exec": {
+                "apiVersion": "client.authentication.k8s.io/v1beta1",
+                "command": plugin.to_string_lossy(), "args": ["-c", "id"]}}}],
+        });
+        // A stand-in kubectl whose `config view` prints that kubeconfig.
+        let kubectl = dir.path().join("kubectl");
+        std::fs::write(&kubectl, format!("#!/bin/sh\ncat <<'EOF'\n{view}\nEOF\n")).unwrap();
+        std::fs::set_permissions(&kubectl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let kc = dir.path().join("config");
+        std::fs::write(&kc, "apiVersion: v1\nkind: Config\n").unwrap();
+        let c = kubeconfig_cluster("refused-1", &kc);
+        let program = kubectl.to_string_lossy().into_owned();
+        let err = overlay_for(&program, &c, &[], dir.path())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("evil.sh"), "{err}");
+        assert!(!marker.exists(), "the plugin must never run");
+        assert!(cached(&c).is_none());
+        // Remembered: refused again without re-deriving.
+        assert!(overlay_for("/nonexistent/kubectl", &c, &[], dir.path())
+            .await
+            .is_err());
+        forget("refused-1", dir.path());
     }
 
     #[cfg(unix)]

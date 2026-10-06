@@ -1077,8 +1077,12 @@ async fn mutating_calls_stay_within_their_statement_budgets() {
 /// read, the usable / still-pending approval lookups, the approval insert +
 /// its re-read, the decision read and the audit insert — fixed per call.
 const PENDING_CALL_BUDGET: u64 = 19;
-/// Measured 14, INCLUDING the self-call's own route.
-const AUTO_APPROVED_CALL_BUDGET: u64 = 16;
+/// Measured 18, INCLUDING the self-call's own route. Since S8-305 the
+/// self-call credential is bound to the calling agent session, so it costs
+/// two statements a person's PAT did not: the lease's liveness re-check of
+/// the cached session-bound token, and the route's managed-token session
+/// check (managed credentials are never served from the auth cache).
+const AUTO_APPROVED_CALL_BUDGET: u64 = 20;
 
 /// R7: the badge count equals the list's length (same visibility) and costs
 /// a fixed handful of statements.
@@ -1672,4 +1676,89 @@ async fn a_native_irreversible_writer_is_governed_for_its_session() {
     )
     .await;
     assert_eq!(env["decision"], "denied", "{env}");
+}
+
+// ---------------------------------------------------------------------------
+// S8-305: governed self-calls carry the caller's credential class.
+// ---------------------------------------------------------------------------
+
+/// The self-call credential rows the governed executor minted.
+async fn self_call_scopes(d: &Daemon) -> Vec<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT session_scope FROM auth_sessions WHERE kind = 'api' AND label = 'mcp-otto-exec'",
+    )
+    .fetch_all(&d.pool)
+    .await
+    .unwrap()
+}
+
+/// An agent's governed call replays with a credential bound to ITS session
+/// (so `is_human` is false at the target route and every agent-credential
+/// rule applies); a person's own governed call replays as a person.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_governed_self_call_is_bound_to_the_calling_session() {
+    let d = boot().await;
+    let env = d
+        .agent_invoke("list_repos", json!({"workspace_id": "ws1"}))
+        .await;
+    assert_eq!(env["executed"], true, "{env}");
+    assert_eq!(self_call_scopes(&d).await, vec![Some(d.sid.clone())]);
+
+    let human = d.human.clone();
+    let env = invoke_as(
+        &d,
+        &human,
+        "list_repos",
+        json!({"workspace_id": "ws1"}),
+        json!({}),
+    )
+    .await;
+    assert_eq!(env["executed"], true, "{env}");
+    let mut scopes = self_call_scopes(&d).await;
+    scopes.sort();
+    assert_eq!(scopes, vec![None, Some(d.sid.clone())]);
+}
+
+/// The person-only improvement-edit tools: an agent's call ALWAYS waits for
+/// a person (an auto-approve rule never covers it), and only the approved
+/// call replays — as the approving person, so the Admin-class route accepts
+/// it (it then 404s on the made-up edit, which is irrelevant here).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_improvement_edit_decision_always_needs_a_person() {
+    let d = boot().await;
+    enable_tools(&d, &["approve_improvement_edit", "list_repos"]).await;
+    let (st, rule) = d
+        .rule(json!({"scope": "global", "target_kind": "tool",
+                     "target": "otto.approve_improvement_edit", "name": "Agents decide edits",
+                     "allow_irreversible": true}))
+        .await;
+    assert!(st == 201 || st == 400, "{rule}");
+    let args = json!({"edit_id": "edit-does-not-exist"});
+    let env = d
+        .agent_invoke("approve_improvement_edit", args.clone())
+        .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert_eq!(env["executed"], false, "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human.clone(),
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let env = d.agent_invoke("approve_improvement_edit", args).await;
+    assert_eq!(env["executed"], true, "{env}");
+    let err = env["content"]["error"].as_str().unwrap_or_default();
+    assert!(
+        !err.contains("a person signed in to Otto must do this"),
+        "the approved call must replay as the person: {env}"
+    );
+    assert_eq!(
+        d.last_audit("approve_improvement_edit").await["decision"],
+        "approved"
+    );
 }

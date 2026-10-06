@@ -594,17 +594,13 @@ pub async fn run_workflow(
         &mut raw_input,
         otto_workflows::triggers::InputSource::Manual,
     );
-    // An explicit target repo must be one of THIS workspace's (S3-302) — a
-    // foreign id would drive another workspace's checkout and git account.
-    if let Some(rid) = raw_input
-        .get("repo_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-    {
-        workflow_engine::ensure_repo_in_workspace(&ctx, &wf.workspace_id, rid)
-            .await
-            .map_err(ApiError)?;
-    }
+    // The run's location must be THIS workspace's (S3-302): an explicit
+    // `repo_id`, a `working_directory` and `repos` may only name its
+    // registered repos (or their worktrees) or its root — a foreign one would
+    // drive another workspace's checkout and git account. 400 otherwise.
+    workflow_engine::ensure_run_location(&ctx, &ws, &raw_input)
+        .await
+        .map_err(ApiError)?;
     let input = seed_review_mode(raw_input, req.review_mode.as_deref()).map_err(ApiError)?;
     let run = repo(&ctx)
         .create_run(&wf.id, &wf.workspace_id, &input, Some(&user.id))

@@ -604,6 +604,21 @@ impl AuthRepo {
         user_id: &Id,
         session_id: &Id,
     ) -> Result<(String, ApiTokenInfo)> {
+        self.issue_session_api_token_labeled(user_id, session_id, &format!("otto-mcp:{session_id}"))
+            .await
+    }
+
+    /// [`Self::issue_session_api_token`] under a caller-chosen label — the
+    /// governed self-call cache (S8-305) mints its session-bound credentials
+    /// with its own label so its crash-leftover sweep can find them. The
+    /// session binding (`session_scope`) is what makes the credential an
+    /// agent's; the label is only a name.
+    pub async fn issue_session_api_token_labeled(
+        &self,
+        user_id: &Id,
+        session_id: &Id,
+        label: &str,
+    ) -> Result<(String, ApiTokenInfo)> {
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND created_by = ?)",
         )
@@ -615,12 +630,8 @@ impl AuthRepo {
         if !exists {
             return Err(Error::Unauthorized);
         }
-        self.issue_api_token_inner(
-            user_id,
-            Some(&format!("otto-mcp:{session_id}")),
-            Some(session_id),
-        )
-        .await
+        self.issue_api_token_inner(user_id, Some(label), Some(session_id))
+            .await
     }
 
     async fn issue_api_token_inner(

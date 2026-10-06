@@ -275,3 +275,155 @@ async fn webhook_body_cannot_set_reserved_run_input_keys() {
     }
     server.abort();
 }
+
+/// Fixture for the run-LOCATION tests (S3-302): workspace B rooted at its own
+/// folder with a repo registered OUTSIDE that root, and a sibling folder that
+/// belongs to neither. Returns (ctx, pool, owner, token, ws_b, b_repo dir,
+/// foreign dir, workflow in B).
+async fn located_workspace(
+    tmp: &tempfile::TempDir,
+) -> (
+    ServerCtx,
+    DbPool,
+    String,
+    otto_core::domain::Workspace,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    otto_core::workflows::Workflow,
+) {
+    let pool = mem_pool().await;
+    let ctx = ServerCtx::for_tests(&pool, tmp.path().join("data")).await;
+    let owner = otto_state::UsersRepo::new(pool.clone())
+        .create("owner", "unused", "Owner", true)
+        .await
+        .unwrap();
+    let token = otto_rbac::AuthRepo::new(pool.clone())
+        .issue(&owner.id)
+        .await
+        .unwrap();
+    let root = tmp.path().join("b-root");
+    let b_repo = tmp.path().join("b-repo");
+    let foreign = tmp.path().join("elsewhere");
+    for d in [&root, &root.join("sub"), &b_repo, &foreign] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let ws_b = ctx
+        .workspaces
+        .create("B", root.to_str().unwrap(), &owner.id)
+        .await
+        .unwrap();
+    ctx.git_store
+        .create_repo(NewRepo {
+            workspace_id: ws_b.id.clone(),
+            name: "b-repo".into(),
+            path: b_repo.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+        })
+        .await
+        .unwrap();
+    let graph: otto_core::workflows::WorkflowGraph = serde_json::from_value(json!({
+        "nodes": [{"id": "n", "kind": "log", "params": {}}], "edges": []
+    }))
+    .unwrap();
+    let wf = otto_state::WorkflowsRepo::new(pool.clone())
+        .create(&ws_b.id, "Locate", "", "", &graph, &owner.id)
+        .await
+        .unwrap();
+    (ctx, pool, token, ws_b, b_repo, foreign, wf)
+}
+
+/// S3-302 (route level): a manual run's `working_directory` / `repos` may only
+/// name the workflow's workspace — its root or a registered repo, and paths
+/// inside them. Anything else is a 400 naming the path, before any run row.
+#[tokio::test]
+async fn manual_run_location_is_limited_to_the_workflows_workspace() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (ctx, pool, token, ws_b, b_repo, foreign, wf) = located_workspace(&tmp).await;
+    let (origin, server) = serve(&ctx).await;
+    let client = reqwest::Client::new();
+    let run = |input: serde_json::Value| {
+        client
+            .post(format!("{origin}/workflows/{}/run", wf.id))
+            .bearer_auth(&token)
+            .json(&json!({ "input": input }))
+            .send()
+    };
+    let escape = format!("{}/../elsewhere", ws_b.root_path);
+    let refused = [
+        json!({"working_directory": foreign.to_string_lossy()}),
+        json!({"working_directory": format!("{}, {}", b_repo.display(), foreign.display())}),
+        json!({"working_directory": "relative/dir"}),
+        json!({"working_directory": escape}),
+        json!({"working_directory": "/"}),
+        json!({"repos": [{"repo": "repo-of-another-ws", "name": "main", "type": "branch"}]}),
+        json!({"repos": [{"repo": foreign.to_string_lossy(), "name": foreign.to_string_lossy()}]}),
+    ];
+    for input in refused {
+        let r = run(input.clone()).await.unwrap();
+        assert_eq!(r.status(), 400, "{input}");
+        let body: serde_json::Value = r.json().await.unwrap();
+        let msg = body["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("workspace") || msg.contains("absolute") || msg.contains("'..'"),
+            "{input}: {body}"
+        );
+    }
+    assert!(
+        otto_state::WorkflowsRepo::new(pool.clone())
+            .list_runs(&wf.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no run row is created for a refused location"
+    );
+    // Inside the root, a registered repo, and a path inside one: accepted.
+    for wd in [
+        ws_b.root_path.clone(),
+        format!("{}/sub", ws_b.root_path),
+        b_repo.to_string_lossy().into_owned(),
+        format!("{}/src/new", b_repo.display()),
+    ] {
+        let r = run(json!({"working_directory": wd})).await.unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "{wd}: {}",
+            r.text().await.unwrap_or_default()
+        );
+    }
+    let r = run(json!({"repos": [{"repo": "b-repo", "name": "main", "type": "branch"}]}))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    server.abort();
+}
+
+/// S3-302 (chat path): a chat `Working Directory:` outside the workflow's
+/// workspace starts nothing and the reply in the thread says why.
+#[tokio::test]
+async fn chat_working_directory_outside_the_workspace_is_refused_in_the_thread() {
+    use otto_channels::workflow_trigger::WorkflowChatTrigger;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (ctx, pool, _token, ws_b, _b_repo, foreign, wf) = located_workspace(&tmp).await;
+    let trigger = otto_workflows::chat::WorkflowChatTriggerImpl { ctx: ctx.clone() };
+    let text = format!(
+        "@otto\nAction: Workflow\nName: Locate\nMsg: do it\nWorking Directory: {}\n",
+        foreign.display()
+    );
+    let ack = trigger
+        .try_start(&ws_b.id, "slack", "C1", Some("t1"), "U1", &text)
+        .await
+        .expect("the thread gets a reply");
+    assert!(ack.reply.contains("Can't start"), "{}", ack.reply);
+    assert!(ack.reply.contains("outside workspace"), "{}", ack.reply);
+    assert!(
+        otto_state::WorkflowsRepo::new(pool.clone())
+            .list_runs(&wf.id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "no run row is created"
+    );
+}

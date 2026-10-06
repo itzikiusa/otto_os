@@ -237,6 +237,26 @@ pub const NATIVE_SESSION_WRITERS: &[&str] = &[
     "api_run_automation",
 ];
 
+/// Governed tools whose self-call target is a PERSON-ONLY (Admin-class)
+/// route: deciding an improvement edit is the governed twin of the Admin
+/// `/improvement/edits/{id}/{approve,reject,rollback}` gates (S11-308). An
+/// agent's governed self-call is bound to its session (S8-305), so the gate
+/// would refuse it — instead the governed path ALWAYS files a human approval
+/// for an agent caller (no auto-approve rule or token grant skips it), and
+/// only the call a person approved replays as that person. Every other
+/// `route_for` target must stay off Admin/Secret routes (a server test pins
+/// both). Each entry must also be in [`DANGEROUS`].
+pub const PERSON_ONLY_TOOLS: &[&str] = &[
+    "approve_improvement_edit",
+    "reject_improvement_edit",
+    "rollback_improvement_edit",
+];
+
+/// True iff `bare` is one of the [`PERSON_ONLY_TOOLS`].
+pub fn tool_is_person_only(bare: &str) -> bool {
+    PERSON_ONLY_TOOLS.contains(&bare)
+}
+
 /// True iff the bare tool is mutating + approval-gated ([`DANGEROUS`]).
 pub fn tool_is_dangerous(bare: &str) -> bool {
     DANGEROUS.contains(&bare)
