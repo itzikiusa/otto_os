@@ -93,7 +93,7 @@ fn jar_scope(wid: &Id, user_id: &Id) -> Id {
 /// client holds and nobody used for [`JAR_IDLE_TTL`] is dropped (S6-310 —
 /// per-user keys made the map grow with every user × workspace).
 fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
-    static JARS: OnceLock<StdMutex<HashMap<Id, (Arc<CookieJar>, Instant)>>> = OnceLock::new();
+    static JARS: OnceLock<StdMutex<JarMap>> = OnceLock::new();
     let jars = JARS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = jars.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
@@ -111,6 +111,8 @@ fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
 }
 
 type CookieJar = reqwest_cookie_store::CookieStoreMutex;
+/// Scope → (jar, last use); swept by [`sweep_idle_jars`].
+type JarMap = HashMap<Id, (Arc<CookieJar>, Instant)>;
 
 /// How long a cookie jar nobody touches is kept once no cached client holds
 /// it (clients themselves go after [`TUNNEL_IDLE_TTL`]).
@@ -119,7 +121,7 @@ const JAR_IDLE_TTL: Duration = Duration::from_secs(12 * 3600);
 /// Drop jars idle past [`JAR_IDLE_TTL`] that only the map still references —
 /// a jar a live client holds is kept, so a send and a listing never diverge
 /// onto two jars for one scope.
-fn sweep_idle_jars(map: &mut HashMap<Id, (Arc<CookieJar>, Instant)>, now: Instant) {
+fn sweep_idle_jars(map: &mut JarMap, now: Instant) {
     map.retain(|_, (jar, used)| {
         Arc::strong_count(jar) > 1 || now.saturating_duration_since(*used) < JAR_IDLE_TTL
     });
@@ -4731,7 +4733,7 @@ mod tests {
         let jar = || Arc::new(CookieJar::new(reqwest_cookie_store::CookieStore::default()));
         let held = jar();
         let _client_ref = held.clone();
-        let mut map: HashMap<Id, (Arc<CookieJar>, Instant)> = HashMap::new();
+        let mut map: JarMap = HashMap::new();
         map.insert("idle".into(), (jar(), t0));
         map.insert("held".into(), (held, t0));
         map.insert("fresh".into(), (jar(), later));
