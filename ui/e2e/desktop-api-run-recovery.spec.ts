@@ -122,7 +122,7 @@ test('SSE applies selected environment, query parameters and saved authorization
   const messages = await page.evaluate(async ({ base, token, workspace, env, saved }) => {
     return new Promise<unknown[]>((resolve, reject) => {
       const frames: unknown[] = [];
-      const socket = new WebSocket(`${base.replace('http:', 'ws:')}/ws/api-client/stream?token=${encodeURIComponent(token)}&workspace_id=${workspace}`);
+      const socket = new WebSocket(`${base.replace('http:', 'ws:')}/ws/api-client/stream?workspace_id=${workspace}`, ['otto-bearer', token]);
       const timer = setTimeout(() => { socket.close(); reject(new Error('stream fixture timed out')); }, 10_000);
       socket.onopen = () => socket.send(JSON.stringify({ action: 'open', kind: 'sse', request: {
         method: 'GET', url: '{{host}}/sse', headers: [], query: [{ key: 'scope', value: 'fixture', enabled: true }],

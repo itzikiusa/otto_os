@@ -190,7 +190,7 @@ impl AuthContext {
     }
 }
 
-/// Validates a bearer token (HTTP header or WS `?token=`) into an [`AuthContext`].
+/// Validates a bearer token (HTTP header or the WS `otto-bearer` subprotocol) into an [`AuthContext`].
 ///
 /// For a normal token the returned context has `real_user == effective_user`.
 pub trait TokenAuthenticator: Send + Sync {

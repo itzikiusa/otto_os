@@ -15,7 +15,7 @@
 //!   so its existence doesn't leak).
 //!
 //! The WS route is root-mounted and self-authenticating (like `/ws/events`):
-//! bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` or `?token=`,
+//! bearer via `Sec-WebSocket-Protocol: otto-bearer, <token>` (never `?token=`),
 //! share-scoped and MCP-only tokens refused, and the grant re-checked every
 //! 5 s off the socket loop.
 
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -679,11 +679,6 @@ async fn screenshot_live(
 // Viewer WebSocket
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
-}
-
 /// What a viewer may do, decided at the upgrade and re-checked every 5 s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewerGrant {
@@ -741,13 +736,11 @@ async fn grant_for(
 async fn live_ws(
     ws: WebSocketUpgrade,
     Path(tab_id): Path<String>,
-    Query(q): Query<TokenQuery>,
     headers: HeaderMap,
     State(ctx): State<ServerCtx>,
 ) -> Response {
-    let sub = crate::ws_events::token_from_subprotocol(&headers);
-    let used_subprotocol = sub.is_some();
-    let Some(token) = sub.or(q.token) else {
+    // Bearer only via the `otto-bearer` subprotocol; no `?token=` (S11-312).
+    let Some(token) = crate::ws_events::token_from_subprotocol(&headers) else {
         return ApiError(Error::Unauthorized).into_response();
     };
     let Ok(auth) = ctx.authenticator.authenticate(&token).await else {
@@ -786,13 +779,9 @@ async fn live_ws(
         .max_message_size(MAX_CLIENT_FRAME_BYTES)
         .max_frame_size(MAX_CLIENT_FRAME_BYTES);
     let go = move |socket: WebSocket| serve_viewer(socket, ctx, token, user, session, grant);
-    if used_subprotocol {
-        upgrade
-            .protocols([crate::ws_events::BEARER_SUBPROTOCOL])
-            .on_upgrade(go)
-    } else {
-        upgrade.on_upgrade(go)
-    }
+    upgrade
+        .protocols([crate::ws_events::BEARER_SUBPROTOCOL])
+        .on_upgrade(go)
 }
 
 enum Recheck {

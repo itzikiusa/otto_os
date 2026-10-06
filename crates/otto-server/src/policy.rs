@@ -1525,6 +1525,9 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/settings/pr-review/presets"
                     | "/room-settings"
                     | "/room-recap-settings"
+                    // Kills every live session of every user (root-only in
+                    // the handler, which an agent token of root passes).
+                    | "/app/kill-sessions"
                     | "/state/restore"
                     | "/state/archive/restore"
                     | "/insights/config"

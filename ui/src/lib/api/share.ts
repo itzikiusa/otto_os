@@ -56,8 +56,8 @@ export async function getSharedSession(id: string, token: string): Promise<Sessi
  * the `otto-bearer` Sec-WebSocket-Protocol subprotocol (keeps the token off
  * the URL / query string and out of access logs).
  *
- * Falls back to `?token=` is only needed for environments that strip custom
- * subprotocols — the server accepts both. We always prefer the subprotocol.
+ * The subprotocol is the ONLY place the daemon accepts the token — a `?token=`
+ * query is refused (S11-312).
  */
 export function openShareTerminalWs(sessionId: string, token: string): WebSocket {
   const base = new URL(baseUrl());

@@ -70,19 +70,44 @@ async fn input_session(ctx: &ServerCtx, user_id: &Id, id: &Id) -> Result<Session
     Ok(session)
 }
 
+/// Who is typing into a session through the REST fan-out routes: the person
+/// the credential belongs to, and — when the credential is an agent
+/// session's own token — that session (S11-305). An agent caller reaches only
+/// itself and the workers it opened, and what it sends is recorded as
+/// agent-originated, never as the person's message.
+#[derive(Clone, Copy)]
+struct Typist<'a> {
+    user_id: &'a Id,
+    agent: Option<&'a Id>,
+}
+
+impl<'a> Typist<'a> {
+    fn new(user_id: &'a Id, auth: &'a otto_core::auth::AuthContext) -> Self {
+        Self {
+            user_id,
+            agent: crate::feature_guard::agent_session_of(auth),
+        }
+    }
+}
+
 /// Send both the paste and its delayed submit through current authorization.
-async fn submit_session_text(ctx: &ServerCtx, user_id: &Id, id: &Id, text: &str) -> Result<()> {
-    input_session(ctx, user_id, id).await?;
+async fn submit_session_text(ctx: &ServerCtx, who: Typist<'_>, id: &Id, text: &str) -> Result<()> {
+    let user_id = who.user_id;
+    let session = input_session(ctx, user_id, id).await?;
+    agent_input_rule(who.agent, &session.id, &session.meta, true)?;
     ctx.manager
         .human_submit_text_checked(id, user_id, false, text, || async {
             input_session(ctx, user_id, id).await.map(|_| ())
         })
         .await?;
-    ctx.manager.record_user_message(id, text).await;
+    match who.agent {
+        Some(from) => ctx.manager.record_agent_message(id, from, text).await,
+        None => ctx.manager.record_user_message(id, text).await,
+    }
     Ok(())
 }
 
-async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<Session>> {
+async fn input_agents(ctx: &ServerCtx, who: Typist<'_>, ws_id: &Id) -> Result<Vec<Session>> {
     let mut allowed = Vec::new();
     for session in ctx.manager.list_by_workspace(ws_id).await? {
         if session.kind == SessionKind::Agent
@@ -92,7 +117,8 @@ async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<S
                     | otto_core::domain::SessionStatus::Working
                     | otto_core::domain::SessionStatus::Idle
             )
-            && input_session(ctx, user_id, &session.id).await.is_ok()
+            && agent_input_rule(who.agent, &session.id, &session.meta, true).is_ok()
+            && input_session(ctx, who.user_id, &session.id).await.is_ok()
         {
             allowed.push(session);
         }
@@ -102,15 +128,15 @@ async fn input_agents(ctx: &ServerCtx, user_id: &Id, ws_id: &Id) -> Result<Vec<S
 
 async fn broadcast_sessions(
     ctx: &ServerCtx,
-    user_id: &Id,
+    who: Typist<'_>,
     ws_id: &Id,
     text: &str,
     targets: Option<&[Id]>,
 ) -> Result<Vec<Id>> {
     let mut sent = Vec::new();
-    for session in input_agents(ctx, user_id, ws_id).await? {
+    for session in input_agents(ctx, who, ws_id).await? {
         if targets.is_none_or(|ids| ids.contains(&session.id))
-            && submit_session_text(ctx, user_id, &session.id, text)
+            && submit_session_text(ctx, who, &session.id, text)
                 .await
                 .is_ok()
         {
@@ -1124,6 +1150,7 @@ async fn orchestrate(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<OrchestrateReq>,
 ) -> ApiResult<Json<OrchestrateResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1131,7 +1158,7 @@ async fn orchestrate(
     // The planner spawns a real claude session in the workspace root —
     // pre-trust the folder so the PTY never stalls on the trust dialog.
     otto_sessions::trust::ensure_trusted("claude", &ws.root_path);
-    let octx = orchestrator_context(&ctx, &user, &ws_id, ws).await?;
+    let octx = orchestrator_context(&ctx, Typist::new(&user.id, &auth), &ws_id, ws).await?;
     let resp = ctx
         .orchestrator
         .orchestrate(req, octx)
@@ -1144,14 +1171,14 @@ async fn orchestrate(
 /// live sessions + connections and the live provider registry.
 async fn orchestrator_context(
     ctx: &ServerCtx,
-    user: &otto_core::domain::User,
+    who: Typist<'_>,
     ws_id: &Id,
     ws: Workspace,
 ) -> ApiResult<OrchestratorContext> {
-    let sessions = input_agents(ctx, &user.id, ws_id).await.map_err(ApiError)?;
+    let sessions = input_agents(ctx, who, ws_id).await.map_err(ApiError)?;
     let connections = ctx
         .connections
-        .list_for(ws_id, &user.id)
+        .list_for(ws_id, who.user_id)
         .await
         .map_err(ApiError)?;
     // Effective default agent for this workspace: per-workspace setting, else
@@ -1180,6 +1207,7 @@ async fn orchestrate_execute(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<ExecutePlanReq>,
 ) -> ApiResult<Json<ExecuteResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1187,12 +1215,13 @@ async fn orchestrate_execute(
     // it since `/orchestrate` validated it — validate again against the live
     // workspace before anything is spawned or typed.
     let ws = ctx.workspaces.get(&ws_id).await.map_err(ApiError)?;
-    let octx = orchestrator_context(&ctx, &user, &ws_id, ws).await?;
+    let octx = orchestrator_context(&ctx, Typist::new(&user.id, &auth), &ws_id, ws).await?;
     otto_orchestrator::parse::validate_plan(&req.plan, &octx, &octx.allowed_providers())
         .map_err(ApiError)?;
     let helper = ExecHelper {
         ctx: ctx.clone(),
         ws_id: ws_id.clone(),
+        agent: crate::feature_guard::agent_session_of(&auth).cloned(),
         user,
     };
     Ok(Json(execute(&req.plan, &helper, &helper).await))
@@ -1206,6 +1235,7 @@ async fn workspace_broadcast(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::BroadcastReq>,
 ) -> ApiResult<Json<otto_core::api::BroadcastResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1215,7 +1245,8 @@ async fn workspace_broadcast(
     }
     // Treat an empty target list the same as "no targets" → broadcast to all.
     let targets = req.session_ids.filter(|ids| !ids.is_empty());
-    let session_ids = broadcast_sessions(&ctx, &user.id, &ws_id, text, targets.as_deref())
+    let who = Typist::new(&user.id, &auth);
+    let session_ids = broadcast_sessions(&ctx, who, &ws_id, text, targets.as_deref())
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::BroadcastResp { session_ids }))
@@ -1230,6 +1261,7 @@ async fn workspace_relay(
     Path(ws_id): Path<Id>,
     State(ctx): State<ServerCtx>,
     CurrentUser(user): CurrentUser,
+    CurrentAuthContext(auth): CurrentAuthContext,
     Json(req): Json<otto_core::api::RelayReq>,
 ) -> ApiResult<Json<otto_core::api::RelayResp>> {
     crate::auth::require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
@@ -1237,9 +1269,8 @@ async fn workspace_relay(
     if text.is_empty() {
         return Err(ApiError(Error::Invalid("relay text is empty".into())));
     }
-    let candidates = input_agents(&ctx, &user.id, &ws_id)
-        .await
-        .map_err(ApiError)?;
+    let who = Typist::new(&user.id, &auth);
+    let candidates = input_agents(&ctx, who, &ws_id).await.map_err(ApiError)?;
     let addressable: Vec<_> = candidates
         .iter()
         .map(|s| otto_sessions::names::Addressable {
@@ -1262,7 +1293,7 @@ async fn workspace_relay(
     let resolved = otto_sessions::names::resolve_address(text, &addressable);
     let mut session_ids = Vec::new();
     for id in &resolved.targets {
-        if submit_session_text(&ctx, &user.id, id, resolved.text.trim())
+        if submit_session_text(&ctx, who, id, resolved.text.trim())
             .await
             .is_ok()
         {
@@ -1286,6 +1317,19 @@ struct ExecHelper {
     ctx: ServerCtx,
     ws_id: Id,
     user: User,
+    /// The caller's own agent session when the plan arrived on an agent
+    /// credential: its broadcast/command steps reach only that session and its
+    /// workers (S11-305).
+    agent: Option<Id>,
+}
+
+impl ExecHelper {
+    fn typist(&self) -> Typist<'_> {
+        Typist {
+            user_id: &self.user.id,
+            agent: self.agent.as_ref(),
+        }
+    }
 }
 
 impl PlanSpawner for ExecHelper {
@@ -1336,7 +1380,7 @@ impl PlanIo for ExecHelper {
         // Funnel through the one shared implementation so the AI/palette path and
         // the dedicated /broadcast endpoint can't drift. `None` = all live agents.
         Box::pin(async move {
-            broadcast_sessions(&self.ctx, &self.user.id, &self.ws_id, text, None).await
+            broadcast_sessions(&self.ctx, self.typist(), &self.ws_id, text, None).await
         })
     }
 
@@ -1350,7 +1394,7 @@ impl PlanIo for ExecHelper {
             }
             // Submit as a real keypress (paste + Enter), not "{text}\n" in one
             // burst — otherwise bracketed-paste TUIs paste the text but never send.
-            submit_session_text(&self.ctx, &self.user.id, session_id, text).await?;
+            submit_session_text(&self.ctx, self.typist(), session_id, text).await?;
             Ok(())
         })
     }
@@ -6004,34 +6048,10 @@ async fn open_agent_session(
 pub const DELEGATED_BY_META: &str = otto_sessions::http::DELEGATED_BY_META;
 
 /// Confinement of an agent session's OWN credential on the REST twins of the
-/// terminal (S11-02 / S1-11): `/ws/term` already lets such a token attach only
-/// to its own session. `/input` follows the same rule; `/message` also
-/// reaches the workers the agent opened (its `otto_send_message` tool). A
-/// person's credential (`own == None`) is unaffected.
-pub fn agent_input_rule(
-    own: Option<&Id>,
-    target_id: &Id,
-    target_meta: &Value,
-    allow_delegated: bool,
-) -> Result<()> {
-    let Some(own) = own else {
-        return Ok(());
-    };
-    if own == target_id {
-        return Ok(());
-    }
-    let delegated = target_meta
-        .get(DELEGATED_BY_META)
-        .and_then(serde_json::Value::as_str)
-        == Some(own.as_str());
-    if allow_delegated && delegated {
-        return Ok(());
-    }
-    Err(Error::Forbidden(
-        "an agent session's credential may only send to its own session or a worker it opened"
-            .into(),
-    ))
-}
+/// terminal (S11-02 / S1-11) and on broadcast/relay (S11-305 / S1-303). The
+/// one rule lives with the sessions router, which applies it to the lifecycle
+/// routes (PATCH, restart, kill, archive, …) too.
+pub use otto_sessions::http::agent_input_rule;
 
 /// `POST /sessions/{id}/message` — deliver ONE message to ONE live agent
 /// session as if typed + Enter: the targeted counterpart of
@@ -6074,7 +6094,7 @@ async fn session_message(
             session.status.as_str()
         ))));
     }
-    submit_session_text(&ctx, &user.id, &session_id, text)
+    submit_session_text(&ctx, Typist::new(&user.id, &auth), &session_id, text)
         .await
         .map_err(ApiError)?;
     Ok(Json(otto_core::api::SessionMessageResp {

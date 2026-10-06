@@ -92,6 +92,7 @@ struct Daemon {
     human: String,
     http: reqwest::Client,
     pool: DbPool,
+    ctx: ServerCtx,
     _tmp: tempfile::TempDir,
 }
 
@@ -221,7 +222,7 @@ async fn boot(tools: &[&str]) -> Daemon {
     let base = format!("http://{addr}");
     let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
-    let app = otto_server::build_router(ctx, api_extras, root_extras);
+    let app = otto_server::build_router(ctx.clone(), api_extras, root_extras);
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -230,6 +231,7 @@ async fn boot(tools: &[&str]) -> Daemon {
         human,
         http: reqwest::Client::new(),
         pool,
+        ctx,
         _tmp: tmp,
     };
     let (st, body) = d
@@ -245,12 +247,15 @@ async fn boot(tools: &[&str]) -> Daemon {
 }
 
 impl Daemon {
-    /// A WebSocket upgrade request against a ROOT route; returns the status.
-    /// The handlers refuse before upgrading, so a refusal is a plain 403.
-    async fn ws_status(&self, path_and_query: &str) -> u16 {
-        self.http
-            .get(format!("{}{path_and_query}", self.base))
-            .header("connection", "upgrade")
+    /// A WebSocket upgrade request against a ROOT route, the bearer in the
+    /// `otto-bearer` subprotocol (`None`: no header); returns the status. The
+    /// handlers refuse before upgrading, so a refusal is a plain 401/403.
+    async fn ws_status(&self, path_and_query: &str, token: Option<&str>) -> u16 {
+        let mut req = self.http.get(format!("{}{path_and_query}", self.base));
+        if let Some(token) = token {
+            req = req.header("sec-websocket-protocol", format!("otto-bearer, {token}"));
+        }
+        req.header("connection", "upgrade")
             .header("upgrade", "websocket")
             .header("sec-websocket-version", "13")
             .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
@@ -287,23 +292,156 @@ async fn agent_credentials_are_confined_on_files_and_root_routes() {
     // The language server reads a whole host directory: agents are refused.
     let root = d._tmp.path().display().to_string();
     assert_eq!(
-        d.ws_status(&format!("/ws/lsp?lang=rust&root={root}&token={agent}"))
+        d.ws_status(&format!("/ws/lsp?lang=rust&root={root}"), Some(&agent))
             .await,
         403
     );
     // A read-only session never opens an HTTP stream (it sends requests).
     assert_eq!(
-        d.ws_status(&format!(
-            "/ws/api-client/stream?workspace_id=ws1&token={read_only}"
-        ))
-        .await,
+        d.ws_status("/ws/api-client/stream?workspace_id=ws1", Some(&read_only))
+            .await,
         403
     );
     // Its event stream (receive-only) still opens.
-    assert_ne!(
-        d.ws_status(&format!("/ws/events?token={read_only}")).await,
-        403
-    );
+    assert_ne!(d.ws_status("/ws/events", Some(&read_only)).await, 403);
+}
+
+/// S11-312: every root-mounted socket takes the bearer ONLY from the
+/// `otto-bearer` subprotocol. The person's VALID token in a `?token=` query
+/// is refused (401) on all five, exactly like no token at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bearer_token_param_is_no_longer_accepted_on_any_socket() {
+    let d = boot(&[]).await;
+    let agent_sid = SessionsRepo::new(d.pool.clone())
+        .create(NewSession {
+            workspace_id: "ws1".into(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "Agent".into(),
+            cwd: d._tmp.path().to_string_lossy().to_string(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: json!({}),
+        })
+        .await
+        .unwrap()
+        .id;
+    let root = d._tmp.path().display().to_string();
+    let human = d.human.clone();
+    for path in [
+        "/ws/events".to_string(),
+        // View-only attach and no `lang`: past auth nothing is spawned (no
+        // resume, no language server) — the request stops at a later check.
+        format!("/ws/term/{agent_sid}?view=1"),
+        format!("/ws/lsp?root={root}"),
+        "/ws/api-client/stream?workspace_id=ws1".to_string(),
+        "/ws/browser/tab1/live".to_string(),
+    ] {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        assert_eq!(
+            d.ws_status(&format!("{path}{sep}token={human}"), None)
+                .await,
+            401,
+            "{path}: ?token= must not authenticate"
+        );
+        // The same token in the subprotocol gets past authentication.
+        assert_ne!(
+            d.ws_status(&path, Some(&human)).await,
+            401,
+            "{path}: the subprotocol still authenticates"
+        );
+    }
+}
+
+/// S11-305 / S1-303: broadcast and relay are the fan-out twins of
+/// `/sessions/{id}/message`. An agent session's own token reaches only itself
+/// and the workers it opened through them — a live sibling (here a plain
+/// `/bin/cat` agent the same root user owns) receives nothing — while the
+/// person's own token still reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_token_broadcast_and_relay_never_reach_a_sibling() {
+    let d = boot(&[]).await;
+    let ws = d.ctx.workspaces.get(&"ws1".to_string()).await.unwrap();
+    let sibling = d
+        .ctx
+        .manager
+        .create(
+            &ws,
+            &"alice".to_string(),
+            otto_core::api::CreateSessionReq {
+                kind: otto_core::domain::SessionKind::Agent,
+                provider: Some("shell".into()),
+                title: Some("Messi".into()),
+                cwd: None,
+                connection_id: None,
+                meta: None,
+                model: None,
+            },
+            Some(otto_pty::CommandSpec {
+                program: "/bin/cat".into(),
+                args: vec![],
+                cwd: Some(d._tmp.path().to_string_lossy().into()),
+                env: vec![],
+            }),
+        )
+        .await
+        .unwrap();
+    let agent = d.agent_session(json!({})).await;
+    let targeted = json!({"text": "echo pwned", "session_ids": [sibling.id]});
+
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            "/workspaces/ws1/broadcast",
+            Some(targeted.clone()),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "targeted broadcast: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            "/workspaces/ws1/broadcast",
+            Some(json!({"text": "echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "broadcast-all: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            "/workspaces/ws1/relay",
+            Some(json!({"text": "Messi: echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([]), "relay: {body}");
+    let (st, body) = d
+        .send(
+            "POST",
+            &agent,
+            &format!("/sessions/{}/message", sibling.id),
+            Some(json!({"text": "echo pwned"})),
+        )
+        .await;
+    assert_eq!(st, 403, "direct message: {body}");
+
+    // The person's credential is unaffected.
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            "/workspaces/ws1/broadcast",
+            Some(targeted),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["session_ids"], json!([sibling.id]), "human: {body}");
+    let _ = d.ctx.manager.remove(&sibling.id).await;
 }
 
 fn pr_args(title: &str) -> Value {

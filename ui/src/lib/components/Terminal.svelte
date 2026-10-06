@@ -280,7 +280,7 @@
      *  `otto-bearer` Sec-WebSocket-Protocol subprotocol carrying this token
      *  instead of the stored owner login token. Used by the guest share view
      *  (SharePage) so the scoped share token never touches localStorage.
-     *  Default = undefined → falls back to today's wsUrl() behaviour. */
+     *  Default = undefined → the stored owner token (via `wsConnect`). */
     shareToken?: string;
     /** Capability-only room transport; bypasses owner authentication entirely. */
     socketFactory?: () => WebSocket;
@@ -851,8 +851,7 @@
     if (socketFactory) {
       sock = socketFactory();
     } else if (shareToken) {
-      const wsBase = wsUrl(`/ws/term/${sessionId}`).replace(/\?token=.*$/, '');
-      sock = new WebSocket(wsBase, [WS_BEARER_SUBPROTOCOL, shareToken]);
+      sock = new WebSocket(wsUrl(`/ws/term/${sessionId}`), [WS_BEARER_SUBPROTOCOL, shareToken]);
     } else {
       sock = wsConnect(`/ws/term/${sessionId}${viewAttach ? '?view=1' : ''}`);
     }

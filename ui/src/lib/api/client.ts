@@ -955,12 +955,14 @@ export function exportProofPack(
   return api.post<ReviewProofPackExport>(`/reviews/${reviewId}/proof-pack/export`, { format });
 }
 
-/** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
+/** Build a daemon WS URL, e.g. wsUrl('/ws/term/SESSION_ID'). It never carries
+ *  the token: the daemon accepts the bearer ONLY in the `otto-bearer`
+ *  subprotocol (S11-312) — open it with {@link wsConnect}, or pass
+ *  `[WS_BEARER_SUBPROTOCOL, token]` yourself for a non-stored token. */
 export function wsUrl(path: string): string {
   const base = new URL(baseUrl());
   const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = getToken() ?? '';
-  return `${proto}//${base.host}${path}?token=${encodeURIComponent(token)}`;
+  return `${proto}//${base.host}${path}`;
 }
 
 /** Fixed first subprotocol paired with the bearer token on auth-by-subprotocol
@@ -970,8 +972,8 @@ export const WS_BEARER_SUBPROTOCOL = 'otto-bearer';
 
 /**
  * Open a WebSocket whose bearer token travels in the `Sec-WebSocket-Protocol`
- * header instead of the `?token=` query string — the URL (and the token) then
- * never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
+ * header — the only place the daemon accepts it (a `?token=` query is refused),
+ * so the token never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
  * the daemon validates the token and echoes `WS_BEARER_SUBPROTOCOL` back.
  *
  * Tokens are not valid `Sec-WebSocket-Protocol` values if they contain spaces or

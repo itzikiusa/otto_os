@@ -16,7 +16,7 @@
 //! full access.
 //!
 //! Task 3.3 additions:
-//! - #L9: terminal attach (`GET /ws/term/{id}?token=`) is now owner-only; a
+//! - #L9: terminal attach (`GET /ws/term/{id}`) is now owner-only; a
 //!   workspace editor who is not the owner gets 403 before the WS upgrade.
 //! - #L8: `POST /app/kill-sessions` requires root; non-root gets 403.
 
@@ -465,13 +465,15 @@ async fn mint_share(pool: &DbPool, owner: &str, session_id: &Id, role: Workspace
 }
 
 /// Send a bare GET (no WS upgrade headers) to the terminal endpoint with the
-/// given raw token in the query string and return the status code. When the
+/// given raw token in the `otto-bearer` subprotocol header (the only place it
+/// is accepted — S11-312) and return the status code. When the
 /// auth/owner gate fires the handler returns 403 *before* the upgrade, so this
 /// lets us distinguish "forbidden" from "auth passed, upgrade rejected".
 async fn term_ws_status(app: &Router, session_id: &Id, token: &str) -> StatusCode {
     let req = Request::builder()
         .method(Method::GET)
-        .uri(format!("/ws/term/{session_id}?token={token}"))
+        .uri(format!("/ws/term/{session_id}"))
+        .header("sec-websocket-protocol", format!("otto-bearer, {token}"))
         .body(Body::empty())
         .unwrap();
     app.clone().oneshot(req).await.unwrap().status()
@@ -749,6 +751,141 @@ async fn bulk_session_actions_respect_resource_denial() {
     let outcomes: serde_json::Value = serde_json::from_slice(&data).unwrap();
     assert_eq!(outcomes[0]["ok"], false);
     assert!(!repo.get(&id).await.unwrap().archived);
+}
+
+/// Send `body` to `uri` as `caller` carrying an agent session's OWN credential
+/// (`managed_session_id = own`), the way the auth middleware resolves it.
+async fn agent_status(
+    app: &Router,
+    caller: &User,
+    own: &Id,
+    method: Method,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    req.extensions_mut().insert(AuthUser(caller.clone()));
+    req.extensions_mut().insert(otto_core::auth::AuthContext {
+        real_user: caller.clone(),
+        effective_user: caller.clone(),
+        scope: None,
+        mcp_only: false,
+        mcp_scope: None,
+        mcp_internal: false,
+        mcp_session_id: None,
+        managed_session_id: Some(own.clone()),
+    });
+    let response = app.clone().oneshot(req).await.unwrap();
+    let status = response.status();
+    let data = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&data).unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// S1-303: an agent session's own token (its owner is root here, so only the
+/// agent rule can refuse) controls its own session and the workers it opened
+/// — never a sibling — and cannot rewrite its own confinement meta.
+#[tokio::test]
+async fn agent_token_controls_only_its_own_session_and_workers() {
+    let pool = mem_pool().await;
+    seed_user(&pool, "alice", true).await;
+    seed_workspace(&pool, "ws1").await;
+    set_member(&pool, "ws1", "alice", "admin").await;
+    let repo = SessionsRepo::new(pool.clone());
+    let me = insert_session(&repo, "ws1", "alice").await;
+    let sibling = insert_session(&repo, "ws1", "alice").await;
+    let worker = insert_session(&repo, "ws1", "alice").await;
+    repo.merge_meta(&worker, &serde_json::json!({ "delegated_by": me }))
+        .await
+        .unwrap();
+    let app = app(&pool).await;
+    let alice = user("alice", true);
+    let none = serde_json::json!({});
+
+    for (method, uri) in [
+        (Method::PATCH, format!("/sessions/{sibling}")),
+        (Method::DELETE, format!("/sessions/{sibling}")),
+        (Method::POST, format!("/sessions/{sibling}/restart")),
+        (Method::POST, format!("/sessions/{sibling}/resume")),
+        (Method::POST, format!("/sessions/{sibling}/kill")),
+        (Method::POST, format!("/sessions/{sibling}/archive")),
+        (Method::POST, format!("/sessions/{sibling}/unarchive")),
+    ] {
+        let (st, _) = agent_status(&app, &alice, &me, method.clone(), &uri, none.clone()).await;
+        assert_eq!(
+            st,
+            StatusCode::FORBIDDEN,
+            "agent token on sibling: {method} {uri}"
+        );
+    }
+    // Bulk skips the sibling rather than failing the batch.
+    let (st, body) = agent_status(
+        &app,
+        &alice,
+        &me,
+        Method::POST,
+        "/sessions/bulk",
+        serde_json::json!({"action":"archive","ids":[sibling]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(body[0]["ok"], false, "{body}");
+    assert!(!repo.get(&sibling).await.unwrap().archived);
+
+    // Its own session and its worker stay controllable.
+    for target in [&me, &worker] {
+        let (st, _) = agent_status(
+            &app,
+            &alice,
+            &me,
+            Method::PATCH,
+            &format!("/sessions/{target}"),
+            serde_json::json!({"title":"renamed"}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "agent token on {target}");
+    }
+    // …but never its own (or a worker's) confinement keys.
+    for key in [
+        "read_only",
+        "project_settings",
+        "allow_subagents",
+        "personal_agent",
+        "account_id",
+    ] {
+        let (st, _) = agent_status(
+            &app,
+            &alice,
+            &me,
+            Method::PATCH,
+            &format!("/sessions/{me}"),
+            serde_json::json!({"meta": { key: true }}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "PATCH meta.{key}");
+    }
+    let meta = repo.get(&me).await.unwrap().meta;
+    assert!(meta.get("project_settings").is_none(), "{meta}");
+    // A person's credential (no AuthContext agent binding) is unchanged.
+    assert_ne!(
+        status_as(
+            &app,
+            &alice,
+            Method::POST,
+            &format!("/sessions/{sibling}/archive")
+        )
+        .await,
+        StatusCode::FORBIDDEN
+    );
 }
 
 /// History's resume is an open-if-live operation, not a destructive restart.
