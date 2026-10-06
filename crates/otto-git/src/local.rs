@@ -4057,6 +4057,40 @@ impl LocalGit {
         Err(upstream_err(&err, &out, code))
     }
 
+    /// Remote-tracking refs that already contain HEAD (`git branch -r
+    /// --contains HEAD`), at most [`HEAD_REMOTES_CAP`]. Non-empty ⇒ amending
+    /// HEAD rewrites a pushed commit — whatever the branch's upstream says: a
+    /// HEAD pushed under another name, or a branch with no upstream at all,
+    /// is still published (S15-28). An unborn HEAD has none.
+    pub async fn head_remote_refs(&self) -> Result<Vec<String>> {
+        let out = match self
+            .run_read(&[
+                "branch",
+                "-r",
+                "--contains",
+                "HEAD",
+                "--format=%(refname:short)%00%(symref)",
+            ])
+            .await
+        {
+            Ok(out) => out,
+            // No commit yet: nothing can contain it.
+            Err(_) if self.run_read(&["rev-parse", "--verify", "-q", "HEAD"]).await.is_err() => {
+                return Ok(Vec::new())
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(out
+            .lines()
+            .filter_map(|l| l.split_once('\0'))
+            // `origin/HEAD` is a symbolic alias of a real ref listed anyway.
+            .filter(|(_, symref)| symref.is_empty())
+            .map(|(name, _)| name.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .take(HEAD_REMOTES_CAP)
+            .collect())
+    }
+
     /// `git stash list` → parsed entries (read-only). Empty list when there are
     /// no stashes (`git` exits 0 with empty output).
     pub async fn stash_list(&self) -> Result<Vec<StashInfo>> {
@@ -5455,6 +5489,9 @@ pub async fn clone_repo(
 // Tests — real throwaway repos under the system temp dir
 // ---------------------------------------------------------------------------
 
+/// Cap on [`LocalGit::head_remote_refs`] — the UI only names a few.
+pub const HEAD_REMOTES_CAP: usize = 20;
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -5617,6 +5654,30 @@ mod tests {
 
         let conflicted = git.conflicted_paths().await.unwrap();
         assert_eq!(conflicted.len(), 2, "both stay conflicted: {conflicted:?}");
+    }
+
+    /// S15-28: the amend warning keyed on `upstream && ahead == 0` missed a
+    /// HEAD pushed under another name and a branch with no upstream.
+    #[tokio::test]
+    async fn head_remote_refs_lists_any_remote_ref_containing_head() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        assert!(git.head_remote_refs().await.unwrap().is_empty());
+        // Pushed as `upstream/other-name`; the local branch has NO upstream.
+        sh_git(&dir, &["update-ref", "refs/remotes/upstream/other-name", "HEAD"]);
+        sh_git(
+            &dir,
+            &["symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/other-name"],
+        );
+        assert_eq!(
+            git.head_remote_refs().await.unwrap(),
+            vec!["upstream/other-name".to_string()],
+            "the symbolic upstream/HEAD alias is not listed"
+        );
+        write(&dir, "new.txt", "unpushed\n");
+        sh_git(&dir, &["add", "new.txt"]);
+        sh_git(&dir, &["commit", "-m", "test: unpushed"]);
+        assert!(git.head_remote_refs().await.unwrap().is_empty());
     }
 
     #[tokio::test]

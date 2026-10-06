@@ -3357,6 +3357,11 @@ export interface ResolveConflictReq {
   side?: 'ours' | 'theirs' | 'keep' | 'delete';
 }
 
+/** `GET /repos/{id}/head/remotes` — remote-tracking refs containing HEAD. */
+export interface HeadRemotesResp {
+  remotes: string[];
+}
+
 /** `POST /repos/{id}/merge/commit` */
 export interface MergeCommitReq {
   message: string | null;

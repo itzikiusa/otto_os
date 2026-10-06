@@ -459,6 +459,7 @@ that user's workspace roles. Bootstrap one with a one-time login, then save it i
 | 88 | GET /api/v1/auth/tokens | member | — | `ApiTokenInfo[]` (never the secret; newest first) |
 | 89 | DELETE /api/v1/auth/tokens/{id} | member | — | 204 (404 if not found / not owned) |
 | 90 | GET /api/v1/repos/{id}/stashes | ws viewer | — | `StashInfo[]` (read-only `git stash list`) |
+| 90a | GET /api/v1/repos/{id}/head/remotes | ws viewer | — | `HeadRemotesResp` `{remotes: string[]}` — remote-tracking refs that already contain HEAD (`git branch -r --contains HEAD`, symbolic `*/HEAD` aliases skipped, ≤ 20; `[]` for an unborn HEAD). Asked when the user ticks Amend: non-empty ⇒ amending rewrites a published commit, whatever the branch's upstream is. |
 | 148 | GET /api/v1/repos/{id}/worktrees | ws viewer | — | `WorktreeInfo[]` (`git worktree list`; first entry = main) |
 | 149 | POST /api/v1/repos/{id}/worktrees/remove | ws editor | `{path, force?}` | `WorktreeInfo[]` (refreshed list; 400 on main/unknown path; git refuses dirty/locked without `force`) |
 | 150 | POST /api/v1/repos/{id}/worktrees/prune | ws editor | — | `WorktreeInfo[]` (drops stale registrations whose dir is gone) |
