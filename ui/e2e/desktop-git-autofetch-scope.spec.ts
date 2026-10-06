@@ -10,6 +10,10 @@ let workspaceId = '';
 let repoId = '';
 let repos: unknown[] = [];
 const status = { branch: 'main', upstream: null, ahead: 0, behind: 0, changes: [] };
+/** Past the selected repo's cadence (`ACTIVE_AUTO_FETCH_SEC`, 60 s in
+ *  stores/git.svelte.ts): a fetch is DUE after this long, so staying away
+ *  proves leaving Git stops it and coming back proves the due fetch resumes. */
+const PAST_ACTIVE_CADENCE_MS = 65_000;
 
 test.beforeAll(async () => {
   const { ctx, base } = await apiCtx();
@@ -59,7 +63,7 @@ test('automatic fetch belongs to Git: inactive boot, leave, and return', async (
   await expect.poll(() => fetches).toBe(1);
   await navigate(page, '#/agents');
   await expect(page.locator('.gitpage')).not.toBeVisible();
-  await page.clock.fastForward(35_000);
+  await page.clock.fastForward(PAST_ACTIVE_CADENCE_MS);
   await page.waitForTimeout(300);
   expect(fetches, 'leaving Git must stop the next due fetch').toBe(1);
 

@@ -38,13 +38,24 @@ async function sessionExists(id: string): Promise<boolean> {
   return (await ctx.get(`${base}/api/v1/sessions/${id}`)).ok();
 }
 
-/** Open the ⌘I plain-English palette and submit `text`. */
-async function runOttoCommand(page: import('@playwright/test').Page, text: string): Promise<void> {
+/** Open the ⌘I plain-English palette and submit `text`. `confirm` names the
+ *  dialog a guarded close raises (several sessions, a delete, an agent
+ *  mid-turn) and the button that accepts it. */
+async function runOttoCommand(
+  page: import('@playwright/test').Page,
+  text: string,
+  confirm?: { title: string; button: string },
+): Promise<void> {
   await page.keyboard.press('Meta+i');
   const box = page.locator('.pal-english textarea');
   await expect(box).toBeVisible({ timeout: 10_000 });
   await box.fill(text);
   await page.keyboard.press('Meta+Enter');
+  if (confirm) {
+    const dialog = page.getByRole('dialog', { name: confirm.title });
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await dialog.getByRole('button', { name: confirm.button, exact: true }).click();
+  }
   // The palette closes itself on a handled command.
   await expect(box).toBeHidden({ timeout: 10_000 });
 }
@@ -76,15 +87,22 @@ test('⌘I: close a session by NAME, then close ALL of a provider', async ({ pag
   const scratchId = (await sr.json()).id as string;
   await expect(page.locator('.navigator .nested-item', { hasText: scratchTitle })).toBeVisible({ timeout: 20_000 });
 
-  // "close zlatan" → only that session is archived.
+  // "close zlatan" → only that session is archived, without a dialog: one
+  // plain shell (its prompt output reads as "working", but a shell is never an
+  // agent mid-turn).
   await runOttoCommand(page, 'please close zlatan');
   await expect.poll(() => isArchived(idByTitle.Zlatan), { timeout: 15_000 }).toBe(true);
   // The others are untouched.
   expect(await isArchived(idByTitle.Pirlo)).toBe(false);
   expect(await isArchived(idByTitle.Buffon)).toBe(false);
 
-  // "close all shell sessions" → every remaining shell is archived.
-  await runOttoCommand(page, 'please close all shell sessions');
+  // "close all shell sessions" → every remaining shell is archived, after ONE
+  // confirm naming the count (a close that ends several sessions always asks,
+  // like the tab bar's multi-close).
+  await runOttoCommand(page, 'please close all shell sessions', {
+    title: 'Archive 2 sessions?',
+    button: 'Archive 2 sessions',
+  });
   await expect.poll(() => isArchived(idByTitle.Pirlo), { timeout: 15_000 }).toBe(true);
   await expect.poll(() => isArchived(idByTitle.Buffon), { timeout: 15_000 }).toBe(true);
   // …but only THIS workspace's: the scratch shell is left running.

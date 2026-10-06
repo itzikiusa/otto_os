@@ -113,7 +113,7 @@ export function storeContext(workspaceId: string): OrchestrateCtx {
     order: paneOrder(),
     archive: (id) => ws.archiveSession(id),
     kill: (id) => ws.killSession(id),
-    isWorking: (id) => ws.statusMap[id] === 'working',
+    isWorking: (id) => ws.isAgentMidTurn(id),
     ...orchestratorPrefs(),
     confirmDestructive: true,
   };

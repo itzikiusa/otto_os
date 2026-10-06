@@ -40,8 +40,8 @@ export interface OrchestrateCtx {
    *  or a working one — as `confirm-close` instead of running them (the same
    *  guard the tab bar's multi-close has). */
   confirmDestructive?: boolean;
-  /** Whether a session is mid-turn. Defaults to its listed `status`; the
-   *  main window passes the live status map. */
+  /** Whether a session is an agent mid-turn. Defaults to its listed
+   *  `status` (shells never count); the main window passes the live map. */
   isWorking?: (id: Id) => boolean;
 }
 
@@ -61,7 +61,7 @@ export type EnglishOutcome =
 // "close <name>" command (verbs, fillers, nouns, providers, numbers).
 const CLOSE_SKIP = new Set([
   'please', 'pls', 'kindly', 'close', 'kill', 'end', 'stop', 'terminate',
-  'quit', 'remove', 'exit', 'shut', 'down', 'and', 'the', 'all', 'every',
+  'quit', 'remove', 'exit', 'shut', 'down', 'delete', 'destroy', 'and', 'the', 'all', 'every',
   'everything', 'everyone', 'them', 'session', 'sessions', 'pane', 'panes',
   'tab', 'tabs', 'terminal', 'terminals', 'window', 'windows', 'agent', 'agents',
   'claude', 'codex', 'agy', 'shell', 'gemini', 'antigravity', 'gpt', 'bash', 'zsh',
@@ -151,9 +151,12 @@ export function resolveCloseNames(
 
 const EXPLICIT_CLOSE = /^\s*(?:please\s+|pls\s+|kindly\s+)?(?:close|kill|delete|destroy)\b/i;
 
+/** An agent mid-turn. `working` only means recent output, so a plain shell
+ *  never counts (its prompt redraw would make every shell close ask). */
 function isWorking(ctx: OrchestrateCtx, id: Id): boolean {
   if (ctx.isWorking) return ctx.isWorking(id);
-  return ctx.sessions.find((s) => s.id === id)?.status === 'working';
+  const s = ctx.sessions.find((x) => x.id === id);
+  return s?.status === 'working' && s.provider !== 'shell';
 }
 
 /** Close ids now (archive, or delete when `permanent`). */

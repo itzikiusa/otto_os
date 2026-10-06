@@ -173,7 +173,7 @@ test('widgets: add from the picker (max 8), resize in grid units, zoom, remove',
   await page.getByRole('button', { name: 'Add widget' }).click();
   const sheet = page.getByRole('dialog');
   await expectFullyInViewport(page, sheet, 'add-widget sheet');
-  await expect(sheet.locator('.kind')).toHaveCount(6);
+  await expect(sheet.locator('.kind')).toHaveCount(7);
   await sheet.locator('.kind', { hasText: 'Usage' }).click();
   await expect(boxes).toHaveCount(5);
   await expect(boxes.nth(4)).toHaveAttribute('data-kind', 'usage');

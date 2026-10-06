@@ -29,7 +29,8 @@ test('every user-facing archive goes through ws.requestArchive', () => {
 test('requestArchive confirms a working agent before archiving', () => {
   const store = read('src/lib/stores/workspace.svelte.ts');
   const fn = store.slice(store.indexOf('  async requestArchive(id: Id)'), store.indexOf('  async unarchiveSession('));
-  assert.match(fn, /this\.statusMap\[id\] === 'working'/);
+  // Agents only: a plain shell's output is not a turn (isAgentMidTurn).
+  assert.match(fn, /this\.isAgentMidTurn\(id\)/);
   assert.match(fn, /confirmer\.ask\(/);
   assert.match(fn, /if \(!ok\) return false;/);
   assert.ok(fn.indexOf('confirmer.ask') < fn.indexOf('this.archiveSession(id)'), 'confirm before the archive');

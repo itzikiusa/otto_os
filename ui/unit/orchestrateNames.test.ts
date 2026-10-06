@@ -124,3 +124,25 @@ test('a provider close never includes background workflow / review agents (S13-0
   assert.equal(out.kind, 'closed', 'one foreground match → no multi-close confirm');
   same(archived, ['m']);
 });
+
+test('"delete <name>" resolves by name and asks before a permanent delete', async () => {
+  // `delete`/`destroy` are close verbs: they used to be missing from the
+  // filler list, so "please delete pirlo" fell through to the AI planner.
+  const { mod, calls } = engine();
+  const out = await mod.runEnglish('please delete pirlo', ctx([sess('p', 'Pirlo')]));
+  assert.equal(out.kind, 'confirm-close');
+  assert.equal(out.permanent, true);
+  same(out.ids, ['p']);
+  assert.ok(!calls.some((c) => c.path.endsWith('/orchestrate')), 'never reaches the planner');
+});
+
+test('a "working" plain shell is not mid-turn: close <name> archives at once', async () => {
+  // `working` only means recent output — a shell's prompt redraw is not an
+  // agent turn, so it must not force the confirm a working agent gets.
+  const { mod } = engine();
+  const archived: string[] = [];
+  const shell = { ...sess('z', 'Zlatan', undefined, 'working'), provider: 'shell' };
+  const out = await mod.runEnglish('please close zlatan', ctx([shell], archived));
+  assert.equal(out.kind, 'closed');
+  assert.deepEqual(archived, ['z']);
+});

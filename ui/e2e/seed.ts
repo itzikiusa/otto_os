@@ -41,9 +41,9 @@ async function postJson(ctx: APIRequestContext, url: string, data: unknown): Pro
   return r.json();
 }
 
-export async function seedWorkspace(ctx: APIRequestContext, base: string): Promise<string> {
+export async function seedWorkspace(ctx: APIRequestContext, base: string, name = 'E2E WS'): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), 'otto-e2e-ws-'));
-  const ws = await postJson(ctx, `${base}/api/v1/workspaces`, { name: 'E2E WS', root_path: root });
+  const ws = await postJson(ctx, `${base}/api/v1/workspaces`, { name, root_path: root });
   return ws.id as string;
 }
 
