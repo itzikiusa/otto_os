@@ -947,7 +947,7 @@
   }
   .mr-link:focus-visible,
   .mr-res-row:focus-visible {
-    outline: 2px solid var(--accent-solid);
+    outline: 2px solid var(--accent-text);
     outline-offset: -2px;
   }
   .mr-clip {

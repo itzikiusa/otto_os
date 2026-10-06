@@ -69,7 +69,7 @@
     color: var(--accent-text);
     text-align: center;
   }
-  summary:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
+  summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   ul {
     margin: 8px 0 0;
     padding: 0;
@@ -90,5 +90,5 @@
     text-decoration: underline;
     text-underline-offset: 2px;
   }
-  .link:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
+  .link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
 </style>

@@ -109,6 +109,10 @@
 //                     (`:disabled`, `[disabled]`, `[aria-disabled…]`,
 //                     `.disabled`) → var(--disabled-opacity) (0.45, tokens.css);
 //                     `node scripts/codemods/disabled-opacity.mjs` rewrites them.
+//   focus-ring-token  a :focus / :focus-visible ring (`outline` / `outline-color`)
+//                     drawn in var(--accent-solid): the darkened fill colour is
+//                     under 3:1 on dark grounds (WCAG 1.4.11) → var(--accent-text),
+//                     the global :focus-visible token (app.css), or no local rule.
 //   local-spinner     a component rule set spinning its own ring (`animation:
 //                     … spin …`, incl. otto-spin) → the global `.spinner`
 //                     (`--spinner-size` for the diameter).
@@ -338,6 +342,7 @@ const RULES = {
   'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
+  'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
   'segmented-state': '.segmented value picker whose selected button (class:active) has no aria-pressed / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
@@ -578,6 +583,11 @@ for (const f of files) {
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
+    if (/:focus/.test(s.sel)) {
+      for (const d of s.decls) {
+        if ((d.prop === 'outline' || d.prop === 'outline-color') && /var\(\s*--accent-solid\s*\)/.test(d.value)) hit('focus-ring-token', f, d.at, `"${s.sel}" ${d.prop}: ${d.value}`);
+      }
+    }
     const ol = s.decls.find((d) => d.prop === 'outline' && /^(none|0)\b/.test(d.value));
     if (ol && !/:focus/.test(s.sel) && !sets2(s, ['border-color', 'box-shadow'])) {
       const bare = s.sel.split(',').filter((part) => !hasRingFor(part));

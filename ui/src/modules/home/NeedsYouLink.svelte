@@ -59,5 +59,5 @@
     border-color: var(--warning-soft);
     background: var(--warning-soft);
   }
-  .nyl:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; }
+  .nyl:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
 </style>

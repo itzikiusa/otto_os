@@ -373,6 +373,7 @@
     "src/modules/panels/BrowserPanel.svelte": 1
   },
   "raw-toast-body": {},
+  "focus-ring-token": {},
   "segmented-state": {},
   "smooth-scroll": {},
   "status-as-text": {},
