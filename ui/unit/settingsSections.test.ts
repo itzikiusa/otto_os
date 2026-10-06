@@ -24,7 +24,7 @@ test('section ids are unique and labels are sentence case', () => {
   assert.equal(new Set(ids).size, ids.length);
   // Sentence case: no word after the first starts upper-case unless it is a
   // proper noun / acronym on the allow-list.
-  const proper = new Set(['MCP', 'Jira', 'Git']);
+  const proper = new Set(['MCP', 'Jira', 'Git', 'Telegram']);
   for (const s of SETTINGS_SECTIONS) {
     const [, ...rest] = s.label.split(/\s+/);
     for (const w of rest) {

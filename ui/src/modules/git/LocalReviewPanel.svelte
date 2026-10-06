@@ -657,7 +657,7 @@
     text-decoration: underline;
     text-underline-offset: 2px;
   }
-  .lrp-pinned .link:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; border-radius: var(--radius-s); }
+  .lrp-pinned .link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; border-radius: var(--radius-s); }
   .lrp-idle-note { margin: 4px 0; color: var(--text-dim); font-size: var(--fs-s); line-height: 1.5; }
   .lrp-idle-note strong { color: var(--text); font-weight: 500; }
   .lrp {
