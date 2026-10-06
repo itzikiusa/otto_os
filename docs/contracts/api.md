@@ -1764,7 +1764,7 @@ state already exists, logging a warning — its status reads `conflict`.)
 `ListenerStatus` per **enabled** Slack / Telegram integration (webhooks have no
 listener; a disabled integration has no entry):
 `{workspace_id, channel, state, detail?, since, connected_at?, last_event_at?,
-last_error?, last_error_at?, failures}`. `state` is one of
+last_error?, last_error_at?, failures, rejected_senders?}`. `state` is one of
 `waiting_for_token` (a token isn't saved / the Keychain isn't readable yet — retried
 every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram poll),
 `reconnecting` (dropped or a failed attempt; retrying with 3 s → 60 s backoff),
@@ -1773,7 +1773,12 @@ every ~15 s), `connecting`, `connected` (Socket Mode `hello` / a good Telegram p
 at the backoff ceiling, but it needs the user), or `conflict` (another enabled
 workspace already listens with this token; not started). `detail` is the user-facing
 reason (secret-bearing URLs redacted, ≤300 chars); `failures` counts consecutive failed
-attempts since the last good connection. Times are RFC 3339.
+attempts since the last good connection. `rejected_senders` (omitted when empty) lists the
+last 10 senders the allow-list dropped, newest first, one per user:
+`{user, name?, at}` — `user` is the channel-native id to add to `allowed_users`
+(a Telegram numeric id is not visible in the Telegram app), `name` the platform's
+@handle / display name when sent (untrusted, display only). In-memory; kept across
+listener restarts. Times are RFC 3339.
 
 ### Inbound webhook trigger
 

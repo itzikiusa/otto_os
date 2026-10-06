@@ -4364,6 +4364,17 @@ export interface ListenerStatus {
   last_error_at?: string;
   /** Consecutive failed attempts since the last good connection. */
   failures: number;
+  /** Last senders the allow-list dropped, newest first (omitted when none). */
+  rejected_senders?: RejectedSender[];
+}
+
+/** A sender a channel's allow-list turned away (`ListenerStatus.rejected_senders`). */
+export interface RejectedSender {
+  /** Channel-native user id — what goes into `allowed_users`. */
+  user: string;
+  /** @handle / display name when the platform sent one (display only). */
+  name?: string;
+  at: string;
 }
 
 export interface UpsertIntegrationReq {
