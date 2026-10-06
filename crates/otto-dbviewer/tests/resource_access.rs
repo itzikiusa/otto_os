@@ -737,7 +737,15 @@ async fn proposed_edits_use_saved_secret_without_persisting_and_reject_delegated
 #[tokio::test]
 async fn daemon_host_paths_are_root_only_even_for_legacy_connections() {
     let f = Fixture::new(ConnectionKind::Mysql, 9).await;
-    // `profile` carries no access policy: the Legacy default.
+    // New connections are created Enforced (migration 0119's insert trigger);
+    // drop `profile`'s policy row so it is Legacy, like a pre-0119 connection.
+    sqlx::query(
+        "DELETE FROM resource_access_policies WHERE resource_kind='connection' AND resource_id=?",
+    )
+    .bind(&f.profile)
+    .execute(&f.pool)
+    .await
+    .unwrap();
     let policy = ResourceAccessRepo::new(f.pool.clone())
         .get_policy(ResourceKind::Connection, &f.profile)
         .await

@@ -810,6 +810,12 @@ impl VaultEngine {
         }
         // Any enumeration/preparation error suppresses pruning for this scan.
         if !incomplete {
+            // The walk deliberately skips protected dirs and key-like files
+            // (S7-303) unless the root itself is protected: such a row still
+            // exists on disk, but is gone from the vault — prune it rather
+            // than read it as the indexed file reappearing.
+            let protected = otto_core::secret_paths::protected_set();
+            let filter_protected = !protected.in_protected_dir(&root);
             for (rel, note) in removed_notes
                 .into_iter()
                 .map(|p| (p, true))
@@ -820,7 +826,12 @@ impl VaultEngine {
                 if state.changed_since(&rel, epoch) {
                     continue;
                 }
+                let excluded = filter_protected && {
+                    let p = root.join(&rel);
+                    otto_core::secret_paths::is_denied_file(&p) || protected.in_protected_dir(&p)
+                };
                 match tokio::fs::symlink_metadata(root.join(&rel)).await {
+                    _ if excluded => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     // Something answers at this path: only a byte-exact
                     // regular file is the indexed entry reappearing. A case

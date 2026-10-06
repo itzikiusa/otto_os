@@ -658,6 +658,13 @@ for line in sys.stdin:
     #[tokio::test]
     async fn non_root_cannot_name_daemon_host_paths_on_legacy_connections() {
         let fixture = Fixture::new().await;
+        // New connections are created Enforced (migration 0119's insert
+        // trigger); a row that predates it has no policy row — Legacy.
+        sqlx::query("DELETE FROM resource_access_policies WHERE resource_kind='connection' AND resource_id=?")
+            .bind(&fixture.connection.id)
+            .execute(&fixture.ctx.pool)
+            .await
+            .unwrap();
         assert!(!fixture
             .ctx
             .connections()
