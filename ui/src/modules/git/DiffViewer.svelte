@@ -55,7 +55,7 @@
     type Row,
   } from './diff-model';
   import { findScroller, resum, rowAt } from './diff-virtual';
-  import { carryViewState, carryViewed } from './diff-viewstate';
+  import { carryViewState, carryViewed, unchangedPaths } from './diff-viewstate';
   import { registerFindProvider } from '../../lib/findProviders';
   import { startMouseDrag } from '../../lib/dragCursor';
   import { ListWindow } from './list-window.svelte';
@@ -183,13 +183,28 @@
   const diffPaths = $derived(new Set(diff.files.map((f) => f.path)));
   /** Same identity, new diff object (a reload): carry, don't reset. */
   const sameKey = (k: string | undefined): boolean => stateKey !== undefined && k === stateKey;
+  // Carried only for files whose content didn't change (S15-304).
   const vs: ViewState = $derived(
     vsRaw.for === diff
       ? vsRaw
       : sameKey(vsRaw.key)
-        ? { ...freshState(diff), ...carryViewState(vsRaw, diffPaths) }
+        ? { ...freshState(diff), ...carryViewState(vsRaw, unchangedPaths(vsRaw.for, diff)) }
         : freshState(diff),
   );
+  // The open composer's file changed under it: its anchor was dropped above.
+  // Keep the typed text for the next composer and say why it closed.
+  let keepComposerText = false;
+  let reanchorToasted: ComposerAt | null = null;
+  $effect(() => {
+    const prev = vsRaw;
+    if (prev.for === diff || !prev.composer || vs.composer || !sameKey(prev.key)) return;
+    if (!diffPaths.has(prev.composer.path) || reanchorToasted === prev.composer) return;
+    if (untrack(() => composerText).trim() !== '') {
+      reanchorToasted = prev.composer;
+      keepComposerText = true;
+      toasts.info('File changed — re-anchor your comment', `${prev.composer.path} changed with the new push. Your text is kept; open the comment on the line you mean.`);
+    }
+  });
   /** Patch the view state of diff `d` — a no-op once `d` is no longer shown. */
   function patchVs(p: Partial<ViewState>, d: DiffResp = diff): void {
     if (d !== diff) return;
@@ -201,7 +216,7 @@
     viewedRaw.for === diff
       ? viewedRaw.v
       : sameKey(viewedRaw.key)
-        ? carryViewed(viewedRaw.v, diffPaths)
+        ? carryViewed(viewedRaw.v, unchangedPaths(viewedRaw.for, diff))
         : new Set<string>(),
   );
 
@@ -886,7 +901,8 @@
     patchVs({
       composer: same ? null : { path, oldLine: line.old_line, newLine: line.new_line, line: a.line, side: a.side },
     });
-    composerText = '';
+    if (!keepComposerText) composerText = '';
+    keepComposerText = false;
   }
   async function submitComment(): Promise<void> {
     const c = vs.composer;
