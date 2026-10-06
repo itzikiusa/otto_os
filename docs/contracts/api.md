@@ -3319,7 +3319,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workspaces/{wid}/agents/{sid}/context-packet/preview | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{redacted, redactions, size_bytes}` (preview only) |
 | POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
 | GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
-| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
+| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level, `orphaned_workflow_runs_swept` — runs the workflow orphan sweep errored since daemon start) |
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |

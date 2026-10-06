@@ -109,6 +109,10 @@ pub struct SupportBundle {
     pub migration_level: i64,
     /// Number of redaction hits applied to settings.
     pub redaction_hits: usize,
+    /// Workflow runs the runtime orphan sweep errored since this daemon
+    /// started (driverless `pending`/`running` rows) — non-zero means engine
+    /// drivers are dying in production (S3-305).
+    pub orphaned_workflow_runs_swept: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +690,8 @@ pub async fn get_support_bundle(
         recent_audit,
         migration_level,
         redaction_hits,
+        orphaned_workflow_runs_swept: crate::workflow_engine::ORPHANED_RUNS_SWEPT
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
