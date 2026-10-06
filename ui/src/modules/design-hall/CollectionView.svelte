@@ -132,9 +132,14 @@
       seenScoped = now;
       if (!sLoaded || !evs.length) return;
       const ids = new Set(hits.map((h) => h.artifact.id));
+      // A project lives in one workspace: a create / delete / link change in
+      // ANOTHER workspace (every design event is broadcast) can't change this
+      // slice, so it must not re-read it. Cards it shows still patch.
+      const home = scope.kind === 'project' ? project?.workspace_id : undefined;
       let full = false;
       for (const ev of evs) {
         if (ev.type === 'design_learning_update') continue;
+        if (home && ev.workspace_id !== home && !ids.has(ev.artifact_id)) continue;
         if (ev.type === 'design_artifact_updated' && ev.change !== 'created' && ev.change !== 'deleted') {
           if (ids.has(ev.artifact_id)) patchIds.add(ev.artifact_id);
           // An update to a card this slice doesn't show can't add it here
