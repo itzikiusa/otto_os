@@ -330,7 +330,12 @@ async fn full_surface_against_redpanda() {
         "Redpanda's exposition must yield per-broker metrics"
     );
 
-    // 11. Schema registry subjects (none registered yet → empty array, 200).
+    // 11. Schema registry subjects. The fixture registry is on loopback, so
+    //     (like the metrics URL above) a direct, untunnelled profile must be
+    //     refused by the SSRF guard — that is the production contract, not a
+    //     test artefact. The listing/parsing half is unit-tested against a
+    //     mock registry (`schema_registry::tests`); here the test, as the
+    //     trusted caller, checks the real registry answers the same request.
     let (st, subjects) = call(
         &app,
         "GET",
@@ -338,8 +343,26 @@ async fn full_surface_against_redpanda() {
         None,
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "subjects: {subjects}");
-    assert!(subjects.is_array());
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "a loopback schema registry must be blocked by the SSRF guard: {subjects}"
+    );
+    assert!(
+        subjects["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("schema registry blocked")),
+        "subjects: {subjects}"
+    );
+    let direct: Value = reqwest::get(format!("{}/subjects", sr_url()))
+        .await
+        .expect("Redpanda schema registry reachable")
+        .error_for_status()
+        .expect("Redpanda schema registry answers 200")
+        .json()
+        .await
+        .unwrap();
+    assert!(direct.is_array(), "registry /subjects: {direct}");
 
     // 12. Delete the topic, then the cluster.
     let (st, _) = call(

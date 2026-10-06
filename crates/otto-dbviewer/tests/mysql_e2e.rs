@@ -8,7 +8,8 @@
 use otto_dbviewer::driver::Driver;
 use otto_dbviewer::drivers::mysql::MysqlDriver;
 use otto_dbviewer::types::{
-    CompletionContext, CompletionKind, Engine, NodePath, QueryRequest, ResolvedConfig, TlsConfig,
+    CancelToken, CompletionContext, CompletionKind, Engine, NodePath, QueryHandle, QueryRequest,
+    ResolvedConfig, TlsConfig,
 };
 use serde_json::json;
 
@@ -649,9 +650,12 @@ async fn mysql_uncapped_read_stops_at_the_row_cap() {
     assert_eq!(next.rows[0][0], json!(7));
 }
 
-/// DB2-01: an auto-limited read that hits the row cap (the default "open
-/// table" view and every page after it) keeps its pooled session — the next
-/// Run reuses the SAME backend connection instead of reconnecting.
+/// DB2-01: an auto-limited read that hits the row cap keeps its pooled
+/// session. Back-to-back Runs are racy to compare (sqlx returns a released
+/// session on a spawned task after a ping, so an immediate acquire can open a
+/// second connection — see `postgres_truncated_read_keeps_its_session`): each
+/// read's own connection id comes from its cancel token, with a settle between
+/// Runs, and the session must still be connected afterwards.
 #[tokio::test]
 #[ignore]
 async fn mysql_truncated_read_keeps_its_session() {
@@ -661,34 +665,53 @@ async fn mysql_truncated_read_keeps_its_session() {
 
     let d = MysqlDriver::default();
     let cfg = cfg();
-    let conn_id = |r: &otto_dbviewer::types::QueryResult| r.rows[0][0].to_string();
-    let first = d
-        .run(&cfg, &query("SELECT CONNECTION_ID()"))
-        .await
-        .expect("conn id");
+    let mut ids = std::collections::BTreeSet::new();
     for _ in 0..5 {
+        let token = CancelToken::new();
         let res = d
-            .run(
+            .run_tracked(
                 &cfg,
                 &QueryRequest {
                     statement: "SELECT id FROM customers".into(),
                     max_rows: Some(1),
                     ..Default::default()
                 },
+                &token,
             )
             .await
             .expect("truncated read");
         assert!(res.truncated, "max_rows 1 over a multi-row table truncates");
         assert_eq!(res.auto_limited, Some(1));
+        match token.handle() {
+            Some(QueryHandle::MysqlConnId(id)) => ids.insert(id),
+            other => panic!("the read must record its connection id; got {other:?}"),
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    let after = d
-        .run(&cfg, &query("SELECT CONNECTION_ID()"))
-        .await
-        .expect("conn id");
     assert_eq!(
-        conn_id(&first),
-        conn_id(&after),
-        "a truncated, server-bounded read must not close its pooled session"
+        ids.len(),
+        1,
+        "a truncated, server-bounded read must not close its pooled session \
+         (each Run reused the previous connection); ids seen: {ids:?}"
+    );
+    let id = *ids.first().unwrap();
+    let alive = d
+        .run(
+            &cfg,
+            &query(&format!(
+                "SELECT COUNT(*) AS c FROM information_schema.PROCESSLIST WHERE ID = {id}"
+            )),
+        )
+        .await
+        .expect("processlist");
+    let alive_n = alive.rows[0][0]
+        .as_i64()
+        .or_else(|| alive.rows[0][0].as_str().and_then(|s| s.parse().ok()));
+    assert_eq!(
+        alive_n,
+        Some(1),
+        "connection {id} must still be open; got {:?}",
+        alive.rows[0][0]
     );
 }
 
