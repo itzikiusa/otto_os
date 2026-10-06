@@ -44,9 +44,11 @@ enum Plan {
     /// every day the target holds (or it is empty).
     Rebuild,
     /// The target holds days raw no longer has (raw keeps ~2 days, the hour
-    /// tier 90): never replace it. Only raw days after the target's newest
-    /// day (`after`, `YYYY-MM-DD`) are appended.
-    TopUp { after: String },
+    /// tier 90): never replace it. Only raw from the target's newest day
+    /// (`after`, `YYYY-MM-DD`) on is appended, and on that day only buckets
+    /// newer than the target's newest bucket (`after_t`, unix seconds) — the
+    /// day was partly folded before the view went missing (S6-308).
+    TopUp { after: String, after_t: u64 },
 }
 
 /// Decide [`Plan`] for `table` from its own day span and raw's first day.
@@ -56,7 +58,7 @@ async fn plan_for(sink: &dyn MonitorSink, table: &str) -> Result<Plan> {
     }
     let target = sink
         .query_rows(&format!(
-            "SELECT count() AS n, toString(min(toDate(t))) AS lo, toString(max(toDate(t))) AS hi FROM {table}"
+            "SELECT count() AS n, toString(min(toDate(t))) AS lo, toString(max(toDate(t))) AS hi, toUInt32(max(t)) AS hi_t FROM {table}"
         ))
         .await?;
     let Some(target) = target.first().filter(|r| count_of(r, "n") > 0) else {
@@ -73,7 +75,10 @@ async fn plan_for(sink: &dyn MonitorSink, table: &str) -> Result<Plan> {
     // ISO dates compare lexically; no raw at all also means "keep".
     let predates_raw = raw_lo.is_none_or(|raw_lo| lo < raw_lo);
     Ok(if predates_raw {
-        Plan::TopUp { after: hi }
+        Plan::TopUp {
+            after: hi,
+            after_t: count_of(target, "hi_t"),
+        }
     } else {
         Plan::Rebuild
     })
@@ -85,20 +90,54 @@ pub(super) fn statements(cluster_id: &str, date: &str, age: i64, retention: u32)
         sql_str(cluster_id),
         sql_str(date)
     );
+    statements_where(&filter, age, retention, None)
+}
+
+/// [`statements`] for a top-up: rows strictly before `upto_ms` (the moment
+/// the restored view started folding — later rows are the view's), and,
+/// when `after_t` is set, only buckets newer than the target's newest one
+/// (each tier's own grain), so a partly folded day is never folded twice.
+fn topup_statements(
+    cluster_id: &str,
+    date: &str,
+    age: i64,
+    retention: u32,
+    upto_ms: u64,
+    after_t: Option<u64>,
+) -> Vec<String> {
+    let filter = format!(
+        "\nFROM k8s_samples\nWHERE cluster_id = {} AND sample_date = {} AND toUnixTimestamp64Milli(ts) < {upto_ms}",
+        sql_str(cluster_id),
+        sql_str(date)
+    );
+    statements_where(&filter, age, retention, after_t)
+}
+
+fn statements_where(
+    filter: &str,
+    age: i64,
+    retention: u32,
+    after_t: Option<u64>,
+) -> Vec<String> {
+    // `AND <bucket> > after_t` for a tier of `grain` seconds.
+    let newer = |grain: i64| match after_t {
+        Some(t) => format!(" AND {} > toDateTime({t})", bucket_expr("ts", grain)),
+        None => String::new(),
+    };
     let mut out = Vec::new();
     for r in ROLLUPS {
         if age <= i64::from(keep_days(r.keep_days, retention)) {
             out.push(format!(
                 "INSERT INTO {}\nSELECT {} AS t, cluster_id, namespace, workload, metric, pod, cityHash64(labels) AS series, labels, \
-                 value AS v_min, value AS v_max, value AS v_sum, toUInt64(1) AS n, (ts, value) AS v_last{filter}{LIMITS}",
-                r.table, bucket_expr("ts", r.grain)
+                 value AS v_min, value AS v_max, value AS v_sum, toUInt64(1) AS n, (ts, value) AS v_last{filter}{}{LIMITS}",
+                r.table, bucket_expr("ts", r.grain), newer(r.grain)
             ));
         }
     }
     if age <= i64::from(LATEST_KEEP_DAYS) {
         out.push(format!("INSERT INTO {LATEST_TABLE}\nSELECT cluster_id, namespace, workload, metric, pod, cityHash64(labels) AS series, labels, ts AS last_ts, value AS last_value{filter}{LIMITS}"));
     }
-    out.push(format!("INSERT INTO {PODS_TABLE}\nSELECT {} AS t, cluster_id, namespace, workload, pod, toUInt64(1) AS n, ts AS last{filter}{LIMITS}", bucket_expr("ts", 3600)));
+    out.push(format!("INSERT INTO {PODS_TABLE}\nSELECT {} AS t, cluster_id, namespace, workload, pod, toUInt64(1) AS n, ts AS last{filter}{}{LIMITS}", bucket_expr("ts", 3600), newer(3600)));
     out
 }
 
@@ -159,15 +198,30 @@ pub(super) async fn migrate(sink: &dyn MonitorSink, retention: u32) -> Result<bo
             .map(str::trim)
             .find(|s| s.starts_with(&view_prefix))
             .expect("every backfill target has a view");
-        if let Plan::TopUp { after } = plan_for(sink, table).await? {
+        if let Plan::TopUp { after, after_t } = plan_for(sink, table).await? {
             // S6-10: a tier added by a release, or one view lost to a failed
             // CREATE, must not trade 90 days of hour rollups for a rebuild
-            // from 2 days of raw. Append only the raw days the target lacks.
+            // from 2 days of raw. Append only the raw the target lacks.
             tracing::warn!(
                 tier = table,
                 after = %after,
                 "k8s monitor: target holds history older than raw; topping up instead of rebuilding"
             );
+            // S6-308: restore the view FIRST so samples arriving from now on
+            // are folded by it, and fold raw only up to that moment. (The
+            // old order — fold, then create — lost every row inserted in
+            // between.) `now` is read just before the CREATE: only a sample
+            // inserted within that one round-trip can be missed.
+            let upto_ms = sink
+                .query_rows("SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms")
+                .await?
+                .first()
+                .map(|r| count_of(r, "now_ms"))
+                .filter(|ms| *ms > 0)
+                .ok_or_else(|| {
+                    otto_core::Error::Internal("k8s monitor: ClickHouse returned no now64()".into())
+                })?;
+            sink.exec(create_view).await?;
             for part in &parts {
                 let cluster = part
                     .get("cluster_id")
@@ -177,17 +231,21 @@ pub(super) async fn migrate(sink: &dyn MonitorSink, retention: u32) -> Result<bo
                 let Ok(day) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
                     continue;
                 };
-                if date <= after.as_str() {
-                    continue;
-                }
-                for sql in statements(cluster, date, (today - day).num_days(), retention) {
+                // Days before the target's newest are folded; its newest day
+                // only past its newest bucket; later days whole.
+                let newer = match date.cmp(after.as_str()) {
+                    std::cmp::Ordering::Less => continue,
+                    std::cmp::Ordering::Equal => Some(after_t),
+                    std::cmp::Ordering::Greater => None,
+                };
+                let age = (today - day).num_days();
+                for sql in topup_statements(cluster, date, age, retention, upto_ms, newer) {
                     if sql.starts_with(&prefix) {
                         sink.exec(&sql).await?;
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }
             }
-            sink.exec(create_view).await?;
             tracing::info!(tier = table, "k8s monitor: rollup tier view restored");
             continue;
         }
@@ -298,13 +356,14 @@ mod tests {
             stats: vec![
                 (
                     "FROM k8s_samples_1h",
-                    serde_json::json!({"n": "2000", "lo": old, "hi": yesterday}),
+                    serde_json::json!({"n": "2000", "lo": old, "hi": yesterday, "hi_t": "1790000000"}),
                 ),
                 ("FROM k8s_samples\n", serde_json::json!({})),
                 (
                     "min(sample_date)",
                     serde_json::json!({"n": "500", "lo": yesterday}),
                 ),
+                ("now64(3)", serde_json::json!({"now_ms": "1790000999000"})),
             ],
             execs: Mutex::new(Vec::new()),
         };
@@ -319,17 +378,32 @@ mod tests {
         assert!(!execs
             .iter()
             .any(|e| e.contains("CREATE TABLE k8s_samples_1h_backfill")));
-        // Only days after the tier's newest day are appended — today, not
-        // yesterday (already folded).
-        let topups: Vec<&String> = execs
+        // S6-308: the view is restored BEFORE the top-up, and raw is folded
+        // only up to that moment (later rows are the view's).
+        let view_at = execs
             .iter()
-            .filter(|e| e.starts_with("INSERT INTO k8s_samples_1h\n"))
+            .position(|e| e.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS k8s_samples_1h_mv TO"))
+            .expect("hour view restored");
+        let topups: Vec<(usize, &String)> = execs
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.starts_with("INSERT INTO k8s_samples_1h\n"))
             .collect();
-        assert_eq!(topups.len(), 1, "{topups:#?}");
-        assert!(topups[0].contains(&today.format("%Y-%m-%d").to_string()));
-        assert!(execs
+        assert!(topups.iter().all(|(i, _)| *i > view_at), "{execs:#?}");
+        assert!(topups
             .iter()
-            .any(|e| e.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS k8s_samples_1h_mv TO")));
+            .all(|(_, e)| e.contains("toUnixTimestamp64Milli(ts) < 1790000999000")));
+        // The tier's newest day (yesterday) is folded again only past its
+        // newest bucket; today is folded whole. Nothing older.
+        assert_eq!(topups.len(), 2, "{topups:#?}");
+        let (y, t) = (topups[0].1, topups[1].1);
+        assert!(y.contains(&yesterday), "{y}");
+        assert!(
+            y.contains("intDiv(toUInt32(toUnixTimestamp(ts)), 3600) * 3600) > toDateTime(1790000000)"),
+            "{y}"
+        );
+        assert!(t.contains(&today.format("%Y-%m-%d").to_string()), "{t}");
+        assert!(!t.contains("> toDateTime("), "{t}");
         // A tier raw fully covers (empty here) is still rebuilt atomically.
         assert!(execs
             .iter()
