@@ -1469,6 +1469,18 @@ async fn a_probed_reads_spoofed_workspace_never_reaches_the_audit() {
 /// the single-use approval runs exactly one of them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn one_approval_runs_one_of_two_waiting_calls() {
+    // `receiver_count` also counts unrelated bus subscribers, so on a loaded
+    // runner the "both parked" check can pass early; retry the scenario until
+    // both calls really shared one card (strict assertions otherwise).
+    for _ in 0..5 {
+        if two_calls_share_one_card().await {
+            return;
+        }
+    }
+    panic!("never got two calls parked on one card in 5 attempts");
+}
+
+async fn two_calls_share_one_card() -> bool {
     let d = Arc::new(boot().await);
     let spawn = |d: Arc<Daemon>| {
         tokio::spawn(async move {
@@ -1532,7 +1544,14 @@ async fn one_approval_runs_one_of_two_waiting_calls() {
     } else {
         &ea
     };
+    // The second call reached the card only after the first had spent the
+    // approval: it correctly opened a FRESH card — the scenario under test
+    // (two calls parked on one card) did not happen, so the caller retries.
+    if other["decision"] == "pending_approval" && other["approval_id"] != json!(id) {
+        return false;
+    }
     assert_eq!(other["decision"], "denied", "{other}");
+    true
 }
 
 /// S5-13: an approval a human granted for one session's call is not spent
