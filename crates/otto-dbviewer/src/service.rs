@@ -1138,7 +1138,9 @@ impl DbViewerService {
                 }
             }
             if profile.kind != logical.kind || profile_params != logical_params {
-                return Err(crate::native_access::setup_error("credential profile must match the logical engine, endpoint, database, TLS and SSH configuration"));
+                return Err(crate::native_access::setup_error(
+                    "credential profile must match the logical engine, endpoint, database, TLS and SSH configuration",
+                ));
             }
             profile
         };
@@ -3361,7 +3363,25 @@ impl DbViewerService {
     pub async fn create_widget(&self, w: NewWidget) -> Result<Widget> {
         self.authorize(&w.connection_id, &w.created_by, None, "db_query")
             .await?;
+        self.ensure_widget_statement_reads(&w.connection_id, &w.statement)
+            .await?;
         self.repo.create_widget(w).await
+    }
+
+    /// Widgets re-run unattended on every refresh, so only a statement the
+    /// read-only classifier accepts may be saved as one (S16-08) — a widget
+    /// holding `UPDATE counters …` would otherwise re-execute the write every
+    /// `refresh_secs`. [`Self::run_widget`] enforces it again at run time
+    /// (with the engine's native read-only mode) for widgets saved earlier.
+    async fn ensure_widget_statement_reads(&self, conn_id: &Id, statement: &str) -> Result<()> {
+        let conn = self.connections.get(conn_id).await?;
+        let Some(engine) = Engine::from_kind(conn.kind) else {
+            return Err(Error::Invalid(format!(
+                "connection '{}' is not a queryable database (kind {:?})",
+                conn.name, conn.kind
+            )));
+        };
+        ensure_widget_statement(engine, statement)
     }
     #[allow(clippy::too_many_arguments)]
     pub async fn update_widget(
@@ -3374,6 +3394,11 @@ impl DbViewerService {
         mapping: Option<&Value>,
         options: Option<&Value>,
     ) -> Result<Widget> {
+        if let Some(statement) = statement {
+            let widget = self.repo.get_widget(id).await?;
+            self.ensure_widget_statement_reads(&widget.connection_id, statement)
+                .await?;
+        }
         self.repo
             .update_widget(id, dashboard_id, title, statement, viz, mapping, options)
             .await
@@ -3387,13 +3412,27 @@ impl DbViewerService {
     /// `user_id` is threaded through to history recording (since migration 0042).
     pub async fn run_widget(&self, id: &Id, user_id: &Id) -> Result<QueryResult> {
         let widget = self.repo.get_widget(id).await?;
-        let req = QueryRequest {
-            statement: widget.statement,
-            max_rows: Some(5000),
-            ..Default::default()
-        };
+        let req = widget_request(widget.statement);
         self.run(&widget.connection_id, user_id, &req).await
     }
+}
+
+/// The request a dashboard widget runs with. An unattended re-run must never
+/// write (S16-08): `read_only` classifies the statement first and then runs it
+/// in the engine's native read-only mode, on ANY connection.
+fn widget_request(statement: String) -> QueryRequest {
+    QueryRequest {
+        statement,
+        max_rows: Some(5000),
+        read_only: true,
+        ..Default::default()
+    }
+}
+
+/// Save-time gate for a widget statement (create / update).
+fn ensure_widget_statement(engine: Engine, statement: &str) -> Result<()> {
+    ensure_read_only_request(engine, statement)
+        .map_err(|e| Error::Invalid(format!("widgets must be read-only queries — {e}")))
 }
 
 /// Render a plan `QueryResult` as compact text for display + drafter feedback.
@@ -3523,6 +3562,25 @@ mod tests {
     //! query leaves no stale entry a later cancel could hit.
 
     use super::*;
+
+    /// S16-08: widgets re-run unattended, so they always run read-only and a
+    /// write/DDL statement is refused when saved.
+    #[test]
+    fn widgets_run_read_only_and_refuse_writes_at_save() {
+        assert!(widget_request("SELECT 1".into()).read_only);
+        for sql in [
+            "UPDATE counters SET n = n + 1",
+            "DELETE FROM sessions WHERE expired",
+            "SELECT pg_terminate_backend(1)",
+            "DROP TABLE t",
+        ] {
+            let e = ensure_widget_statement(Engine::Postgres, sql).unwrap_err();
+            assert!(e.to_string().contains("read-only"), "{sql}: {e}");
+        }
+        assert!(ensure_widget_statement(Engine::Redis, "DEL k").is_err());
+        assert!(ensure_widget_statement(Engine::Postgres, "SELECT count(*) FROM t").is_ok());
+        assert!(ensure_widget_statement(Engine::Mysql, "SHOW TABLES").is_ok());
+    }
 
     /// DB2-07: the reaper's sweep drops expired schema graphs without anyone
     /// requesting a diagram, and keeps fresh ones.

@@ -115,6 +115,11 @@ async fn tick(ctx: &SwarmRt) -> otto_core::Result<()> {
                     let _ = run::run_turn(ctx2, run).await;
                 });
             }
+            // An exhausted run budget (Conflict) is a steady state, not an
+            // incident: it re-occurs every 60 s tick per due agent (S4-25a).
+            Err(otto_core::Error::Conflict(m)) => {
+                tracing::debug!(swarm = %swarm.id, agent = %agent.id, "swarm scheduler: not scheduled: {m}")
+            }
             Err(e) => tracing::warn!("swarm scheduler: create run: {e}"),
         }
     }

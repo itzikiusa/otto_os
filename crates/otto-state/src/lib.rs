@@ -177,7 +177,7 @@ pub use review_findings::{
     ReviewFindingsRepo,
 };
 pub use review_proof_packs::ReviewProofPacksRepo;
-pub use reviews::ReviewsRepo;
+pub use reviews::{ReviewRunContext, ReviewsRepo};
 pub use runs::RunsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{

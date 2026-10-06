@@ -286,6 +286,34 @@ pub async fn stop_task(ctx: &SwarmRt, task_id: &str) {
         cs.signal();
         cs.kill_tracked(ctx).await;
     }
+    // The controller returns on `cancelled` without touching the status (the
+    // swarm-abort path owns it there) — so an operator Stop must settle the
+    // task itself, or it sits in `verifying` forever and the next coordinator
+    // start's `recover` restarts the verification the user stopped (S4-06).
+    let id = task_id.to_string();
+    if ctx
+        .swarm_repo()
+        .set_task_status_if(&id, &["verifying"], "blocked")
+        .await
+        .unwrap_or(false)
+    {
+        crate::runtime::engine::emit_task_pub(ctx, &id).await;
+        if let Ok(task) = ctx.swarm_repo().get_task(&id).await {
+            crate::runtime::engine::system_post_meta(
+                ctx,
+                &task.swarm_id,
+                Some(&task.project_id),
+                Some(&task.id),
+                "status",
+                &format!(
+                    "Verification of “{}” was stopped by an operator — task blocked.",
+                    task.title
+                ),
+                json!({ "event": "verification_stopped" }),
+            )
+            .await;
+        }
+    }
 }
 
 /// RAII guard: removes the registry entry when the controller exits (incl. panic).
@@ -870,21 +898,24 @@ async fn run_controller(
 
     // Final task status + summary post.
     let final_status = if summary.cancelled {
-        // Leave as-is on cancel; abort path handles status.
+        // Leave as-is on cancel: the abort path (swarm abort) or `stop_task`
+        // (operator "Stop verification") owns the status.
         return Ok(());
     } else if summary.blocked {
         "blocked"
     } else {
         "done"
     };
-    repo.update_task(
-        &task.id,
-        TaskPatch {
-            status: Some(final_status.into()),
-            ..Default::default()
-        },
-    )
-    .await?;
+    // CAS from `verifying` (S4-07): the operator may have cancelled the task
+    // or moved it back to To do during a multi-minute verify/fix/merge — that
+    // choice wins; no `done`, no summary post, no parent completion.
+    if !repo
+        .set_task_status_if(&task.id, &["verifying"], final_status)
+        .await?
+    {
+        tracing::info!(task = %task.id, "swarm: verification finished after the task left `verifying`; result discarded");
+        return Ok(());
+    }
     crate::runtime::engine::emit_task_pub(ctx, &task.id).await;
     // A verified subtask may be the last open child of a delegated parent —
     // complete it (only `route_result`'s plain `done` path did, so a parent

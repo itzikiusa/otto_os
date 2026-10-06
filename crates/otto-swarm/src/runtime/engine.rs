@@ -729,22 +729,15 @@ async fn pick_agent(ctx: &SwarmRt, swarm: &Swarm, task: &SwarmTask) -> Option<Sw
 }
 
 /// [`pick_agent`] over an already-loaded roster (the coordinator tick loads
-/// it once). An assignee outside the roster is still looked up by id.
+/// it once). An assignee outside the roster (another swarm's — or another
+/// workspace's — agent, S4-05) is ignored and the task is best-fit picked.
 async fn pick_agent_from(
-    ctx: &SwarmRt,
+    _ctx: &SwarmRt,
     agents: &[SwarmAgent],
     task: &SwarmTask,
 ) -> Option<SwarmAgent> {
-    if let Some(aid) = &task.assignee_agent_id {
-        let a = match agents.iter().find(|a| &a.id == aid) {
-            Some(a) => Some(a.clone()),
-            None => ctx.swarm_repo().get_agent(aid).await.ok(),
-        };
-        if let Some(a) = a {
-            if a.status == "active" {
-                return Some(a);
-            }
-        }
+    if let Some(a) = on_roster_assignee(agents, task) {
+        return Some(a.clone());
     }
     let active: Vec<&SwarmAgent> = agents.iter().filter(|a| a.status == "active").collect();
     if active.is_empty() {
@@ -757,6 +750,14 @@ async fn pick_agent_from(
         .max_by_key(|a| agent_fit_score(a, &hay))
         .or_else(|| active.first().copied())
         .cloned()
+}
+
+/// The task's explicit assignee when it is an ACTIVE agent of this roster.
+fn on_roster_assignee<'a>(agents: &'a [SwarmAgent], task: &SwarmTask) -> Option<&'a SwarmAgent> {
+    let aid = task.assignee_agent_id.as_ref()?;
+    agents
+        .iter()
+        .find(|a| &a.id == aid && a.swarm_id == task.swarm_id && a.status == "active")
 }
 
 async fn has_reports(ctx: &SwarmRt, swarm_id: &str, agent_id: &str) -> bool {
@@ -1721,15 +1722,15 @@ struct UpdateGoalReq {
     title: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     metric: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     comparator: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     target_value: Option<Option<f64>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     block_value: Option<Option<f64>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     verify_cmd: Option<Option<String>>,
     #[serde(default)]
     max_retries: Option<i64>,
@@ -1904,14 +1905,22 @@ async fn list_standing_goals_h(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let swarm = ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Viewer).await?;
-    // Seed defaults on first read so the UI has something to edit.
-    crate::runtime::verify::ensure_standing_goals(
-        &ctx,
-        &swarm.id,
-        &swarm.workspace_id,
-        &swarm.created_by,
-    )
-    .await;
+    // A Viewer GET never writes (S4-24). Swarms that predate seeding get
+    // their defaults lazily — but only on an Editor's read.
+    if ctx
+        .roles()
+        .check(&user.0, &swarm.workspace_id, WorkspaceRole::Editor)
+        .await
+        .is_ok()
+    {
+        crate::runtime::verify::ensure_standing_goals(
+            &ctx,
+            &swarm.id,
+            &swarm.workspace_id,
+            &swarm.created_by,
+        )
+        .await;
+    }
     Ok(Json(
         ctx.swarm_repo()
             .list_standing_goals(&sid)
@@ -1934,23 +1943,21 @@ async fn put_standing_goals_h(
 ) -> ApiResult<Json<Vec<SwarmGoal>>> {
     let swarm = ctx.swarm_repo().get_swarm(&sid).await.map_err(ApiError)?;
     check(&ctx, &user, &swarm.workspace_id, WorkspaceRole::Editor).await?;
-    for g in ctx
-        .swarm_repo()
-        .list_standing_goals(&sid)
-        .await
-        .unwrap_or_default()
-    {
-        let _ = ctx.swarm_repo().delete_goal(&g.id).await;
-    }
-    for (i, r) in req.goals.into_iter().enumerate() {
-        let mut ng = new_goal_from(r, &swarm.id, &swarm.workspace_id, None, None, &user.0.id);
-        ng.kind = "standing".into();
-        ng.order_idx = i as i64;
-        let _ = ctx.swarm_repo().create_goal(ng).await;
-    }
+    let goals = req
+        .goals
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut ng = new_goal_from(r, &swarm.id, &swarm.workspace_id, None, None, &user.0.id);
+            ng.kind = "standing".into();
+            ng.order_idx = i as i64;
+            ng
+        })
+        .collect();
+    // One transaction, errors propagated (S4-24).
     Ok(Json(
         ctx.swarm_repo()
-            .list_standing_goals(&sid)
+            .replace_standing_goals(&sid, goals)
             .await
             .map_err(ApiError)?,
     ))
@@ -2043,7 +2050,7 @@ struct UpdateTriggerReq {
     match_chat: Option<String>,
     #[serde(default)]
     keyword: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::types::de_double_option")]
     repo_path: Option<Option<String>>,
     #[serde(default)]
     auto_start: Option<bool>,
@@ -2143,13 +2150,33 @@ async fn agent_stop(
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
     crate::runtime::agent_run::stop(&ctx, &sid).await;
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn check(ctx: &SwarmRt, user: &AuthUser, ws: &Id, role: WorkspaceRole) -> ApiResult<()> {
     ctx.roles().check(&user.0, ws, role).await.map_err(ApiError)
+}
+
+/// Role-check `ws` AND require that swarm `sid` lives in it (S4-01). The
+/// lifecycle routes are keyed by the path workspace, but every repo call below
+/// them is keyed by `sid` alone — without this an Editor of workspace A could
+/// abort/plan/recruit against workspace B's swarm. A foreign swarm answers 404
+/// (indistinguishable from a missing one, so ids don't leak across tenants).
+async fn swarm_in_ws(
+    ctx: &SwarmRt,
+    user: &AuthUser,
+    ws: &Id,
+    sid: &Id,
+    role: WorkspaceRole,
+) -> ApiResult<Swarm> {
+    check(ctx, user, ws, role).await?;
+    let swarm = ctx.swarm_repo().get_swarm(sid).await.map_err(ApiError)?;
+    if &swarm.workspace_id != ws {
+        return Err(ApiError(Error::NotFound(format!("swarm {sid}"))));
+    }
+    Ok(swarm)
 }
 
 /// Resolve the default agent provider a swarm meta-agent (recruiter / planner /
@@ -2166,7 +2193,7 @@ async fn start(
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
-    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
     let _operation = operation_guard(&sid).await;
 
     // Point-of-action budget gate (A2): check workspace-level cap before the
@@ -2196,7 +2223,7 @@ async fn pause(
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
-    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
     let _operation = operation_guard(&sid).await;
     ctx.swarm_repo()
         .set_swarm_status(&sid, "paused")
@@ -2221,7 +2248,7 @@ async fn abort(
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
-    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
     let _operation = operation_guard(&sid).await;
     ctx.swarm_repo()
         .set_swarm_status(&sid, "aborted")
@@ -2255,7 +2282,7 @@ async fn resume(
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
 ) -> ApiResult<Json<Swarm>> {
-    check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
+    swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
     let _operation = operation_guard(&sid).await;
 
     // Point-of-action budget gate (A2): also checked on resume (a pause may have
@@ -2466,7 +2493,6 @@ async fn run_task(
             agent.name
         ))));
     }
-    let _ = ctx.swarm_repo().bump_task_attempt(&tid).await;
     let is_leader = has_reports(&ctx, &swarm.id, &agent.id).await;
     let kind = if is_leader && !task.delegated {
         "planning"
@@ -2489,6 +2515,10 @@ async fn run_task(
         )
         .await
         .map_err(ApiError)?;
+    // Count the attempt only once a slot was actually reserved (S4-18): a
+    // run refused at capacity (Conflict) must not walk the task toward its
+    // attempt ceiling — the coordinator bumps after its reserve too.
+    let _ = ctx.swarm_repo().bump_task_attempt(&tid).await;
     let _ = ctx
         .swarm_repo()
         .update_task(
@@ -2559,7 +2589,8 @@ async fn recruit(
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
     let (swarm_name, mission, titles) = match &req.swarm_id {
         Some(sid) => {
-            let s = ctx.swarm_repo().get_swarm(sid).await.map_err(ApiError)?;
+            // S4-01: never read (or recruit into) another workspace's swarm.
+            let s = swarm_in_ws(&ctx, &user, &ws, sid, WorkspaceRole::Editor).await?;
             let titles = ctx
                 .swarm_repo()
                 .list_agents(sid)
@@ -2705,6 +2736,11 @@ async fn plan(
 ) -> ApiResult<Json<Vec<SwarmTask>>> {
     check(&ctx, &user, &ws, WorkspaceRole::Editor).await?;
     let project = ctx.swarm_repo().get_project(&pid).await.map_err(ApiError)?;
+    // S4-01: the project must belong to the path workspace — `plan` spawns
+    // planners in the project's repo and writes tasks into its swarm.
+    if project.workspace_id != ws {
+        return Err(ApiError(Error::NotFound(format!("project {pid}"))));
+    }
     let goal = project.goal_md.clone().unwrap_or_default();
     if goal.trim().is_empty() {
         return Err(ApiError(Error::Invalid(
@@ -2941,5 +2977,39 @@ mod waiting_tests {
 
         set_waiting(&sid, HashMap::new());
         assert!(waiting_for(&sid).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod row_workspace_guard {
+    /// Guard (S4-01 class): every handler that takes BOTH a path workspace and
+    /// a row id (`Path((ws, …))`) must tie the row to that workspace —
+    /// `swarm_in_ws(…)` or an explicit `workspace_id != ws` check — because
+    /// the role check alone only covers the path workspace. Handlers keyed by
+    /// the row alone derive the workspace from the row and are not matched.
+    #[test]
+    fn workspace_scoped_row_handlers_check_row_ownership() {
+        let src = include_str!("engine.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod row_workspace_guard").unwrap()];
+        let mut checked = 0;
+        for (i, _) in code.match_indices("Path((ws, ") {
+            let fn_start = code[..i].rfind("async fn ").unwrap();
+            let name = code[fn_start + 9..].split('(').next().unwrap().to_string();
+            let body_end = ["\nasync fn ", "\nfn ", "\npub fn ", "\npub async fn "]
+                .iter()
+                .filter_map(|m| code[i..].find(m))
+                .min()
+                .map_or(code.len(), |e| i + e);
+            let body = &code[i..body_end];
+            assert!(
+                body.contains("swarm_in_ws(") || body.contains("workspace_id != ws"),
+                "{name}: Path((ws, row)) handler never checks the row belongs to `ws`"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 6,
+            "guard matched {checked} handlers — pattern drifted?"
+        );
     }
 }

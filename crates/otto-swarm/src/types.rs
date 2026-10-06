@@ -9,8 +9,9 @@ use serde_json::Value;
 // --- Swarms ----------------------------------------------------------------
 
 /// Optional present-or-absent budget fields. `Some(None)` clears a limit
-/// (unlimited); `None` (absent) leaves it untouched. Used by `UpdateSwarmReq`.
-fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
+/// (unlimited); `None` (absent) leaves it untouched. Used by every PATCH DTO
+/// with a clearable field (S4-17: also goals/triggers in `runtime::engine`).
+pub(crate) fn de_double_option<'de, D, T>(de: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -171,8 +172,8 @@ pub struct UpdateProjectReq {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
-    pub repo_path: Option<String>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub repo_path: Option<Option<String>>,
     #[serde(default)]
     pub goal_md: Option<String>,
     /// Project-level skill set (`[{name, must_use?}]` or `["name", …]`), layered
@@ -212,8 +213,8 @@ pub struct UpdateTaskReq {
     pub title: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default)]
-    pub assignee_agent_id: Option<Id>,
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub assignee_agent_id: Option<Option<Id>>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]

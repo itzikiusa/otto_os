@@ -361,14 +361,37 @@ pub(crate) fn hooks_path_inside(hooks: &str, toplevel: Option<&str>) -> bool {
     resolved.starts_with(&top)
 }
 
-/// The git subcommand in an argv, for error text: `args[0]`, or `args[2]` when
-/// the call is prefixed with `-c <key=value>` (the diff family does that).
-fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
+/// The git subcommand in an argv: the first word after git's GLOBAL options.
+/// Used for error text AND for [`HOOK_VERBS`] gating, so every leading global
+/// option must be skipped — `-c <k=v>` (the diff family), `-C <dir>`, the
+/// separate-argument long forms (`--git-dir <p>`, `--work-tree <p>`,
+/// `--namespace <n>`, …) and flag-only ones (`--literal-pathspecs`,
+/// `--no-pager`). Stopping at a flag would turn `--no-pager commit` into a
+/// non-hook verb and silently skip the user's hooks.
+pub(crate) fn verb_of<'a>(args: &'a [&'a str]) -> &'a str {
+    const TAKES_VALUE: &[&str] = &[
+        "-c",
+        "-C",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--super-prefix",
+        "--config-env",
+        "--exec-path",
+        "--attr-source",
+        "--list-cmds",
+    ];
     let mut i = 0;
-    while args.get(i) == Some(&"-c") {
-        i += 2;
+    while let Some(&a) = args.get(i) {
+        if TAKES_VALUE.contains(&a) {
+            i += 2;
+        } else if a.starts_with('-') {
+            i += 1;
+        } else {
+            return a;
+        }
     }
-    args.get(i).copied().unwrap_or("command")
+    "command"
 }
 
 /// git's `-l<N>` overflow warning ("exhaustive/inexact rename detection was
@@ -380,6 +403,16 @@ fn note_renames(stderr: &str, ri: &std::sync::atomic::AtomicBool) {
         ri.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
+
+/// Per-file cap on one untracked file's patch in a review diff (it is
+/// clipped past this, with an omitted marker).
+const REVIEW_UNTRACKED_FILE_CAP: usize = 1024 * 1024;
+
+/// The `(diff omitted: ` marker line [`LocalGit::review_diff_text`] writes for
+/// an untracked file the reviewers did not get in full. MUST equal
+/// `otto_review::engine::DIFF_OMITTED_MARKER` (otto-git cannot depend on
+/// otto-review); `diff_is_partial` keys on it to block auto-resolution.
+pub const UNTRACKED_OMITTED_MARKER: &str = "(diff omitted: ";
 
 /// Ceiling on the stdout ANY single git spawn may buffer. Nothing Otto asks
 /// for legitimately comes close (a full 100k-line commit diff is ~10 MB, a
@@ -1406,26 +1439,39 @@ impl LocalGit {
         let mut child = cmd
             .spawn()
             .map_err(|e| Error::Internal(format!("spawn git: {e}")))?;
-        if let Some(bytes) = stdin {
-            use tokio::io::AsyncWriteExt;
-            let mut si = child.stdin.take().expect("piped stdin");
-            si.write_all(bytes)
-                .await
-                .map_err(|e| Error::Internal(format!("git stdin: {e}")))?;
-            drop(si); // EOF — git blocks reading otherwise
-        }
+        // stdin is written INSIDE `collect`, concurrently with the readers and
+        // under the time budget: written up front, a large patch could block
+        // forever on a full pipe (git waiting on its own full stdout), and an
+        // early git exit surfaced as "Broken pipe" instead of git's stderr.
+        let stdin_pipe =
+            stdin.map(|bytes| (child.stdin.take().expect("piped stdin"), bytes.to_vec()));
         let pid = child.id().expect("spawned") as libc::pid_t;
         limit.max = limit.max.min(GIT_STDOUT_CAP);
         let kill_pid = (class == SpawnClass::LocalRead).then_some(pid);
         let collect = async move {
             let stdout = child.stdout.take().expect("piped stdout");
             let stderr = child.stderr.take().expect("piped stderr");
-            let (so, se) = tokio::join!(
+            let feed = async move {
+                use tokio::io::AsyncWriteExt;
+                let Some((mut si, bytes)) = stdin_pipe else {
+                    return Ok(());
+                };
+                match si.write_all(&bytes).await {
+                    // git exited (or closed stdin) before reading it all: its
+                    // exit status + stderr below are the real error.
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                    other => other,
+                }
+                // `si` drops here → EOF; git blocks reading otherwise.
+            };
+            let (fed, so, se) = tokio::join!(
+                feed,
                 read_stdout_capped(stdout, &mut limit, kill_pid),
                 read_stderr_capped(stderr)
             );
             let (stdout, cut) = so?;
             let stderr = se?;
+            fed?;
             let mut status = child.wait().await?;
             if cut != Cut::None && kill_pid.is_some() {
                 use std::os::unix::process::ExitStatusExt;
@@ -2802,31 +2848,105 @@ impl LocalGit {
         }
     }
 
+    /// One untracked file as a new-file patch, stdout capped just past the
+    /// per-file review cap (`--no-index` exits 1 for a normal difference).
+    async fn untracked_patch(&self, f: String) -> Result<(bool, Vec<u8>, String, Option<i32>)> {
+        let cmd = GitCmd::diff("diff")
+            .args(["-U3", "--no-index"])
+            .paths(["/dev/null", f.as_str()])
+            .truncate_stdout(REVIEW_UNTRACKED_FILE_CAP + 1);
+        self.exec(&cmd, None).await
+    }
+
     /// [`Self::diff_text_against`] plus every untracked (not ignored) file as
     /// a new-file patch — what a LOCAL review must see: a brand-new module the
     /// user hasn't `git add`ed yet is part of the change under review, but a
     /// plain `git diff` never lists it.
     pub async fn review_diff_text(&self, base: &str) -> Result<String> {
         // Bound the untracked tail: an unignored build/vendor dir must not
-        // turn a review into a multi-hundred-MB prompt file.
+        // turn a review into a multi-hundred-MB prompt file. The budget is
+        // enforced PER FILE (a single 60 MB dump is clipped, not appended
+        // whole), the file count is capped, and every file that was clipped
+        // or skipped gets a `(diff omitted: …)` line — the marker
+        // `otto_review::engine::diff_is_partial` keys on, so a review that
+        // never saw a file cannot resolve findings in it.
         const UNTRACKED_BUDGET: usize = 8 * 1024 * 1024;
+        const UNTRACKED_FILE_CAP: usize = REVIEW_UNTRACKED_FILE_CAP;
+        const UNTRACKED_MAX_FILES: usize = 2_000;
+        // Per-file omission blocks past this collapse into one summary line.
+        const MAX_OMITTED_BLOCKS: usize = 200;
         let mut out = self.diff_text_against(base).await?;
-        for f in self.untracked(&[]).await? {
-            if out.len() > UNTRACKED_BUDGET {
-                break;
+        let files = self.untracked(&[]).await?;
+        let (take, over_count) = files.split_at(files.len().min(UNTRACKED_MAX_FILES));
+        let mut omitted: Vec<(&str, &'static str)> = Vec::new();
+
+        // A few `--no-index` spawns in flight at a time (order preserved),
+        // each killed past its per-file cap. Owned paths + plain future vecs:
+        // a stream closure borrowing `&String` made the whole future
+        // non-`Send` (higher-ranked lifetime) for every axum handler above.
+        let mut consumed = 0usize;
+        'chunks: for chunk in take.chunks(4) {
+            let mut futs = Vec::with_capacity(chunk.len());
+            for f in chunk {
+                futs.push(self.untracked_patch(f.clone()));
             }
-            let cmd = GitCmd::diff("diff")
-                .args(["-U3", "--no-index"])
-                .paths(["/dev/null", f.as_str()]);
-            // --no-index exits 1 for a normal difference.
-            let (_, stdout, _, _) = self.exec(&cmd, None).await?;
-            let patch = String::from_utf8_lossy(&stdout);
-            if !patch.is_empty() {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
+            let results = futures_util::future::join_all(futs).await;
+            for (f, r) in chunk.iter().zip(results) {
+                consumed += 1;
+                let remaining = UNTRACKED_BUDGET.saturating_sub(out.len());
+                if remaining == 0 {
+                    omitted.push((f.as_str(), "review size cap reached"));
+                    break 'chunks;
                 }
-                out.push_str(&patch);
+                // --no-index exits 1 for a normal difference.
+                let (_, stdout, _, _) = r?;
+                let mut patch = String::from_utf8_lossy(&stdout).into_owned();
+                let cap = remaining.min(UNTRACKED_FILE_CAP);
+                let clipped = patch.len() > cap;
+                if clipped {
+                    let mut end = cap;
+                    while !patch.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    let end = patch[..end].rfind('\n').map_or(0, |i| i + 1);
+                    patch.truncate(end);
+                }
+                if !patch.is_empty() {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&patch);
+                }
+                if clipped {
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&format!(
+                        "{UNTRACKED_OMITTED_MARKER}untracked file clipped at the review size cap — \
+                         read {f} on disk)\n"
+                    ));
+                }
             }
+        }
+        for f in &take[consumed..] {
+            omitted.push((f.as_str(), "review size cap reached"));
+        }
+        for f in over_count {
+            omitted.push((f.as_str(), "too many untracked files"));
+        }
+        if !omitted.is_empty() && !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        for (path, why) in omitted.iter().take(MAX_OMITTED_BLOCKS) {
+            out.push_str(&format!(
+                "--- a/{path}\n+++ b/{path}\n{UNTRACKED_OMITTED_MARKER}{why} — read the file on disk)\n"
+            ));
+        }
+        if omitted.len() > MAX_OMITTED_BLOCKS {
+            out.push_str(&format!(
+                "{UNTRACKED_OMITTED_MARKER}{} more untracked files not shown — review size cap reached)\n",
+                omitted.len() - MAX_OMITTED_BLOCKS
+            ));
         }
         Ok(out)
     }
@@ -3473,35 +3593,51 @@ impl LocalGit {
         Ok(out)
     }
 
-    /// Fetch a PR/MR's head commit into the private ref
-    /// `refs/otto/pr-review/<pr_number>` and return that ref. A fork PR's
+    /// Fetch a PR/MR's head commit into a private `refs/otto/pr-review/…` ref
+    /// and return that ref. A fork PR's
     /// source branch does not exist on `origin`, so `origin/<branch>` cannot
     /// be checked out — but the host publishes the head under a
     /// provider-specific ref: GitHub `refs/pull/N/head`, GitLab
     /// `refs/merge-requests/N/head`. Both are tried (a miss is a cheap
     /// "couldn't find remote ref"). Falls back to `head_sha` when the commit
     /// is already present locally (e.g. Bitbucket, which exposes neither).
+    ///
+    /// The ref is keyed by PR AND head (`<n>-<sha12>`, see [`pr_review_ref`]):
+    /// two reviews of the same PR at different heads no longer overwrite each
+    /// other's ref mid-checkout. A fetch that failed for a reason other than
+    /// a missing ref (expired token, network) is reported as that upstream
+    /// error instead of the misleading "no pull/merge-request ref".
     pub async fn fetch_pr_head(
         &self,
         pr_number: u64,
         head_sha: Option<&str>,
         token: Option<String>,
     ) -> Result<String> {
-        let local = format!("refs/otto/pr-review/{pr_number}");
+        let head_sha = head_sha.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(sha) = head_sha {
+            Self::guard_ref(sha)?;
+        }
+        let local = pr_review_ref(pr_number, head_sha);
+        let mut last_failure: Option<(String, String, Option<i32>)> = None;
         for remote_ref in [
             format!("refs/pull/{pr_number}/head"),
             format!("refs/merge-requests/{pr_number}/head"),
         ] {
             let spec = format!("+{remote_ref}:{local}");
-            if let Ok((true, ..)) = self
+            match self
                 .run_remote_raw(&["fetch", "--no-tags", "origin", &spec], token.clone())
                 .await
             {
-                return Ok(local);
+                Ok((true, ..)) => return Ok(local),
+                Ok((false, stdout, stderr, code)) => {
+                    if !is_missing_remote_ref(&stderr) {
+                        last_failure = Some((stderr, stdout, code));
+                    }
+                }
+                Err(e) => last_failure = Some((e.to_string(), String::new(), None)),
             }
         }
-        if let Some(sha) = head_sha.map(str::trim).filter(|s| !s.is_empty()) {
-            Self::guard_ref(sha)?;
+        if let Some(sha) = head_sha {
             let commit = format!("{sha}^{{commit}}");
             if let Ok(full) = self
                 .run(&["rev-parse", "--verify", "--quiet", &commit])
@@ -3509,6 +3645,9 @@ impl LocalGit {
             {
                 return Ok(full.trim().to_string());
             }
+        }
+        if let Some((stderr, stdout, code)) = last_failure {
+            return Err(upstream_err(&stderr, &stdout, code));
         }
         Err(Error::Invalid(format!(
             "could not fetch the head of PR #{pr_number} (no pull/merge-request ref and the head commit is not local)"
@@ -3713,9 +3852,28 @@ impl LocalGit {
     /// this the request errored *before* the prune ran, so the bad menu entry
     /// persisted and every retry failed.
     pub async fn delete_remote_branch(&self, name: &str, token: Option<String>) -> Result<String> {
+        self.delete_remote_branch_on("origin", name, token).await
+    }
+
+    /// [`Self::delete_remote_branch`] against the NAMED remote
+    /// (`git push <remote> --delete <name>`). The remote-ref row for
+    /// `upstream/feature-x` must delete `feature-x` on `upstream` — routing it
+    /// to origin destroyed the wrong branch. `remote` must be a configured
+    /// remote (an unknown name is a 400, never a guess); the caller decides
+    /// whether the account token may be offered to that remote's host.
+    pub async fn delete_remote_branch_on(
+        &self,
+        remote: &str,
+        name: &str,
+        token: Option<String>,
+    ) -> Result<String> {
+        Self::guard_ref(remote)?;
         Self::guard_ref(name)?;
+        if !self.remotes().await?.iter().any(|r| r.name == remote) {
+            return Err(Error::Invalid(format!("no remote named '{remote}'")));
+        }
         let (ok, stdout, stderr, code) = self
-            .run_remote_raw(&["push", "origin", "--delete", name], token)
+            .run_remote_raw(&["push", remote, "--delete", name], token)
             .await?;
         let already_gone = !ok && remote_ref_absent(&stderr);
         if !ok && !already_gone {
@@ -3727,11 +3885,11 @@ impl LocalGit {
         // shows up immediately. Best-effort: if push already pruned it (or it never
         // existed), the delete is a no-op error we ignore.
         let _ = self
-            .run(&["update-ref", "-d", &format!("refs/remotes/origin/{name}")])
+            .run(&["update-ref", "-d", &format!("refs/remotes/{remote}/{name}")])
             .await;
         if already_gone {
             return Ok(format!(
-                "origin/{name} was already absent on origin; pruned the stale local tracking ref"
+                "{remote}/{name} was already absent on {remote}; pruned the stale local tracking ref"
             ));
         }
         // Happy path: surface git's own summary (stdout + stderr, minus noise),
@@ -4978,6 +5136,36 @@ fn auth_hint(full_lc: &str) -> Option<&'static str> {
     None
 }
 
+/// The private ref [`LocalGit::fetch_pr_head`] fetches a PR head into:
+/// `refs/otto/pr-review/<n>-<first 12 of head_sha>`, or `<n>` when the head
+/// is unknown. A sibling name (not `<n>/<sha>`) so it never D/F-conflicts with
+/// a `refs/otto/pr-review/<n>` an older build left behind.
+pub(crate) fn pr_review_ref(pr_number: u64, head_sha: Option<&str>) -> String {
+    match head_sha {
+        Some(sha) => {
+            let short: String = sha
+                .chars()
+                .filter(char::is_ascii_hexdigit)
+                .take(12)
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if short.is_empty() {
+                format!("refs/otto/pr-review/{pr_number}")
+            } else {
+                format!("refs/otto/pr-review/{pr_number}-{short}")
+            }
+        }
+        None => format!("refs/otto/pr-review/{pr_number}"),
+    }
+}
+
+/// A `git fetch` failure that only means "the host doesn't publish this
+/// ref" (try the next one) — as opposed to auth / network / repo errors.
+pub(crate) fn is_missing_remote_ref(stderr: &str) -> bool {
+    let lc = stderr.to_ascii_lowercase();
+    lc.contains("couldn't find remote ref") || lc.contains("could not find remote ref")
+}
+
 pub(crate) fn upstream_err(stderr: &str, stdout: &str, code: Option<i32>) -> Error {
     // Among the meaningful (non-noise) lines, prefer one that actually names the
     // failure — git scatters the real reason ("! [remote rejected] …", "error:
@@ -6112,6 +6300,63 @@ mod tests {
         );
     }
 
+    /// S15-01: a remote-ref row on a NON-origin remote (`upstream/tmp`) must
+    /// delete `tmp` on `upstream` — origin's same-named branch is untouched —
+    /// and an unknown remote name is refused before any push.
+    #[tokio::test]
+    async fn delete_remote_branch_on_targets_the_named_remote_only() {
+        let (_tmp, dir) = fixture();
+        sh_git(&dir, &["add", "-A"]);
+        sh_git(&dir, &["commit", "-m", "tidy"]);
+        let parent = dir.parent().unwrap();
+        sh_git(parent, &["init", "--bare", "origin.git"]);
+        sh_git(parent, &["init", "--bare", "upstream.git"]);
+        let origin = parent.join("origin.git");
+        let upstream = parent.join("upstream.git");
+        sh_git(&dir, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        sh_git(
+            &dir,
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+        );
+        sh_git(&dir, &["branch", "tmp"]);
+        sh_git(&dir, &["push", "origin", "main", "tmp"]);
+        sh_git(&dir, &["push", "upstream", "main", "tmp"]);
+        sh_git(&dir, &["fetch", "--all"]);
+
+        let git = LocalGit::new(&dir);
+        let err = git
+            .delete_remote_branch_on("nope", "tmp", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+
+        git.delete_remote_branch_on("upstream", "tmp", None)
+            .await
+            .unwrap();
+        let remote = git.refs().await.unwrap().remote;
+        assert!(!remote.iter().any(|b| b.name == "upstream/tmp"));
+        assert!(
+            remote.iter().any(|b| b.name == "origin/tmp"),
+            "origin/tmp must survive a delete aimed at upstream"
+        );
+        // And on the remotes themselves, not just the tracking refs.
+        let on = |bare: &std::path::Path| {
+            std::process::Command::new("git")
+                .args([
+                    "--git-dir",
+                    bare.to_str().unwrap(),
+                    "branch",
+                    "--list",
+                    "tmp",
+                ])
+                .output()
+                .unwrap()
+                .stdout
+        };
+        assert!(on(&upstream).is_empty(), "tmp deleted on upstream");
+        assert!(!on(&origin).is_empty(), "tmp still on origin");
+    }
+
     /// `repo` (from [`fixture`], committed) pushed to a bare `origin.git`, plus
     /// a second clone `other` that can push behind `repo`'s back.
     fn pushed_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -6584,6 +6829,97 @@ mod tests {
     /// `main` moved on after the branch point: the review/PR diff must hold
     /// ONLY the branch's own change (merge-base), not main's later commits as
     /// reverse hunks; the review variant also carries untracked new files.
+    /// S2-19: the PR review ref is keyed by PR + head, and only a "missing
+    /// ref" fetch failure is treated as "try the next provider ref".
+    #[test]
+    fn pr_review_ref_is_keyed_by_head_and_missing_ref_is_classified() {
+        assert_eq!(pr_review_ref(7, None), "refs/otto/pr-review/7");
+        assert_eq!(
+            pr_review_ref(7, Some("ABCDEF0123456789abcdef")),
+            "refs/otto/pr-review/7-abcdef012345"
+        );
+        assert_ne!(
+            pr_review_ref(7, Some("aaaa")),
+            pr_review_ref(7, Some("bbbb"))
+        );
+        assert!(is_missing_remote_ref(
+            "fatal: couldn't find remote ref refs/pull/7/head"
+        ));
+        assert!(!is_missing_remote_ref(
+            "remote: Invalid username or token.\nfatal: Authentication failed for 'https://x'"
+        ));
+    }
+
+    /// S2-19: an unreachable origin surfaces the real fetch error, not the
+    /// "no pull/merge-request ref" text.
+    #[tokio::test]
+    async fn fetch_pr_head_reports_the_real_fetch_error() {
+        let (tmp, dir) = bare_main_repo();
+        let missing = tmp.path().join("no-such-remote.git");
+        sh_git(
+            &dir,
+            &["remote", "add", "origin", missing.to_str().unwrap()],
+        );
+        let err = LocalGit::new(&dir)
+            .fetch_pr_head(3, None, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("no pull/merge-request ref"), "{err}");
+    }
+
+    fn bare_main_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir(&dir).unwrap();
+        sh_git(&dir, &["init", "-b", "main"]);
+        sh_git(&dir, &["config", "user.email", "otto@test.local"]);
+        sh_git(&dir, &["config", "user.name", "Otto Test"]);
+        sh_git(&dir, &["config", "commit.gpgsign", "false"]);
+        write(&dir, "seed.txt", "seed\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        (tmp, dir)
+    }
+
+    /// S2-09: ONE oversized untracked file is clipped at the per-file cap and
+    /// marked `(diff omitted: …)` (it used to be appended whole).
+    #[tokio::test]
+    async fn review_diff_clips_an_oversized_untracked_file_with_a_marker() {
+        let (_tmp, dir) = bare_main_repo();
+        let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n";
+        write(&dir, "dump.txt", &line.repeat(48 * 1024)); // ~3 MiB
+        write(&dir, "small.rs", "fn small() {}\n");
+        let r = LocalGit::new(&dir).review_diff_text("main").await.unwrap();
+        assert!(r.len() < 2 * 1024 * 1024, "clipped: {} bytes", r.len());
+        assert!(r.contains("+fn small() {}"), "small file still reviewed");
+        assert!(
+            r.lines()
+                .any(|l| l.starts_with(UNTRACKED_OMITTED_MARKER) && l.contains("dump.txt")),
+            "clipped file is marked"
+        );
+    }
+
+    /// S2-09: past the total budget, the remaining untracked files are NOT
+    /// dropped silently — each gets a marker line.
+    #[tokio::test]
+    async fn review_diff_marks_untracked_files_past_the_budget() {
+        let (_tmp, dir) = bare_main_repo();
+        let line = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde\n";
+        let big = line.repeat(17 * 1024); // ~1.06 MiB → clipped to the 1 MiB cap
+        for i in 0..10 {
+            write(&dir, &format!("f{i:02}.txt"), &big);
+        }
+        let r = LocalGit::new(&dir).review_diff_text("main").await.unwrap();
+        assert!(r.len() <= 9 * 1024 * 1024, "{} bytes", r.len());
+        let skipped = r
+            .lines()
+            .filter(|l| l.starts_with(UNTRACKED_OMITTED_MARKER) && l.contains("size cap reached"))
+            .count();
+        assert!(skipped >= 1, "over-budget files are marked");
+        assert!(r.contains("+++ b/f09.txt"), "the last file is named");
+    }
+
     #[tokio::test]
     async fn diff_text_against_uses_merge_base_and_review_adds_untracked() {
         let (_tmp, dir) = fixture_on_branch("main");

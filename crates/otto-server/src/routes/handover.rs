@@ -796,7 +796,12 @@ async fn wait_for_ready(manager: &SessionManager, id: &Id) {
 /// (`ESC[200~ … ESC[201~`) keeps the multi-line brief from submitting on its
 /// first newline; a trailing `\r` then sends it. Returns whether it landed.
 async fn inject_handover_prompt(manager: &SessionManager, id: &Id, prompt: &str) -> bool {
-    let paste = format!("\x1b[200~{prompt}\x1b[201~");
+    // The brief quotes another session's transcript: strip controls so an
+    // embedded `ESC[201~` can't end the paste and type the rest as keys.
+    let paste = format!(
+        "\x1b[200~{}\x1b[201~",
+        otto_orchestrator::claude_pty::sanitize_paste(prompt)
+    );
     if let Err(e) = manager.input(id, paste.as_bytes()).await {
         tracing::warn!(session = %id, "handover: paste failed: {e}");
         return false;

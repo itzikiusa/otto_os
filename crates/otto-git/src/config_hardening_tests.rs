@@ -6,7 +6,9 @@
 
 use std::path::Path;
 
-use crate::local::{hardened_config_for, LocalGit, HARDENED_GIT_CONFIG, HOOKED_GIT_CONFIG};
+use crate::local::{
+    hardened_config_for, verb_of, LocalGit, HARDENED_GIT_CONFIG, HOOKED_GIT_CONFIG,
+};
 
 fn sh(dir: &Path, args: &[&str]) {
     let out = std::process::Command::new("git")
@@ -290,4 +292,45 @@ fn hardened_command_helpers_carry_the_hardened_config() {
         assert_eq!(get("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
         assert_eq!(get("GIT_PAGER").as_deref(), Some("cat"));
     }
+}
+
+/// S2-20: every leading global option is skipped, so a `--no-pager commit` or
+/// `-C <dir> push` still keeps the user's hooks.
+#[test]
+fn verb_of_skips_all_global_options() {
+    assert_eq!(verb_of(&["status"]), "status");
+    assert_eq!(verb_of(&["-c", "a=b", "-c", "c=d", "diff"]), "diff");
+    assert_eq!(verb_of(&["--literal-pathspecs", "add", "x"]), "add");
+    assert_eq!(verb_of(&["--no-pager", "commit"]), "commit");
+    assert_eq!(verb_of(&["-C", "/tmp/r", "push"]), "push");
+    assert_eq!(
+        verb_of(&["--git-dir", "/r/.git", "--work-tree", "/r", "merge"]),
+        "merge"
+    );
+    assert_eq!(verb_of(&["--git-dir=/r/.git", "log"]), "log");
+    assert_eq!(verb_of(&["--no-pager"]), "command");
+    assert_eq!(
+        hardened_config_for(verb_of(&["--no-pager", "commit"])),
+        HOOKED_GIT_CONFIG
+    );
+}
+
+/// S2-21: stdin is fed concurrently with the readers, so a git that exits
+/// without draining a large stdin reports ITS error (exit + stderr), not a
+/// daemon-side "Broken pipe".
+#[tokio::test]
+async fn early_exit_with_large_stdin_reports_git_error_not_epipe() {
+    let (_tmp, repo) = repo();
+    let git = LocalGit::new(&repo);
+    // 4 MiB ≫ any pipe buffer; `rev-parse` never reads stdin.
+    let big = vec![b'x'; 4 * 1024 * 1024];
+    let (ok, _stdout, stderr, _code) = git
+        .run_raw_stdin(&["rev-parse", "--verify", "--quiet", "no-such-ref"], &big)
+        .await
+        .expect("an early git exit is not a spawn error");
+    assert!(!ok);
+    assert!(
+        !stderr.to_ascii_lowercase().contains("broken pipe"),
+        "{stderr}"
+    );
 }

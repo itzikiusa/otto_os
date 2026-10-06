@@ -59,17 +59,28 @@ pub async fn open(path: &Path) -> Result<DbPool> {
         .await
         .map_err(|e| Error::Internal(format!("sqlite connect: {e}")))?;
 
-    // Must run BEFORE sqlx::migrate!() — repairs DBs bricked by the vault-docs
+    restrict_db_file_mode(path);
+
+    let mut migrator = sqlx::migrate!();
+    // Applied versions this binary doesn't know are a NEWER build's additive
+    // migrations (they are append-only): a rollback to the previous app — or
+    // a manual `ottod.prev` restore — must boot against that schema instead
+    // of exiting with sqlx's `VersionMissing` and crash-looping under
+    // KeepAlive. Checksums of the versions it DOES know are still validated.
+    migrator.set_ignore_missing(true);
+    // A schema migration is the one boot step that rewrites the user's whole
+    // database irreversibly, and a deploy that rolls back to the previous app
+    // can't un-apply it. Snapshot first — only when something is pending, so
+    // an ordinary restart never pays the copy — and BEFORE the renumber
+    // repairs below, so the copy is a true "before" image.
+    snapshot_before_migrations(&pool, path, &migrator).await;
+
+    // Must run BEFORE the migrator runs — repairs DBs bricked by the vault-docs
     // migration renumber before sqlx validates recorded checksums by version.
     repair_renumbered_vault_migrations(&pool).await?;
     repair_renumbered_migrations(&pool, RENUMBERED).await?;
 
-    let migrator = sqlx::migrate!();
-    // A schema migration is the one boot step that rewrites the user's whole
-    // database irreversibly, and a deploy that rolls back to the previous app
-    // can't un-apply it. Snapshot first — only when something is pending, so
-    // an ordinary restart never pays the copy.
-    snapshot_before_migrations(&pool, path, &migrator).await;
+    warn_unknown_applied_versions(&pool, &migrator).await;
     migrator
         .run(&pool)
         .await
@@ -80,6 +91,68 @@ pub async fn open(path: &Path) -> Result<DbPool> {
         .max_connections(READ_CONNECTIONS)
         .connect_lazy_with(read_opts);
     Ok(DbPool::split(read, pool))
+}
+
+/// `chmod 0600` the database and its WAL/SHM side files (best-effort): they
+/// hold session transcripts, tokens' metadata and audit rows, and SQLite
+/// creates them with the umask's 0644 inside a 0755 data dir.
+fn restrict_db_file_mode(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let base = path.as_os_str().to_owned();
+        for suffix in ["", "-wal", "-shm"] {
+            let mut p = base.clone();
+            p.push(suffix);
+            let p = std::path::PathBuf::from(p);
+            if let Ok(meta) = std::fs::metadata(&p) {
+                if meta.permissions().mode() & 0o077 != 0 {
+                    if let Err(e) =
+                        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))
+                    {
+                        tracing::warn!("chmod 0600 {}: {e}", p.display());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Applied versions in `applied` that `embedded` (this binary's migrations)
+/// does not contain — a newer build's migrations. Sorted.
+fn unknown_applied_versions(applied: &[i64], embedded: &[i64]) -> Vec<i64> {
+    let known: std::collections::HashSet<i64> = embedded.iter().copied().collect();
+    let mut unknown: Vec<i64> = applied
+        .iter()
+        .copied()
+        .filter(|v| !known.contains(v))
+        .collect();
+    unknown.sort_unstable();
+    unknown
+}
+
+/// Log (WARN) the applied migrations this binary doesn't know, so a rollback
+/// running on a newer schema is visible in `ottod.log` rather than silent.
+async fn warn_unknown_applied_versions(pool: &SqlitePool, migrator: &sqlx::migrate::Migrator) {
+    let Ok(applied) =
+        sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(pool)
+            .await
+    else {
+        return; // fresh database (no table yet)
+    };
+    let embedded: Vec<i64> = migrator.iter().map(|m| m.version).collect();
+    let unknown = unknown_applied_versions(&applied, &embedded);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            "database carries {} migration(s) newer than this build {:?} — running on a \
+             newer (additive) schema, e.g. after a rollback; they are left in place",
+            unknown.len(),
+            unknown
+        );
+    }
 }
 
 /// One-time data repair for DBs bricked by the vault-docs migration **renumber**
@@ -256,6 +329,44 @@ fn snapshots_to_prune(db_file: &str, names: &[String], keep: usize) -> Vec<Strin
         .collect()
 }
 
+/// Where a snapshot is written before it is complete.
+fn partial_snapshot_path(target: &Path) -> std::path::PathBuf {
+    let mut p = target.as_os_str().to_owned();
+    p.push(".partial");
+    std::path::PathBuf::from(p)
+}
+
+/// Remove `<db_file>.pre-*.partial` leftovers of an interrupted snapshot.
+fn sweep_partial_snapshots(backups: &Path, db_file: &str) {
+    let prefix = format!("{db_file}.pre-");
+    let Ok(rd) = std::fs::read_dir(backups) else {
+        return;
+    };
+    for name in rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(".partial"))
+    {
+        match std::fs::remove_file(backups.join(&name)) {
+            Ok(()) => tracing::warn!("migrate snapshot: removed interrupted snapshot {name}"),
+            Err(e) => tracing::warn!("migrate snapshot: remove {name}: {e}"),
+        }
+    }
+}
+
+/// Snapshots are a full copy of the user's data: owner-only (0600).
+fn restrict_snapshot_mode(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("migrate snapshot: chmod 0600 {}: {e}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// When migrations are pending on an EXISTING database, write a consistent
 /// copy (`VACUUM INTO`) to `<dir>/backups/` and keep the newest
 /// [`KEEP_MIGRATION_SNAPSHOTS`]. Best-effort by design: a full disk must not
@@ -298,6 +409,9 @@ async fn snapshot_before_migrations(
         return;
     };
     let backups = dir.join("backups");
+    // A snapshot interrupted by a kill (SIGKILL, power loss) leaves only its
+    // `.partial` file — never a name the retention below counts as a good copy.
+    sweep_partial_snapshots(&backups, file);
     if let Err(e) = std::fs::create_dir_all(&backups) {
         tracing::error!(
             "migrate snapshot: create {}: {e} — migrating WITHOUT a snapshot",
@@ -306,13 +420,21 @@ async fn snapshot_before_migrations(
         return;
     }
     let target = backups.join(snapshot_name(file, last_applied, chrono::Utc::now()));
+    let partial = partial_snapshot_path(&target);
     let started = std::time::Instant::now();
     // `VACUUM INTO` reads one consistent snapshot through the writer and never
     // touches the live file; the target must not exist (the stamp is unique).
+    // It writes `<name>.partial` and is renamed only once complete, so a
+    // kill mid-copy can't leave a truncated file under a retained name.
     let res = sqlx::query("VACUUM INTO ?")
-        .bind(target.to_string_lossy().into_owned())
+        .bind(partial.to_string_lossy().into_owned())
         .execute(pool)
-        .await;
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|_| {
+            restrict_snapshot_mode(&partial);
+            std::fs::rename(&partial, &target).map_err(|e| format!("rename: {e}"))
+        });
     match res {
         Ok(_) => tracing::info!(
             "migrate snapshot: {} pending migration(s) {:?}; saved {} in {} ms",
@@ -322,7 +444,7 @@ async fn snapshot_before_migrations(
             started.elapsed().as_millis()
         ),
         Err(e) => {
-            let _ = std::fs::remove_file(&target);
+            let _ = std::fs::remove_file(&partial);
             tracing::error!(
                 "migrate snapshot: VACUUM INTO {} failed: {e} — migrating WITHOUT a snapshot",
                 target.display()
@@ -474,6 +596,86 @@ mod tests {
             .into_string()
             .unwrap();
         assert!(name.starts_with("otto.db.pre-"), "{name}");
+    }
+
+    #[test]
+    fn unknown_applied_versions_are_the_newer_builds() {
+        assert_eq!(
+            unknown_applied_versions(&[1, 2], &[1, 2, 3]),
+            Vec::<i64>::new()
+        );
+        assert_eq!(unknown_applied_versions(&[9, 1, 2, 7], &[1, 2]), vec![7, 9]);
+    }
+
+    /// S10-01: a rollback boots the PREVIOUS binary against a database the
+    /// failed (newer) build already migrated. sqlx's default `VersionMissing`
+    /// check made it exit and crash-loop; it must open the newer schema.
+    #[tokio::test]
+    async fn open_tolerates_versions_applied_by_a_newer_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otto.db");
+        drop(open(&path).await.unwrap());
+        {
+            let pool = open(&path).await.unwrap();
+            // What a newer build leaves behind: an additive table + its row.
+            sqlx::query("CREATE TABLE future_feature (id INTEGER PRIMARY KEY)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                 (version, description, success, checksum, execution_time) \
+                 VALUES (99999999999999, 'future feature', 1, X'00', 0)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let pool = open(&path)
+            .await
+            .expect("an older binary must boot on a newer additive schema");
+        // Left in place — never un-applied or deleted.
+        assert!(versions(pool.writer()).await.contains(&99999999999999));
+        // And a newer-only DB is not "pending": no snapshot was taken.
+        assert!(!dir.path().join("backups").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshots_are_owner_only_and_partials_are_swept() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otto.db");
+        let backups = dir.path().join("backups");
+        drop(open(&path).await.unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "otto.db is owner-only"
+        );
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // A copy a SIGKILL interrupted in an earlier boot.
+        std::fs::create_dir_all(&backups).unwrap();
+        let stale = backups.join("otto.db.pre-5-20260101T000000Z.partial");
+        std::fs::write(&stale, b"truncated").unwrap();
+        let _ = open(&path).await;
+        let names: Vec<String> = std::fs::read_dir(&backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(!names[0].ends_with(".partial"), "{names:?}");
+        let mode = std::fs::metadata(backups.join(&names[0]))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     async fn versions(pool: &SqlitePool) -> Vec<i64> {

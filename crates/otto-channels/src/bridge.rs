@@ -116,7 +116,7 @@ impl ChatReply {
     async fn say(&self, text: &str) {
         if let Err(e) = self
             .adapter
-            .send(&self.chat, self.thread.as_deref(), text)
+            .send_notice(&self.chat, self.thread.as_deref(), text)
             .await
         {
             warn!("bridge: could not post the failure notice: {e}");
@@ -234,23 +234,52 @@ fn neutralize_markers(text: &str) -> String {
 }
 
 /// The allowed-users gate. `allowed_users` is the integration's comma-separated
-/// list of channel-native user ids; blank = everyone. Entries are trimmed and
+/// list of channel-native user ids; blank = everyone ONLY when
+/// `open_when_blank` (the integration's explicit `open_to_all` opt-in, or a
+/// webhook — authenticated by its own secret), else blank = NOBODY (fail
+/// closed: a Telegram bot is reachable by anyone who finds its username, and
+/// a sender drives an agent session as the owner). Entries are trimmed and
 /// empty ones (a trailing comma) ignored, and ids compare case-insensitively —
 /// Slack ids are upper-case (`U0123ABC`) and a hand-typed `u0123abc` used to
 /// lock its owner out silently. A message with no sender id never passes a
 /// non-blank list. Shared by the bridge and the Slack listener, which checks it
 /// BEFORE downloading a message's attachments.
-pub fn user_allowed(allowed_users: &str, user: &str) -> bool {
+pub fn user_allowed(allowed_users: &str, open_when_blank: bool, user: &str) -> bool {
     let mut entries = allowed_users
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .peekable();
     if entries.peek().is_none() {
-        return true;
+        return open_when_blank;
     }
     let user = user.trim();
     !user.is_empty() && entries.any(|a| a.eq_ignore_ascii_case(user))
+}
+
+/// [`user_allowed`] for an integration: a blank list is open only under the
+/// explicit `open_to_all` opt-in, or for a webhook (whose caller already
+/// proved the integration's secret).
+pub fn integration_admits(integ: &Integration, user: &str) -> bool {
+    user_allowed(
+        &integ.allowed_users,
+        integ.open_to_all || integ.channel == Channel::Webhook,
+        user,
+    )
+}
+
+/// True when an integration admits every sender (a blank allow-list under
+/// the `open_to_all` opt-in) — the listeners warn about it on every start.
+pub fn open_to_everyone(integ: &Integration) -> bool {
+    integ.channel != Channel::Webhook
+        && integ.open_to_all
+        && integ.allowed_users.split(',').all(|s| s.trim().is_empty())
+}
+
+/// The agent prompt for a human EDIT of an earlier message: marked, so the
+/// agent treats it as a correction to what it already saw, not a new task.
+fn edit_prompt(text: &str) -> String {
+    format!("[edited earlier message]\n{text}")
 }
 
 /// Derive a session title from the first inbound message so the sidebar pane is
@@ -335,9 +364,11 @@ async fn agent_dispatched(
 /// in its own task so a slow TUI never stalls the channel receive loop.
 ///
 /// `_turn` is this session's turn lock (see [`Bridge::handle`] step 4): held
-/// from the paste through the dispatch confirmation, so a second message in
-/// the same thread can't paste into the box before this one was submitted
-/// (the two used to merge into one prompt).
+/// from the paste through the dispatch confirmation AND until the turn's
+/// final reply (capped at [`crate::mirror::TURN_HOLD_CAP`]), so a second
+/// message in the same thread can't paste into the box before this one was
+/// submitted (the two used to merge into one prompt), nor re-point the mirror
+/// while this turn is still answering.
 async fn submit_to_agent(
     manager: Arc<SessionManager>,
     mirror: Arc<Mirror>,
@@ -393,8 +424,13 @@ async fn submit_to_agent(
 
     // 4. Monitor: confirm the agent actually started. If the prompt is still
     //    sitting in the box after the grace window, press Enter once more.
+    //    Then keep the turn lock until THIS turn's Final reply (capped): the
+    //    next message's attach / begin_turn must not reset the mirror mid-turn.
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed — session is processing the relay");
+        mirror
+            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
+            .await;
         return;
     }
     warn!(channel = %label, session = %session_id, "bridge: agent did not start within {DISPATCH_WAIT:?}; re-sending Enter");
@@ -404,6 +440,9 @@ async fn submit_to_agent(
     }
     if agent_dispatched(&manager, &session_id, before).await {
         info!(channel = %label, session = %session_id, "bridge: agent dispatch confirmed after retry");
+        mirror
+            .wait_turn_done(&session_id, crate::mirror::TURN_HOLD_CAP)
+            .await;
     } else {
         warn!(channel = %label, session = %session_id, "bridge: agent still not dispatched — prompt may be sitting in the input box");
     }
@@ -592,7 +631,7 @@ impl Bridge {
     }
 
     /// Handle one inbound message.
-    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, msg: Inbound) {
+    pub async fn handle(&self, integ: &Integration, adapter: Arc<dyn Adapter>, mut msg: Inbound) {
         info!(
             channel = %adapter.channel().as_str(),
             workspace = %msg.workspace_id,
@@ -603,7 +642,7 @@ impl Bridge {
         );
 
         // --- 1. Allowed-users check ---
-        if !user_allowed(&integ.allowed_users, &msg.user) {
+        if !integration_admits(integ, &msg.user) {
             info!(
                 channel = %adapter.channel().as_str(),
                 workspace = %msg.workspace_id,
@@ -619,8 +658,14 @@ impl Bridge {
         // normal prompt rather than a control command. Command replies go via
         // `adapter.send`, which the webhook adapter no-ops, and a stray `/stop`
         // could disrupt a session — so skip interception for webhooks entirely.
+        // An EDIT of an earlier message re-fires nothing: no quick command,
+        // no swarm / run / workflow trigger (fixing a typo in an `Action:
+        // Workflow` post must not start a second run). It goes to the
+        // conversation's agent, marked as an edit.
+        let fresh = !msg.edited;
         let trimmed = msg.text.trim();
-        if adapter.channel() != Channel::Webhook
+        if fresh
+            && adapter.channel() != Channel::Webhook
             && trimmed.starts_with('/')
             && self
                 .handle_command(integ, adapter.clone(), &msg, trimmed)
@@ -642,7 +687,7 @@ impl Bridge {
         // --- 3b. Swarm trigger: a message on a swarm-bound channel launches the
         // team instead of starting a normal session. Webhook callers can launch
         // via the dedicated /webhooks/swarm route, so only chat channels route here.
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.swarm_trigger {
                 if let Some(ack) = trigger
                     .try_launch(
@@ -673,7 +718,7 @@ impl Bridge {
         // launches the one-button pipeline, and an `approve`/`reject` reply
         // resolves an awaiting run's gate. Like the swarm trigger, chat channels
         // only (webhook has its dedicated /webhooks/{ws}/run route).
-        if adapter.channel() != Channel::Webhook {
+        if fresh && adapter.channel() != Channel::Webhook {
             if let Some(trigger) = &self.run_trigger {
                 if let Some(ack) = trigger
                     .handle(
@@ -705,7 +750,7 @@ impl Bridge {
         // Action:Workflow trigger so a control word in a live run's thread isn't
         // mistaken for a new run; a non-command reply (or no matching active run)
         // returns None and falls through to normal routing.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_control(
                     &msg.workspace_id,
@@ -733,7 +778,7 @@ impl Bridge {
         // --- 3d. Workflow trigger: a structured `Action: Workflow` message starts
         // a workflow run (resolved by Name within the workspace). Available on all
         // channels, including webhook.
-        if let Some(trigger) = &self.workflow_trigger {
+        if let Some(trigger) = self.workflow_trigger.as_ref().filter(|_| fresh) {
             if let Some(ack) = trigger
                 .try_start(
                     &msg.workspace_id,
@@ -756,6 +801,10 @@ impl Bridge {
                     .await;
                 return;
             }
+        }
+
+        if msg.edited {
+            msg.text = edit_prompt(&msg.text);
         }
 
         // --- 4. Find or create a session ---
@@ -854,7 +903,7 @@ impl Bridge {
                         warn!("bridge: failed to create session: {e}");
                         drop(_conv);
                         let _ = adapter
-                            .send(&msg.chat, msg.thread.as_deref(), CREATE_FAILED_REPLY)
+                            .send_notice(&msg.chat, msg.thread.as_deref(), CREATE_FAILED_REPLY)
                             .await;
                         return;
                     }
@@ -881,7 +930,7 @@ impl Bridge {
         // One turn at a time on this session: the previous message's paste →
         // submit → dispatch confirmation completes before this one attaches
         // its turn and pastes (two quick messages used to merge into one
-        // prompt). Held by `submit_to_agent` until dispatch is confirmed.
+        // prompt). Held by `submit_to_agent` until the turn's final reply.
         let turn = turn.acquire().await;
 
         // --- 5. Compose the message text ---
@@ -1348,19 +1397,69 @@ mod tests {
 
     #[test]
     fn allowed_users_gate() {
-        // Blank (or only separators) = everyone.
-        assert!(user_allowed("", "U1"));
-        assert!(user_allowed(" , ", "U1"));
+        // Blank (or only separators) = everyone ONLY under the opt-in…
+        assert!(user_allowed("", true, "U1"));
+        assert!(user_allowed(" , ", true, "U1"));
+        // …and NOBODY without it (fail closed — review S5-02).
+        assert!(!user_allowed("", false, "U1"));
+        assert!(!user_allowed(" , ", false, "U1"));
         // Listed ids pass, trimmed, case-insensitively; others don't.
-        assert!(user_allowed("U0123ABC, U0456", "U0123ABC"));
-        assert!(user_allowed("u0123abc", "U0123ABC"));
-        assert!(!user_allowed("U0123ABC,", "U0456"));
-        assert!(!user_allowed("U0123ABC", "U0123AB"), "no prefix match");
-        // A sender-less event never passes a real list.
-        assert!(!user_allowed("U0123ABC", ""));
-        assert!(!user_allowed("U0123ABC,", "  "));
-        // Telegram numeric ids work the same way.
-        assert!(user_allowed("12345, 678", "678"));
+        for open in [false, true] {
+            assert!(user_allowed("U0123ABC, U0456", open, "U0123ABC"));
+            assert!(user_allowed("u0123abc", open, "U0123ABC"));
+            assert!(!user_allowed("U0123ABC,", open, "U0456"));
+            assert!(
+                !user_allowed("U0123ABC", open, "U0123AB"),
+                "no prefix match"
+            );
+            // A sender-less event never passes a real list.
+            assert!(!user_allowed("U0123ABC", open, ""));
+            assert!(!user_allowed("U0123ABC,", open, "  "));
+            // Telegram numeric ids work the same way.
+            assert!(user_allowed("12345, 678", open, "678"));
+        }
+    }
+
+    #[test]
+    fn an_edit_is_marked_for_the_agent() {
+        assert_eq!(
+            edit_prompt("Action: Workflow\nName: PR Reviewer"),
+            "[edited earlier message]\nAction: Workflow\nName: PR Reviewer"
+        );
+    }
+
+    #[test]
+    fn a_blank_allow_list_admits_nobody_unless_opened() {
+        let mut integ = Integration {
+            workspace_id: "ws".into(),
+            channel: Channel::Telegram,
+            enabled: true,
+            allowed_users: String::new(),
+            open_to_all: false,
+            agent_reply: true,
+            reply_instructions: String::new(),
+            channel_id: String::new(),
+            preferred_cli: String::new(),
+            has_bot_token: true,
+            has_app_token: false,
+            updated_at: chrono::Utc::now(),
+        };
+        // A new Telegram bot with no list: a stranger is refused.
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // The explicit opt-in (migrated pre-flag bots) keeps it open, flagged.
+        integ.open_to_all = true;
+        assert!(integration_admits(&integ, "424242"));
+        assert!(open_to_everyone(&integ));
+        // A real list wins over the opt-in.
+        integ.allowed_users = "7".into();
+        assert!(!integration_admits(&integ, "424242"));
+        assert!(!open_to_everyone(&integ));
+        // A webhook's caller proved the secret: blank stays open.
+        integ.channel = Channel::Webhook;
+        integ.allowed_users.clear();
+        integ.open_to_all = false;
+        assert!(integration_admits(&integ, "caller"));
     }
 
     #[test]

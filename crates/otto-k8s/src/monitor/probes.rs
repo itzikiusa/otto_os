@@ -222,6 +222,12 @@ impl MonitorConfig {
             if !p.path.starts_with('/') {
                 return Err(inv(format!("probe '{name}': path must start with '/'")));
             }
+            // The path is spliced into `get --raw …/proxy{path}` and the
+            // port-forward URL: the same rules as pod HTTP (no scheme/host,
+            // no `..` or encoded slashes, no whitespace) keep it on the pod.
+            if let Err(e) = crate::pod_http::validate_path(&p.path) {
+                return Err(inv(format!("probe '{name}': {e}")));
+            }
             if p.port == Some(0) {
                 return Err(inv(format!("probe '{name}': port must be 1..65535")));
             }
@@ -583,6 +589,24 @@ mod tests {
         let mut c = cfg();
         c.probes[0].path = "actuator".into();
         assert!(c.validate(Some("ns")).is_err());
+        // S6-14: the path reaches `get --raw …/proxy{path}` — the pod-HTTP
+        // rules apply (no traversal, encoded slash, host, whitespace).
+        for bad in [
+            "/../../api/v1/secrets",
+            "/a/%2e%2e/b",
+            "/a%2Fb",
+            "//evil.example/x",
+            "/http://x",
+            "/a b",
+            "/m#frag",
+        ] {
+            let mut c = cfg();
+            c.probes[0].path = bad.into();
+            assert!(c.validate(Some("ns")).is_err(), "{bad}");
+        }
+        let mut c = cfg();
+        c.probes[0].path = "/actuator/prometheus?x=1".into();
+        assert!(c.validate(Some("ns")).is_ok());
         let mut c = cfg();
         c.probes = (0..11).map(|i| p(&format!("p{i}"), "/m")).collect();
         assert!(c.validate(Some("ns")).is_err());

@@ -885,7 +885,9 @@ async fn sqs_attributes<S: AwsCtx>(
 /// POST /aws/accounts/{id}/sqs/queues/peek — AwsSqs:Edit. The receive pins
 /// visibility timeout 0 (nothing is hidden), but SQS still bumps each
 /// message's receive count — enough to dead-letter it on a queue with a
-/// redrive policy — so it is gated like Send, not View.
+/// redrive policy — so it needs Edit on `aws_sqs` (checked here: the policy
+/// table grades the POST View) plus the account's own `sqs_receive`
+/// operation, which is not `sqs_send` (S6-12).
 async fn sqs_peek<S: AwsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
@@ -894,6 +896,14 @@ async fn sqs_peek<S: AwsCtx>(
     Json(req): Json<sqs::PeekReq>,
 ) -> ApiResult<Json<sqs::PeekResp>> {
     crate::access::check(&ctx.pool(), &user, &id, sqs::PEEK_OPERATION, None).await?;
+    GrantsRepo::new(ctx.pool())
+        .check_global(
+            &user,
+            Feature::AwsSqs,
+            Capability::Edit,
+            "peeking SQS messages bumps their receive count and requires aws_sqs:Edit",
+        )
+        .await?;
     let svc = AwsService::from_ctx(&ctx);
     let a = svc.get_row(&id).await?;
     Ok(Json(sqs::peek(&svc, &a, &req, rq.region.as_deref()).await?))

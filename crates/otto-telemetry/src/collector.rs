@@ -111,7 +111,17 @@ impl Collector {
         let _ = self.child.wait().await;
         self._owner_lock.take();
     }
-    pub async fn start(dir: &Path, clickhouse: &str, config: &TelemetryConfig) -> Result<Self> {
+    /// `recover`: run the orphan/live-owner process scans (4 whole-machine
+    /// `sysinfo` scans). The service passes it only until one recovery has
+    /// succeeded (S9-04): afterwards every collector it starts is its own
+    /// `kill_on_drop` child, and the owner lock already excludes a concurrent
+    /// owner for as long as its collector runs.
+    pub async fn start(
+        dir: &Path,
+        clickhouse: &str,
+        config: &TelemetryConfig,
+        recover: bool,
+    ) -> Result<Self> {
         // A previous daemon may have died without running Child::drop. Never
         // rewrite a live owner's config or start a second exporter beside it.
         tokio::fs::create_dir_all(dir).await?;
@@ -122,9 +132,13 @@ impl Collector {
             .context("resolve telemetry directory")?;
         let dir = absolute_dir.as_path();
         let owner_lock = acquire_owner_lock(dir).await?;
-        recover_unlocked(dir, owner_lock.clone()).await?;
+        if recover {
+            recover_unlocked(dir, owner_lock.clone()).await?;
+        }
         let bin = install(dir).await?;
-        recover_unlocked(dir, owner_lock.clone()).await?;
+        if recover {
+            recover_unlocked(dir, owner_lock.clone()).await?;
+        }
         let health_port = port()?;
         let metrics_port = port()?;
         let port = port()?;
@@ -139,10 +153,13 @@ impl Collector {
                 "endpoint":clickhouse,"database":"otto_telemetry","create_schema":true,
                 // The daemon hands over minutes of buffered records at once;
                 // server-side async inserts + large batches keep part count low.
-                "ttl":format!("{}h",days*24),"async_insert":true,"compress":"none","timeout":"10s",
+                "ttl":format!("{}h",days*24),"async_insert":true,"compress":"none","timeout":"5s",
                 "connection_params":{"max_open_conns":"2","max_idle_conns":"1"},
                 "sending_queue":{"enabled":true,"num_consumers":1,"queue_size":16384,"sizer":"items","batch":{"min_size":2048,"max_size":8192,"flush_timeout":"10s","sizer":"items"}},
-                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"10s","max_elapsed_time":"30s"}
+                // Retries must give up before the daemon's drain deadline (S9-03):
+                // batch flush (10 s) + retries (≤ 10 s) + one 5 s attempt
+                // fit DRAIN_DEADLINE (25 s); anything left is reported, not lost silently.
+                "retry_on_failure":{"enabled":true,"initial_interval":"1s","max_interval":"4s","max_elapsed_time":"10s"}
             }));
         }
         let config = json!({
@@ -252,9 +269,18 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     let bin = install_dir.join("otelcol-contrib");
     let stamp = install_dir.join("binary.sha256");
     if bin.is_file() && stamp.is_file() {
+        let stamped = tokio::fs::read_to_string(&stamp).await?;
+        // Re-hashing the 363 MB binary cost ~0.5 s per flush (S9-04): reuse
+        // a digest verified in this process while the file's identity
+        // (device, inode, size, mtime, ctime) is unchanged.
+        let key = file_key(&bin).await;
+        if key.is_some() && verified_digest(key) == Some(stamped.clone()) {
+            return Ok(bin);
+        }
         let path = bin.clone();
         let digest = tokio::task::spawn_blocking(move || hash_file(&path)).await??;
-        if tokio::fs::read_to_string(&stamp).await? == digest {
+        if stamped == digest {
+            remember_digest(key, digest);
             return Ok(bin);
         }
     }
@@ -297,6 +323,44 @@ async fn install(dir: &Path) -> Result<std::path::PathBuf> {
     tokio::fs::write(stamp, digest).await?;
     tokio::fs::remove_file(archive).await?;
     Ok(bin)
+}
+/// Identity of an on-disk file for the verified-digest cache. `ctime` cannot
+/// be set by user code, so an in-place rewrite never matches a stale entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FileKey([i64; 7]);
+#[cfg(unix)]
+pub(crate) async fn file_key(path: &Path) -> Option<FileKey> {
+    use std::os::unix::fs::MetadataExt;
+    let m = tokio::fs::metadata(path).await.ok()?;
+    Some(FileKey([
+        m.dev() as i64,
+        m.ino() as i64,
+        m.size() as i64,
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    ]))
+}
+#[cfg(not(unix))]
+pub(crate) async fn file_key(_path: &Path) -> Option<FileKey> {
+    None
+}
+static VERIFIED: std::sync::Mutex<Option<(FileKey, String)>> = std::sync::Mutex::new(None);
+/// The digest last verified for exactly this file identity, if any.
+pub(crate) fn verified_digest(key: Option<FileKey>) -> Option<String> {
+    let key = key?;
+    VERIFIED
+        .lock()
+        .ok()?
+        .as_ref()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, d)| d.clone())
+}
+pub(crate) fn remember_digest(key: Option<FileKey>, digest: String) {
+    if let (Some(key), Ok(mut slot)) = (key, VERIFIED.lock()) {
+        *slot = Some((key, digest));
+    }
 }
 fn hash_file(path: &Path) -> Result<String> {
     use std::io::Read;

@@ -1314,7 +1314,9 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     //   S3     — read-only by design: every S3 route (incl. download) is View,
     //            EXCEPT `download-to` (+ its cancel): it writes a file onto the
     //            daemon HOST, so it is Edit (same as SFTP download, r3-10-01).
-    //   SQS    — list/attributes/peek are View; send/delete/purge/redrive Edit.
+    //   SQS    — list/attributes are View; send/delete/purge/redrive Edit.
+    //            Peek is graded View here, but its handler requires
+    //            aws_sqs:Edit (a receive bumps the receive count, S6-12).
     //   EC2    — describe is View; start/stop/reboot Edit.
     //   Athena — catalog/history/results/cancel View; executing a query Edit.
     //   EKS    — describe is View; kubeconfig import Edit.

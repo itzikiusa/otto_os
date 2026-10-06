@@ -1,7 +1,7 @@
 //! SwarmService — CRUD façade over `SwarmRepo` plus composite assembly. Holds no
 //! session/LLM dependencies (those live in the otto-server runtime).
 
-use otto_core::{Id, Result};
+use otto_core::{Error, Id, Result};
 use otto_state::swarm::NewTask;
 use otto_state::{
     NewAgent, NewMessage, NewProject, NewSwarm, ProjectPatch, RunFilter, Swarm, SwarmAgent,
@@ -239,7 +239,7 @@ impl SwarmService {
                     description: req.description,
                     repo_path: req
                         .repo_path
-                        .map(|p| Some(otto_core::paths::expand_tilde(&p))),
+                        .map(|p| p.map(|p| otto_core::paths::expand_tilde(&p))),
                     goal_md: req.goal_md.map(Some),
                     // story_id is an internal Plan → Swarm back-link, not editable
                     // via the project PATCH endpoint — leave it unchanged.
@@ -281,6 +281,9 @@ impl SwarmService {
         user: &Id,
         req: CreateTaskReq,
     ) -> Result<SwarmTask> {
+        if let Some(aid) = &req.assignee_agent_id {
+            self.check_assignee(&project.swarm_id, aid).await?;
+        }
         self.repo
             .create_task(NewTask {
                 project_id: project.id.clone(),
@@ -305,13 +308,17 @@ impl SwarmService {
     }
 
     pub async fn update_task(&self, id: &Id, req: UpdateTaskReq) -> Result<SwarmTask> {
+        if let Some(Some(aid)) = &req.assignee_agent_id {
+            let task = self.repo.get_task(id).await?;
+            self.check_assignee(&task.swarm_id, aid).await?;
+        }
         self.repo
             .update_task(
                 id,
                 TaskPatch {
                     title: req.title,
                     description: req.description,
-                    assignee_agent_id: req.assignee_agent_id.map(Some),
+                    assignee_agent_id: req.assignee_agent_id,
                     status: req.status,
                     priority: req.priority,
                     depends_on: req.depends_on,
@@ -322,6 +329,18 @@ impl SwarmService {
                 },
             )
             .await
+    }
+
+    /// A task's assignee must be an agent of the task's OWN swarm (S4-05):
+    /// an off-roster id would make the run provision another swarm's (or
+    /// another workspace's) soul, skills and model and mark that agent busy.
+    async fn check_assignee(&self, swarm_id: &Id, agent_id: &Id) -> Result<()> {
+        let foreign = || Error::Invalid(format!("agent {agent_id} is not in this swarm"));
+        match self.repo.get_agent(agent_id).await {
+            Ok(a) if &a.swarm_id == swarm_id => Ok(()),
+            Ok(_) | Err(Error::NotFound(_)) => Err(foreign()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn delete_task(&self, id: &Id) -> Result<()> {

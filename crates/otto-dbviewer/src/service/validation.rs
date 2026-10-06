@@ -59,7 +59,9 @@ impl DbViewerService {
                 }
             }
             if profile.kind != logical.kind || left != right {
-                return Err(crate::native_access::setup_error("credential profile differs from the logical endpoint, database, TLS or SSH configuration"));
+                return Err(crate::native_access::setup_error(
+                    "credential profile differs from the logical endpoint, database, TLS or SSH configuration",
+                ));
             }
             for subject in subjects {
                 if !checked.insert((subject.clone(), source.clone())) {
@@ -103,7 +105,9 @@ impl DbViewerService {
                             .preview(&user, candidate, &resource, "change_execute")
                             .await?;
                         if permission.reason == "explicit_deny" || !change.allowed {
-                            return Err(crate::native_access::setup_error("native credential privileges exceed a candidate user's effective scope"));
+                            return Err(crate::native_access::setup_error(
+                                "native credential privileges exceed a candidate user's effective scope",
+                            ));
                         }
                     }
                 }

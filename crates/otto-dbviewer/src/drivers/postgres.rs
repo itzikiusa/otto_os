@@ -132,7 +132,9 @@ impl Driver for PostgresDriver {
         let database_authority: bool = sqlx::query_scalar("SELECT has_database_privilege(current_database(), 'CREATE') OR has_database_privilege(current_database(), 'TEMP') OR datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user) FROM pg_database WHERE datname = current_database()")
             .fetch_one(&pool).await.map_err(types::upstream)?;
         if elevated || memberships != 0 || database_authority {
-            return Err(setup_error("native role has administrative, inherited-role, database-owner, CREATE, or TEMP authority"));
+            return Err(setup_error(
+                "native role has administrative, inherited-role, database-owner, CREATE, or TEMP authority",
+            ));
         }
         let unsafe_routines: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND has_function_privilege(p.oid, 'EXECUTE')")
             .fetch_one(&pool).await.map_err(types::upstream)?;
@@ -143,7 +145,9 @@ impl Driver for PostgresDriver {
         let cascades: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_constraint c WHERE c.contype='f' AND (c.confdeltype IN ('c','n','d') OR c.confupdtype IN ('c','n','d')) AND has_table_privilege(c.confrelid,'DELETE,UPDATE')")
             .fetch_one(&pool).await.map_err(types::upstream)?;
         if unsafe_routines != 0 || unsafe_objects != 0 || triggers != 0 || cascades != 0 {
-            return Err(setup_error("native routine, view, foreign-table, or trigger authority cannot prove the requested scope"));
+            return Err(setup_error(
+                "native routine, view, foreign-table, or trigger authority cannot prove the requested scope",
+            ));
         }
         let schemas: Vec<(String, bool, bool)> = sqlx::query_as("SELECT nspname, has_schema_privilege(oid,'CREATE') OR nspowner = (SELECT oid FROM pg_roles WHERE rolname = current_user), has_schema_privilege(oid,'USAGE') FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema'")
             .fetch_all(&pool).await.map_err(types::upstream)?;
@@ -2915,6 +2919,8 @@ mod tests {
             "CREATE TEMP TABLE t (id int)",
             "SELECT set_config('search_path', 'x', false)",
             "SELECT pg_advisory_lock(1)",
+            "SELECT pg_try_advisory_lock(1)",
+            "SELECT pg_try_advisory_lock_shared(1, 2)",
             "SELECT * INTO TEMP t2 FROM t",
             "select id into temporary table t3 from t",
             "SELECT * INTO UNLOGGED t4 FROM t",

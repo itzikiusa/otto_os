@@ -256,10 +256,16 @@ impl RunsRepo {
         Ok(())
     }
 
-    pub async fn set_error(&self, id: &Id, err: &str) -> Result<()> {
+    /// Fail a run — a CAS against every terminal status: a stage that errors
+    /// out AFTER a cancel (its worktree was removed underneath it) must not
+    /// overwrite `cancelled` with `failed`. Returns whether the row changed;
+    /// `false` means the run had already ended and the caller must not
+    /// announce a failure.
+    pub async fn set_error(&self, id: &Id, err: &str) -> Result<bool> {
         let now = fmt(Utc::now());
-        sqlx::query(
-            "UPDATE otto_runs SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+        let res = sqlx::query(
+            "UPDATE otto_runs SET status = 'failed', error = ?, updated_at = ? \
+             WHERE id = ? AND status NOT IN ('completed', 'failed', 'rejected', 'cancelled')",
         )
         .bind(err)
         .bind(&now)
@@ -267,7 +273,7 @@ impl RunsRepo {
         .execute(&self.pool)
         .await
         .map_err(dberr("set run error"))?;
-        Ok(())
+        Ok(res.rows_affected() == 1)
     }
 
     /// Write the `Some` fields of a patch (others unchanged via `COALESCE`).
@@ -522,6 +528,25 @@ mod tests {
             repo.get(&run.id).await.unwrap().status,
             RunStatus::ResolvingSource
         );
+    }
+
+    /// S2-04: a stage failing after a cancel leaves the run Cancelled.
+    #[tokio::test]
+    async fn set_error_never_overwrites_a_terminal_status() {
+        let pool = mem_pool().await;
+        let ws = seed_ws(&pool).await;
+        let repo = RunsRepo::new(pool);
+        let run = repo.create(sample(&ws)).await.unwrap();
+        repo.set_status(&run.id, RunStatus::Cancelled)
+            .await
+            .unwrap();
+        assert!(!repo.set_error(&run.id, "worktree vanished").await.unwrap());
+        let got = repo.get(&run.id).await.unwrap();
+        assert_eq!(got.status, RunStatus::Cancelled);
+        // A live run still fails normally.
+        let live = repo.create(sample(&ws)).await.unwrap();
+        assert!(repo.set_error(&live.id, "boom").await.unwrap());
+        assert_eq!(repo.get(&live.id).await.unwrap().status, RunStatus::Failed);
     }
 
     #[tokio::test]

@@ -120,7 +120,7 @@ connection library unusable for every non-root account.)
 | 53 | POST /api/v1/repos/{id}/prs/{number}/comments | ws editor | NewPrCommentReq `{body, path?, line?, in_reply_to?, side?: "old"\|"new" (default new; a deleted line sends "old" with its OLD number), old_line? (the row's old number — GitLab needs both for a context line), commit_id? (head sha the reviewer saw; GitHub skips the PR lookup)}` | PrComment (carries `resolved: bool` + `thread_id?: string` on thread heads — Bitbucket comment id, GitLab discussion id, GitHub GraphQL reviewThread node id; inline comments add `side?: "old"\|"new"` and `outdated: bool` — outdated = the forge no longer maps it onto the diff, `line` is then the original line) |
 | 53b | POST /api/v1/repos/{id}/prs/{number}/comments/{cid}/resolve | ws editor | ResolvePrThreadReq `{"resolved": bool}` — `{cid}` is `PrComment.thread_id`; `false` reopens | 204 |
 | 54 | POST /api/v1/repos/{id}/prs/{number}/approve | ws editor | — | 204 |
-| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?}` | 204 — `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
+| 55 | POST /api/v1/repos/{id}/prs/{number}/merge | ws editor | MergePrReq `{strategy, delete_source_branch?, expected_head_sha?}` | 204 — `expected_head_sha` (the `head_sha` the user reviewed) pins the merge: a PR whose head moved since is refused with **409 "PR changed — re-check"** (GitHub/GitLab: forwarded as the forge's `sha` pin, atomic; GitLab `rebase` and Bitbucket: the PR head is read and compared by case-insensitive prefix — Bitbucket abbreviates — before merging). Absent ⇒ unpinned. `delete_source_branch:true` also drops the source branch (GitHub: a follow-up ref delete after the merge only for a verified same-repository head; fork/missing-head-repository cleanup is skipped; GitLab: `should_remove_source_branch`; Bitbucket: `close_source_branch`). GitHub's follow-up delete is best-effort — a refused delete (protected branch, missing scope) is logged and never fails a merge that landed |
 | 56 | POST /api/v1/repos/{id}/prs/{number}/decline | ws editor | — | 204 |
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
@@ -1316,7 +1316,7 @@ run keeps its status and counts but `result_dropped: true`.
 | POST /repos/{id}/revert | ws editor | `{sha}` | RepoStatusResp — a conflicting revert is a normal 200 (see cherry-pick; `op_in_progress:"revert"`) |
 | POST /repos/{id}/branch | ws editor | `{name, start_point?, checkout?}` | RepoStatusResp (create a branch, optionally from `start_point` and checking it out) |
 | POST /repos/{id}/branch/rename | ws editor | `{from, to}` | RepoStatusResp (rename a local branch) |
-| POST /repos/{id}/branch/delete | ws editor | `{name, remote?, local?, force?}` | RepoStatusResp (delete the local branch (`local` default true); `remote:true` also deletes `origin/<name>`; `local:false` = remote-only; never the checked-out branch — 400). `force` defaults FALSE (safe `-d`, refuses an unmerged branch with 409 "not fully merged"); clients escalate to `force:true` (`-D`) only after their own explicit confirm. |
+| POST /repos/{id}/branch/delete | ws editor | `{name, remote?, local?, force?, remote_name?}` | RepoStatusResp (delete the local branch (`local` default true); `remote:true` also deletes `<remote_name>/<name>` — `git push <remote_name> --delete <name>`, `remote_name` defaults to `origin` and must be a configured remote (400 otherwise); a remote-ref row such as `upstream/x` MUST send `remote_name:"upstream"`. The bound account token is offered only to `origin` or a remote on origin's host; `local:false` = remote-only; never the checked-out branch — 400). `force` defaults FALSE (safe `-d`, refuses an unmerged branch with 409 "not fully merged"); clients escalate to `force:true` (`-D`) only after their own explicit confirm. |
 | POST /repos/{id}/tag | ws editor | `{name, sha, message?, push?}` | RepoStatusResp (create a tag at `sha`; annotated when `message`; pushes the new tag when `push:true`) |
 | POST /repos/{id}/tag/push | ws editor | `{name}` | RepoStatusResp (push an existing tag to origin) |
 | POST /repos/{id}/tag/delete | ws editor | `{name, remote?}` | RepoStatusResp (delete the local tag; `remote:true` also deletes it on origin) |
@@ -1324,7 +1324,7 @@ run keeps its status and counts but `result_dropped: true`.
 | POST /repos/{id}/prs/{number}/request-changes | ws editor | — | 204 (request changes review) |
 | POST /repos/{id}/api-collections/pull | ws editor | — | pull API-client collections committed in the repo |
 | POST /repos/{id}/api-collections/push | ws editor | — | commit API-client collections into the repo |
-| POST /repos/{id}/pr/draft | ws editor | DraftPrReq | DraftPrResp (AI-drafted title+body, plus the `session_id` that drafted it). When the bundled `pull-request` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected as the title prefix (never in the body). No AI attribution is added. Runs as a REAL Otto session titled `PR draft · <branch>` — it appears in Agents as soon as it spawns, so it can be opened in a pane and watched mid-draft. The turn uses the `pr_draft_model` setting (default `haiku`) and `lean_turn` (no MCP servers, no Bash/Edit/Web tools): the prompt already carries the diff and the skill, so both are pure latency. |
+| POST /repos/{id}/pr/draft | ws editor | DraftPrReq `{base, head?}` | DraftPrResp (AI-drafted title+body, plus the `session_id` that drafted it). `head` (the PR's Source branch) drafts from `git diff <base>...<head>` — that branch's committed work vs its merge-base, never the checked-out branch or the working tree — and `source_branch` echoes it (400 for an unknown branch); absent ⇒ the checked-out branch, as before. When the bundled `pull-request` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected as the title prefix (never in the body). No AI attribution is added. Runs as a REAL Otto session titled `PR draft · <branch>` — it appears in Agents as soon as it spawns, so it can be opened in a pane and watched mid-draft. The turn uses the `pr_draft_model` setting (default `haiku`) and `lean_turn` (no MCP servers, no Bash/Edit/Web tools): the prompt already carries the diff and the skill, so both are pure latency. |
 | POST /repos/{id}/draft-commit-message | ws editor | DraftCommitMessageReq (empty `{}`) | DraftCommitMessageResp (AI-drafted Conventional-Commits message from the STAGED diff; falls back to the working diff when nothing is staged; plus the `session_id` that drafted it). When the bundled `commit-message` skill is installed it is prepended to the draft prompt; the branch Jira key (if any) is injected into the subject. No AI attribution is added. Runs exactly like `pr/draft`: a REAL session titled `Commit draft · <branch>` (source `commit-draft`, a background source — watchable from the WIP panel, not listed under Agents) on the `pr_draft_model` setting with `lean_turn`. |
 
 > Removed in this version: `POST /repos/{id}/checkout-update` (stash · pull · pop). A switch never pulls; use `POST /repos/{id}/checkout {auto_stash:true}` for the stash-around-switch, and `POST /repos/{id}/pull` to update.
@@ -1336,17 +1336,17 @@ run keeps its status and counts but `result_dropped: true`.
 | POST /repos/{id}/prs/{number}/review | ws editor | StartReviewReq | Review (starts the agent fan-out) |
 | GET /repos/{id}/prs/{number}/review | ws viewer | — | Review (latest, with live agent state) |
 | GET /repos/{id}/prs/{number}/reviews | ws viewer | — | `Review[]` (history for the PR) |
-| POST /repos/{id}/local-review | ws editor | LocalReviewReq | Review (review the working diff) |
+| POST /repos/{id}/local-review | ws editor | LocalReviewReq | Review (review the working diff). Budget-gated like a PR review (`400` when the workspace budget blocks). Reviewer sessions run `read_only` (forced Seatbelt, no shell) without the checkout's project settings (`--setting-sources user`). |
 | GET /repos/{id}/local-review | ws viewer | — | latest local Review |
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
-| POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
+| POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. **409** when the comment is `declined` (also re-checked under the post claim, so a decline racing a "Post all" wins) — restore it to draft via `PATCH … {restore_draft:true}` first. |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
 | PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
-| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. |
-| POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. |
+| POST /reviews/{review_id}/agents/{index}/retry | ws editor | — | re-run one stuck/failed review agent. The agent's fully-composed prompt (and the run's diff) are DB-persisted at dispatch, so retry survives reboots / temp-dir sweeps / daemon redeploys; the `$TMPDIR` prompt file is the legacy fallback for pre-0100 reviews. `400` when neither source has the prompt. `409` unless the agent is settled (`done` / `error` / `skipped`) — stop a live one first. A branch review (pr #0) retries in the run's recorded checkout (or a throwaway worktree at its recorded head), never the user's main checkout. Budget-gated like a new review (`400` when blocked). |
+| POST /reviews/{review_id}/summarizer/retry | ws editor | — | re-run ONLY the summarize+persist stage from the STORED per-agent findings (no reviewer re-runs). Deletes the review's unposted `draft` comments (approved/declined/posted stay), flips the run back to `running` (live via `review_changed`), re-summarizes with the repo's effective config, and persists the new comments + workflow findings. Falls back to the deterministic Rust-side summary if the summarizer fails OR returns 0 comments while findings exist. `400` if the review is still running or no stored finding has content. Returns the (now `running`) Review. Budget-gated (`400` when blocked); a branch review anchors on its recorded checkout/head. |
 | POST /reviews/{review_id}/agents/{index}/stop | ws editor | — | `202` + updated Review: stop one **running/waiting** review agent (trips its cancel flag, kills its session, marks the row `error`/"stopped by user" — still retryable; the rest of the run continues and the summarizer proceeds with the remaining findings). `409` if the row is not running/waiting or is the trailing summarizer; broadcasts `review_changed`. |
 
 The trailing summarizer row uses a managed session on every configured provider
@@ -1556,7 +1556,7 @@ Live publish requires the matching successful persisted human-approval node in t
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns) |
+| POST /workspaces/{id}/product/stories/{sid}/analyze | ws editor | AnalyzeReq | Analysis (multi-lens fan-out spawns). 400 above 4 providers per agent or 12 agents (lenses × providers) total; 409 while another analysis of the story is `running` |
 | POST /workspaces/{id}/product/stories/{sid}/rewrite | ws editor | RewriteReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/testcases/generate | ws editor | GenerateTestsReq? | 202 |
 | POST /workspaces/{id}/product/stories/{sid}/plan/generate | ws editor | GeneratePlanReq? | 202 (multi-agent: spawns N visible planning sessions + a summarizer when >1; emits `plan_run`) |
@@ -1564,7 +1564,7 @@ Live publish requires the matching successful persisted human-approval node in t
 | POST /product/stories/{sid}/to-swarm | ws editor | ToSwarmReq? | ToSwarmResp (create a swarm project from the story + seed tasks from its plan) |
 | POST /workspaces/{id}/product/stories/{sid}/inject-session | ws editor | InjectSessionReq | inject story context into a session |
 | POST /product/analyses/{aid}/agents/{agent_id}/retry | ws editor | — | 202 (re-run one analysis lens agent) |
-| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent) |
+| POST /product/analyses/{aid}/agents/{agent_id}/stop | ws editor | — | 202 (stop a running analysis agent); 404 when `agent_id` is not an agent of `aid` |
 
 ### Product story attachments & the Design arena
 
@@ -1687,7 +1687,7 @@ configured Jira/Confluence account.
 |---|---|---|---|
 | GET /issue/accounts | member | — | `IssueAccount[]` (own; token never present) |
 | POST /issue/accounts | member | CreateIssueAccountReq | IssueAccount |
-| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount |
+| PATCH /issue/accounts/{id} | member (owner) | UpdateIssueAccountReq | IssueAccount. A `base_url` on a different **host** (scheme / host / port) requires a new non-empty `token` in the same request — else **400** (the stored token is only ever sent to the host it was saved for) |
 | DELETE /issue/accounts/{id} | member (owner) | — | 204 |
 | GET /issue/projects | member | — | available projects |
 | GET /issue/search | member | — | issue search results (JQL). `?start_at=` offset paging (windows of 25; a full window ⇒ maybe more). Jira Cloud's `/search/jql` is token-paged: the daemon fetches 100-issue pages and memoises the (account, JQL) token walk for 10 min, so "load more" resumes from the nearest token instead of re-walking from page 0; `start_at=0` always starts a fresh walk |
@@ -1731,6 +1731,15 @@ channel-agnostic. For `webhook`, the reused fields carry webhook meanings:
 `bot_token` = the inbound secret **key** (set manually or generate one client-side),
 `channel_id` = the optional default **reply callback URL**, `allowed_users` = the
 optional allowed caller ids (matched against the request's `user`).
+
+**Allow-list (Slack / Telegram) fails closed.** A blank `allowed_users` admits
+**nobody** unless the integration carries the explicit `open_to_all: true` opt-in
+(`Integration.open_to_all`; `UpsertIntegrationReq.open_to_all` — omitted ⇒ the stored
+value is kept, a new integration starts `false`). Integrations created before the flag
+existed with a blank list were migrated to `open_to_all: true` so they keep working; the
+daemon logs a `channel OPEN TO EVERYONE` warning for each on every listener start, and
+Settings → Channels badges them. A webhook (authenticated by its secret key) treats a
+blank caller list as everyone and ignores the flag.
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -1803,7 +1812,9 @@ in the 202 body — pass it back as `conversation` to deliberately continue that
 Errors: 404 (no enabled webhook), 401 (bad/missing key), 400 (empty `text`), 503 (no
 root user yet). The callback URL passes through the SSRF guard before each POST. The
 callback body is `{kind:"reply", conversation, thread, text}` or, for attachments /
-long replies, `{kind:"file", conversation, thread, filename, content_base64}`.
+long replies, `{kind:"file", conversation, thread, filename, content_base64}`. A message
+that never reached an agent (delivery or session creation failed) is reported as
+`{kind:"error", conversation, thread, text}`.
 
 ## Self-improvement engine
 
@@ -2081,7 +2092,7 @@ workspace from the workflow/run row.
 | POST /workspaces/{wid}/workflows/generate | ws editor | GenerateWorkflowReq | Workflow (AI-generated) |
 | GET /workflows/{id} | ws viewer | — | Workflow |
 | PATCH /workflows/{id} | ws editor | UpdateWorkflowReq | Workflow |
-| DELETE /workflows/{id} | ws editor | — | 204 |
+| DELETE /workflows/{id} | ws editor | — | 204; **409** while the workflow has a `pending`/`running` run (cancel it first — the cascade would orphan the live driver) |
 | POST /workflows/{id}/run | ws editor | `RunWorkflowReq? {input?, start_node?, only_node?, review_mode?}` | WorkflowRun — created immediately; may start **queued** (see Run queue) — `review_mode` ("fan_out"\|"orchestrator") seeds `input.review_mode` (400 on an unknown value or a non-object `input`); the engine reads it from the run input and it takes precedence over every `review_run` node's `params.mode`, regardless of graph position (order: run input → node `mode` → stored `ReviewConfig.mode` → `fan_out`) |
 | POST /workflows/{id}/validate | ws viewer | `{graph?: WorkflowGraph}` (omitted uses saved graph) | `{valid: boolean, issues: WorkflowValidationIssue[]}`; each issue has `field`, `message`, optional `node_id`/`edge_id`; no execution |
 | POST /workflows/{id}/triggers/preview | ws viewer | `{kind, spec}` | `{kind, next_fire_times: string[]}`; validates trigger and returns next five schedule times (UTC timestamps), empty list for other kinds; does not save or advance cursor |
@@ -2385,8 +2396,8 @@ reads = `ws viewer`, mutations/execution = `ws editor`.
 | POST /workspaces/{wid}/api-client/grpc/invoke | ws editor | GrpcInvokeReq | gRPC call result. The whole call is bounded at 60 s (unary: `DEADLINE_EXCEEDED` result); a server stream stops at 60 s, 1000 messages or 5 MiB of JSON and returns what arrived with `truncated: true` |
 | POST /workspaces/{wid}/api-client/grpc/reflect | ws editor | GrpcReflectReq | server reflection listing |
 | POST /workspaces/{wid}/api-client/oauth2/token | ws editor | OAuth2TokenReq | fetched OAuth2 token. Same 409 `needs_confirm=new_host` when a `$secret` marker's saved `token_url` host differs from the requested one; `confirm_new_host:true` (person only). 30 s budget, redirects are NOT followed (a 307/308 would resend the client secret), the body read is capped at 256 KiB, and an error without `error`/`error_description` quotes at most 300 chars of the body. Honours the workspace `allow_local` opt-in like `execute` |
-| GET /workspaces/{wid}/api-client/cookies | ws editor | — | THIS workspace's cookie jar (jars are per-workspace, never shared; values are live credentials — editor-gated) |
-| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear THIS workspace's jar |
+| GET /workspaces/{wid}/api-client/cookies | ws editor | — | the CALLER's cookie jar in this workspace (jars are per (workspace, user) — never shared across workspaces or users; automation runs use their actor's jar; values are live credentials — editor-gated) |
+| DELETE /workspaces/{wid}/api-client/cookies | ws editor | — | clear the caller's jar in this workspace |
 | GET /workspaces/{wid}/api-client/automations | ws viewer | — | `Automation[]` |
 | POST /workspaces/{wid}/api-client/automations | ws editor | CreateAutomationReq | Automation |
 | PATCH /workspaces/{wid}/api-client/automations/{id} | ws editor | UpdateAutomationReq | Automation |
@@ -2838,6 +2849,17 @@ them as four distinct routes. Each takes no body and returns the updated `Swarm`
 | POST /workspaces/{id}/swarm/swarms/{sid}/pause | ws editor | — | Swarm (pause new turns; suspend idle sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/abort | ws editor | — | Swarm (cancel runs; kill swarm sessions) |
 | POST /workspaces/{id}/swarm/swarms/{sid}/resume | ws editor | — | Swarm (resume from paused) |
+
+A `{sid}` (or `{pid}` for `…/projects/{pid}/plan`, `swarm_id` in a recruit body) that
+belongs to a different workspace than the path `{id}` answers **404**, exactly like a
+missing row — the role check alone is on `{id}`. The same applies to
+`…/swarms/{sid}/agent-stop`.
+
+PATCH bodies (`UpdateTaskReq.assignee_agent_id`, `UpdateProjectReq.repo_path`,
+`UpdateGoalReq.metric|comparator|target_value|block_value|verify_cmd`,
+`UpdateTriggerReq.repo_path`): an absent key leaves the field unchanged, an explicit
+`null` clears it. A task's `assignee_agent_id` must name an agent of the task's own
+swarm (create or update) — otherwise **400** `invalid`.
 
 ## Swarm goals, verification & channel triggers (additive, continues #86)
 
@@ -3296,7 +3318,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
 | GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
 | GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
-| POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `{run_id}` (token validated against workflow_triggers) |
+| POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
 | PATCH /workflow-triggers/{id} | ws editor (Workflows:Edit) | `UpsertTriggerReq` | `WorkflowTrigger` — resuming it (`enabled` false→true) or a really different schedule key (`cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`/`run_at`) re-arms it: `armed_at` = now, and the scheduler never looks before `max(last_run, armed_at)`, so a run missed while paused is not caught up. Created triggers are armed at creation. `armed_at` is null on rows predating migration 0151 |
@@ -3315,6 +3337,19 @@ polled). A `schedule` trigger's `spec.prompt` (string, optional), when set, is t
 run's input as `input.prompt` (in addition to `input.trigger:"schedule"`) — same input shape at
 both `create_run` and the spawned `run_workflow` call — so a fixed instruction reaches the
 engine's prompt normalization exactly like a chat-started run.
+
+**Reserved run-input keys.** Some run-input keys steer who reports a run, where its
+result goes and where agents run; which trigger may set them:
+
+| Keys | Chat path | Trigger spec (schedule/event/webhook) | Manual `POST /workflows/{id}/run` | Webhook body |
+|---|---|---|---|---|
+| `origin_*` (e.g. `origin_workspace_id`), `channel`, `chat`, `thread` | yes | — | dropped | dropped |
+| `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
+| `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
+
+Results always post through the **workflow's own** workspace integration: an
+`origin_workspace_id` naming another workspace is ignored (chat triggers only
+resolve workflows of the receiving workspace).
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
 `otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
@@ -3343,9 +3378,9 @@ every inbound Slack/Telegram/webhook message *before* normal session routing. Re
 is GLOBAL across every workspace, so match candidates are walked in preference order and each
 candidate's workflow is re-checked against the inbound `workspace_id` before being trusted — a
 channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
-channel's messages) into workspace A. This is unlike the legacy/simplified name-addressed
-commands above (1 and 2), which intentionally resolve against the GLOBAL workflow library
-(`find_by_name`, preferring but not requiring the message's own workspace).
+channel's messages) into workspace A. The name-addressed commands above (1 and 2) apply the
+same gate: `find_by_name` resolves only within the message's own workspace, so a member of
+workspace A's channel can never start workspace B's workflow.
 
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
@@ -3489,8 +3524,8 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 | 106a | GET /api/v1/canvas/scenes/{id}/versions | ws viewer | — | `CanvasSceneVersion[]` newest first `{id, scene_id, origin: 'agent'\|'user'\|'restore', created_by?, format?, size, created_at}` — no documents. Each entry is the doc as it was JUST BEFORE a change: before every Ask AI commit, before a restore, and at most once per 10 min across user saves (#105 with `doc`); deduped against the newest entry; newest 30 kept (migration 0152). `format`/`size` are columns recorded at snapshot time (migration 0159) — listing never parses a document; `size` is the original doc's byte length. Excalidraw images (`files[*].dataURL`) are stored once per sha256 in `canvas_files` and referenced from versions, restored inline by #106b; pruning / scene delete garbage-collects unreferenced files |
 | 106b | POST /api/v1/canvas/scenes/{id}/versions/{vid}/restore | ws editor | — | CanvasScene — snapshots the current doc (origin `restore`, so a restore is undoable) then writes the version's doc. 404 when `vid` isn't a version of THIS scene |
 | 106c | GET /api/v1/canvas/files/{sha} | ws viewer of any workspace holding a scene (live or in history) that references the file | — | `text/plain` — the file's `data:` URL (what Excalidraw's `addFiles` takes). `ETag: "<sha>"`, `Cache-Control: private, max-age=31536000, immutable`; `If-None-Match` → 304. 400 on a non-sha256 id; 404 when missing OR not visible to the caller (a hash never reveals another workspace's image) |
-| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a |
-| 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas") |
+| 107 | POST /api/v1/canvas/scenes/{id}/assist | ws editor | `{prompt, mode?}` | AssistResult `{mermaid?, d2?, excalidraw?, format, nodes, edges, note}` (one agent turn edits AND COMMITS the scene's backing file as `doc_json` — not a dry-run preview). On an Excalidraw board the agent sees only shapes/arrows/text in the simplified form; images, freedraw, lines, frames, free arrows (and anything bound to them) plus top-level `files`/`appState` are set aside and merged back into the committed scene, which may therefore mix simplified and full elements. The committed doc keeps the prior doc's extra keys (`sketch`, `positions`, …) and the pre-turn doc is recorded in #106a. **409** while another assist turn runs on the same scene |
+| 108 | POST /api/v1/canvas/assist/preview | canvas edit | `{prompt, mode?}` | AssistResult (no scene; used by empty-canvas hero + Discovery-Chat "Open in Canvas"). Runs a throwaway session in a per-call scratch dir under `<data>/canvas/preview/` (never the workspace repo); the session is killed and the dir removed afterwards, also when the request is dropped |
 | 145 | GET /api/v1/sessions/{sid}/canvas-refs | ws viewer | — | `CanvasSceneSummary[]` — scenes referenced by this session |
 | 146 | POST /api/v1/sessions/{sid}/canvas-refs | ws editor | `{scene_id}` | 204 (idempotent; 404 if the scene isn't in the session's workspace) |
 | 147 | DELETE /api/v1/sessions/{sid}/canvas-refs/{scene_id} | ws editor | — | 204 (detaches; the scene itself is untouched) |
@@ -4181,7 +4216,7 @@ before it, so a resumed task does not catch up what it missed while paused, and 
 `daily 09:00` created at 15:00 first fires tomorrow 09:00 (its `next_run_at`). A
 `once` whose `run_at` changes forgets that it fired. `last_status` reflects the latest
 run, manual included (manual runs never move the cursor). A `ScheduledTaskRun` carries `{…,
-status (running|ok|error|canceled), trigger, started_at, finished_at?, summary, report_path?, report_rel?,
+status (running|ok|error|canceled|skipped — a workflow task whose workflow was still busy; no failure notice), trigger, started_at, finished_at?, summary, report_path?, report_rel?,
 delivered, delivery_error?, error?, session_id?, report_hash?, proof_pack_id?,
 attempts, skipped_delivery, workflow_run_id?, created_at}`. A failed run keeps what it
 produced: its `session_id` (open it to see why), a shell task's stdout/stderr as the
@@ -4211,7 +4246,7 @@ redacted (`otto_core::redact`); webhook delivery is SSRF-guarded (`otto_netguard
 | 141 | POST /api/v1/scheduled-tasks/{id}/run | scheduled_tasks edit + ws editor | — | ScheduledTaskRun — the manual run, returned at once in `running` (it executes in the background; completion arrives as `scheduled_task_run_updated`, or poll the runs list). 409 while a run of the task is already in progress |
 | 142 | GET /api/v1/scheduled-tasks/{id}/runs | scheduled_tasks view + ws viewer | — | `ScheduledTaskRun[]` |
 | 143 | GET /api/v1/scheduled-tasks/runs/{run_id}/report | scheduled_tasks view + ws viewer | — | `text/markdown` (the stored report) |
-| 143a | POST /api/v1/scheduled-tasks/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run: its agent session is killed (no retry), a shell task's process group is killed, a workflow hand-off's workflow run is cancelled; the run settles `canceled` (announced by `scheduled_task_run_updated`; a scheduled run still advances the cursor). `409` when the run isn't running |
+| 143a | POST /api/v1/scheduled-tasks/runs/{run_id}/cancel | scheduled_tasks edit + ws editor | — | `{ok:true}` — stop a `running` run: its agent session is killed (no retry), a shell task's process group is killed, a workflow hand-off's workflow run is cancelled; the run settles `canceled` (announced by `scheduled_task_run_updated`; a scheduled run still advances the cursor). Stoppable from the moment Run now returns its `running` row. `409` when the run isn't running, or (different message) when it is **finishing** — execution ended and it is saving/delivering its report |
 | 144 | POST /api/v1/scheduled-tasks/{id}/convert-to-workflow | scheduled_tasks edit + ws editor | `ConvertTaskReq {disable_task?}` | `ConvertTaskResp {workflow_id, trigger_id?}` |
 
 **Convert to workflow (#144)** materializes a scheduled task as a Workflow
@@ -4610,13 +4645,13 @@ The run advances in the background; subscribe to `Event::OttoRunUpdated` (see `w
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) |
+| POST /api/v1/workspaces/{wid}/runs | run_with_otto edit + ws editor | `LaunchRunReq {source_kind?, source_ref?, url?, seed_text?, mode?, provider?, model?, repo_id?, auto_open_pr?, title?}` | OttoRun (queued; poll/subscribe) `404` when `repo_id` names a repo outside `{wid}` (reported like a missing repo; no run is created). |
 | GET /api/v1/workspaces/{wid}/runs | run_with_otto view + ws viewer | — | `OttoRun[]` |
 | GET /api/v1/workspaces/{wid}/runs/detect?q= | run_with_otto view + ws viewer | — | `{detected: {source_kind, source_ref, url}?}` |
 | GET /api/v1/runs/{id} | run_with_otto view + ws viewer | — | OttoRun |
 | GET /api/v1/runs/{id}/events | run_with_otto view + ws viewer | — | `RunEvent[]` (the stage timeline) |
 | POST /api/v1/runs/{id}/approve | run_with_otto edit + ws editor | `{decision: "approve"\|"reject", note?}` | OttoRun |
-| POST /api/v1/runs/{id}/cancel | run_with_otto edit + ws editor | — | OttoRun |
+| POST /api/v1/runs/{id}/cancel | run_with_otto edit + ws editor | — | OttoRun — stops the WORK, not just the status: the in-flight stage is dropped (its agent CLI is killed), the run's review is cancelled and its goal loop stopped; the worktree is removed only after the stage has stopped. A stage error landing after the cancel never turns the run `failed` (no failure notice, no second callback). |
 | POST /api/v1/runs/{id}/open-pr | run_with_otto edit + ws editor | — | PrSummary (requires approved + passed/waived proof) |
 
 Webhook entry (public-by-key, same per-workspace `X-Otto-Webhook-Key` as the channel
@@ -5109,7 +5144,7 @@ the cache.
 |---|---|---|---|
 | GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
 | GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
-| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_send`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_receive`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
 | POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
 | POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
 | POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |
@@ -5136,7 +5171,7 @@ public_ip, launch_time, platform, vpc_id, subnet_id, tags: Record<string,string>
 | GET /aws/accounts/{id}/athena/databases | AwsAthena:View | `?catalog=AwsDataCatalog&region=` | `{ databases: string[] }` |
 | GET /aws/accounts/{id}/athena/tables | AwsAthena:View | `?database=&catalog=&region=` | `{ tables: { name, type, columns: { name, type }[] }[] }` (`list-table-metadata`; partition keys appended to `columns`) |
 | GET /aws/accounts/{id}/athena/history | AwsAthena:View | `?workgroup=&max=&region=` (`max` ≤ 50) | `{ executions: { id, query, state, submitted_at, completed_at?, data_scanned_bytes?, execution_ms? }[] }` |
-| POST /aws/accounts/{id}/athena/query | AwsAthena:Edit | `{ sql, database?, workgroup?, output_location? }` (`?region=`) | `{ query_execution_id }` — 400 with a hint when neither the workgroup nor the request carries an output location; audited `aws.athena.execute` (SQL clipped to 2000 chars) |
+| POST /aws/accounts/{id}/athena/query | AwsAthena:Edit | `{ sql, database?, workgroup?, output_location?, confirm? }` (`?region=`) | `{ query_execution_id }` — 400 with a hint when neither the workgroup nor the request carries an output location; on a `prod` account a statement that is not a plain read (leading keyword other than `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`DESC`/`VALUES`/`TABLE`/non-`ANALYZE` `EXPLAIN` — i.e. DDL, DML, CTAS, `MSCK`, `UNLOAD`) is refused with 400 `confirm_required: …` unless `confirm: true` (the UI sets it only after the person confirms; the MCP tool never forwards it); audited `aws.athena.execute` (SQL clipped to 2000 chars) |
 | GET /aws/accounts/{id}/athena/query/{qid} | AwsAthena:View | `?token=&max=&region=` (`max` ≤ 1000) | `AthenaQueryStatus { state: QUEUED\|RUNNING\|SUCCEEDED\|FAILED\|CANCELLED, reason?, stats: { data_scanned_bytes, execution_ms }, result?: QueryResult, next_token? }` — `result` only when `SUCCEEDED`, in the DB Explorer `QueryResult` shape (`columns: { name, type_hint }[]`, `rows: unknown[][]`, `stats: { duration_ms, row_count, bytes_read }`, `truncated`); the header row is dropped on the first page |
 | POST /aws/accounts/{id}/athena/query/{qid}/cancel | AwsAthena:View | `?region=` | 204 (`stop-query-execution`) |
 
@@ -5348,7 +5383,19 @@ WS `k8s_monitor_cycle`. Guide: `docs/features/kubernetes-monitoring.md`.
 
 Auth: `/k8s/monitor/overview` is `kubernetes:View`; `/k8s/clusters/{id}/monitor*`
 is View on GET, Edit on PUT/POST. Enabling requires the usage engine
-(ClickHouse) to be available ⇒ `409 conflict` otherwise.
+(ClickHouse) to be available ⇒ `409 conflict` otherwise. On top of the feature
+tier every per-cluster route checks the cluster's resource grant itself (an
+Enforced cluster lowers the feature gate to View on that assumption):
+`GET …/monitor` needs `discover`; `PUT …/monitor`, `POST …/monitor/test` and
+`POST …/monitor/run` need `configure` (+ the legacy Admin tier); `workloads`,
+`series`, `events` need `metrics` for the namespace asked for (`?ns=`; without
+it, cluster-wide `metrics`); `health` needs cluster-wide `metrics`. No grant ⇒
+404, a narrower grant ⇒ 403, a malformed `ns`/`pod` ⇒ 400. The overview and
+the fleet routes are scoped to the caller's grants: clusters the caller cannot
+`discover` are omitted, a cluster without cluster-wide `metrics` appears as
+`{ …, restricted: true }` with zeroed figures, and fleet queries only see
+(cluster, namespace) pairs the caller holds `metrics` on (the fleet cache key
+includes that scope).
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
@@ -5358,9 +5405,9 @@ is View on GET, Edit on PUT/POST. Enabling requires the usage engine
 | POST /k8s/clusters/{id}/monitor/run | Edit | — | `MonitorStatus` — runs one cycle inline (schema ensured first) |
 | GET /k8s/monitor/overview?window=24h | View | — | `OverviewRow[]`, one per registered cluster (disabled clusters carry `enabled:false`, `health:"off"`) |
 | GET /k8s/clusters/{id}/monitor/workloads?window=1h&ns= | View | — | `{ window, step_secs, enabled, status, namespaces: string[] /* all, unfiltered */, workloads: WorkloadRow[] }` |
-| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
-| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
-| GET /k8s/clusters/{id}/monitor/health?window=1h | View + per-cluster `discover` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
+| GET /k8s/clusters/{id}/monitor/series?metric=&workload=&pod=&ns=&window=1h&step= | View | — | `{ metric, kind: "gauge"\|"rate", step_secs, points: [{ t, v }] }` — counters (`*_total`, `*_count`, `*_sum`, `*_bucket`) are returned as per-second rates; `step_secs` is rounded up to whole minutes / 5 minutes / hours (≥ 60 s for windows ≥ 24 min, whole hours for windows ≥ 24 h) so the chart reads a rollup |
+| GET /k8s/clusters/{id}/monitor/events?window=24h&class=&workload=&ns=&limit=200 | View | — | `MonitorEvent[]` newest first; `class` ∈ `oom\|crash\|probe\|planned\|completed\|unknown` filters classified rows, `k8s_event` returns raw cluster events |
+| GET /k8s/clusters/{id}/monitor/health?window=1h | View + cluster-wide `metrics` grant | — | `Health` — the compact digest the `k8s_health` MCP tool returns (≤20 entries per list) |
 
 `window` accepts `<n>m|h|d` (max `90d`). `metric`, `workload`, `pod`, `ns`
 and `class` must match `^[A-Za-z0-9_.:/-]{1,128}$` (400 otherwise).
@@ -6071,7 +6118,12 @@ matched route TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed) and the U
 names its client span `http.client.<method>.<template>` (same shape as the server
 span name) so client latency rolls up per endpoint. A request whose client
 disconnects before the response is recorded with `status:"cancelled"` and
-`http.response.status_code:499`;
+`http.response.status_code:499`, and is rolled up under its own operation
+`<name> [cancelled]` so aborted requests neither skew the real operation's
+latency quantiles nor disappear; `GET /telemetry/traces/{id}` returns `status` as
+`ok`, `error`, `cancelled` or `unset` (OTLP Unset is never shown as `ok`), with
+the suffix stripped from `name`. Long-polls (`GET /sessions/{id}/wait`) and
+WebSocket upgrades are not timed as server spans;
 raw URLs, prompts, SQL, body text, headers, file paths and user identifiers are
 never exported. Browser timestamps allow at most one day of age / one minute
 of future skew; duration is finite and bounded to one hour. Attributes have an

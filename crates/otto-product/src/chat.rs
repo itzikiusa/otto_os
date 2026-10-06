@@ -625,7 +625,7 @@ fn build_chat_prompt(context: &str, history: &[DiscoveryChatMessage], new_messag
 /// prose with the json block removed. Tolerant — never panics.
 fn split_actions(raw: &str) -> (String, Option<String>) {
     // Find an actions array via the shared extractor.
-    let actions_json = otto_swarm::recruiter::extract_json(raw)
+    let actions_json = otto_core::text::extract_json(raw)
         .and_then(|v| v.get("actions").cloned())
         .filter(|a| a.is_array() && !a.as_array().map(|x| x.is_empty()).unwrap_or(true))
         .map(|a| a.to_string());

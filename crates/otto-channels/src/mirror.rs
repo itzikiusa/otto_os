@@ -238,6 +238,17 @@ struct Destination {
     agent_reply: bool,
 }
 
+/// The longest the bridge holds a session's turn lock waiting for the turn's
+/// Final (see [`Mirror::wait_turn_done`]) — the stall timeout, after which
+/// the watchdog would end the turn anyway.
+pub const TURN_HOLD_CAP: Duration = TURN_STALL_TIMEOUT;
+
+/// Wait for a turn watch to read "idle" (false), at most `cap`; a dropped
+/// sender (the tailer stopped) ends the wait too. Pure plumbing — tested.
+async fn wait_until_idle(mut rx: tokio::sync::watch::Receiver<bool>, cap: Duration) {
+    let _ = tokio::time::timeout(cap, rx.wait_for(|live| !*live)).await;
+}
+
 /// Snapshot the current destination (never held across an `.await`; a
 /// poisoned lock still yields the last value written).
 fn current_dest(dest: &StdMutex<Destination>) -> Destination {
@@ -338,6 +349,25 @@ impl Mirror {
         if let Some(e) = self.sessions.lock().await.get(session_id) {
             e.new_turn.store(true, Ordering::Relaxed);
             e.typing_active.send_replace(true);
+        }
+    }
+
+    /// Wait until `session_id`'s current turn has ended — its Final reply
+    /// posted, or the watchdog declared it stalled — at most `cap`. Returns at
+    /// once when the session is not tracked (or its tailer stops). The bridge
+    /// holds the session's turn lock across this, so turn N+1's `attach` /
+    /// `begin_turn` never resets the mirror while turn N runs (N's feed stuck
+    /// on "Analyzing…", N's reply ending N+1's typing — and, for a webhook,
+    /// N's answer going to N+1's callback URL).
+    pub async fn wait_turn_done(&self, session_id: &Id, cap: Duration) {
+        let rx = self
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|e| e.typing_active.subscribe());
+        if let Some(rx) = rx {
+            wait_until_idle(rx, cap).await;
         }
     }
 
@@ -1177,6 +1207,37 @@ mod tests {
     /// perf §15 N2: between turns the status loop wakes only for the slow
     /// liveness probe (an idle wake never refreshes the feed header); during
     /// a turn it ticks every STATUS_TICK. Real clock, scaled cadence.
+    /// S5-06: the turn hold ends on the Final (idle), on a stopped tailer,
+    /// or at the cap — never earlier while the turn is live.
+    #[tokio::test]
+    async fn a_turn_hold_waits_for_the_final() {
+        let tx = tokio::sync::watch::Sender::new(true);
+        let rx = tx.subscribe();
+        let wait = tokio::spawn(wait_until_idle(rx, Duration::from_secs(5)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!wait.is_finished(), "still live: the next turn must wait");
+        tx.send_replace(false); // the Final
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("released on the Final")
+            .unwrap();
+        // A stopped tailer (sender gone) releases it as well…
+        let tx = tokio::sync::watch::Sender::new(true);
+        let rx = tx.subscribe();
+        drop(tx);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_until_idle(rx, Duration::from_secs(5)),
+        )
+        .await
+        .expect("released when the tailer stops");
+        // …and the cap bounds a turn that never ends.
+        let tx = tokio::sync::watch::Sender::new(true);
+        let started = Instant::now();
+        wait_until_idle(tx.subscribe(), Duration::from_millis(150)).await;
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
     #[tokio::test]
     async fn status_wakes_park_between_turns() {
         let tick = Duration::from_millis(20);

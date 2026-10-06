@@ -636,6 +636,8 @@ impl<S: K8sCtx> Clusters<S> {
         }
         // The cached EKS token file is a credential — never leave it behind.
         crate::eks_token::forget(id.as_str(), self.ctx.data_dir());
+        // Nor a pooled mutating `kubectl proxy` holding its credentials.
+        crate::pod_http::forget(id.as_str()).await;
         self.broadcast(id, true);
         Ok(())
     }

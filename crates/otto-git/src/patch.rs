@@ -245,18 +245,6 @@ fn build_hunk_patch_dir(
         }
     }
 
-    let mut out: Vec<u8> = Vec::with_capacity(raw_diff.len());
-    for l in &block[..head_end] {
-        // A hunk operation moves CONTENT only. `old mode`/`new mode` would ride
-        // along with any single hunk, so discarding one hunk also reverted a
-        // `chmod +x` (and staging one staged it). Creation/deletion modes
-        // (`new file mode`, `deleted file mode`) are structural and stay.
-        if l.starts_with(b"old mode ") || l.starts_with(b"new mode ") {
-            continue;
-        }
-        out.extend_from_slice(l);
-    }
-
     // Counts are recomputed for the SELECTION. Forward: `old` = context +
     // every `-` (kept or converted), `new` = context + kept `+` + converted
     // `-`. Reverse: `old` = context + kept `-` + converted `+`, `new` =
@@ -315,7 +303,72 @@ fn build_hunk_patch_dir(
     // the numbers are belt-and-braces — but a readable patch matters in a log.
     // The text after the closing `@@` (git's function-context hint) and the
     // line terminator are preserved verbatim.
-    let (old_start, new_start, trailer) = split_hunk_header(hunk[0])?;
+    let (mut old_start, mut new_start, trailer) = split_hunk_header(hunk[0])?;
+
+    // A PARTIAL selection on a created/deleted file is no longer a creation or
+    // deletion: unselected lines survive as context, so the pre-image of a
+    // "new file" (reverse Unstage) or the post-image of a "deleted file"
+    // (forward Stage) is non-empty and `git apply` refuses ("removal patch
+    // leaves file contents"). Rewrite such a block as a plain modification:
+    // drop the creation/deletion mode and the all-zero `index` line, replace
+    // the `/dev/null` side with the real path, and move a zero start to 1.
+    let is_new = block[..head_end]
+        .iter()
+        .any(|l| l.starts_with(b"new file mode "));
+    let is_deleted = block[..head_end]
+        .iter()
+        .any(|l| l.starts_with(b"deleted file mode "));
+    let as_modification = (is_new && old_count > 0) || (is_deleted && new_count > 0);
+    let other_side = |prefix: &[u8]| -> Option<Vec<u8>> {
+        block[..head_end]
+            .iter()
+            .find_map(|l| l.strip_prefix(prefix))
+            .map(|rest| rest.to_vec())
+    };
+
+    let mut out: Vec<u8> = Vec::with_capacity(raw_diff.len());
+    for l in &block[..head_end] {
+        // A hunk operation moves CONTENT only. `old mode`/`new mode` would ride
+        // along with any single hunk, so discarding one hunk also reverted a
+        // `chmod +x` (and staging one staged it). Creation/deletion modes
+        // (`new file mode`, `deleted file mode`) are structural and stay —
+        // unless the selection turned the block into a modification (above).
+        if l.starts_with(b"old mode ") || l.starts_with(b"new mode ") {
+            continue;
+        }
+        if as_modification {
+            if l.starts_with(b"new file mode ")
+                || l.starts_with(b"deleted file mode ")
+                || l.starts_with(b"index ")
+            {
+                continue;
+            }
+            if l.starts_with(b"--- /dev/null") {
+                let rest = other_side(&b"+++ "[..])
+                    .ok_or_else(|| Error::Invalid("stage the whole file".into()))?;
+                out.extend_from_slice(b"--- ");
+                out.extend_from_slice(&swap_side_prefix(&rest, b'b', b'a')?);
+                continue;
+            }
+            if l.starts_with(b"+++ /dev/null") {
+                let rest = other_side(&b"--- "[..])
+                    .ok_or_else(|| Error::Invalid("stage the whole file".into()))?;
+                out.extend_from_slice(b"+++ ");
+                out.extend_from_slice(&swap_side_prefix(&rest, b'a', b'b')?);
+                continue;
+            }
+        }
+        out.extend_from_slice(l);
+    }
+    if as_modification {
+        if old_start == 0 && old_count > 0 {
+            old_start = 1;
+        }
+        if new_start == 0 && new_count > 0 {
+            new_start = 1;
+        }
+    }
+
     out.extend_from_slice(
         format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@").as_bytes(),
     );
@@ -325,6 +378,20 @@ fn build_hunk_patch_dir(
         out.push(b'\n');
     }
     Ok(out)
+}
+
+/// `b/path\n` → `a/path\n` (and `"b/p q"\n` → `"a/p q"\n`): the path of
+/// one side of a `---`/`+++` pair, re-labelled for the other side. Anything
+/// else (a `diff.noprefix` diff) can't be rewritten safely.
+fn swap_side_prefix(rest: &[u8], from: u8, to: u8) -> Result<Vec<u8>> {
+    let mut v = rest.to_vec();
+    let at = usize::from(v.first() == Some(&b'"'));
+    if v.get(at) == Some(&from) && v.get(at + 1) == Some(&b'/') {
+        v[at] = to;
+        Ok(v)
+    } else {
+        Err(Error::Invalid("stage the whole file".into()))
+    }
 }
 
 fn push_marker(out: &mut Vec<u8>, marker: Option<&[u8]>) {
@@ -908,6 +975,56 @@ index 1111111..2222222 100644
         assert_eq!(p, DELETED_FILE);
     }
 
+    /// S2-10: a PARTIAL reverse selection on a created file keeps unselected
+    /// lines → the block is rewritten as a modification, not a removal.
+    #[test]
+    fn partial_reverse_on_new_file_becomes_modification() {
+        let p = build_reverse_hunk_patch_bytes(
+            NEW_FILE.as_bytes(),
+            "n.txt",
+            0,
+            "@@ -0,0 +1,3 @@",
+            Some(&[0]),
+        )
+        .unwrap();
+        let p = String::from_utf8(p).unwrap();
+        assert_eq!(
+            p,
+            "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1,2 +1,3 @@\n+n1\n n2\n n3\n"
+        );
+    }
+
+    /// S2-10: a PARTIAL forward selection on a deleted file leaves lines in
+    /// the post-image → modification with a real `+++` path.
+    #[test]
+    fn partial_forward_on_deleted_file_becomes_modification() {
+        let p = build_hunk_patch(DELETED_FILE, "x.txt", 0, "@@ -1,3 +0,0 @@", Some(&[0])).unwrap();
+        assert_eq!(
+            p,
+            "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1,3 +1,2 @@\n-x1\n x2\n x3\n"
+        );
+        // The whole selection is still a deletion.
+        let full = build_hunk_patch(
+            DELETED_FILE,
+            "x.txt",
+            0,
+            "@@ -1,3 +0,0 @@",
+            Some(&[0, 1, 2]),
+        )
+        .unwrap();
+        assert_eq!(full, DELETED_FILE);
+    }
+
+    #[test]
+    fn swap_side_prefix_handles_quoted_paths() {
+        assert_eq!(swap_side_prefix(b"b/x\n", b'b', b'a').unwrap(), b"a/x\n");
+        assert_eq!(
+            swap_side_prefix(b"\"b/p q\"\n", b'b', b'a').unwrap(),
+            b"\"a/p q\"\n"
+        );
+        assert!(swap_side_prefix(b"x\n", b'b', b'a').is_err());
+    }
+
     #[test]
     fn renamed_block_is_invalid() {
         let e = build_hunk_patch(RENAMED, "new.txt", 0, "@@ -1,3 +1,3 @@", None).unwrap_err();
@@ -1355,6 +1472,51 @@ index 1111111..2222222 100644
             .expect("partial discard applies");
         let disk = std::fs::read_to_string(dir.join("r.txt")).unwrap();
         assert_eq!(disk, "line 1\nline 2\nB\nline 4\n");
+    }
+
+    /// S2-10: partial Unstage of a staged NEW file leaves the unselected
+    /// lines in the index (it used to fail: "removal patch leaves contents").
+    #[tokio::test]
+    async fn partial_unstage_of_new_file_applies() {
+        let (_tmp, dir, git) = repo();
+        write(&dir, "seed.txt", "seed\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        write(&dir, "n.txt", "n1\nn2\nn3\n");
+        sh_git(&dir, &["add", "n.txt"]);
+        let h = header_of(&git, DiffTarget::Staged, "n.txt", 0).await;
+        let request = StageHunkReq {
+            lines: Some(vec![0]),
+            ..req("n.txt", 0, &h, HunkOp::Unstage)
+        };
+        run_test_hunk_op(&git, &request)
+            .await
+            .expect("partial unstage of a new file applies");
+        let index = String::from_utf8(git_bytes(&dir, &["show", ":n.txt"])).unwrap();
+        assert_eq!(index, "n2\nn3\n");
+        let disk = std::fs::read_to_string(dir.join("n.txt")).unwrap();
+        assert_eq!(disk, "n1\nn2\nn3\n");
+    }
+
+    /// S2-10: partial Stage of a DELETED file stages only the selected
+    /// removals; the file stays in the index with the rest.
+    #[tokio::test]
+    async fn partial_stage_of_deleted_file_applies() {
+        let (_tmp, dir, git) = repo();
+        write(&dir, "x.txt", "x1\nx2\nx3\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "init"]);
+        std::fs::remove_file(dir.join("x.txt")).unwrap();
+        let h = header_of(&git, DiffTarget::Worktree, "x.txt", 0).await;
+        let request = StageHunkReq {
+            lines: Some(vec![0]),
+            ..req("x.txt", 0, &h, HunkOp::Stage)
+        };
+        run_test_hunk_op(&git, &request)
+            .await
+            .expect("partial stage of a deleted file applies");
+        let index = String::from_utf8(git_bytes(&dir, &["show", ":x.txt"])).unwrap();
+        assert_eq!(index, "x2\nx3\n");
     }
 
     #[tokio::test]

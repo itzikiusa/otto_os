@@ -63,12 +63,65 @@ pub fn session_cwd(requested: &str) -> String {
     }
 
     // Shared-temp fallback → unique per-session subdir so codex usage attributes
-    // 1:1 by cwd instead of colliding on the shared temp dir.
-    let unique = temp.join(format!("otto-product-{}", uuid::Uuid::new_v4()));
+    // 1:1 by cwd instead of colliding on the shared temp dir. The children live
+    // under ONE stable root (S4-14) that is swept of day-old leftovers here, so
+    // scratch dirs no longer accumulate in `$TMPDIR` forever.
+    let root = temp.join(SCRATCH_ROOT);
+    spawn_scratch_sweep(root.clone());
+    let unique = root.join(uuid::Uuid::new_v4().to_string());
     if let Err(e) = std::fs::create_dir_all(&unique) {
         tracing::debug!("product_run: create session cwd {}: {e}", unique.display());
     }
     unique.to_string_lossy().to_string()
+}
+
+/// Stable parent of every product scratch cwd (under the temp dir).
+pub const SCRATCH_ROOT: &str = "otto-product-scratch";
+/// Scratch dirs older than this are removed by the next [`session_cwd`] call
+/// (a product run never takes a day; the agents' sessions are long done).
+pub const SCRATCH_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// Run [`sweep_stale_scratch`] off the async workers: [`session_cwd`] is called
+/// from async run code, and a directory walk + recursive delete blocks. One
+/// sweep at a time; a call while one is running skips (the next call sweeps).
+fn spawn_scratch_sweep(root: std::path::PathBuf) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SWEEPING: AtomicBool = AtomicBool::new(false);
+    if SWEEPING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let run = move || {
+        sweep_stale_scratch(&root, SCRATCH_MAX_AGE);
+        SWEEPING.store(false, Ordering::Release);
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(run);
+        }
+        Err(_) => run(),
+    }
+}
+
+/// Remove children of `root` last modified more than `max_age` ago
+/// (best-effort; a missing root is fine). Blocking: call it from the blocking
+/// pool (see [`spawn_scratch_sweep`]) or a test.
+#[allow(clippy::disallowed_methods)] // sync helper: only run via spawn_scratch_sweep's spawn_blocking (or a test)
+pub fn sweep_stale_scratch(root: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age);
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +172,10 @@ pub struct FoundLearning {
 /// caller-facing shape; the host's run mechanics return their own outcome type,
 /// which [`ProductRunHost::run_agent_with_recovery`] flattens into this (keeping
 /// `reason` as a stable `&str` for the existing notification/error-note code).
+/// [`LensRunResult::reason`] when a newer run (a Retry after Stop) took the
+/// agent row over mid-flight: the caller must skip every status write (S4-16).
+pub const SUPERSEDED: &str = "superseded";
+
 pub struct LensRunResult {
     /// Raw text the agent wrote to its out file (or the claude transcript turn).
     pub raw: Option<String>,
@@ -192,82 +249,10 @@ Respond with EXACTLY ONE ```json code block (no prose before or after) matching:
 // Pure helpers (unit-testable without an agent)
 // ---------------------------------------------------------------------------
 
-/// Extract the first JSON value from `s`.
-///
-/// Priority:
-/// 1. First ```` ```json ```` fenced block (wins even if a bare `{` appears earlier
-///    in prose before the fence).
-/// 2. First balanced `{…}` not preceded by a fence marker.
-/// 3. `None` for prose-only input.
-pub fn extract_json_block(s: &str) -> Option<serde_json::Value> {
-    // --- Strategy 1: find the first ```json ... ``` fence --------------------
-    if let Some(fence_start) = s.find("```json") {
-        let after_marker = fence_start + "```json".len();
-        // Skip an optional newline right after the marker
-        let content_start = if s[after_marker..].starts_with('\n') {
-            after_marker + 1
-        } else {
-            after_marker
-        };
-        if let Some(end_fence) = s[content_start..].find("```") {
-            let json_str = s[content_start..content_start + end_fence].trim();
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
-                return Some(v);
-            }
-        }
-    }
-
-    // --- Strategy 2: first balanced { ... } anywhere in the string ----------
-    find_first_balanced_object(s)
-}
-
-/// Find and parse the first balanced `{…}` block in `s`.
-fn find_first_balanced_object(s: &str) -> Option<serde_json::Value> {
-    let bytes = s.as_bytes();
-    let mut depth = 0i32;
-    let mut start: Option<usize> = None;
-    let mut in_string = false;
-    let mut escape_next = false;
-
-    for (i, &b) in bytes.iter().enumerate() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-        if in_string {
-            match b {
-                b'\\' => escape_next = true,
-                b'"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => {
-                if depth == 0 {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(s_idx) = start {
-                        let candidate = &s[s_idx..=i];
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate) {
-                            return Some(v);
-                        }
-                    }
-                    // Reset for next candidate
-                    start = None;
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+/// Extract the first JSON value from an agent reply (```json fence first,
+/// else the first balanced `{…}` that parses). The shared implementation:
+/// see [`otto_core::text::extract_json`].
+pub use otto_core::text::extract_json as extract_json_block;
 
 /// Build the full analysis prompt for one agent.
 ///
@@ -619,6 +604,13 @@ pub async fn run_analysis<C: ProductRunHost>(
                         errored: false,
                     }
                 }
+                _ if result.reason == Some(SUPERSEDED) => LensOutcome {
+                    name: spec.name.clone(),
+                    provider: spec.provider.clone(),
+                    findings_json: None,
+                    findings: None,
+                    errored: true,
+                },
                 _ => {
                     let stopped = result.reason == Some("stopped");
                     let err = if result.errored {
@@ -691,7 +683,7 @@ pub async fn run_analysis<C: ProductRunHost>(
         .product_repo()
         .add_analysis_agent(NewAnalysisAgent {
             analysis_id: analysis_id.clone(),
-            name: format!("Summarizer \u{00b7} {summarizer_provider}"),
+            name: format!("{SUMMARIZER_NAME_PREFIX}{summarizer_provider}"),
             skill: "po-story-overview".into(),
             provider: summarizer_provider.clone(),
             model: String::new(),
@@ -1211,6 +1203,7 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
                 warn!("product_run(retry): set_agent_status done {agent_id}: {e}");
             }
         }
+        _ if result.reason == Some(SUPERSEDED) => {}
         _ => {
             let err = if result.errored {
                 "retry: session produced no output (timeout/exit/start failure)".to_string()
@@ -1240,6 +1233,18 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
 // Orphan reaper — auto-resume analysis agents stranded by a daemon restart
 // ---------------------------------------------------------------------------
 
+/// Summary stamped on an analysis the boot reaper finalizes (S4-10).
+pub const INTERRUPTED_SUMMARY: &str =
+    "Interrupted by a daemon restart before the summary — re-run the analysis to consolidate.";
+
+/// Display-name prefix of the summarizer agent row (see `run_analysis`).
+pub const SUMMARIZER_NAME_PREFIX: &str = "Summarizer \u{00b7} ";
+
+/// True for the analysis's summarizer row (not a lens).
+pub fn is_summarizer_agent(name: &str) -> bool {
+    name.starts_with(SUMMARIZER_NAME_PREFIX)
+}
+
 /// Run ONCE at daemon startup. After a restart, any analysis agent still in
 /// `running`/`waiting` has no surviving task driving it, so it is orphaned.
 /// For each: if it hasn't exhausted its resume budget, re-run it via
@@ -1247,6 +1252,22 @@ pub async fn retry_analysis_agent<C: ProductRunHost>(
 /// with full recovery); otherwise mark it errored and notify. Running this only at
 /// startup avoids racing legitimately-in-flight agents (there are none yet).
 pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
+    // The analysis rows themselves (S4-10): `run_analysis` — the only writer of
+    // their final status — died with the previous daemon, so a `running` row
+    // would spin the Analysis tab forever. Finalize each as `partial` (a
+    // terminal status the UI understands); resumed lens agents still land
+    // their findings on their own rows, and a re-run re-summarizes.
+    match ctx.product_repo().list_running_analyses().await {
+        Ok(running) => {
+            for a in running {
+                let _ = ctx
+                    .product_repo()
+                    .set_analysis_status(&a.id, "partial", Some(INTERRUPTED_SUMMARY), true)
+                    .await;
+            }
+        }
+        Err(e) => warn!("orphan reaper: list_running_analyses failed: {e}"),
+    }
     let agents = match ctx.product_repo().list_unfinished_agents().await {
         Ok(a) => a,
         Err(e) => {
@@ -1263,6 +1284,21 @@ pub async fn reap_orphaned_agents_on_startup<C: ProductRunHost>(ctx: C) {
     );
 
     for agent in agents {
+        // The summarizer is not a lens: re-running it through the lens retry
+        // would store lens findings on the summarizer row (S4-10).
+        if is_summarizer_agent(&agent.name) {
+            let _ = ctx
+                .product_repo()
+                .set_agent_status(
+                    &agent.id,
+                    "error",
+                    None,
+                    Some("interrupted by daemon restart — re-run the analysis to re-summarize"),
+                    true,
+                )
+                .await;
+            continue;
+        }
         let analysis = match ctx.product_repo().get_analysis(&agent.analysis_id).await {
             Ok(a) => a,
             Err(_) => {
@@ -2777,6 +2813,26 @@ mod tests {
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(out_path);
+    }
+
+    /// S4-14: product scratch dirs share one stable root, and stale ones are swept.
+    #[test]
+    fn session_cwd_uses_a_stable_swept_root() {
+        let fallback = std::env::temp_dir().to_string_lossy().to_string();
+        let out = session_cwd(&fallback);
+        let root = std::env::temp_dir().join(SCRATCH_ROOT);
+        assert!(std::path::Path::new(&out).starts_with(&root), "{out}");
+        let _ = std::fs::remove_dir_all(&out);
+        // The sweep removes children older than max-age (private root, so
+        // parallel tests' fresh dirs are never touched).
+        let mine = tempfile::tempdir().unwrap();
+        let child = mine.path().join("old");
+        std::fs::create_dir_all(&child).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_secs(3600));
+        assert!(child.exists(), "fresh scratch kept");
+        sweep_stale_scratch(mine.path(), std::time::Duration::from_millis(1));
+        assert!(!child.exists(), "stale scratch swept");
     }
 
     #[test]

@@ -381,9 +381,12 @@ async fn namespaces<S: K8sCtx>(
             });
         }
     }
-    let mut ns = Vec::new();
-    for candidate in listed {
-        for op in [
+    let names: Vec<String> = listed.iter().map(|n| n.name.clone()).collect();
+    let visible = crate::access::namespaces_allowing_any(
+        &ctx.pool(),
+        &user,
+        &id,
+        &[
             "workloads_view",
             "resources_view",
             "secrets_view",
@@ -394,13 +397,15 @@ async fn namespaces<S: K8sCtx>(
             "scale",
             "restart",
             "delete",
-        ] {
-            if crate::access::allowed(&ctx.pool(), &user, &id, op, Some(&candidate.name)).await? {
-                ns.push(candidate);
-                break;
-            }
-        }
-    }
+        ],
+        &names,
+    )
+    .await?;
+    let ns: Vec<_> = listed
+        .into_iter()
+        .zip(visible)
+        .filter_map(|(row, ok)| ok.then_some(row))
+        .collect();
     Ok(Json(json!({ "namespaces": ns })))
 }
 

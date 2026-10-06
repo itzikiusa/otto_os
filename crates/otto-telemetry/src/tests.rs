@@ -622,3 +622,125 @@ async fn canceled_pending_export_is_accounted_without_claiming_acceptance() {
     }
     assert_eq!(discarded.load(Ordering::Relaxed), 17);
 }
+
+/// S9-03: a flush is only confirmed when the exporter counters were read and
+/// every queue drained. Records still queued at the deadline (a slow / waking
+/// ClickHouse) or unreadable counters are a failure: nothing counts as
+/// exported and status carries an error.
+#[test]
+fn drain_settlement_never_claims_unconfirmed_exports() {
+    use collector::ExporterStats;
+    let stalled = settle(
+        Some(ExporterStats {
+            send_failed: 0,
+            queue_size: 40,
+        }),
+        40,
+    );
+    assert_eq!(
+        stalled.exported, 0,
+        "queued records were counted as exported"
+    );
+    assert_eq!(stalled.failed, 40);
+    assert!(stalled.error.as_deref().is_some_and(|e| e.contains("40")));
+
+    let unknown = settle(None, 12);
+    assert_eq!((unknown.exported, unknown.failed), (0, 12));
+    assert!(
+        unknown.error.is_some(),
+        "missing counters must not read as success"
+    );
+
+    let partial = settle(
+        Some(ExporterStats {
+            send_failed: 3,
+            queue_size: 0,
+        }),
+        10,
+    );
+    assert_eq!((partial.exported, partial.failed), (7, 3));
+    assert!(partial.error.is_some());
+
+    let clean = settle(Some(ExporterStats::default()), 10);
+    assert_eq!(
+        clean,
+        Settlement {
+            exported: 10,
+            failed: 0,
+            error: None
+        }
+    );
+}
+
+/// S9-05: cancelled spans are filed under their own operation name (so they
+/// neither feed the real operation's quantiles nor vanish) and keep their
+/// status through the drill-down; `Unset` is not shown as "ok".
+#[test]
+fn cancelled_and_unset_spans_stay_distinguishable() {
+    let mut s = SpanRecord::new("GET /api/v1/x", "server", 900.0);
+    s.status = "cancelled".into();
+    let span = &otlp::traces(&[s])["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
+    assert_eq!(span["name"], "GET /api/v1/x [cancelled]");
+    assert_eq!(span["status"]["code"], 0);
+    assert_eq!(span["status"]["message"], "cancelled");
+    assert!(span["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["key"] == "otto.status" && a["value"]["stringValue"] == "cancelled"));
+    assert_eq!(span_status("Unset", Some("cancelled")), "cancelled");
+    assert_eq!(span_status("Unset", None), "unset");
+    assert_eq!(span_status("Error", None), "error");
+    assert_eq!(span_status("Ok", None), "ok");
+}
+
+/// S9-08: resource points taken for an export that is cancelled (dropped
+/// mid-send by a config change) go back into the buffer instead of vanishing.
+#[tokio::test]
+async fn cancelled_export_requeues_unsent_points() {
+    let buffer = Arc::new(Mutex::new(BTreeMap::new()));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let point = |t: i64| ResourcePoint {
+        timestamp: t,
+        process: "daemon".into(),
+        cpu_percent: Some(1.0),
+        rss_mb: None,
+        host_load: None,
+    };
+    let (b, d) = (buffer.clone(), dropped.clone());
+    let task = tokio::spawn(async move {
+        let mut pending = PendingPoints {
+            buffer: &b,
+            dropped: &d,
+            points: vec![point(60), point(120), point(180)],
+            sent: 0,
+        };
+        pending.sent = 1; // first chunk acknowledged
+        std::future::pending::<()>().await;
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    let _ = task.await;
+    let keys: Vec<i64> = buffer.lock().unwrap().keys().map(|k| k.0).collect();
+    assert_eq!(keys, vec![120, 180], "unsent points were lost on cancel");
+    assert_eq!(dropped.load(Ordering::Relaxed), 0);
+}
+
+/// S9-04: the collector binary's verified digest is reused only for the
+/// exact same file identity; any rewrite (new ctime/size) re-hashes.
+#[tokio::test]
+async fn verified_digest_cache_is_keyed_by_file_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bin");
+    std::fs::write(&path, b"one").unwrap();
+    let key = collector::file_key(&path).await;
+    assert!(key.is_some());
+    collector::remember_digest(key, "d1".into());
+    assert_eq!(collector::verified_digest(key).as_deref(), Some("d1"));
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, b"other").unwrap();
+    let changed = collector::file_key(&path).await;
+    assert_ne!(changed, key);
+    assert_eq!(collector::verified_digest(changed), None);
+    assert_eq!(collector::verified_digest(None), None);
+}

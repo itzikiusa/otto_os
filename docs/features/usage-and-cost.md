@@ -242,7 +242,8 @@ Otto ships no embedded C++; it drives the *same* `clickhouse` binary you'd insta
 via `curl https://clickhouse.com/ | sh`, as one persistent **`clickhouse server`**
 child bound to a random loopback HTTP port over the data dir
 (`crates/otto-usage/src/clickhouse.rs`). Writes are batched (usage events every
-15 s while any are buffered, system metrics every 5 min).
+90 s while any are buffered, or sooner when a dashboard reads; system metrics every
+5 min).
 
 **Idle-stop.** The server costs ~56 threads / ~100+ MB RSS even with nothing to
 do, so after **15 min** with no query, insert or DDL (and none in flight) it is
@@ -343,10 +344,16 @@ The alter is skipped when the table's TTL (read from `system.tables.engine_full`
 already matches, and carries `materialize_ttl_after_modify = 0`, so neither boot nor a
 self-heal queues a part-rewriting mutation; background TTL merges apply the window.
 
-**Write path.** The writer flushes buffered events every **15 s** (or at 200 events,
-and on shutdown), with server-side `async_insert=1&wait_for_async_insert=1`, and both
-tables use `old_parts_lifetime = 60`. The live dashboard therefore lags by up to ~15 s;
-in exchange ClickHouse no longer creates (and re-merges) a part every 2 s.
+**Write path.** The writer flushes buffered events every **90 s** (or at 2,000 events,
+right after a Usage read asks for fresh rows, and on shutdown — which waits for that
+final flush), with server-side `async_insert=1&wait_for_async_insert=1`, and both
+tables use `old_parts_lifetime = 60`. Each flush is one part that is later merged into
+the month's partition, so the coarse cadence keeps merge I/O low (at 15 s a month's
+partition was rewritten ~1,300 times in three days). Usage flushes are **background**
+writes: they never wake an idle-stopped server or reset its idle clock. While it is
+parked, events stay in memory until the next foreground request wakes it, or until
+the oldest has waited 30 min (or 20,000 are buffered), when the writer wakes it once
+without resetting the idle clock. Budgets therefore see new spend after the next flush.
 
 ---
 

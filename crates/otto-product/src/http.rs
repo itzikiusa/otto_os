@@ -65,6 +65,25 @@ pub trait ProductCtx: Clone + Send + Sync + 'static {
     fn attachment_repo(&self) -> Option<&otto_state::ProductAttachmentRepo> {
         None
     }
+    /// The workspace's root folder, for validating a story `cwd` on PATCH
+    /// (S4-13). Default `None` (then only temp dirs / git checkouts pass).
+    fn workspace_root<'a>(
+        &'a self,
+        _ws: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
+    /// Stop every live analysis agent of `story_id` (trip its cancel flag so
+    /// the recovery loop does not retry, then kill its session) — called by
+    /// `DELETE /product/stories/{sid}` BEFORE the rows go (S4-23), so deleted
+    /// stories don't keep agents burning budget until the next restart.
+    /// Default: no-op (hosts without sessions).
+    fn stop_story_agents<'a>(
+        &'a self,
+        _story_id: &'a Id,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +443,17 @@ async fn patch_story<S: ProductCtx>(
                 url: None,
                 issue_type: None,
                 stage: req.stage,
-                cwd: req.cwd.map(Some),
+                cwd: match req.cwd {
+                    // Agents are spawned (and pre-trusted) here — validate (S4-13).
+                    Some(c) if !c.trim().is_empty() => {
+                        let root = ctx.workspace_root(&ws).await;
+                        Some(Some(crate::service::validate_agent_cwd(
+                            &c,
+                            root.as_deref(),
+                        )?))
+                    }
+                    other => other.map(Some),
+                },
                 watch_enabled: req.watch_enabled,
                 watch_cadence_min: req.watch_cadence_min,
                 confluence_tests_page_id: None,
@@ -457,6 +486,9 @@ async fn delete_story<S: ProductCtx>(
     Path(StoryId { sid }): Path<StoryId>,
 ) -> ApiResult<StatusCode> {
     ws_from_story(&ctx, &user, &sid, WorkspaceRole::Editor).await?;
+    // Stop the story's running agents first (S4-23): once the rows are gone
+    // their writes fail silently while they keep spending.
+    ctx.stop_story_agents(&sid).await;
     // Attachment ids BEFORE the rows go: each may own an assist scratch dir.
     let attachment_ids: Vec<Id> = match ctx.attachment_repo() {
         Some(repo) => repo

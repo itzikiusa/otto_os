@@ -104,14 +104,32 @@ fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
 /// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
 /// daemon (otto-server `personal_agent_policy`). Claude-only flag; other
 /// providers rely on the sandbox + the daemon-side policy.
+///
+/// Two review-only refinements (code review runs against PR checkouts whose
+/// content an outsider wrote):
+/// - `meta.allow_subagents = true` keeps the sub-agent tool (an orchestrator
+///   reviewer delegates each lens to one) while the shell stays removed;
+/// - `meta.project_settings = false` adds `--setting-sources user`, so the
+///   checkout's `.claude/settings*.json` (hooks, MCP servers, permission
+///   rules) never loads — a repo hook would otherwise run on SessionStart.
 fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     if provider != "claude" || meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
         return vec![];
     }
-    vec![
+    let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
+    let mut args = vec![
         "--disallowed-tools".to_string(),
-        "Bash NotebookEdit Task".to_string(),
-    ]
+        if subagents {
+            "Bash NotebookEdit".to_string()
+        } else {
+            "Bash NotebookEdit Task".to_string()
+        },
+    ];
+    if meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false) {
+        args.push("--setting-sources".to_string());
+        args.push("user".to_string());
+    }
+    args
 }
 
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
@@ -3942,6 +3960,9 @@ impl SessionManager {
                 live.push((id, pid));
             }
         }
+        // A shell idling at its prompt has no child process, so it cannot be
+        // hosting an agent: skip it without the whole-box `ps` (S9-10).
+        live.retain(|(_, pid)| pid.is_some_and(crate::nested::has_children));
         if live.is_empty() {
             return 0;
         }
@@ -4762,7 +4783,11 @@ impl SessionManager {
             // Transcript not on disk yet (id just captured, first turn pending).
             return Ok(false);
         };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // Async stat: this runs every ~20 s per candidate on a runtime worker.
+        let mtime = tokio::fs::metadata(&path)
+            .await
+            .and_then(|m| m.modified())
+            .ok();
         // Nothing new since the last look — skip the re-parse.
         if let Some(prev) = self.title_probe.get(&s.id) {
             if mtime.is_some() && prev.mtime == mtime {
@@ -9369,6 +9394,27 @@ mod tests {
         assert!(read_only_args("claude", &serde_json::json!({})).is_empty());
         assert!(read_only_args("claude", &serde_json::json!({ "read_only": "yes" })).is_empty());
         assert!(read_only_args("codex", &on).is_empty());
+        // No project settings unless the caller opts out of them.
+        assert!(!args.iter().any(|a| a == "--setting-sources"));
+    }
+
+    /// A review session: shell gone, sub-agents kept for orchestrator lenses,
+    /// and the checkout's own `.claude/settings*.json` (hooks) never loaded.
+    #[test]
+    fn read_only_review_args_keep_subagents_and_drop_project_settings() {
+        let meta = serde_json::json!({
+            "read_only": true, "allow_subagents": true, "project_settings": false
+        });
+        let args = read_only_args("claude", &meta);
+        assert_eq!(args[0], "--disallowed-tools");
+        assert!(args[1].split(' ').any(|t| t == "Bash"));
+        assert!(!args[1].split(' ').any(|t| t == "Task"));
+        let at = args.iter().position(|a| a == "--setting-sources").unwrap();
+        assert_eq!(args[at + 1], "user");
+        // project_settings without read_only does nothing (never a silent opt-in).
+        assert!(
+            read_only_args("claude", &serde_json::json!({ "project_settings": false })).is_empty()
+        );
     }
 
     /// claude with a model set → ["--model", name].
@@ -9540,6 +9586,22 @@ mod tests {
         let needle = "(literal \"/nonexistent-otto-work/p/.mcp.json\")";
         assert!(p(true).contains(needle));
         assert!(!p(false).contains(needle));
+    }
+
+    /// S3-04: a scheduled shell task (`process_sandbox_policy("shell", …)`)
+    /// is gated exactly like a `shell` agent session: off when the setting is
+    /// off or names other providers, on by default when enabled.
+    #[test]
+    fn sandbox_decision_covers_scheduled_shell_tasks() {
+        let off = serde_json::json!({ "enabled": false });
+        let not_shell = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        let on = serde_json::json!({ "enabled": true });
+        assert_eq!(sandbox_decision(&off, SessionKind::Agent, "shell"), None);
+        assert_eq!(
+            sandbox_decision(&not_shell, SessionKind::Agent, "shell"),
+            None
+        );
+        assert!(sandbox_decision(&on, SessionKind::Agent, "shell").is_some());
     }
 
     #[test]

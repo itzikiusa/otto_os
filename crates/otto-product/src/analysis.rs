@@ -66,6 +66,24 @@ pub async fn analyze<C: ProductStudioHost>(
         }
     }
 
+    // Bound the fan-out (S4-15): a malformed client or double-click must not
+    // spawn dozens of concurrent PTY agents.
+    validate_fanout(&req.agents).map_err(ApiError)?;
+    // One analysis per story at a time (409) — the boot reaper finalizes rows
+    // orphaned by a restart, so `running` here means a live fan-out.
+    if ctx
+        .product_repo()
+        .list_analyses(&sid)
+        .await
+        .map_err(ApiError)?
+        .iter()
+        .any(|a| a.status == "running")
+    {
+        return Err(ApiError(Error::Conflict(
+            "an analysis is already running for this story".into(),
+        )));
+    }
+
     // Resolve default provider (workspace → global → "claude"), mirroring the
     // `orchestrate` handler exactly.
     let ws = ctx.workspaces().get(&ws_id).await.map_err(ApiError)?;
@@ -131,11 +149,8 @@ pub async fn analyze<C: ProductStudioHost>(
         .filter(|p| !p.trim().is_empty())
         .unwrap_or_else(|| default_provider.clone());
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Latest source version id for the analysis row.
     let source_version_id = ctx
@@ -173,6 +188,53 @@ pub async fn analyze<C: ProductStudioHost>(
     ));
 
     Ok(Json(analysis))
+}
+
+/// Resolve an agent cwd: the request's (400 when invalid) → the story's (a
+/// stale/invalid stored value falls back with a warning) → the temp dir. Every
+/// accepted path passed [`crate::service::validate_agent_cwd`] (S4-13).
+async fn resolve_agent_cwd<C: ProductStudioHost>(
+    ctx: &C,
+    ws_id: &Id,
+    req_cwd: Option<String>,
+    story_cwd: Option<String>,
+) -> ApiResult<String> {
+    let root = ctx.workspaces().get(ws_id).await.ok().map(|w| w.root_path);
+    if let Some(c) = req_cwd.filter(|c| !c.trim().is_empty()) {
+        return crate::service::validate_agent_cwd(&c, root.as_deref()).map_err(ApiError);
+    }
+    if let Some(c) = story_cwd.filter(|c| !c.trim().is_empty()) {
+        match crate::service::validate_agent_cwd(&c, root.as_deref()) {
+            Ok(c) => return Ok(c),
+            Err(e) => tracing::warn!("product: stored story cwd rejected ({e}); using a temp dir"),
+        }
+    }
+    Ok(std::env::temp_dir().to_string_lossy().to_string())
+}
+
+/// Most lens agents one analysis may request (sum of agents × providers).
+pub const MAX_ANALYSIS_AGENTS: usize = 12;
+/// Most providers one lens may fan out to.
+pub const MAX_PROVIDERS_PER_AGENT: usize = 4;
+
+/// Reject an over-wide analysis fan-out with 400 (S4-15).
+pub fn validate_fanout(agents: &[crate::types::AnalyzeAgentReq]) -> Result<(), Error> {
+    let mut total = 0usize;
+    for a in agents {
+        let n = a.providers.iter().filter(|p| !p.trim().is_empty()).count();
+        if n > MAX_PROVIDERS_PER_AGENT {
+            return Err(Error::Invalid(format!(
+                "at most {MAX_PROVIDERS_PER_AGENT} providers per analysis agent"
+            )));
+        }
+        total += n.max(1);
+    }
+    if total > MAX_ANALYSIS_AGENTS {
+        return Err(Error::Invalid(format!(
+            "at most {MAX_ANALYSIS_AGENTS} analysis agents (lenses × providers) per run"
+        )));
+    }
+    Ok(())
 }
 
 /// `POST /workspaces/{id}/product/stories/{sid}/rewrite` — spawn the writer
@@ -221,11 +283,8 @@ pub async fn rewrite<C: ProductStudioHost>(
     ]);
     let provider = req.provider.clone().unwrap_or(default_provider);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_rewrite.
     tokio::spawn(crate::run::run_rewrite(
@@ -288,11 +347,8 @@ pub async fn generate_tests<C: ProductStudioHost>(
     ]);
     let provider = req.provider.clone().unwrap_or(default_provider);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_tests.
     tokio::spawn(crate::run::run_generate_tests(
@@ -388,11 +444,8 @@ pub async fn generate_plan<C: ProductStudioHost>(
     // when the UI explicitly turned the autonomy toggle OFF.
     let interactive = req.interactive.unwrap_or(false);
 
-    // Resolve cwd: req → story.cwd → temp dir.
-    let cwd = req
-        .cwd
-        .or_else(|| story.cwd.clone())
-        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    // Resolve cwd: req → story.cwd → temp dir, validated (S4-13).
+    let cwd = resolve_agent_cwd(&ctx, &ws_id, req.cwd.clone(), story.cwd.clone()).await?;
 
     // Spawn background task; errors are isolated inside run_generate_plan.
     tokio::spawn(crate::run::run_generate_plan(
@@ -592,15 +645,28 @@ pub async fn stop_analysis_agent<C: ProductStudioHost>(
         .check(&user, &story.workspace_id, WorkspaceRole::Editor)
         .await?;
 
+    // The agent must belong to THIS analysis (S4-04): the role check above is
+    // on `aid`'s story, so an unchecked `agent_id` would let an Editor of A
+    // stop (cancel + kill + mark errored) an agent of workspace B. A foreign
+    // agent answers 404, exactly like a missing one.
+    let agent = ctx
+        .product_repo()
+        .get_analysis_agent(&agent_id)
+        .await
+        .map_err(ApiError)?;
+    if agent.analysis_id != aid {
+        return Err(ApiError(Error::NotFound(format!(
+            "analysis agent {agent_id}"
+        ))));
+    }
+
     // Signal the in-flight recovery loop FIRST so the kill below is seen as
     // intentional (no auto-retry).
     crate::run::signal_cancel(ctx.agent_cancels(), &agent_id);
 
     // Kill the current live session, if any.
-    if let Ok(agent) = ctx.product_repo().get_analysis_agent(&agent_id).await {
-        if let Some(sid) = agent.session_id.as_ref() {
-            let _ = ctx.kill_session(sid).await;
-        }
+    if let Some(sid) = agent.session_id.as_ref() {
+        let _ = ctx.kill_session(sid).await;
     }
 
     // Mark terminal so the UI reflects it immediately.
@@ -610,4 +676,37 @@ pub async fn stop_analysis_agent<C: ProductStudioHost>(
         .await;
 
     Ok(StatusCode::ACCEPTED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agents(v: serde_json::Value) -> Vec<crate::types::AnalyzeAgentReq> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// S4-15: the fan-out is bounded (400 above the caps).
+    #[test]
+    fn fanout_caps_providers_and_total_agents() {
+        assert!(validate_fanout(&[]).is_ok());
+        let ok = agents(serde_json::json!([
+            {"skill": "a", "providers": ["claude", "codex", "agy", "x"]},
+            {"skill": "b"},
+        ]));
+        assert!(validate_fanout(&ok).is_ok());
+        let wide = agents(serde_json::json!([
+            {"skill": "a", "providers": ["p1", "p2", "p3", "p4", "p5"]},
+        ]));
+        assert!(matches!(validate_fanout(&wide), Err(Error::Invalid(_))));
+        let many: Vec<_> = (0..13)
+            .map(|i| serde_json::json!({"skill": format!("s{i}")}))
+            .collect();
+        let many = agents(serde_json::Value::Array(many));
+        assert!(matches!(validate_fanout(&many), Err(Error::Invalid(_))));
+        let twelve: Vec<_> = (0..12)
+            .map(|i| serde_json::json!({"skill": format!("s{i}")}))
+            .collect();
+        assert!(validate_fanout(&agents(serde_json::Value::Array(twelve))).is_ok());
+    }
 }

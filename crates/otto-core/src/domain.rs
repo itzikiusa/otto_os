@@ -884,6 +884,13 @@ pub struct Integration {
     pub channel: Channel,
     pub enabled: bool,
     pub allowed_users: String,
+    /// Explicit "open to everyone" opt-in: with a BLANK `allowed_users` list,
+    /// every sender may drive the bot. Off ⇒ a blank list admits NOBODY (fail
+    /// closed). Set by migration on integrations that predate the flag (their
+    /// blank list used to mean everyone) so they keep working — loudly logged
+    /// and flagged in Settings → Channels.
+    #[serde(default)]
+    pub open_to_all: bool,
     pub agent_reply: bool,
     pub reply_instructions: String,
     pub channel_id: String,

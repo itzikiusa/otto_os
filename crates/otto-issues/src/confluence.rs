@@ -211,6 +211,15 @@ impl ConfluenceClient {
                 break;
             }
         }
+        if next.is_some() {
+            // The cap, not the end of the collection: never silent.
+            tracing::warn!(
+                what,
+                max_pages,
+                fetched = all.len(),
+                "confluence: listing TRUNCATED at the page cap — later results are not shown"
+            );
+        }
         Ok(all)
     }
 

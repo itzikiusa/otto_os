@@ -102,7 +102,7 @@ These map 1:1 to the **Settings → Channels** edit form and to
 | `bot_token` *(write-only)* | Slack `xoxb-…` / Telegram `123456:ABC…`. Stored in Keychain; never returned. |
 | `app_token` *(write-only, Slack only)* | Slack Socket Mode `xapp-…` token. Stored in Keychain; never returned. |
 | `channel_id` | **Default chat ID** — the chat the `/test` button and notifications post to (Slack `C…` channel id; Telegram numeric chat id). Not required for relaying inside a live thread. |
-| `allowed_users` | Comma-separated **channel-native** user IDs allowed to drive the bot. Blank = everyone. (Slack `U…` ids; Telegram numeric user ids.) |
+| `allowed_users` | Comma-separated **channel-native** user IDs allowed to drive the bot. Blank = **nobody**, unless the explicit "Open to everyone" opt-in (`open_to_all`) is set. (Slack `U…` ids; Telegram numeric user ids.) |
 | `agent_reply` | `false` (default) → **Otto relays** the agent's final reply for you. `true` → the agent marks the exact text to send; the agent never posts on its own (Otto still does the posting). See §5. |
 | `reply_instructions` | Free-text guidance injected into the trusted-context block (e.g. tone/format). Only surfaced in the UI when `agent_reply` is on. |
 | `preferred_cli` | Agent CLI for this channel's sessions (`claude`, `codex`, `shell`, …). Blank → workspace default → global default → `claude`. |
@@ -121,8 +121,12 @@ What actually crosses the bridge — derived directly from `bridge.rs` and
    it, the message is silently dropped. Ids are trimmed and compared
    case-insensitively; a message with no sender id never passes a non-blank list.
    On Slack the gate runs **before** attachments are downloaded. A blank list
-   lets anyone who can message the bot run an agent on your Mac — the Channels
-   page flags such an integration **Open to everyone**.
+   admits **nobody** (fail closed) — unless the integration is explicitly opened
+   to everyone (`open_to_all`, a confirmed opt-in in the editor; integrations
+   that predate the flag with a blank list were migrated to it). An open
+   integration lets anyone who can message the bot run an agent on your Mac:
+   the Channels page flags it **Open to everyone** and the daemon logs a
+   `channel OPEN TO EVERYONE` warning on every listener start.
 3. **Quick commands.** A message that starts with `/` may be a quick command
    (`/help`, `/sessions`, `/who`, `/stop`, `/new`, `/restart`) and is handled
    locally without touching an agent — see §5.

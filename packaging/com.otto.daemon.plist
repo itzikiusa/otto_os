@@ -23,8 +23,9 @@
          with the plist apps/desktop/src-tauri/src/supervisor.rs installs. -->
     <key>ProcessType</key>
     <string>Interactive</string>
-    <!-- SIGKILL this long after SIGTERM. ottod caps its HTTP drain at ~3 s
-         and bounds each teardown step; 30 s is headroom. -->
+    <!-- SIGKILL this long after SIGTERM. ottod's worst-case stop is ~24 s:
+         a 3 s HTTP drain, an 18 s teardown deadline shared by every step
+         (ClickHouse's flush slot reserved) and a 2 s runtime shutdown. -->
     <key>ExitTimeOut</key>
     <integer>30</integer>
     <!-- Panics/aborts land on stderr before the tracing file sees them. -->

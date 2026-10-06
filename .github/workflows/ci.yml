@@ -2,9 +2,11 @@ name: CI
 
 # Lint, type-check, and test the Rust workspace + the Svelte UI on every push
 # and pull request. The Tauri desktop app (apps/desktop/src-tauri) is a separate,
-# macOS-only workspace (launchd + Keychain + codesigning) and is intentionally
-# NOT built here — `cargo build --workspace` from the repo root covers the daemon
-# crates and `ottod`, which is what CI guards.
+# macOS-only workspace (launchd + Keychain + codesigning), so it is NOT built on
+# these Linux runners: macos.yml's `desktop` job runs its fmt/clippy/`cargo test`
+# (supervisor plist + keep_previous_daemon, browser allow-list, window registry,
+# the no-remote-webviews capability pin) on every PR touching apps/desktop/**
+# and nightly. The daemon crates' macOS cfg branches run in macos-server.yml.
 
 on:
   push:
@@ -144,6 +146,14 @@ jobs:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
 
+      # Every `.config/nextest.toml` override disjunct must still match >=1
+      # test: a crate split / module move otherwise orphans a `timing` or
+      # `processes` entry silently and the wall-clock asserts it protects
+      # run under full contention again. Lists the binaries built above.
+      - name: nextest override filters match tests
+        if: success() || failure()
+        run: python3 scripts/check-nextest-filters.py
+
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
       # vault listing, ~40 s of fixture creation) still gate every PR here. Same
       # build as above (--workspace), so this only lists + runs; no recompile.
@@ -205,6 +215,10 @@ jobs:
       - name: Test Insights collector calendar boundaries
         working-directory: .
         run: python3 -B -m unittest discover -s crates/otto-skills/assets/skills/insights/insights/scripts -p test_collect_window.py
+
+      - name: Test the nextest override-filter guard (parsing)
+        working-directory: .
+        run: python3 -B -m unittest discover -s scripts -p 'test_check_nextest_filters.py'
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -270,6 +284,68 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+  # BLOCKING e2e smoke gate: the green-history subset listed in
+  # ui/e2e/gate-specs.ts (~35 specs: shell, sessions, API client, canvas,
+  # proof packs, scheduled tasks, git, assistant, two mobile pages) on the
+  # `desktop-gate` (Chromium) + `iphone-gate` (WebKit) projects. Unlike the
+  # sharded suite below it has NO continue-on-error: retries 0, any `flaky`
+  # count fails, and a red result fails the workflow — make this job a
+  # required status check. Gate specs need only the isolated throwaway daemon
+  # (no docker stack / redis / ClickHouse / tour film), so setup stays small.
+  e2e-gate:
+    name: E2E smoke gate (blocking)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: ui
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: E2E smoke gate (desktop-gate + iphone-gate)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_FUNCTIONAL_ONLY: '1'
+        run: npx playwright test --project=desktop-gate --project=iphone-gate --retries=0
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-gate-report
+          path: |
+            ui/e2e/.report-0
+            ui/test-results
+          retention-days: 7
+
   # ADVISORY functional E2E: every desktop-* spec on the desktop-browser
   # project (Chromium, 1280×800 3-pane shell) plus the mobile specs at iPhone
   # portrait (WebKit), sharded across 4 runners. Isolated throwaway daemon per
@@ -278,7 +354,9 @@ jobs:
   # they run in perf-gates. Retries are 0 and any `flaky` count fails the
   # shard, so a red shard is an honest result — but the suite is too slow to
   # gate merges, so it never fails the workflow (continue-on-error) and no
-  # job `needs:` it. Keep it out of the branch's required status checks.
+  # job `needs:` it. Keep it out of the branch's required status checks; the
+  # blocking subset is `e2e-gate` above (promote a spec into it through
+  # ui/e2e/gate-specs.ts once it shows a green history here).
   # The other mobile/tablet projects run nightly (e2e-nightly.yml).
   e2e-functional:
     name: E2E functional (shard ${{ matrix.shard }}/4, advisory)
@@ -601,13 +679,14 @@ jobs:
         # which Otto never does. Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
 
-  # Duplicate-version report (deny.toml: multiple-versions = "warn"). Advisory:
-  # it surfaces crates compiled twice at different semver majors so they can be
-  # aligned; licenses/advisories are not gated here (see the audit job).
+  # Duplicate-version gate (deny.toml: multiple-versions = "deny" + a `skip`
+  # list of today's known duplicates). BLOCKING: a PR that adds a second
+  # semver-incompatible copy of a crate fails here — align the pin or, if an
+  # upstream forces it, add a skip with the reason. Licenses/advisories are
+  # not gated here (see the audit job).
   deny:
-    name: cargo deny (duplicates, advisory)
+    name: cargo deny (duplicates)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
 

@@ -3451,6 +3451,10 @@ export interface CreatePrReq {
 
 export interface DraftPrReq {
   base: string;
+  /** The PR's Source branch. When set the draft describes
+   *  `merge-base(base, head)..head` and `DraftPrResp.source_branch` echoes it;
+   *  absent ⇒ the checked-out branch (+ working tree). */
+  head?: string;
 }
 
 export interface DraftPrResp {
@@ -3505,6 +3509,23 @@ export interface MergePrReq {
   strategy: MergeStrategy;
   /** Ask the provider to delete the PR's source branch as part of the merge. */
   delete_source_branch?: boolean;
+  /** The `PrSummary.head_sha` the user reviewed. A PR whose head moved since
+   *  is refused with 409 "PR changed — re-check" instead of merging. */
+  expected_head_sha?: string;
+}
+
+/** `POST /repos/{id}/branch/delete` body. */
+export interface DeleteBranchReq {
+  name: string;
+  /** Also delete the branch on `remote_name` (default `origin`). */
+  remote?: boolean;
+  /** Delete the local branch (default true); `false` = remote-only. */
+  local?: boolean;
+  /** `-D` instead of the safe `-d` — only after the user's explicit confirm. */
+  force?: boolean;
+  /** Which remote a `remote:true` delete targets (default `origin`). A
+   *  remote-ref row like `upstream/x` must send `remote_name: 'upstream'`. */
+  remote_name?: string;
 }
 
 /** One CI check / job / commit-status row behind the PR's aggregate status
@@ -4301,6 +4322,9 @@ export interface Integration {
   channel: Channel;
   enabled: boolean;
   allowed_users: string;     // comma-separated
+  /** Explicit opt-in: a BLANK `allowed_users` admits every sender. Off ⇒ a
+   *  blank list admits nobody (fail closed). Webhooks ignore it. */
+  open_to_all: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;
@@ -4343,6 +4367,8 @@ export interface UpsertIntegrationReq {
   bot_token?: string | null;   // omit/null to keep existing
   app_token?: string | null;   // slack only
   allowed_users: string;
+  /** Omit to keep the stored value. */
+  open_to_all?: boolean;
   agent_reply: boolean;
   reply_instructions: string;
   channel_id: string;
@@ -7634,8 +7660,9 @@ export interface ScheduledTaskRun {
   id: Id;
   task_id: Id;
   workspace_id: Id;
-  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`). */
-  status: 'running' | 'ok' | 'error' | 'canceled';
+  /** `canceled`: stopped from Otto (`POST …/runs/{run_id}/cancel`).
+   *  `skipped`: a workflow task whose workflow was still busy with an earlier run. */
+  status: 'running' | 'ok' | 'error' | 'canceled' | 'skipped';
   trigger: 'schedule' | 'manual';
   started_at: string;
   finished_at?: string | null;
@@ -8924,6 +8951,9 @@ export interface AthenaQueryReq {
   database?: string;
   workgroup?: string;
   output_location?: string;
+  /** Required on a prod account for any statement that is not a plain read
+   *  (DDL/DML) — set only after the person confirms; else 400 `confirm_required`. */
+  confirm?: boolean;
 }
 
 export type AthenaQueryState = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
@@ -9739,6 +9769,9 @@ export type K8sMonitorHealth = 'healthy' | 'degraded' | 'incident' | 'off' | 'un
 
 export interface K8sMonitorOverviewRow {
   cluster: { id: Id; name: string; environment: Environment; color?: string | null };
+  /** The caller can discover this cluster but lacks cluster-wide `metrics`:
+   *  figures are zeroed (namespace-scoped users never see other namespaces). */
+  restricted?: boolean;
   enabled: boolean;
   interval_secs: number;
   status: K8sMonitorStatus | null;

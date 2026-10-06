@@ -391,6 +391,7 @@ impl JiraClient {
         let search_url = format!("{}/rest/api/3/project/search", self.base_url);
         let mut all: Vec<serde_json::Value> = Vec::new();
         let mut start_at: usize = 0;
+        let mut complete = false;
         for page_no in 0..PROJECT_PAGES_MAX {
             let start_s = start_at.to_string();
             let page_s = PAGE.to_string();
@@ -425,6 +426,7 @@ impl JiraClient {
                     })?;
                 let body = Self::project_body(r).await?;
                 all = body.as_array().cloned().unwrap_or_default();
+                complete = true;
                 break;
             }
 
@@ -446,8 +448,17 @@ impl JiraClient {
                     None => got < PAGE,
                 });
             if got == 0 || is_last {
+                complete = true;
                 break;
             }
+        }
+        if !complete {
+            // The cap, not the last page: never silent.
+            tracing::warn!(
+                pages = PROJECT_PAGES_MAX,
+                fetched = all.len(),
+                "jira: project list TRUNCATED at the page cap — later projects are not shown"
+            );
         }
         let projects_arr = all.as_slice();
 

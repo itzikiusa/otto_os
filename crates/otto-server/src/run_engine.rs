@@ -11,7 +11,7 @@
 //! or a goal loop), proof (`crate::proof`), review (`modules::run_review_for_branch`),
 //! PR draft (`modules::draft_pr_core`). The run also projects into Mission Control.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,10 +32,18 @@ const POLL_EVERY: Duration = Duration::from_secs(2);
 /// event; this slow re-check only covers a missed or lagged event.
 const REVIEW_SAFETY_RECHECK: Duration = Duration::from_secs(30);
 const GOAL_LOOP_POLL_MAX: u32 = 7_200; // ~4 h (matches goal-loop HARD_CAP)
+/// Why a run whose agent committed nothing stops at the review stage.
+pub(crate) const NO_CHANGES_ERROR: &str =
+    "the agent produced no changes — nothing to review or open a PR for";
 
 /// Per-run in-flight registry. Stored on `ServerCtx.runs_engine`.
 pub struct RunEngine {
     inflight: Mutex<HashSet<Id>>,
+    /// Per-run cancel token, tripped by [`RunEngine::cancel`]. `advance`
+    /// races every stage against it, so a cancel DROPS the in-flight stage
+    /// future — the agent's `PtyHandle` drop kills its CLI — instead of
+    /// letting it run on in a worktree that is being removed (S2-04).
+    cancels: Mutex<HashMap<Id, tokio_util::sync::CancellationToken>>,
 }
 
 struct InFlight<'a> {
@@ -47,14 +55,52 @@ impl Drop for InFlight<'_> {
         if let Ok(mut g) = self.engine.inflight.lock() {
             g.remove(&self.id);
         }
+        if let Ok(mut g) = self.engine.cancels.lock() {
+            g.remove(&self.id);
+        }
     }
 }
 
 impl RunEngine {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inflight: Mutex::new(HashSet::new()),
-        })
+        Arc::new(Self::default())
+    }
+
+    /// The cancel token of the run `advance` is driving (created on claim).
+    fn token(&self, id: &Id) -> tokio_util::sync::CancellationToken {
+        self.cancels
+            .lock()
+            .map(|mut g| g.entry(id.clone()).or_default().clone())
+            .unwrap_or_default()
+    }
+
+    /// Trip the run's cancel token: its in-flight stage is dropped at once.
+    /// No-op when no stage is running.
+    pub fn cancel(&self, id: &Id) {
+        if let Ok(g) = self.cancels.lock() {
+            if let Some(t) = g.get(id) {
+                t.cancel();
+            }
+        }
+    }
+
+    /// Is a stage of this run still being driven?
+    pub fn is_inflight(&self, id: &Id) -> bool {
+        self.inflight.lock().is_ok_and(|g| g.contains(id))
+    }
+
+    /// Wait (bounded) until the run's in-flight stage has stopped — after
+    /// [`Self::cancel`] that is one scheduler hop, the worktree is then safe
+    /// to remove. `false` on timeout.
+    pub async fn wait_idle(&self, id: &Id, max: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + max;
+        while self.is_inflight(id) {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        true
     }
 
     /// Claim the run; `None` means another `advance` is already driving it.
@@ -76,6 +122,7 @@ impl Default for RunEngine {
     fn default() -> Self {
         Self {
             inflight: Mutex::new(HashSet::new()),
+            cancels: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -92,6 +139,7 @@ pub async fn advance(ctx: &ServerCtx, run_id: Id) {
         Some(c) => c,
         None => return,
     };
+    let cancel = ctx.runs_engine.token(&run_id);
     loop {
         let run = match ctx.runs.get(&run_id).await {
             Ok(r) => r,
@@ -101,7 +149,13 @@ pub async fn advance(ctx: &ServerCtx, run_id: Id) {
             break;
         }
         let cur = run.status;
-        match run_stage(ctx, &run).await {
+        // A cancel drops the stage future mid-flight (the agent CLI dies with
+        // its PTY handle); the run is already Cancelled, nothing to record.
+        let outcome = tokio::select! {
+            r = run_stage(ctx, &run) => r,
+            () = cancel.cancelled() => break,
+        };
+        match outcome {
             Ok(()) => {
                 let Some(next) = cur.next_on_success() else {
                     break; // AwaitingApproval reached via Reviewing → no auto-next
@@ -304,7 +358,7 @@ async fn execute_single_agent(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
                 // Replace the stored source body with the human-readable packet
                 // summary now that the prompt has been assembled from it.
                 context_summary: Some(packet.summary.clone()),
-                result_summary: Some(truncate(&reply, 4_000)),
+                result_summary: Some(otto_core::text::clip_bytes(&reply, 4_000)),
                 ..Default::default()
             },
         )
@@ -484,7 +538,7 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         return Ok(());
     }
 
-    let (review_id, resolved, _no_changes) = crate::modules::run_review_for_branch(
+    let (review_id, _resolved, no_changes, diff_len) = crate::modules::run_review_for_branch_sized(
         ctx,
         &repo_id,
         &wt,
@@ -504,13 +558,14 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
             },
         )
         .await?;
+    // An EMPTY diff means no reviewer ran: "0 findings (0 blocking)" would be
+    // an unreviewed change dressed as a clean one in the approval prompt
+    // (`run_review_for_branch`'s contract). Stop before AwaitingApproval.
+    if no_changes {
+        return Err(Error::Invalid(NO_CHANGES_ERROR.into()));
+    }
     // Wait as long as the review itself may legitimately take (agents +
     // summarizer), sized off the same diff the reviewers received.
-    let diff_len = otto_git::LocalGit::new(&wt)
-        .review_diff_text(&resolved.diff_ref)
-        .await
-        .map(|d| d.len())
-        .unwrap_or(usize::MAX);
     let budget = crate::modules::review_wait_budget(ctx, &repo_id, diff_len).await;
     let (total, _open, blocker) = poll_review(ctx, &review_id, budget).await?;
     ctx.runs
@@ -587,17 +642,6 @@ fn reconstruct_resolved(run: &OttoRun) -> ResolvedSource {
         repo_hint: None,
         metadata: serde_json::Value::Null,
     }
-}
-
-fn truncate(s: &str, cap: usize) -> String {
-    if s.len() <= cap {
-        return s.to_string();
-    }
-    let mut end = cap;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
 }
 
 async fn e2e_commit_note(wt: &str, run: &OttoRun) {
@@ -734,8 +778,17 @@ async fn poll_goal_loop(ctx: &ServerCtx, loop_id: &Id) -> Result<otto_core::doma
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
-    ctx.goal_loops_repo.get(loop_id).await
+    // Past the cap the loop is still running: stop it (it would otherwise keep
+    // burning tokens with no run waiting on it) and say why, instead of the
+    // misleading "goal loop produced no branch" a half-done loop surfaced.
+    if let Err(e) = crate::goal_loop::stop_loop(ctx, loop_id).await {
+        tracing::warn!(goal_loop = %loop_id, "stop overdue goal loop: {e}");
+    }
+    Err(Error::Internal(GOAL_LOOP_OVERDUE.into()))
 }
+
+/// The goal-loop stage's error once [`GOAL_LOOP_POLL_MAX`] polls elapsed.
+const GOAL_LOOP_OVERDUE: &str = "goal loop exceeded 4h — stopped";
 
 async fn best_effort_push(ctx: &ServerCtx, run: &OttoRun) {
     let (Some(repo_id), Some(wt)) = (run.repo_id.as_deref(), run.worktree_path.as_deref()) else {
@@ -793,7 +846,20 @@ async fn after_transition(ctx: &ServerCtx, run_id: &Id, new_status: RunStatus) {
 }
 
 async fn fail(ctx: &ServerCtx, run: &OttoRun, err: &str) {
-    let _ = ctx.runs.set_error(&run.id, err).await;
+    // CAS: a run already ended (cancelled while this stage was in flight)
+    // stays as it is — no Failed overwrite, no "❌ Run failed" notice, no
+    // second webhook callback.
+    match ctx.runs.set_error(&run.id, err).await {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(run = %run.id, "stage error after the run ended (ignored): {err}");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(run = %run.id, "set run error: {e}");
+            return;
+        }
+    }
     let _ = ctx
         .runs
         .add_event(NewRunEvent {
@@ -889,9 +955,18 @@ fn approval_prompt(run: &OttoRun) -> String {
         .risk_score
         .map(|r| r.to_string())
         .unwrap_or_else(|| "?".to_string());
+    // The approval is an OUTWARD action: say where it goes. Approving pushes
+    // the run's branch to `origin` (`best_effort_push`, when the repo has a
+    // bound git account) before the PR draft is written.
+    let branch = run
+        .branch
+        .as_deref()
+        .filter(|b| !b.is_empty())
+        .map_or_else(|| format!("otto-run/{}", run.id), str::to_string);
     format!(
         "🧪 *Run with Otto* — ready for review\n*{title}*\nProof: {proof} · risk {risk}/100 · \
-         findings: {total} ({blocking} blocking)\n\nReply *approve* to draft a PR, or *reject*.",
+         findings: {total} ({blocking} blocking)\n\nReply *approve* to push branch `{branch}` \
+         to the repo's `origin` remote and draft a PR, or *reject*.",
         title = run.title,
         proof = proof,
         risk = risk,
@@ -1032,5 +1107,113 @@ mod tests {
         assert!(!criteria[0].verify.trim().is_empty());
         // A manual criterion needs no verify_cmd (only command-kind does).
         assert_eq!(criteria[0].verify_kind, "manual");
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::{approval_prompt, RunEngine};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// S2-04: a cancel drops the in-flight stage future (its PTY handle — and
+    /// so the agent CLI — goes with it) and `wait_idle` then reports the run
+    /// idle, so the worktree is removed only after the stage stopped.
+    #[tokio::test]
+    async fn cancel_drops_the_in_flight_stage_then_the_run_goes_idle() {
+        let engine = RunEngine::new();
+        let id = "run-1".to_string();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let driver = {
+            let engine = Arc::clone(&engine);
+            let id = id.clone();
+            let dropped = Arc::clone(&dropped);
+            tokio::spawn(async move {
+                let _claim = engine.claim(&id).expect("first claim");
+                let cancel = engine.token(&id);
+                let stage = async move {
+                    let _agent = DropFlag(dropped);
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                };
+                tokio::select! {
+                    () = stage => "finished",
+                    () = cancel.cancelled() => "cancelled",
+                }
+            })
+        };
+        while !engine.is_inflight(&id) {
+            tokio::task::yield_now().await;
+        }
+        engine.cancel(&id);
+        assert!(engine.wait_idle(&id, Duration::from_secs(5)).await);
+        assert_eq!(driver.await.unwrap(), "cancelled");
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the stage future was dropped"
+        );
+        // Cancelling an idle run is a no-op.
+        engine.cancel(&id);
+        assert!(!engine.is_inflight(&id));
+    }
+
+    /// S2-16: approving pushes a branch — the prompt says which and where.
+    #[test]
+    fn approval_prompt_names_the_push_and_its_remote() {
+        use chrono::Utc;
+        use otto_core::run::{OttoRun, RunMode, RunOrigin, RunStatus, SourceKind};
+        let run = OttoRun {
+            id: "abc".into(),
+            workspace_id: "w1".into(),
+            title: "t".into(),
+            source_kind: SourceKind::Finding,
+            source_ref: "f1".into(),
+            source_url: None,
+            goal: "g".into(),
+            mode: RunMode::SingleAgent,
+            provider: "claude".into(),
+            model: String::new(),
+            repo_id: Some("r1".into()),
+            repo_path: None,
+            base_branch: Some("main".into()),
+            branch: Some("otto-run/abc".into()),
+            worktree_path: None,
+            base_commit: None,
+            status: RunStatus::AwaitingApproval,
+            error: None,
+            origin_kind: RunOrigin::Api,
+            origin_chat: None,
+            origin_thread: None,
+            origin_user: None,
+            callback_url: None,
+            goal_loop_id: None,
+            review_id: None,
+            proof_pack_id: None,
+            proof_status: None,
+            risk_score: None,
+            findings_total: 0,
+            findings_blocking: 0,
+            pr_draft_json: None,
+            pr_url: None,
+            auto_open_pr: false,
+            approval_decision: None,
+            approved_by: None,
+            approved_at: None,
+            result_summary: None,
+            context_summary: None,
+            created_by: "root".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let p = approval_prompt(&run);
+        assert!(p.contains("push branch `otto-run/abc`"), "{p}");
+        assert!(p.contains("`origin`"), "{p}");
     }
 }

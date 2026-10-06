@@ -138,6 +138,10 @@ where
         // `recover_before_serve`, before this task was spawned) are
         // `pending` again and keep theirs.
         crate::workflow_engine::sweep_stale_run_worktrees(&ctx).await;
+        // Runtime orphan sweep: a live run row whose driver is gone (a failed
+        // terminal write, a panicked driver) is errored instead of blocking
+        // its workflow's triggers until the next restart.
+        crate::workflow_engine::start_orphan_run_sweep(&ctx);
         tracing::info!(
             "boot: post-listen work done in {} ms (plugins={plugins_ms})",
             t.elapsed().as_millis()
