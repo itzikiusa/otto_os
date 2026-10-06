@@ -3917,6 +3917,9 @@ export interface ReviewAgentState {
    *  lens are the same lens on different providers. Absent on the summarizer
    *  row and on reviews persisted before the field existed. */
   lens?: string;
+  /** Orchestrator rows only: the lens slugs delegated to sub-agents. A retry
+   *  re-spawns the row as the same orchestrator. */
+  lens_slugs?: string[];
 }
 
 export interface ReviewComment {

@@ -1890,6 +1890,7 @@ async fn run_review_core(
             findings: Vec::new(),
             fallback: false,
             lens: r.lens.clone(),
+            lens_slugs: r.lens_slugs(),
         })
         .collect();
     agent_states.push(ReviewAgentState {
@@ -1903,6 +1904,7 @@ async fn run_review_core(
         findings: Vec::new(),
         fallback: false,
         lens: String::new(),
+        lens_slugs: Vec::new(),
     });
     ctx.reviews_store
         .set_agents(review_id, &agent_states)
@@ -4334,6 +4336,30 @@ pub(crate) fn agent_retryable(status: &str) -> bool {
     matches!(status, "done" | "error" | "skipped")
 }
 
+/// Why a single-agent Retry is refused (`None` ⇒ allowed). Besides the agent
+/// itself being settled, the REVIEW must be: while it is still Running, the
+/// original run's end-of-review temp sweep deletes the retried agent's
+/// re-materialised `.diff` / `.prompt` / findings file mid-read, and its
+/// summarizer runs without the retried agent's findings (S2-303) — the same
+/// rule the summarizer retry already applies.
+pub(crate) fn agent_retry_block(
+    review_status: ReviewStatus,
+    index: usize,
+    agent_status: &str,
+) -> Option<String> {
+    if !agent_retryable(agent_status) {
+        return Some(format!(
+            "agent {index} is still {agent_status} — stop it before retrying"
+        ));
+    }
+    if review_status == ReviewStatus::Running {
+        return Some(
+            "the review is still running — retry this agent once the review has finished".into(),
+        );
+    }
+    None
+}
+
 /// Re-run a single review agent (e.g. one that never received its prompt). Uses
 /// the prompt persisted when the review started, kills the agent's old (stuck)
 /// session, and spawns a fresh one in the background.
@@ -4374,11 +4400,8 @@ async fn retry_review_agent(
     // and replaced its cancel flag: the original recovery loop then respawned
     // into the same index + findings file, and its orphaned flag left neither
     // Stop nor Cancel able to reach it. A stuck agent is Stopped first.
-    if !agent_retryable(&review.agents[index].status) {
-        return Err(crate::error::ApiError(Error::Conflict(format!(
-            "agent {index} is still {} — stop it before retrying",
-            review.agents[index].status
-        ))));
+    if let Some(why) = agent_retry_block(review.status, index, &review.agents[index].status) {
+        return Err(crate::error::ApiError(Error::Conflict(why)));
     }
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
@@ -4434,6 +4457,9 @@ async fn retry_review_agent(
     }
 
     let provider = review.agents[index].provider.clone();
+    // An orchestrator row re-spawns as an orchestrator (sub-agent tool + the
+    // per-lens findings files its persisted prompt names) — S2-304.
+    let lens_slugs = review.agents[index].lens_slugs.clone();
     // Retry this reviewer with the SAME model it was configured with (empty →
     // provider default) so the retry matches the original run.
     let model = review.agents[index].model.clone();
@@ -4512,9 +4538,7 @@ async fn retry_review_agent(
             None,
             Some(&agent_cancel), // per-agent Stop works on retried agents too
             review_skills_dir.as_deref(),
-            // The persisted prompt carries the lens list, but the retry route
-            // does not parse it — the guard's note falls back to today's text.
-            &[],
+            &lens_slugs,
         )
         .await;
         if let Some(wt) = pr_wt {
@@ -7464,5 +7488,56 @@ mod agent_input_rule_tests {
         assert!(agent_input_rule(Some(&me), &worker, &worker_meta, false).is_err());
         // Another lead's worker: no.
         assert!(agent_input_rule(Some(&me), &worker, &other_worker_meta, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_retry_tests {
+    use super::agent_retry_block;
+    use otto_core::domain::{ReviewAgentState, ReviewStatus};
+
+    /// S2-303: a settled agent is retryable only once the review has settled.
+    #[test]
+    fn agent_retry_needs_a_settled_agent_and_a_settled_review() {
+        assert!(agent_retry_block(ReviewStatus::Done, 0, "done").is_none());
+        assert!(agent_retry_block(ReviewStatus::Error, 0, "error").is_none());
+        assert!(agent_retry_block(ReviewStatus::Cancelled, 0, "skipped").is_none());
+        let why = agent_retry_block(ReviewStatus::Running, 0, "done").unwrap();
+        assert!(why.contains("still running"), "{why}");
+        let why = agent_retry_block(ReviewStatus::Done, 2, "running").unwrap();
+        assert!(why.contains("agent 2 is still running"), "{why}");
+    }
+
+    /// S2-304: an orchestrator row carries its lens slugs through agents_json,
+    /// so the retry route re-spawns it WITH its sub-agent tool; fan-out rows
+    /// (and pre-field rows) stay without one.
+    #[test]
+    fn orchestrator_row_keeps_its_lens_slugs_for_retry() {
+        let row: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "orchestrator", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+            "lens_slugs": ["correctness", "security"],
+        }))
+        .unwrap();
+        let back = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            back["lens_slugs"],
+            serde_json::json!(["correctness", "security"])
+        );
+        let meta = crate::review_session::review_session_meta("r1", 0, !row.lens_slugs.is_empty());
+        assert_eq!(meta["allow_subagents"], true);
+
+        let fan_out: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "correctness", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+        }))
+        .unwrap();
+        assert!(fan_out.lens_slugs.is_empty());
+        assert!(serde_json::to_value(&fan_out)
+            .unwrap()
+            .get("lens_slugs")
+            .is_none());
+        let meta = crate::review_session::review_session_meta("r1", 0, false);
+        assert!(meta.get("allow_subagents").is_none());
     }
 }

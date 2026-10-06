@@ -496,19 +496,27 @@ mod tests {
         };
         let run_id: Id = "run-1".into();
         let exec = repo
-            .create(mk(serde_json::json!({"source": "run_with_otto", "run_id": "run-1"})))
+            .create(mk(
+                serde_json::json!({"source": "run_with_otto", "run_id": "run-1"}),
+            ))
             .await
             .unwrap();
         let draft = repo
-            .create(mk(serde_json::json!({"source": "pr-draft", "run_id": "run-1"})))
+            .create(mk(
+                serde_json::json!({"source": "pr-draft", "run_id": "run-1"}),
+            ))
             .await
             .unwrap();
         let other_run = repo
-            .create(mk(serde_json::json!({"source": "run_with_otto", "run_id": "run-2"})))
+            .create(mk(
+                serde_json::json!({"source": "run_with_otto", "run_id": "run-2"}),
+            ))
             .await
             .unwrap();
         let workflow = repo
-            .create(mk(serde_json::json!({"source": "workflow", "run_id": "run-1"})))
+            .create(mk(
+                serde_json::json!({"source": "workflow", "run_id": "run-1"}),
+            ))
             .await
             .unwrap();
         let interactive = repo.create(mk(serde_json::json!({}))).await.unwrap();
