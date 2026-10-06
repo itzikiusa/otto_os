@@ -2913,6 +2913,10 @@ mod tests {
             "gate",
             "someday-new",
             "Review",
+            // Workflow-graph edge fixtures (secgate's human_approval tests).
+            "implement",
+            "approve",
+            "approve2",
         ];
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
