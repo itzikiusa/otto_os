@@ -94,6 +94,9 @@ struct Queued {
 }
 
 impl Queued {
+    /// Wait for the place without a notice (the bridge always uses
+    /// [`Queued::acquire_or_notify`]; the queue-order tests use this).
+    #[cfg(test)]
     async fn acquire(self) -> tokio::sync::OwnedMutexGuard<()> {
         match self.now {
             Some(guard) => guard,
