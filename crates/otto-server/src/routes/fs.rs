@@ -887,6 +887,28 @@ mod tests {
         assert!(super::non_root_canonical_denied(&other.path().canonicalize().unwrap()).is_ok());
     }
 
+    /// S7-301: the `/System/Volumes/Data` firmlink spelling of the data dir,
+    /// `~/.ssh` or `/private/etc` is refused like the short one.
+    #[test]
+    fn non_root_deny_covers_firmlink_spellings() {
+        let Some(home) = otto_core::secret_paths::home_dir() else {
+            return;
+        };
+        let fl = std::path::Path::new("/System/Volumes/Data").join(home.strip_prefix("/").unwrap());
+        for p in [
+            fl.join("Library/Application Support/Otto/otto.db"),
+            fl.join(".ssh/config"),
+            fl.join(".codex/auth.json"),
+            std::path::PathBuf::from("/System/Volumes/Data/private/etc/hosts"),
+        ] {
+            assert!(
+                super::non_root_canonical_denied(&p).is_err(),
+                "{} must be denied",
+                p.display()
+            );
+        }
+    }
+
     #[test]
     fn non_root_deny_covers_ssh_and_key_files_through_dotdot() {
         let home = std::env::var("HOME").unwrap_or_default();

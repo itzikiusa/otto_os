@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use otto_core::api::{CreateSessionReq, Problem, UpdateSessionReq};
-use otto_core::auth::{session_owner_or_admin, AuthUser, RoleChecker};
+use otto_core::auth::{session_owner_or_admin, AuthContext, AuthUser, RoleChecker};
 use otto_core::domain::{Session, User, WorkspaceRole, SCRATCH_WORKSPACE_ID};
 use otto_core::workref::WorkRef;
 use otto_core::{Error, Id};
@@ -390,6 +390,7 @@ async fn visible_out<S: SessionsCtx>(
 async fn create_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(ws_id): Path<Id>,
     Json(mut req): Json<CreateSessionReq>,
 ) -> ApiResult<Json<Session>> {
@@ -422,6 +423,20 @@ async fn create_session<S: SessionsCtx>(
     }
 
     let ws = ctx.workspaces().get(&ws_id).await?;
+    // S11-302: an agent session's own credential (its API token or its MCP
+    // credential) may only start sessions inside the workspace, its own
+    // folder or a worktree of the same repo. A person's token is unaffected.
+    if let Some(Extension(auth)) = &auth {
+        if let Some(caller) = auth
+            .managed_session_id
+            .as_ref()
+            .or(auth.mcp_session_id.as_ref())
+        {
+            ctx.manager()
+                .check_agent_cwd(&ws, caller, req.cwd.as_deref())
+                .await?;
+        }
+    }
     let session = ctx.manager().create(&ws, &user.id, req, None).await?;
     Ok(Json(session))
 }
@@ -443,6 +458,12 @@ async fn get_session<S: SessionsCtx>(
 /// Otto TYPES `cd <nested_cwd> && <provider> --resume <sid>` into the shell's
 /// PTY, so a token that could rewrite those values would type commands into a
 /// sibling (unsandboxed) shell.
+///
+/// The confinement keys are create-only for the same reason (S1-303): the
+/// session's own token could otherwise lift `read_only`, opt into the
+/// project's `.claude` hooks (`project_settings`), re-enable subagents, drop
+/// its personal-agent policy binding, or swap the provider account whose home
+/// the sandbox re-opens — and the next respawn would run with the widened set.
 pub const SERVER_OWNED_META: &[&str] = &[
     "ui_control",
     "client_id",
@@ -450,6 +471,11 @@ pub const SERVER_OWNED_META: &[&str] = &[
     "nested_provider",
     "nested_cwd",
     "nested_pid",
+    "read_only",
+    "project_settings",
+    "allow_subagents",
+    "personal_agent",
+    "account_id",
 ];
 
 /// Meta key naming the agent session that opened this one as a worker
@@ -457,6 +483,55 @@ pub const SERVER_OWNED_META: &[&str] = &[
 /// caller's credential; it decides whether that agent's own token may
 /// message this session, so a PATCH must never set or change it.
 pub const DELEGATED_BY_META: &str = "delegated_by";
+
+/// The agent session an Otto-minted credential is bound to: an author
+/// session's API token (`managed_session_id`) or a session's internal MCP
+/// credential (`mcp_session_id`). `None` for a person's own login/PAT token.
+pub fn agent_session_of(auth: &AuthContext) -> Option<&Id> {
+    auth.managed_session_id
+        .as_ref()
+        .or(auth.mcp_session_id.as_ref())
+}
+
+/// Confinement of an agent session's OWN credential (S11-02 / S1-11 / S1-303):
+/// it may drive or control only its own session, plus — when
+/// `allow_delegated` — the workers it opened through
+/// `POST /workspaces/{id}/sessions/open` (stamped [`DELEGATED_BY_META`]).
+/// `/ws/term` and `/input` use the strict form; `/message`, broadcast/relay
+/// and the lifecycle routes (PATCH, restart, kill, archive, …) the delegated
+/// one. A person's credential (`own == None`) is unaffected.
+pub fn agent_input_rule(
+    own: Option<&Id>,
+    target_id: &Id,
+    target_meta: &serde_json::Value,
+    allow_delegated: bool,
+) -> Result<(), Error> {
+    let Some(own) = own else {
+        return Ok(());
+    };
+    if own == target_id {
+        return Ok(());
+    }
+    let delegated = target_meta
+        .get(DELEGATED_BY_META)
+        .and_then(serde_json::Value::as_str)
+        == Some(own.as_str());
+    if allow_delegated && delegated {
+        return Ok(());
+    }
+    Err(Error::Forbidden(
+        "an agent session's credential may only act on its own session or a worker it opened"
+            .into(),
+    ))
+}
+
+/// [`agent_input_rule`] (delegated form) for the per-session lifecycle routes.
+/// The auth middleware always inserts the [`AuthContext`]; a router mounted
+/// without it (unit harnesses) is treated as a person, like before.
+fn ensure_agent_may_control(auth: Option<&AuthContext>, session: &Session) -> ApiResult<()> {
+    let own = auth.and_then(agent_session_of);
+    agent_input_rule(own, &session.id, &session.meta, true).map_err(ApiErr)
+}
 
 /// `session.meta` keys that bind a session to its swarm/project/task/run. The
 /// swarm ingest endpoints (`otto-post`, `otto-mockup`…) act on these ids with
@@ -476,11 +551,13 @@ pub const SWARM_BINDING_META: &[&str] = &[
 async fn patch_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
     Json(mut req): Json<UpdateSessionReq>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     if let Some(meta) = &req.meta {
         // These fields bind a terminal to its originating protected resource.
         // Ordinary metadata edits must not detach or replace that binding.
@@ -503,8 +580,9 @@ async fn patch_session<S: SessionsCtx>(
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
-                "ui_control / client_id / delegated_by / nested_* are server-owned (ui_control: \
-                 use POST /sessions/{id}/ui-control)"
+                "ui_control / client_id / delegated_by / nested_* and the confinement keys \
+                 (read_only, project_settings, allow_subagents, personal_agent, account_id) \
+                 are server-owned (ui_control: use POST /sessions/{id}/ui-control)"
                     .into(),
             )));
         }
@@ -536,10 +614,12 @@ async fn patch_session<S: SessionsCtx>(
 async fn delete_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     ctx.manager().remove(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -548,10 +628,12 @@ async fn delete_session<S: SessionsCtx>(
 async fn resume_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     if session.archived {
         return Err(Error::Conflict("session is archived — unarchive it first".into()).into());
     }
@@ -569,10 +651,12 @@ async fn resume_session<S: SessionsCtx>(
 async fn restart_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     Ok(Json(ctx.manager().restart(&id, None).await?))
 }
 
@@ -580,10 +664,12 @@ async fn restart_session<S: SessionsCtx>(
 async fn archive_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     Ok(Json(ctx.manager().archive(&id).await?))
 }
 
@@ -591,10 +677,12 @@ async fn archive_session<S: SessionsCtx>(
 async fn unarchive_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     Ok(Json(ctx.manager().unarchive(&id).await?))
 }
 
@@ -605,10 +693,12 @@ async fn unarchive_session<S: SessionsCtx>(
 async fn kill_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Path(id): Path<Id>,
 ) -> ApiResult<Json<Session>> {
     let session = ctx.manager().get(&id).await?;
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    ensure_agent_may_control(auth.as_ref().map(|a| &a.0), &session)?;
     ctx.manager().kill_session(&id).await?;
     Ok(Json(ctx.manager().get(&id).await?))
 }
@@ -638,6 +728,7 @@ struct BulkSessionResult {
 async fn bulk_sessions<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<AuthContext>>,
     Json(req): Json<BulkSessionsReq>,
 ) -> ApiResult<Json<Vec<BulkSessionResult>>> {
     const BULK_CAP: usize = 200;
@@ -661,6 +752,12 @@ async fn bulk_sessions<S: SessionsCtx>(
             if !session_owner_or_admin(ctx.roles().as_ref(), &user, &session).await {
                 return Err(Error::Forbidden("forbidden".into()));
             }
+            agent_input_rule(
+                auth.as_ref().and_then(|a| agent_session_of(&a.0)),
+                &session.id,
+                &session.meta,
+                true,
+            )?;
             match req.action.as_str() {
                 "archive" => ctx.manager().archive(&id).await.map(|_| ()),
                 "delete" => ctx.manager().remove(&id).await,

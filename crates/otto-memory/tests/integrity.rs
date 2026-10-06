@@ -458,3 +458,41 @@ async fn warm_fts_reconciles_before_the_first_request() {
     assert_eq!(fts_mids(&cold).await.len(), 1, "reconciled at warm-up");
     assert_eq!(search_ids(&cold, &ws, "epsilon").await.len(), 1);
 }
+
+/// S7-307: the undo token never appears in a memory's JSON (any Viewer reads
+/// those), and the per-memory undo route restores only that memory.
+#[tokio::test]
+async fn undo_token_is_not_serialized_and_undo_is_pinned_to_its_memory() {
+    let (pool, ws, user) = otto_memory::test_support::mem_pool().await;
+    let svc = MemoryService::with_defaults(pool);
+    let saved = svc
+        .save(
+            &ws,
+            &user,
+            vec![nm("A", "epsilon fact"), nm("B", "zeta fact")],
+        )
+        .await
+        .unwrap();
+    let t1 = svc.soft_forget(&ws, &saved[0].id).await.unwrap().undo_token;
+    let row = svc.get(&ws, &saved[0].id).await.unwrap();
+    assert_eq!(row.undo_token.as_deref(), Some(t1.as_str()), "stored");
+    let json = serde_json::to_string(&row).unwrap();
+    assert!(
+        !json.contains(&t1) && !json.contains("undo_token"),
+        "{json}"
+    );
+    // A token for A presented on B's route: 404, A stays forgotten.
+    assert!(matches!(
+        svc.undo_forget_id(&ws, &saved[1].id, &t1)
+            .await
+            .unwrap_err(),
+        Error::NotFound(_)
+    ));
+    assert!(!svc.get(&ws, &saved[0].id).await.unwrap().active);
+    assert!(
+        svc.undo_forget_id(&ws, &saved[0].id, &t1)
+            .await
+            .unwrap()
+            .active
+    );
+}

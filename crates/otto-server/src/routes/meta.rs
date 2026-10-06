@@ -62,7 +62,10 @@ async fn probe_tools_cached(specs: std::collections::BTreeMap<String, String>) -
 #[cfg(test)]
 static PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Whether the request carries a bearer that verifies (any credential kind).
+/// Whether the request carries a bearer that verifies as a full (unscoped,
+/// non-MCP) account credential. A share link — verified or still OTP-pending —
+/// and an MCP token are NOT "signed in" here (S8-308): a leaked share link
+/// must not learn tool/provider versions or the second loopback base.
 async fn caller_authenticated(ctx: &ServerCtx, headers: &axum::http::HeaderMap) -> bool {
     let Some(token) = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -73,7 +76,10 @@ async fn caller_authenticated(ctx: &ServerCtx, headers: &axum::http::HeaderMap) 
     else {
         return false;
     };
-    ctx.authenticator.authenticate(token).await.is_ok()
+    ctx.authenticator
+        .authenticate(token)
+        .await
+        .is_ok_and(|auth| !auth.is_scoped() && !auth.mcp_only)
 }
 
 /// `GET /api/v1/meta`
@@ -314,6 +320,43 @@ mod walkthrough_tests {
         );
         configure_provider_probe(&mut probes, "custom-agent", "/bin/sh".into());
         assert_eq!(probes["custom-agent"], "/bin/sh");
+    }
+
+    /// S8-308: only a full account credential counts as "signed in" for
+    /// `/meta`'s detail — never a share link or an MCP token.
+    #[tokio::test]
+    async fn share_and_mcp_tokens_are_not_signed_in_for_meta() {
+        let pool = crate::test_support::mem_pool().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ServerCtx::for_tests(&pool, tmp.path()).await;
+        let owner = otto_state::UsersRepo::new(pool.clone())
+            .create("s8308", "x", "Owner", true)
+            .await
+            .unwrap();
+        let repo = otto_rbac::AuthRepo::new(pool.clone());
+        let login = repo.issue(&owner.id).await.unwrap();
+        let (share, _) = repo
+            .issue_share_token(
+                &owner.id,
+                &otto_core::Id::from("S1"),
+                otto_core::domain::WorkspaceRole::Viewer,
+                3600,
+                None,
+            )
+            .await
+            .unwrap();
+        let mcp = repo.issue_mcp_token(&owner.id, None).await.unwrap();
+        let headers = |t: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {t}").parse().unwrap(),
+            );
+            h
+        };
+        assert!(caller_authenticated(&ctx, &headers(&login)).await);
+        assert!(!caller_authenticated(&ctx, &headers(&share)).await);
+        assert!(!caller_authenticated(&ctx, &headers(&mcp)).await);
     }
 
     /// S8-04: 50 concurrent `/meta` probes run the tool detection ONCE per

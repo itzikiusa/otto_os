@@ -167,7 +167,7 @@ pub async fn create(
     Json(req): Json<CreateMcpServerReq>,
 ) -> ApiResult<Json<McpServer>> {
     require_ws_role(&ctx, &user, &ws_id, WorkspaceRole::Editor).await?;
-    if !user.is_root {
+    if !otto_core::auth::root_authority(&user) {
         return Err(Error::Forbidden(
             "only the owner can attach MCP credentials or commands".into(),
         )
@@ -233,7 +233,7 @@ pub async fn update(
     let existing = repo.get(&id).await?;
     resource_check(&ctx, &user, &id, "configure").await?;
     require_ws_role(&ctx, &user, &existing.workspace_id, WorkspaceRole::Editor).await?;
-    if !user.is_root
+    if !otto_core::auth::root_authority(&user)
         && (req.command.as_ref().is_some_and(|v| v != &existing.command)
             || req.args.as_ref().is_some_and(|v| v != &existing.args)
             || req.env.as_ref().is_some_and(|v| v != &existing.env)

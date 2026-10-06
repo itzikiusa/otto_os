@@ -989,7 +989,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Secret-store status + the confirmed "Secure secrets…" migration — root
     // daemon maintenance (handlers require root).
-    if matches!(p, "/admin/secrets/status" | "/admin/secrets/secure") {
+    if matches!(
+        p,
+        "/admin/secrets/status" | "/admin/secrets/secure" | "/admin/secrets/reset-store"
+    ) {
         return Require(Settings, Admin);
     }
     if matches!(
@@ -1491,6 +1494,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             | "/state/archive"
             | "/admin/secrets/status"
             | "/admin/secrets/secure"
+            | "/admin/secrets/reset-store"
     ) {
         return Some(S);
     }
@@ -1525,6 +1529,9 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/settings/pr-review/presets"
                     | "/room-settings"
                     | "/room-recap-settings"
+                    // Kills every live session of every user (root-only in
+                    // the handler, which an agent token of root passes).
+                    | "/app/kill-sessions"
                     | "/state/restore"
                     | "/state/archive/restore"
                     | "/insights/config"
@@ -1555,6 +1562,53 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
                     | "/workspaces/{wid}/workgraph/approvals/{aid}/decide"
             )
             || p.starts_with("/state/git/")
+            // MCP control-plane registry (S11-301): a server row names the
+            // command the daemon spawns unsandboxed; a tool row / allowlist
+            // switches the approval gate on governed outbound tools.
+            || matches!(
+                p,
+                "/workspaces/{wid}/mcp/servers"
+                    | "/mcp/servers/{id}"
+                    | "/mcp/tools/{tool_id}"
+                    | "/workspaces/{wid}/mcp/allowlist"
+                    | "/mcp/otto-server/enabled"
+            )
+            // Kubeconfigs name an `exec` plugin the daemon runs (S11-303).
+            || matches!(
+                p,
+                "/k8s/clusters"
+                    | "/k8s/clusters/{id}"
+                    | "/k8s/clusters/import"
+                    | "/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig"
+            )
+            // Channel bridges: tokens, allowed users and open_to_all decide
+            // who can drive new agent sessions remotely (S11-306). The
+            // `/test` send stays Outward (matched below).
+            || matches!(
+                p,
+                "/workspaces/{id}/integrations"
+                    | "/workspaces/{id}/integrations/{channel}"
+                    | "/workspaces/{id}/integrations/seed-from-loom"
+            )
+            // Self-improvement autonomy flips edits to auto-apply into shared
+            // skills (S8-304); the email sender carries share links + OTPs;
+            // notification settings silence the owner; revoking the owner's
+            // own tokens / shares is a credential administration act.
+            || matches!(
+                p,
+                "/workspaces/{id}/self-improvement"
+                    | "/email-sender"
+                    | "/email-sender/verify"
+                    | "/notifications/settings"
+                    | "/auth/tokens/{id}"
+                    | "/auth/shares/revoke-all"
+                    | "/skill-reviews/{id}/apply"
+            )
+            // Human approval gates, structurally (S11-308, S8-304): every
+            // write that approves / decides / rejects / rolls back is a
+            // person's call — except a PR approve, an Outward act on the
+            // remote that the `otto-pr` skill performs with its own token.
+            || (is_gate_decision(p) && !p.starts_with("/repos/{id}/prs/"))
             // The shared skill/soul library is loaded into every session.
             || (p.starts_with("/library/") && !p.starts_with("/library/bundled"))
             || p == "/skill-evaluations/{id}/promote";
@@ -1612,6 +1666,29 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
     None
 }
 
+/// The last path segment decides a human approval gate.
+fn is_gate_decision(p: &str) -> bool {
+    matches!(
+        p.rsplit('/').next().unwrap_or(""),
+        "approve" | "decide" | "reject" | "rollback"
+    )
+}
+
+/// The reviewed allow-list of WRITES on which an agent credential keeps its
+/// owner's root authority (S11 "flip the default"). Everywhere else the
+/// feature guard withholds root from a non-human credential's write, so a
+/// handler's `require_root` / `require_setup_authority` /
+/// `otto_core::auth::root_authority` refuses it — a new root-gated route is
+/// closed to agents until someone reviews it and adds it HERE.
+///
+/// Today the list is exactly the [`RouteClass::Outward`] routes: the user has
+/// not decided whether an agent's own token may merge / push / post (the
+/// `otto-pr` skill drives PRs with its session token), so those keep working.
+/// No Admin / Secret route may ever appear here (a test pins that).
+pub fn agent_root_write_allowed(method: &Method, matched_path: &str) -> bool {
+    matches!(route_class(method, matched_path), Some(RouteClass::Outward))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1663,6 +1740,83 @@ mod tests {
         assert_eq!(c(Method::POST, "/api/v1/sessions/{id}/input"), None);
         assert_eq!(c(Method::POST, "/api/v1/admin/impersonate/stop"), None);
         assert_eq!(c(Method::GET, "/api/v1/auth/tokens"), None);
+        // S11-301 / 303 / 306 / 308, S8-304: root-gated writes the agent
+        // could reach before, now person-only.
+        for (m, p) in [
+            (Method::POST, "/api/v1/workspaces/{wid}/mcp/servers"),
+            (Method::PATCH, "/api/v1/mcp/servers/{id}"),
+            (Method::DELETE, "/api/v1/mcp/servers/{id}"),
+            (Method::PATCH, "/api/v1/mcp/tools/{tool_id}"),
+            (Method::PUT, "/api/v1/workspaces/{wid}/mcp/allowlist"),
+            (Method::PUT, "/api/v1/mcp/otto-server/enabled"),
+            (Method::POST, "/api/v1/k8s/clusters"),
+            (Method::POST, "/api/v1/k8s/clusters/import"),
+            (
+                Method::POST,
+                "/api/v1/aws/accounts/{id}/eks/clusters/{name}/import-kubeconfig",
+            ),
+            (
+                Method::PUT,
+                "/api/v1/workspaces/{id}/integrations/{channel}",
+            ),
+            (
+                Method::POST,
+                "/api/v1/workspaces/{id}/integrations/seed-from-loom",
+            ),
+            (Method::POST, "/api/v1/improvement/edits/{eid}/approve"),
+            (Method::POST, "/api/v1/improvement/edits/{eid}/rollback"),
+            (Method::POST, "/api/v1/findings/{id}/approve"),
+            (Method::POST, "/api/v1/pr-review-comments/{cid}/approve"),
+            (Method::POST, "/api/v1/product/testcase-runs/{rid}/approve"),
+            (Method::POST, "/api/v1/design/artifacts/{id}/approve"),
+            (Method::POST, "/api/v1/database-changes/{id}/reject"),
+            (Method::POST, "/api/v1/skill-reviews/{id}/apply"),
+            (Method::PUT, "/api/v1/workspaces/{id}/self-improvement"),
+            (Method::PUT, "/api/v1/email-sender"),
+            (Method::POST, "/api/v1/email-sender/verify"),
+            (Method::PUT, "/api/v1/notifications/settings"),
+            (Method::DELETE, "/api/v1/auth/tokens/{id}"),
+            (Method::POST, "/api/v1/auth/shares/revoke-all"),
+        ] {
+            assert_eq!(c(m.clone(), p), Some(A), "{m} {p}");
+        }
+        // The PR approve stays Outward (the `otto-pr` skill), and the
+        // integration `/test` send stays Outward too.
+        assert_eq!(
+            c(Method::POST, "/api/v1/repos/{id}/prs/{number}/approve"),
+            Some(O)
+        );
+        assert_eq!(
+            c(
+                Method::POST,
+                "/api/v1/workspaces/{id}/integrations/{channel}/test"
+            ),
+            Some(O)
+        );
+        // Reading the bridges / k8s clusters stays untagged.
+        assert_eq!(c(Method::GET, "/api/v1/workspaces/{id}/integrations"), None);
+        assert_eq!(c(Method::GET, "/api/v1/k8s/clusters"), None);
+    }
+
+    #[test]
+    fn agent_root_write_allow_list_is_outward_only_and_never_admin_or_secret() {
+        assert!(agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/repos/{id}/prs/{number}/merge"
+        ));
+        assert!(agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/repos/{id}/prs"
+        ));
+        assert!(!agent_root_write_allowed(&Method::PUT, "/api/v1/settings"));
+        assert!(!agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/workspaces/{wid}/mcp/servers"
+        ));
+        assert!(!agent_root_write_allowed(
+            &Method::POST,
+            "/api/v1/sessions/{id}/input"
+        ));
     }
 
     // Helper: every test path carries the `/api/v1` nest prefix the guard sees.

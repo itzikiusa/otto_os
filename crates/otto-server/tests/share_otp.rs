@@ -484,6 +484,25 @@ async fn extend_emails_fresh_otp_to_locked_recipient_and_re_pends() {
         "verified share is not pending before extend"
     );
 
+    // S8-307: a link holder can't kick the verified guest back to pending
+    // while its window is open — extend is refused and nothing is mailed.
+    let refused = extend_otp_share(&repo, &owner, &token, &mailer).await;
+    assert!(
+        matches!(
+            refused,
+            Err(otto_server::error::ApiError(Error::Conflict(_)))
+        ),
+        "extend of a verified, open share must be refused"
+    );
+    assert_eq!(mailer.sent.lock().unwrap().len(), 1);
+    // The verified window lapses (as it does after ≤12h)…
+    sqlx::query("UPDATE auth_sessions SET max_expires_at = ? WHERE token_hash = ?")
+        .bind(Utc::now().timestamp() - 1)
+        .bind(otto_rbac::tokens::token_hash(&token))
+        .execute(&pool)
+        .await
+        .unwrap();
+
     // EXTEND — note the call carries NO email; the destination is read from the
     // share row. The handler signature is the proof: it cannot redirect delivery.
     extend_otp_share(&repo, &owner, &token, &mailer)

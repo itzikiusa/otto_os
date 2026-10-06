@@ -26,6 +26,10 @@
   interface ProcessSandbox {
     enabled: boolean;
     network: 'full' | 'loopback' | 'none';
+    /** Providers a person exempted from confinement (kept as-is on save). */
+    exempt_providers?: string[];
+    /** Legacy allow-list of built-in providers (kept as-is on save). */
+    providers?: string[];
   }
 
   let loading = $state(true);
@@ -41,6 +45,7 @@
   // Last-saved values: the ONE Save (in the header) sends only the groups
   // that differ from these, and is disabled while nothing does.
   let savedListener = $state<NetworkListener>({ enabled: false, port: 7700 });
+  let sandboxRest: Partial<ProcessSandbox> = {};
   let savedSandbox = $state<ProcessSandbox>({ enabled: false, network: 'full' });
   const listenerDirty = $derived(enabled !== savedListener.enabled || port !== savedListener.port);
   const sandboxDirty = $derived(
@@ -95,7 +100,13 @@
       }
       savedListener = { enabled, port };
       const sb = allSettings['process_sandbox'] as ProcessSandbox | undefined;
+      sandboxRest = {};
       if (sb) {
+        // Keys this form doesn't edit (the exempt list) survive a save.
+        const rest: Partial<ProcessSandbox> = { ...sb };
+        delete rest.enabled;
+        delete rest.network;
+        sandboxRest = rest;
         sandboxEnabled = sb.enabled;
         sandboxNetwork = sb.network ?? 'full';
       }
@@ -129,7 +140,8 @@
     // still write a network-listener audit entry.
     const body: Record<string, unknown> = {};
     if (listenerDirty) body.network_listener = { enabled, port };
-    if (sandboxDirty) body.process_sandbox = { enabled: sandboxEnabled, network: sandboxNetwork };
+    if (sandboxDirty)
+      body.process_sandbox = { ...sandboxRest, enabled: sandboxEnabled, network: sandboxNetwork };
     if (sessionsDirty) {
       if (persistEnabled !== savedSessions.persist) body.session_persistence = persistEnabled;
       if (manualGrace !== savedSessions.manualGrace) body.manual_idle_suspend_secs = manualGrace;

@@ -1,6 +1,6 @@
 //! Streaming API-client transports: a single WebSocket the UI opens to the
 //! daemon (`GET /ws/api-client/stream`, bearer in the `otto-bearer`
-//! subprotocol; `?token=` legacy fallback) which then bridges to an
+//! subprotocol only — no `?token=`) which then bridges to an
 //! upstream **SSE** (`text/event-stream`) or **WebSocket** endpoint. Running
 //! the upstream connection in the daemon (like the HTTP proxy) dodges webview
 //! CORS/CSP and keeps secrets server-side.
@@ -35,7 +35,6 @@ use serde_json::{json, Value};
 
 #[derive(Deserialize)]
 struct StreamQuery {
-    token: Option<String>,
     workspace_id: Id,
 }
 
@@ -59,15 +58,10 @@ async fn stream_ws(
     State(ctx): State<ServerCtx>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    // Prefer the `otto-bearer` subprotocol (token out of the URL — S11-11);
-    // `?token=` stays as a fallback for older clients.
-    let subprotocol_token = crate::ws_events::token_from_subprotocol(&headers);
-    let ws = if subprotocol_token.is_some() {
-        ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL])
-    } else {
-        ws
-    };
-    let token = match subprotocol_token.or(q.token) {
+    // The bearer travels only in the `otto-bearer` subprotocol (token out of
+    // the URL — S11-11); the legacy `?token=` fallback is gone (S11-312).
+    let ws = ws.protocols([crate::ws_events::BEARER_SUBPROTOCOL]);
+    let token = match crate::ws_events::token_from_subprotocol(&headers) {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };

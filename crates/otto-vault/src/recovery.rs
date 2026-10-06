@@ -143,7 +143,69 @@ fn known_ignored(key: &(String, &'static str)) -> bool {
     false
 }
 
+/// Per vault root: when the tracked recovery dirs were probed, and the answer.
+type TrackedCache = Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>;
+
+/// Recovery dirs whose contents the vault's git repo tracks, per root, with
+/// when that was probed — `status` is polled, `git ls-files` is not free.
+fn tracked_cache() -> &'static TrackedCache {
+    static CACHE: OnceLock<TrackedCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// How long a tracked-recovery probe answer is reused.
+const TRACKED_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The recovery dirs among `.otto-history` / `.trash` with at least one file
+/// in git's index (blocking). Not a repo, no git, or nothing tracked → empty.
+fn probe_tracked_recovery(root: &str) -> Vec<String> {
+    let out = otto_git::hardened_std_command()
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-z", "--", ".otto-history", ".trash"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut dirs: Vec<String> = Vec::new();
+    for path in out.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+        let first = path.split(|b| *b == b'/').next().unwrap_or_default();
+        let first = String::from_utf8_lossy(first).into_owned();
+        if !dirs.contains(&first) {
+            dirs.push(first);
+        }
+    }
+    dirs.sort();
+    dirs
+}
+
 impl VaultEngine {
+    /// Recovery dirs git already tracks for the vault at `root` (S7-07): the
+    /// `.gitignore` only stops NEW history/trash files from being committed.
+    /// Cached a few minutes per root; probed off the runtime.
+    pub(crate) async fn tracked_recovery_dirs(root: &str) -> Vec<String> {
+        if let Some((at, dirs)) = tracked_cache()
+            .lock()
+            .ok()
+            .and_then(|c| c.get(root).cloned())
+        {
+            if at.elapsed() < TRACKED_PROBE_TTL {
+                return dirs;
+            }
+        }
+        let owned = root.to_string();
+        let dirs = blocking(move || Ok(probe_tracked_recovery(&owned)))
+            .await
+            .unwrap_or_default();
+        if let Ok(mut c) = tracked_cache().lock() {
+            c.insert(root.to_string(), (std::time::Instant::now(), dirs.clone()));
+        }
+        dirs
+    }
+
     /// Make sure `<root>/<dir>/.gitignore` exists (blocking), created through
     /// the symlink-refusing directory capability and never overwriting a
     /// file the user put there. Best-effort: a failure only means the dir
@@ -845,5 +907,49 @@ mod gitignore_tests {
         std::fs::write(&gi, b"custom\n").unwrap();
         VaultEngine::ignore_recovery_dir(&root, ".otto-history");
         assert_eq!(std::fs::read(&gi).unwrap(), b"custom\n");
+    }
+}
+
+#[cfg(test)]
+mod tracked_recovery_tests {
+    use super::*;
+
+    /// S7-07: history committed BEFORE Otto wrote the `.gitignore` is still
+    /// tracked — the probe reports the dir so the UI can tell the user to
+    /// `git rm --cached -r` it; an untracked / non-repo vault reports nothing.
+    #[test]
+    fn probe_reports_only_recovery_dirs_git_tracks() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        assert!(
+            probe_tracked_recovery(&root.to_string_lossy()).is_empty(),
+            "not a repo"
+        );
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git on this host
+        }
+        std::fs::create_dir_all(root.join(".otto-history/n1")).unwrap();
+        std::fs::write(root.join(".otto-history/n1/rev.json"), "{}").unwrap();
+        std::fs::create_dir_all(root.join(".trash")).unwrap();
+        std::fs::write(root.join(".trash/old.md"), "x").unwrap();
+        std::fs::write(root.join("note.md"), "x").unwrap();
+        assert!(
+            probe_tracked_recovery(&root.to_string_lossy()).is_empty(),
+            "untracked"
+        );
+        assert!(git(&["add", "-f", ".otto-history", "note.md"]));
+        assert_eq!(
+            probe_tracked_recovery(&root.to_string_lossy()),
+            vec![".otto-history".to_string()]
+        );
     }
 }

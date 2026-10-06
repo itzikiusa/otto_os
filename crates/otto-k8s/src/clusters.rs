@@ -525,7 +525,7 @@ impl<S: K8sCtx> Clusters<S> {
     ) -> Result<K8sCluster> {
         crate::access::check(&self.ctx.pool(), user, id, "configure", None).await?;
         let cur = self.repo.get(id).await?;
-        if !user.is_root {
+        if !otto_core::auth::root_authority(user) {
             let path_changed = req.kubeconfig_path.as_deref().is_some_and(|p| {
                 let p = p.trim();
                 let normalized = if p.is_empty() {

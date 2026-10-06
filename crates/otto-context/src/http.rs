@@ -74,8 +74,10 @@ type ApiResult<T> = std::result::Result<T, ApiErr>;
 
 /// Library writes are root-only.
 fn require_root(user: &AuthUser) -> Result<(), ApiErr> {
-    if user.0.is_root {
+    if otto_core::auth::root_authority(&user.0) {
         Ok(())
+    } else if user.0.is_root {
+        Err(otto_core::auth::root_refusal().into())
     } else {
         Err(Error::Forbidden("library writes require root".into()).into())
     }

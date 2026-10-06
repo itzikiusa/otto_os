@@ -72,8 +72,43 @@ function defaultBase(): string {
   return location.origin;
 }
 
+/** sessionStorage key of THIS tab's impersonation bearer (S13-303). It used
+ *  to overwrite the shared `localStorage.otto_token`, so every other window
+ *  and tab silently started acting as the impersonated user while still
+ *  rendering the admin. Per tab, like the admin token it overlays. */
+const IMP_TOKEN_KEY = 'otto_imp_token';
+let impTokenMem: string | null = null;
+
+function sessionItem(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** This tab's impersonation bearer, or null when not impersonating. */
+export function getImpersonationToken(): string | null {
+  return impTokenMem ?? sessionItem(IMP_TOKEN_KEY);
+}
+
+/** Start (token) or end (null) THIS tab's impersonation. Never touches the
+ *  shared `otto_token`, so other windows keep their own identity. */
+export function setImpersonationToken(token: string | null): void {
+  impTokenMem = token;
+  try {
+    if (token === null) sessionStorage.removeItem(IMP_TOKEN_KEY);
+    else sessionStorage.setItem(IMP_TOKEN_KEY, token);
+  } catch {
+    /* blocked storage: the in-memory copy still drives this document */
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('otto:auth-changed'));
+}
+
+/** The bearer every request sends: this tab's impersonation token when one is
+ *  active, else the shared sign-in token. */
 export function getToken(): string | null {
-  return storedItem('otto_token');
+  return getImpersonationToken() ?? storedItem('otto_token');
 }
 
 export function setToken(token: string | null): void {
@@ -955,12 +990,14 @@ export function exportProofPack(
   return api.post<ReviewProofPackExport>(`/reviews/${reviewId}/proof-pack/export`, { format });
 }
 
-/** Build a WS URL with the auth token, e.g. wsUrl('/ws/term/SESSION_ID'). */
+/** Build a daemon WS URL, e.g. wsUrl('/ws/term/SESSION_ID'). It never carries
+ *  the token: the daemon accepts the bearer ONLY in the `otto-bearer`
+ *  subprotocol (S11-312) — open it with {@link wsConnect}, or pass
+ *  `[WS_BEARER_SUBPROTOCOL, token]` yourself for a non-stored token. */
 export function wsUrl(path: string): string {
   const base = new URL(baseUrl());
   const proto = base.protocol === 'https:' ? 'wss:' : 'ws:';
-  const token = getToken() ?? '';
-  return `${proto}//${base.host}${path}?token=${encodeURIComponent(token)}`;
+  return `${proto}//${base.host}${path}`;
 }
 
 /** Fixed first subprotocol paired with the bearer token on auth-by-subprotocol
@@ -970,8 +1007,8 @@ export const WS_BEARER_SUBPROTOCOL = 'otto-bearer';
 
 /**
  * Open a WebSocket whose bearer token travels in the `Sec-WebSocket-Protocol`
- * header instead of the `?token=` query string — the URL (and the token) then
- * never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
+ * header — the only place the daemon accepts it (a `?token=` query is refused),
+ * so the token never lands in access logs. The browser offers `[WS_BEARER_SUBPROTOCOL, token]`;
  * the daemon validates the token and echoes `WS_BEARER_SUBPROTOCOL` back.
  *
  * Tokens are not valid `Sec-WebSocket-Protocol` values if they contain spaces or

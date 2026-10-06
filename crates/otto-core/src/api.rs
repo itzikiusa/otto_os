@@ -437,6 +437,11 @@ pub struct UpdateUserReq {
     pub display_name: Option<String>,
     pub password: Option<String>,
     pub disabled: Option<bool>,
+    /// REQUIRED when a caller changes its OWN password (S8-310): a stolen UI
+    /// token must not be able to set a new password without knowing the old
+    /// one. Ignored otherwise (root resetting another user's password).
+    #[serde(default)]
+    pub current_password: Option<String>,
 }
 
 /// `POST /api/v1/workspaces`

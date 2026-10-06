@@ -26,7 +26,7 @@
 //!
 //! ## Exclusions
 //! - `/ws/*` and `/browser/proxy` — WebSocket / proxy routes that
-//!   self-authenticate via `?token=` and never reach the central feature guard.
+//!   self-authenticate (WS subprotocol bearer / proxy ticket) and never reach the central feature guard.
 //!   Documented in `policy.rs` and route_inventory's exclusion comment.
 //! - `/auth/tokens` (bare path) — handled under the `/auth/tokens` Exempt rule
 //!   whether the method is GET or POST; covered correctly.
@@ -106,12 +106,12 @@ pub(crate) fn registered_routes(root: &Path) -> BTreeSet<String> {
 /// Routes that are legitimately outside the bearer-auth / feature-policy
 /// surface and must be excluded from the coverage check.
 ///
-/// `/ws/*` and `/browser/proxy` use per-session `?token=` authentication and
+/// `/ws/*` and `/browser/proxy` self-authenticate (subprotocol bearer / ticket) and
 /// never reach the central feature guard (documented in `policy.rs`).  The
 /// route-inventory test also skips `tests/` directories, so test-stub routes
 /// are never included in the source set.
 fn is_policy_exempt_by_design(path: &str) -> bool {
-    // `/ws/*` and `/browser/proxy` self-authenticate via `?token=`. The runtime
+    // `/ws/*` and `/browser/proxy` self-authenticate (bearer / ticket). The runtime
     // plugin reverse-proxy + iframe-asset routes (`/plugins/{slug}/…`) are
     // feature-gated by the dedicated plugin branch in `feature_guard` BEFORE
     // `policy_for` is consulted, so they intentionally have no policy-table entry.
@@ -277,5 +277,120 @@ fn policy_decisions_match_the_golden_snapshot() {
         added.len(),
         removed.join("\n"),
         added.join("\n"),
+    );
+}
+
+/// S8-305: every governed `otto.*` tool replays its REST call through
+/// `self_call` with a PERSON-classed credential (the self-call PAT has no
+/// session binding), so `credential_class_gate` never sees the agent behind
+/// it. That is only safe while no tool maps onto a person-only route: this
+/// pins every `route_for` target to a route whose credential class is
+/// neither Admin nor Secret. A new tool that targets one fails here — bind
+/// its self-call to the calling session instead, or drop the mapping.
+/// Governed tools whose self-call target is person-only, each reviewed: the
+/// tool must stay approval-gated (`DANGEROUS`) for the exception to hold.
+const GOVERNED_PERSON_ONLY: &[&str] = &[
+    "approve_improvement_edit",
+    "reject_improvement_edit",
+    "rollback_improvement_edit",
+];
+
+#[test]
+fn governed_self_call_targets_are_never_person_only_routes() {
+    use axum::http::Method;
+    use otto_mcp::outward::{otto_tool_specs, route_for};
+    use otto_server::policy::{route_class, RouteClass};
+    use serde_json::{json, Map, Value};
+
+    let templates: Vec<String> = registered_routes(&repo_root()).into_iter().collect();
+    // The registered template a concrete `/api/v1/...` path resolves to: the
+    // one with the most literal segments matching (axum's precedence).
+    let resolve = |path: &str| -> Option<String> {
+        let p = path.split('?').next().unwrap_or(path);
+        let p = p.strip_prefix("/api/v1").unwrap_or(p);
+        let segs: Vec<&str> = p.split('/').collect();
+        let mut best: Option<(usize, &String)> = None;
+        for t in &templates {
+            let ts: Vec<&str> = t.split('/').collect();
+            let wildcard = ts.last().is_some_and(|s| s.starts_with("{*"));
+            if !(ts.len() == segs.len() || (wildcard && segs.len() >= ts.len())) {
+                continue;
+            }
+            let mut literal = 0;
+            let ok = ts.iter().zip(&segs).all(|(t, s)| {
+                if t.starts_with('{') {
+                    true
+                } else if t == s {
+                    literal += 1;
+                    true
+                } else {
+                    false
+                }
+            });
+            if ok && best.is_none_or(|(n, _)| literal > n) {
+                best = Some((literal, t));
+            }
+        }
+        best.map(|(_, t)| format!("/api/v1{t}"))
+    };
+    // Plausible arguments from a tool's input schema.
+    let synth = |schema: &Value| -> Value {
+        let mut args = Map::new();
+        if let Some(props) = schema["properties"].as_object() {
+            for (k, p) in props {
+                let v = if let Some(first) = p["enum"].as_array().and_then(|e| e.first()) {
+                    first.clone()
+                } else {
+                    match p["type"].as_str() {
+                        Some("integer" | "number") => json!(1),
+                        Some("boolean") => json!(true),
+                        Some("array") => json!([]),
+                        Some("object") => json!({}),
+                        _ => json!("x1"),
+                    }
+                };
+                args.insert(k.clone(), v);
+            }
+        }
+        Value::Object(args)
+    };
+
+    let mut checked = 0usize;
+    let mut wrong = Vec::new();
+    for spec in otto_tool_specs() {
+        let Some(bare) = spec["name"].as_str().and_then(|n| n.strip_prefix("otto.")) else {
+            continue;
+        };
+        let Ok(call) = route_for(bare, &synth(&spec["inputSchema"])) else {
+            continue; // handled before the self-call, or needs richer args
+        };
+        let method = Method::from_bytes(format!("{:?}", call.method).to_uppercase().as_bytes())
+            .expect("method");
+        let Some(template) = resolve(&call.path) else {
+            wrong.push(format!("{bare}: {method} {} matches no route", call.path));
+            continue;
+        };
+        checked += 1;
+        if let Some(c @ (RouteClass::Admin | RouteClass::Secret)) = route_class(&method, &template)
+        {
+            // Reviewed exceptions: the improvement-edit decisions are the
+            // governed twin of an Admin-tagged gate (S11-308). They stay
+            // reachable ONLY because each call files a human approval first
+            // (DANGEROUS) — the person who approves the MCP call decides.
+            let reviewed =
+                GOVERNED_PERSON_ONLY.contains(&bare) && otto_mcp::outward::tool_is_dangerous(bare);
+            if !reviewed {
+                wrong.push(format!("{bare}: {method} {template} is {c:?}"));
+            }
+        }
+    }
+    assert!(
+        checked >= 40,
+        "only {checked} tools resolved — synth broke?"
+    );
+    assert!(
+        wrong.is_empty(),
+        "governed self-calls must not target person-only routes:\n{}",
+        wrong.join("\n")
     );
 }

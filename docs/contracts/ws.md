@@ -10,23 +10,24 @@ room credentials are never accepted by ordinary terminal/event sockets.
   `Sec-WebSocket-Protocol` request header — the client offers
   `["otto-bearer", "<token>"]` and the server echoes back `otto-bearer` on
   success. This keeps the token out of the URL/query string (which is logged by
-  proxies and servers). A `?token=<bearer token>` query parameter is still
-  accepted as a backward-compatible fallback.
+  proxies and servers). A `?token=<bearer token>` query parameter is **not**
+  accepted (401) — on this or any other daemon socket (S11-312).
 - The terminal stream (`/ws/term/{session_id}`) accepts the token the same way:
   prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes back
-  `otto-bearer` on success, keeping the share token out of the URL). A
-  `?token=<bearer token>` query parameter is still accepted as a
-  backward-compatible fallback for existing clients.
+  `otto-bearer` on success, keeping the share token out of the URL). `?token=`
+  is refused (401); so are `/ws/lsp`, `/ws/api-client/stream` and
+  `/ws/browser/{tab_id}/live`, which take the bearer the same way.
 
 ## 1. Terminal stream — `WS /ws/term/{session_id}`
 
-Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
+Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `otto-bearer` subprotocol on success, keeping the bearer token out of the URL).
-`?token=<bearer token>` query parameter is accepted as a backward-compatible
-fallback. A token that verifies is never refused; an IP whose tokens fail
+A `?token=<bearer token>` query parameter is refused (401). A token that verifies is never refused; an IP whose tokens fail
 validation too many times gets 429 (instead of 401) for further FAILED attempts.
-The IP is the tunnel-aware client IP (`CF-Connecting-IP` for a loopback request
-naming the Public link domain, else the socket peer). A store error is 503 and
+The IP is the tunnel-aware client IP (the `trusted_client_ip_header` setting's
+header — by default `CF-Connecting-IP` for a loopback request naming a non-Funnel
+Public link domain — else the socket peer; IPv6 is keyed by /64, and a full
+throttle map fails closed for untracked IPs). A store error is 503 and
 never counted.
 
 **Attach intent — `?view=1` (optional).** By default an attach that may type
@@ -309,7 +310,7 @@ must already exist (`POST /api/v1/browser/tabs/{id}/live`); otherwise the
 upgrade is refused with 404.
 
 **Auth** (validated BEFORE the upgrade): `Sec-WebSocket-Protocol: otto-bearer,
-<token>` (server echoes `otto-bearer`), `?token=` accepted as a fallback.
+<token>` (server echoes `otto-bearer`); `?token=` is refused (401).
 Share-scoped and MCP-only tokens → 403. The caller must hold `Feature::Browser`
 ≥ View **and** be the session's owner, a workspace Admin of the tab's workspace,
 or root (anyone else → 404, so a session's existence doesn't leak). Driving

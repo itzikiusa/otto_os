@@ -1,6 +1,7 @@
 //! Terminal WebSocket — `GET /ws/term/{session_id}` per docs/contracts/ws.md.
 //!
-//! Auth: `?token=` validated BEFORE the upgrade via a `route_layer` middleware,
+//! Auth: the `otto-bearer` subprotocol token (never `?token=`, S11-312)
+//! validated BEFORE the upgrade via a `route_layer` middleware,
 //! so the 403 path is exercisable in tests even without a real WS connection.
 //! Owners (session creator), workspace Admins, and root may attach. Editors and
 //! Viewers who are not the owner are rejected (#L9).  Input/resize capability
@@ -73,11 +74,6 @@ const REVIVE_POLL: Duration = Duration::from_secs(1);
 struct WsState<S> {
     auth: Arc<dyn TokenAuthenticator>,
     ctx: S,
-}
-
-#[derive(Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
 }
 
 fn user_input_default() -> bool {
@@ -781,17 +777,16 @@ fn problem(status: StatusCode, e: &Error) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Route-layer middleware: authenticate the token (from `Sec-WebSocket-Protocol`
-/// or `?token=`), look up the session, and enforce the owner-or-admin gate (#L9).
+/// Route-layer middleware: authenticate the token (from `Sec-WebSocket-Protocol`),
+/// look up the session, and enforce the owner-or-admin gate (#L9).
 ///
-/// Token extraction order (Task 1.10):
-///  1. `Sec-WebSocket-Protocol: otto-bearer, <token>` — preferred; keeps the
-///     token out of the URL (which is logged everywhere). On a successful
-///     subprotocol auth, the upgrade response echoes `otto-bearer` back.
-///  2. `?token=<bearer token>` query param — backward-compatible fallback.
+/// The token travels ONLY as `Sec-WebSocket-Protocol: otto-bearer, <token>`
+/// (Task 1.10), which keeps it out of the URL (logged everywhere); the upgrade
+/// response echoes `otto-bearer` back. The legacy `?token=` query fallback is
+/// gone (S11-312) — a request carrying only that is a 401.
 ///
-/// On success, inserts [`AuthUser`], [`CanInput`], and [`UsedSubprotocol`]
-/// extensions so `term_ws` can read them. On failure, returns a 401/403/404
+/// On success, inserts [`AuthUser`] and [`CanInput`] extensions so `term_ws`
+/// can read them. On failure, returns a 401/403/404
 /// JSON problem BEFORE the WebSocket upgrade extractor runs — this is the
 /// property the isolation tests rely on.
 ///
@@ -802,7 +797,6 @@ fn problem(status: StatusCode, e: &Error) -> Response {
 async fn ws_auth_gate<S: SessionsCtx>(
     State(st): State<WsState<S>>,
     Path(session_id): Path<Id>,
-    Query(q): Query<TokenQuery>,
     mut req: Request,
     next: Next,
 ) -> Response {
@@ -811,10 +805,8 @@ async fn ws_auth_gate<S: SessionsCtx>(
     //    harnesses that wire neither).
     let peer_ip = share_throttle::client_ip(req.extensions());
 
-    // 1. Token source resolution (Task 1.10): subprotocol first, then query.
-    let subprotocol_token = token_from_subprotocol(req.headers());
-    let used_subprotocol = subprotocol_token.is_some();
-    let token = match subprotocol_token.or(q.token) {
+    // 1. Token source (Task 1.10 / S11-312): the subprotocol only.
+    let token = match token_from_subprotocol(req.headers()) {
         Some(t) => t,
         None => return problem(StatusCode::UNAUTHORIZED, &Error::Unauthorized),
     };
@@ -938,10 +930,6 @@ async fn ws_auth_gate<S: SessionsCtx>(
     });
     req.extensions_mut().insert(AuthUser(user));
     req.extensions_mut().insert(CanInput(can_input));
-    // Tell term_ws whether the client used the subprotocol path so it can echo
-    // `otto-bearer` back in the upgrade response (Task 1.10).
-    req.extensions_mut()
-        .insert(UsedSubprotocol(used_subprotocol));
 
     next.run(req).await
 }
@@ -1026,20 +1014,12 @@ impl LiveTerminalAuth {
     }
 }
 
-/// Newtype extension: true iff the client presented the token via the
-/// `Sec-WebSocket-Protocol: otto-bearer, <token>` header. When set, `term_ws`
-/// echoes the `otto-bearer` subprotocol in the upgrade response so the browser
-/// handshake completes; a bare `?token=` client gets a plain upgrade.
-#[derive(Clone, Copy)]
-struct UsedSubprotocol(bool);
-
 async fn term_ws<S: SessionsCtx>(
     ws: WebSocketUpgrade,
     Path(session_id): Path<Id>,
     State(st): State<WsState<S>>,
     axum::Extension(live_auth): axum::Extension<LiveTerminalAuth>,
     axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
-    axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
     Query(attach): Query<AttachQuery>,
 ) -> Response {
     let view_only = attach.view_only();
@@ -1049,25 +1029,10 @@ async fn term_ws<S: SessionsCtx>(
         Err(e) => return problem(lookup_failure_status(&e), &e),
     };
     let initial_status = session.status;
-    // Echo `otto-bearer` only when the client used the subprotocol path (Task
-    // 1.10): the browser rejects an unsolicited subprotocol in the upgrade
-    // response, so we must not echo it for legacy `?token=` clients.
-    if used_subprotocol {
-        ws.protocols([BEARER_SUBPROTOCOL])
-            .on_upgrade(move |socket| async move {
-                serve_terminal(
-                    socket,
-                    st.ctx,
-                    session_id,
-                    initial_status,
-                    can_input,
-                    view_only,
-                    live_auth,
-                )
-                .await;
-            })
-    } else {
-        ws.on_upgrade(move |socket| async move {
+    // Echo `otto-bearer` (the only way a token arrives — Task 1.10 /
+    // S11-312) so the browser completes the handshake.
+    ws.protocols([BEARER_SUBPROTOCOL])
+        .on_upgrade(move |socket| async move {
             serve_terminal(
                 socket,
                 st.ctx,
@@ -1079,7 +1044,6 @@ async fn term_ws<S: SessionsCtx>(
             )
             .await;
         })
-    }
 }
 
 /// Receive the next live output chunk, pending forever without a handle.
@@ -2283,22 +2247,17 @@ mod tests {
     }
 
     /// Build a router that layers the REAL [`ws_auth_gate`] over a probe handler
-    /// echoing the gate-set [`CanInput`] and [`UsedSubprotocol`] flags into
-    /// response headers. This lets the test read the exact capability decision
-    /// and subprotocol detection pre-upgrade (without a real WS upgrade).
+    /// echoing the gate-set [`CanInput`] flag into a response header. This lets
+    /// the test read the exact capability decision pre-upgrade (without a real
+    /// WS upgrade).
     fn probe_app(state: WsState<Ctx>) -> Router {
         async fn probe(
             axum::Extension(CanInput(can_input)): axum::Extension<CanInput>,
-            axum::Extension(UsedSubprotocol(used_subprotocol)): axum::Extension<UsedSubprotocol>,
         ) -> Response {
             let mut resp = StatusCode::OK.into_response();
             resp.headers_mut().insert(
                 "x-can-input",
                 axum::http::HeaderValue::from_static(if can_input { "1" } else { "0" }),
-            );
-            resp.headers_mut().insert(
-                "x-used-subprotocol",
-                axum::http::HeaderValue::from_static(if used_subprotocol { "1" } else { "0" }),
             );
             resp
         }
@@ -2335,8 +2294,13 @@ mod tests {
             .0
     }
 
-    /// Drive the gate via the legacy `?token=` query param.
+    /// Drive the gate the way every client authenticates: the subprotocol.
     async fn gate(app: &Router, sid: &Id, token: &str) -> Response {
+        gate_subprotocol(app, sid, token).await
+    }
+
+    /// Drive the gate via the retired `?token=` query param (S11-312).
+    async fn gate_query(app: &Router, sid: &Id, token: &str) -> Response {
         let req = Request::builder()
             .method("GET")
             .uri(format!("/ws/term/{sid}?token={token}"))
@@ -2556,7 +2520,7 @@ mod tests {
     // ---- Task 1.10: otto-bearer subprotocol on /ws/term -------------------
 
     /// A share token presented via `Sec-WebSocket-Protocol: otto-bearer, <token>`
-    /// is accepted: the gate sets 200 and marks `UsedSubprotocol = true`.
+    /// is accepted: the gate sets 200.
     #[tokio::test]
     async fn subprotocol_token_accepted() {
         let pool = mem_pool().await;
@@ -2571,11 +2535,6 @@ mod tests {
             resp.status(),
             StatusCode::OK,
             "subprotocol token must pass the gate"
-        );
-        assert_eq!(
-            resp.headers().get("x-used-subprotocol").unwrap(),
-            "1",
-            "gate must detect the subprotocol path"
         );
     }
 
@@ -2596,9 +2555,10 @@ mod tests {
         );
     }
 
-    /// Legacy `?token=` is still accepted and `UsedSubprotocol` is false.
+    /// S11-312: the legacy `?token=` query fallback is gone — a VALID token
+    /// presented only in the URL is a 401, the same as no token at all.
     #[tokio::test]
-    async fn query_param_token_marks_no_subprotocol() {
+    async fn bearer_token_param_is_no_longer_accepted() {
         let pool = mem_pool().await;
         seed_user(&pool, "alice").await;
         seed_workspace(&pool, "ws1").await;
@@ -2606,17 +2566,12 @@ mod tests {
         let app = probe_app(build(&pool).await);
 
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
-        let resp = gate(&app, &s1, &token).await;
         assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "?token= must still work (backward compat)"
+            gate_query(&app, &s1, &token).await.status(),
+            StatusCode::UNAUTHORIZED,
+            "?token= must no longer authenticate"
         );
-        assert_eq!(
-            resp.headers().get("x-used-subprotocol").unwrap(),
-            "0",
-            "legacy ?token= path must NOT set UsedSubprotocol"
-        );
+        assert_eq!(gate(&app, &s1, &token).await.status(), StatusCode::OK);
     }
 
     // ---- Task 1.8: share redemption rate limiter --------------------------
@@ -2650,7 +2605,11 @@ mod tests {
         let token = mint_share(&pool, "alice", &s1, WorkspaceRole::Viewer).await;
         let req = Request::builder()
             .method("GET")
-            .uri(format!("/ws/term/{s1}?token={token}"))
+            .uri(format!("/ws/term/{s1}"))
+            .header(
+                axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                format!("otto-bearer, {token}"),
+            )
             // Inject a clean ConnectInfo — the loopback already has N failures
             // in the isolated `throttle` above, but the GLOBAL store is clean.
             .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))))
@@ -2684,7 +2643,11 @@ mod tests {
         let req = |token: &str, ip: IpAddr| {
             Request::builder()
                 .method("GET")
-                .uri(format!("/ws/term/{s1}?token={token}"))
+                .uri(format!("/ws/term/{s1}"))
+                .header(
+                    axum::http::header::SEC_WEBSOCKET_PROTOCOL,
+                    format!("otto-bearer, {token}"),
+                )
                 .extension(ClientIp { ip, local: false })
                 .body(axum::body::Body::empty())
                 .unwrap()

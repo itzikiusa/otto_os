@@ -810,6 +810,12 @@ impl VaultEngine {
         }
         // Any enumeration/preparation error suppresses pruning for this scan.
         if !incomplete {
+            // The walk deliberately skips protected dirs and key-like files
+            // (S7-303) unless the root itself is protected: such a row still
+            // exists on disk, but is gone from the vault — prune it rather
+            // than read it as the indexed file reappearing.
+            let protected = otto_core::secret_paths::protected_set();
+            let filter_protected = !protected.in_protected_dir(root);
             for (rel, note) in removed_notes
                 .into_iter()
                 .map(|p| (p, true))
@@ -820,7 +826,12 @@ impl VaultEngine {
                 if state.changed_since(&rel, epoch) {
                     continue;
                 }
+                let excluded = filter_protected && {
+                    let p = root.join(&rel);
+                    otto_core::secret_paths::is_denied_file(&p) || protected.in_protected_dir(&p)
+                };
                 match tokio::fs::symlink_metadata(root.join(&rel)).await {
+                    _ if excluded => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     // Something answers at this path: only a byte-exact
                     // regular file is the indexed entry reappearing. A case
@@ -881,6 +892,7 @@ impl VaultEngine {
 
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
         let v = self.get_scoped(ws, id).await?;
+        let v_root = v.root_path.clone();
         self.ensure_fresh(id);
         let key = (
             self.generation(id).load(Ordering::Relaxed),
@@ -899,6 +911,7 @@ impl VaultEngine {
         }
         status.generation = Some(key.0.to_string());
         status.graph_generation = Some(key.1.to_string());
+        status.tracked_recovery = Self::tracked_recovery_dirs(&v_root).await;
         Ok(status)
     }
 
@@ -971,13 +984,33 @@ impl VaultEngine {
     /// unless the vault ROOT itself was (deliberately, by root) placed there.
     /// Covers vaults registered before roots were vetted (S7-01) — a legacy
     /// `~` vault can't stream `Library/Application Support/Otto/otto.db`.
+    ///
+    /// A path that CONTAINS a protected dir is refused too (S7-303): on a
+    /// legacy vault rooted at `~/Library`, renaming or trashing
+    /// `Application Support` would carry the live data dir along.
     fn refuse_protected(rootc: &Path, path: &Path) -> Result<()> {
         use otto_core::secret_paths as sp;
-        if sp::is_denied_file(path) || (sp::in_protected_dir(path) && !sp::in_protected_dir(rootc))
-        {
+        let set = sp::protected_set();
+        if set.in_protected_dir(rootc) {
+            // Root deliberately placed a vault there: only key-like names.
+            return if sp::is_denied_file(path) {
+                Err(Error::Forbidden(
+                    "path holds credentials or Otto's own state".into(),
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        if sp::is_denied_file(path) || set.in_protected_dir(path) {
             return Err(Error::Forbidden(
                 "path holds credentials or Otto's own state".into(),
             ));
+        }
+        if let Some(p) = set.contained_in(path) {
+            return Err(Error::Forbidden(format!(
+                "path contains {}, which holds credentials or Otto's own state",
+                p.display()
+            )));
         }
         Ok(())
     }

@@ -312,9 +312,14 @@ fn recheck_due(last: Option<std::time::Instant>, now: std::time::Instant) -> boo
 }
 
 /// Native credential attachment is host authority, not delegated resource configuration.
+/// Root authority as exercised by this request: withheld from an agent
+/// credential's writes (S11-303 — a kubeconfig/profile names the command the
+/// daemon runs), see [`otto_core::auth::root_authority`].
 pub fn require_setup_authority(user: &User) -> Result<()> {
-    if user.is_root && !user.disabled {
+    if otto_core::auth::root_authority(user) && !user.disabled {
         Ok(())
+    } else if user.is_root && !user.disabled {
+        Err(otto_core::auth::root_refusal())
     } else {
         Err(Error::Forbidden(
             "only root can attach or change native cloud credentials".into(),

@@ -530,7 +530,18 @@ fn ensure_prod_confirmed(
     env: otto_core::domain::Environment,
     sql: &str,
     confirm: bool,
+    agent: bool,
 ) -> Result<()> {
+    if env == otto_core::domain::Environment::Prod && confirm && agent && !sql_is_read(sql) {
+        // The prod confirm is a body flag the client asserts: an agent
+        // session's own credential cannot assert a person's confirmation
+        // (S6-304) — it may still run reads.
+        return Err(Error::Forbidden(
+            "an agent session's credential cannot confirm DDL/DML on a production account — \
+             a person signed in to Otto must run it"
+                .into(),
+        ));
+    }
     if env == otto_core::domain::Environment::Prod && !confirm && !sql_is_read(sql) {
         return Err(Error::Invalid(
             "confirm_required: this is a production account and the statement is not a \
@@ -551,7 +562,12 @@ pub async fn start_query(
     if sql.is_empty() || sql.len() > 256 * 1024 {
         return Err(Error::Invalid("sql must be 1 byte .. 256 KiB".into()));
     }
-    ensure_prod_confirmed(a.environment, sql, req.confirm)?;
+    ensure_prod_confirmed(
+        a.environment,
+        sql,
+        req.confirm,
+        otto_core::auth::request_is_agent(),
+    )?;
     let workgroup = req
         .workgroup
         .as_deref()
@@ -746,10 +762,14 @@ mod tests {
             "/* c */ MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
         ] {
             assert!(!sql_is_read(sql), "{sql}");
-            let e = ensure_prod_confirmed(Environment::Prod, sql, false).unwrap_err();
+            let e = ensure_prod_confirmed(Environment::Prod, sql, false, false).unwrap_err();
             assert!(e.to_string().contains("confirm_required"), "{sql}: {e}");
-            assert!(ensure_prod_confirmed(Environment::Prod, sql, true).is_ok());
-            assert!(ensure_prod_confirmed(Environment::Dev, sql, false).is_ok());
+            assert!(ensure_prod_confirmed(Environment::Prod, sql, true, false).is_ok());
+            assert!(ensure_prod_confirmed(Environment::Dev, sql, false, false).is_ok());
+            // S6-304: an agent credential's `confirm: true` is not a person's.
+            let e = ensure_prod_confirmed(Environment::Prod, sql, true, true).unwrap_err();
+            assert!(matches!(e, Error::Forbidden(_)), "{sql}: {e}");
+            assert!(ensure_prod_confirmed(Environment::Dev, sql, true, true).is_ok());
         }
         for sql in [
             "SELECT 1",
@@ -761,7 +781,8 @@ mod tests {
             "-- hi\nSELECT 1",
         ] {
             assert!(sql_is_read(sql), "{sql}");
-            assert!(ensure_prod_confirmed(Environment::Prod, sql, false).is_ok());
+            assert!(ensure_prod_confirmed(Environment::Prod, sql, false, false).is_ok());
+            assert!(ensure_prod_confirmed(Environment::Prod, sql, true, true).is_ok());
         }
     }
 

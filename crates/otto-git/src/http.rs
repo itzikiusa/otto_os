@@ -285,10 +285,21 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 ) -> Result<(Repo, LocalGit)> {
     let repo = s.store().get_repo(repo_id).await?;
     s.roles().check(&user.0, &repo.workspace_id, min).await?;
-    // A git route call is a person's deliberate act: their hooks run, an
-    // in-work-tree `core.hooksPath` (husky) included. (An agent's own token
-    // calling these routes is the open outward-route decision, S11-05.)
-    let git = LocalGit::new(&repo.path).person_initiated();
+    // A git route call on a PERSON's credential is their deliberate act: their
+    // hooks run, an in-work-tree `core.hooksPath` (husky) included. An agent
+    // session's own token is not (S11-304): it could have just written those
+    // hook files from inside its sandbox, and ottod runs git unconfined — so
+    // its commit/merge/checkout skips in-work-tree hooks like any
+    // daemon-internal call.
+    let git = LocalGit::new(&repo.path);
+    // The credential class is the one the server's feature guard publishes for
+    // every request (`otto_core::auth::RequestCredential`); with no request
+    // scope (daemon-internal callers, a spawned task) it is not a person.
+    let git = if otto_core::auth::request_is_person() {
+        git.person_initiated()
+    } else {
+        git
+    };
     Ok((repo, git))
 }
 
@@ -4034,5 +4045,39 @@ mod tests {
         assert!(r.is_err());
         assert!(after);
         forget_repo_locks(&id);
+    }
+}
+
+#[cfg(test)]
+mod person_call_tests {
+    use otto_core::auth::{
+        carry_request_credential, request_is_person, with_request_credential, RequestCredential,
+        OUTSIDE_REQUEST,
+    };
+
+    /// S11-304: only a person's own credential makes a git route call
+    /// `person_initiated` (in-work-tree hooks run); an agent session's
+    /// credential, no request scope at all, and a task spawned off a person's
+    /// request without carrying the credential do not.
+    #[tokio::test]
+    async fn only_a_person_s_credential_runs_in_worktree_hooks() {
+        let person = RequestCredential::default();
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        assert!(with_request_credential(person, async { request_is_person() }).await);
+        assert!(!with_request_credential(agent, async { request_is_person() }).await);
+        assert!(!with_request_credential(OUTSIDE_REQUEST, async { request_is_person() }).await);
+        assert!(!request_is_person());
+        let (spawned, carried) = with_request_credential(person, async {
+            let spawned = tokio::spawn(async { request_is_person() }).await.unwrap();
+            let carried = tokio::spawn(carry_request_credential(async { request_is_person() }))
+                .await
+                .unwrap();
+            (spawned, carried)
+        })
+        .await;
+        assert!(!spawned && carried);
     }
 }
