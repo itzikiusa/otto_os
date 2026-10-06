@@ -6940,6 +6940,9 @@ export interface VaultStatus {
   unresolved: number;
   tags: number;
   attachments: number;
+  /** Recovery dirs (`.otto-history`, `.trash`) git already tracks — committed
+   *  before Otto ignored them; untrack with `git rm --cached -r <dir>`. Omitted when none. */
+  tracked_recovery?: string[];
 }
 
 export interface VaultDirEntry {

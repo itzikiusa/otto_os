@@ -881,6 +881,7 @@ impl VaultEngine {
 
     pub async fn status(self: &Arc<Self>, ws: &str, id: i64) -> Result<VaultStatus> {
         let v = self.get_scoped(ws, id).await?;
+        let v_root = v.root_path.clone();
         self.ensure_fresh(id);
         let key = (
             self.generation(id).load(Ordering::Relaxed),
@@ -899,6 +900,7 @@ impl VaultEngine {
         }
         status.generation = Some(key.0.to_string());
         status.graph_generation = Some(key.1.to_string());
+        status.tracked_recovery = Self::tracked_recovery_dirs(&v_root).await;
         Ok(status)
     }
 

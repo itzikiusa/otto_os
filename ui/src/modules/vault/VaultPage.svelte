@@ -7,6 +7,7 @@
   import { onMount } from 'svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import Icon from '../../lib/components/Icon.svelte';
+  import { toasts } from '../../lib/toast.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
@@ -203,6 +204,15 @@
 
   const scanning = $derived(vault.status?.scan_state === 'scanning');
   const scanError = $derived(vault.status?.scan_state.startsWith('error') ?? false);
+  const trackedRecovery = $derived(vault.status?.tracked_recovery ?? []);
+  function explainTrackedRecovery(): void {
+    const cmd = `git rm --cached -r ${trackedRecovery.join(' ')}`;
+    toasts.info(
+      'Note history is tracked by git',
+      `Otto now ignores ${trackedRecovery.join(' and ')}, but files committed earlier are still in the repository. ` +
+        `In the vault folder run:\n${cmd}\nthen commit. Earlier commits keep their copies until the history is rewritten.`,
+    );
+  }
 
   // The first load comes from the workspace effect below (it runs on mount
   // too) — loading here as well fetched every vault request twice.
@@ -254,6 +264,17 @@
       {:else if scanError}
         <button class="scan-chip err" title={`${vault.status?.scan_state ?? ''} — click to rescan`} onclick={() => void vault.rescan()}>
           <Icon name="warning" size={12} /> Indexing failed · Rescan
+        </button>
+      {/if}
+      {#if (vault.status?.tracked_recovery?.length ?? 0) > 0}
+        <!-- S7-07: private note history / trash committed before Otto ignored
+             them keeps being pushed with the repo. -->
+        <button
+          class="scan-chip err"
+          title={`Git already tracks ${trackedRecovery.join(' and ')} (private note history). Click for the command that stops tracking it.`}
+          onclick={explainTrackedRecovery}
+        >
+          <Icon name="warning" size={12} /> Note history is in git
         </button>
       {/if}
       {#if vault.activeDocsRuns.length > 0}
