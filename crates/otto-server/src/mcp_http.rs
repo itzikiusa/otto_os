@@ -48,7 +48,15 @@ pub async fn mcp_http_get() -> Response {
 pub async fn mcp_http_post(
     State(ctx): State<ServerCtx>,
     CurrentAuthContext(auth): CurrentAuthContext,
+    untimed: Option<axum::Extension<crate::telemetry::UntimedMark>>,
     Json(body): Json<Value>,
 ) -> Response {
+    // A `tools/call` of `wait_session` parks like the LONG_POLLS route it
+    // self-calls: keep it out of the operation timings (S9-304).
+    if let Some(axum::Extension(mark)) = &untimed {
+        if crate::telemetry::jsonrpc_calls_long_poll(&body) {
+            mark.mark();
+        }
+    }
     jsonrpc::post_response(&ServerTools(&ctx), &auth, &body, env!("CARGO_PKG_VERSION")).await
 }

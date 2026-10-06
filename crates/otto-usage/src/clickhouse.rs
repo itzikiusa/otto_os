@@ -397,7 +397,20 @@ impl ClickHouse {
     /// a non-2xx (ClickHouse returns a readable message in the body). `timeout`
     /// bounds the request — short for queries, long for DDL/OPTIMIZE.
     async fn post(&self, sql: String, settings: &str, timeout: Duration) -> Result<String> {
-        let (_busy, base_url) = self.begin().await?;
+        let (busy, base_url) = self.begin().await?;
+        self.post_on(busy, &base_url, sql, settings, timeout).await
+    }
+
+    /// [`Self::post`] on an already-marked in-flight request; `_busy` is held
+    /// until the reply is in.
+    async fn post_on(
+        &self,
+        _busy: Busy<'_>,
+        base_url: &str,
+        sql: String,
+        settings: &str,
+        timeout: Duration,
+    ) -> Result<String> {
         let url = if settings.is_empty() {
             format!("{base_url}/")
         } else {
@@ -487,17 +500,47 @@ impl ClickHouse {
                 Duration::from_secs(120),
             )
             .await?;
-        let mut rows = Vec::new();
-        for line in body.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        parse_rows(&body)
+    }
+
+    /// [`Self::query_rows`] for BACKGROUND readers (S9-303: the budget
+    /// sampler, budget gates, swarm per-turn totals): never resets the idle
+    /// clock, so a periodic reader cannot keep the server up. A parked server
+    /// is left parked (`Ok(None)`) unless `wake`, which restarts it for this
+    /// one query without stamping — the next idle check may park it again.
+    pub async fn query_rows_background(
+        &self,
+        sql: &str,
+        wake: bool,
+    ) -> Result<Option<Vec<serde_json::Value>>> {
+        let (parked, base_url) = {
+            let mut p = self.proc.lock().unwrap();
+            if p.parked && !wake {
+                return Ok(None);
             }
-            let v: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| Error::Internal(format!("parse clickhouse row: {e}")))?;
-            rows.push(v);
-        }
-        Ok(rows)
+            p.inflight += 1;
+            (p.parked, p.base_url.clone())
+        };
+        let busy = Busy {
+            ch: self,
+            stamp: false,
+        };
+        let base_url = if parked {
+            self.unpark().await?;
+            self.proc.lock().unwrap().base_url.clone()
+        } else {
+            base_url
+        };
+        let body = self
+            .post_on(
+                busy,
+                &base_url,
+                format!("{sql}\nFORMAT JSONEachRow"),
+                QUERY_SETTINGS,
+                Duration::from_secs(120),
+            )
+            .await?;
+        parse_rows(&body).map(Some)
     }
 
     /// Run several queries and return their row sets in order — CONCURRENT
@@ -581,6 +624,31 @@ impl ClickHouse {
                 "clickhouse insert failed: {}",
                 body.trim()
             )))
+        }
+    }
+
+    /// A handle with no server child, pointed at `base_url` — writer tests.
+    /// `parked` makes it look idle-stopped; its (empty) binary path makes a
+    /// wake fail fast instead of spawning anything.
+    #[cfg(test)]
+    pub(crate) fn for_tests(base_url: &str, parked: bool) -> Self {
+        Self {
+            bin: PathBuf::new(),
+            data_dir: PathBuf::new(),
+            http: reqwest::Client::new(),
+            proc: Mutex::new(Proc {
+                child: None,
+                base_url: base_url.to_string(),
+                parked,
+                inflight: 0,
+                last_use: std::time::Instant::now(),
+            }),
+            life: tokio::sync::Mutex::new(()),
+            parks: Default::default(),
+            restarts: Default::default(),
+            queries: Default::default(),
+            rows_read: Default::default(),
+            wake_hook: std::sync::OnceLock::new(),
         }
     }
 
@@ -773,6 +841,21 @@ fn free_loopback_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
+/// Parse a `JSONEachRow` body into one JSON object per non-blank line.
+fn parse_rows(body: &str) -> Result<Vec<serde_json::Value>> {
+    let mut rows = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(line)
+            .map_err(|e| Error::Internal(format!("parse clickhouse row: {e}")))?;
+        rows.push(v);
+    }
+    Ok(rows)
+}
+
 /// Generate the minimal server config and return its path. Loopback-only, empty
 /// default user (machine-local trust boundary, same as the old `local` mode),
 /// memory-capped to stay desktop-light.
@@ -797,6 +880,12 @@ fn free_loopback_port() -> std::io::Result<u16> {
 ///   build's default cadence, and the expression-JIT cache is 16 MB;
 /// - `max_server_memory_usage` is a hard 1 GiB (the 0.3 ratio alone allowed
 ///   ~15 GB on this machine for ~20 MB of data);
+/// - `memory_worker_use_cgroup` is OFF (S12-304): on Linux the MemoryWorker
+///   otherwise corrects its tracker from the enclosing cgroup's usage — on a
+///   CI runner that is the whole job (5.2 GiB), so every query tripped the
+///   1 GiB cap while the server itself used ~150 MB. A no-op on macOS. The
+///   setting exists in both the local 26.6 and CI's pinned 26.8 builds (and
+///   an unknown server-config element would be ignored, not fatal);
 /// - NO system log section (`query_log`, `trace_log`, `metric_log`,
 ///   `asynchronous_metric_log`, `part_log`, `text_log`, …) is declared, and with
 ///   a standalone config the server creates none (verified: `system.tables`
@@ -860,6 +949,7 @@ fn write_server_config(data_dir: &Path, port: u16) -> Result<PathBuf> {
          <background_move_pool_size>1</background_move_pool_size>\n\
          <background_fetches_pool_size>1</background_fetches_pool_size>\n\
          <memory_worker_period_ms>10000</memory_worker_period_ms>\n\
+         <memory_worker_use_cgroup>0</memory_worker_use_cgroup>\n\
          <max_io_thread_pool_size>8</max_io_thread_pool_size>\n\
          <max_io_thread_pool_free_size>0</max_io_thread_pool_free_size>\n\
          <max_active_parts_loading_thread_pool_size>2</max_active_parts_loading_thread_pool_size>\n\
@@ -1133,6 +1223,8 @@ mod tests {
         assert!(xml.contains("<disable_internal_dns_cache>1</disable_internal_dns_cache>"));
         assert!(xml.contains("max_server_memory_usage_to_ram_ratio"));
         assert!(xml.contains("<max_server_memory_usage>1073741824</max_server_memory_usage>"));
+        // S12-304: the 1 GiB cap tracks the server's OWN RSS, not its cgroup's.
+        assert!(xml.contains("<memory_worker_use_cgroup>0</memory_worker_use_cgroup>"));
         assert!(xml.contains("<background_schedule_pool_size>4</background_schedule_pool_size>"));
         // The merge pool is lowered ONLY with every MergeTree free-entry
         // threshold below it (else tables refuse to attach).

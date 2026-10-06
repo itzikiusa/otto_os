@@ -6,6 +6,7 @@
 //! engine can be (re)initialized at runtime — e.g. right after the wizard
 //! installs or updates the `clickhouse` binary — without a daemon restart.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
@@ -163,10 +164,82 @@ pub struct UsageEngine {
     /// skipped (see [`Self::usage_generation`]) and the totals memo never
     /// serves a rollup computed before a flush.
     usage_gen: Arc<AtomicU64>,
-    /// Asks the usage writer to flush its buffer now (S9-01): poked by every
-    /// dashboard read ([`Self::ch_read`]) and after a lazy restart, so the
-    /// 90 s flush interval never shows a watcher stale numbers for long.
-    flush_req: Arc<tokio::sync::Notify>,
+    /// Asks the usage writer to flush its buffer now (S9-01) and acks when it
+    /// did (S9-303): every read flushes-and-waits ([`Self::ch_read`]), and a
+    /// lazy restart pokes it, so the 90 s flush interval never shows a reader
+    /// stale numbers.
+    flush_sync: Arc<FlushSync>,
+    /// The last rollup each `(days, otto_only)` key produced — served by
+    /// [`Self::session_totals_background`] while the server is parked, so a
+    /// budget gate neither wakes it nor fails open on a cap it already saw.
+    last_totals: std::sync::Mutex<HashMap<(u32, bool), Arc<Vec<SessionTotals>>>>,
+}
+
+/// How long a read waits for the writer to flush what it buffered before it
+/// queries anyway (S9-303). Bounded: a writer stuck in a slow insert must not
+/// hang the dashboard.
+const READ_FLUSH_WAIT: Duration = Duration::from_secs(2);
+
+/// Flush requests from readers to the usage writer, with an ack (S9-303).
+/// A reader bumps `requested`, pokes `notify`, and waits until `done` reaches
+/// its number; the writer reads `requested` BEFORE it drains the channel, so
+/// every event recorded before the request is in the flush it acks.
+/// `wake_upto` is the highest request that may wake a parked server (a
+/// foreground read wakes it anyway; a background read must not).
+#[derive(Default)]
+struct FlushSync {
+    requested: AtomicU64,
+    wake_upto: AtomicU64,
+    done: AtomicU64,
+    notify: tokio::sync::Notify,
+    acked: tokio::sync::Notify,
+}
+
+impl FlushSync {
+    /// Ask for a flush without waiting (the post-wake hook).
+    fn poke(&self) -> u64 {
+        let n = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        self.notify.notify_one();
+        n
+    }
+
+    /// Ask for a flush and wait (bounded) until the writer handled it.
+    /// Returns whether the ack arrived in time.
+    async fn flush_and_wait(&self, wake: bool, within: Duration) -> bool {
+        let n = self.requested.fetch_add(1, Ordering::SeqCst) + 1;
+        if wake {
+            self.wake_upto.fetch_max(n, Ordering::SeqCst);
+        }
+        self.notify.notify_one();
+        tokio::time::timeout(within, async {
+            loop {
+                let acked = self.acked.notified();
+                tokio::pin!(acked);
+                // Register BEFORE re-checking, so an ack between the check and
+                // the await is not lost.
+                acked.as_mut().enable();
+                if self.done.load(Ordering::SeqCst) >= n {
+                    return;
+                }
+                acked.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// Writer side: the request number this flush answers, and whether any
+    /// unanswered request allows waking a parked server.
+    fn take(&self) -> (u64, bool) {
+        let target = self.requested.load(Ordering::SeqCst);
+        let wake = self.wake_upto.load(Ordering::SeqCst) > self.done.load(Ordering::SeqCst);
+        (target, wake)
+    }
+
+    fn ack(&self, target: u64) {
+        self.done.fetch_max(target, Ordering::SeqCst);
+        self.acked.notify_waiters();
+    }
 }
 
 fn unix_now() -> u64 {
@@ -238,7 +311,8 @@ impl UsageEngine {
             idle_stop_changed: Arc::new(tokio::sync::Notify::new()),
             ch_woke: Arc::new(tokio::sync::Notify::new()),
             usage_gen: Arc::new(AtomicU64::new(0)),
-            flush_req: Arc::new(tokio::sync::Notify::new()),
+            flush_sync: Arc::new(FlushSync::default()),
+            last_totals: std::sync::Mutex::new(HashMap::new()),
         });
         let bg = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -273,7 +347,7 @@ impl UsageEngine {
                 woke.notified().await;
                 let Some(engine) = weak.upgrade() else { break };
                 // Usage events held while parked go in too.
-                engine.flush_req.notify_one();
+                engine.flush_sync.poke();
                 match engine.flush_metrics().await {
                     Ok(0) => {}
                     Ok(n) => tracing::debug!("usage: wrote {n} metrics held while idle-stopped"),
@@ -344,7 +418,7 @@ impl UsageEngine {
                                     rx,
                                     Arc::clone(&self.heal),
                                     Arc::clone(&self.usage_gen),
-                                    Arc::clone(&self.flush_req),
+                                    Arc::clone(&self.flush_sync),
                                 );
                                 spawn_idle_stopper(
                                     Arc::downgrade(&ch),
@@ -466,12 +540,15 @@ impl UsageEngine {
         self.inner.read().expect("usage inner lock").ch.clone()
     }
 
-    /// [`Self::ch`] for a dashboard READ of `usage_events`: also asks the
-    /// writer to flush what it buffered, so a watcher (who keeps the server
-    /// awake anyway) sees fresh rows by the next poll.
-    fn ch_read(&self) -> Option<Arc<ClickHouse>> {
-        self.flush_req.notify_one();
-        self.ch()
+    /// [`Self::ch`] for a foreground READ of `usage_events`: first has the
+    /// writer flush what it buffered and waits (≤ READ_FLUSH_WAIT) for that,
+    /// so the read sees the rows recorded before it (S9-303 — it used to only
+    /// poke, and raced the flush it asked for). The read wakes a parked server
+    /// anyway, so its flush may wake it too.
+    async fn ch_read(&self) -> Option<Arc<ClickHouse>> {
+        let ch = self.ch()?;
+        self.flush_sync.flush_and_wait(true, READ_FLUSH_WAIT).await;
+        Some(ch)
     }
 
     fn config(&self) -> UsageConfig {
@@ -482,7 +559,13 @@ impl UsageEngine {
 
     /// Queue one event for buffered insertion (fire-and-forget; dropped if the
     /// engine is disabled).
-    pub fn record(&self, ev: UsageEvent) {
+    ///
+    /// The event is stamped NOW when it carries no `ts` (S9-302): the column
+    /// default `now64(3)` is the INSERT time, which the 90 s flush interval and
+    /// up to MAX_DEFER of parked deferral would push minutes late — billing a
+    /// swarm turn's rows to the next turn and shifting rows across midnight.
+    pub fn record(&self, mut ev: UsageEvent) {
+        stamp_ts(&mut ev);
         self.last_record.store(unix_now(), Ordering::Relaxed);
         let tx = self.inner.read().expect("usage inner lock").tx.clone();
         if let Some(tx) = tx {
@@ -907,22 +990,88 @@ impl UsageEngine {
                 return Ok(Arc::clone(rows));
             }
         }
-        let rows = Arc::new(self.session_totals_uncached(days, otto_only).await?);
-        *memo = Some((
-            (days, otto_only),
-            gen,
-            std::time::Instant::now(),
-            Arc::clone(&rows),
-        ));
+        let rows = Arc::new(self.rows(&session_totals_sql(days, otto_only)).await?);
+        self.remember_totals(&mut memo, (days, otto_only), gen, &rows);
         Ok(rows)
     }
 
-    async fn session_totals_uncached(
+    /// Store a fresh rollup in the TTL memo AND the last-known map.
+    fn remember_totals(
+        &self,
+        memo: &mut Option<SessionTotalsMemo>,
+        key: (u32, bool),
+        gen: u64,
+        rows: &Arc<Vec<SessionTotals>>,
+    ) {
+        *memo = Some((key, gen, std::time::Instant::now(), Arc::clone(rows)));
+        self.last_totals
+            .lock()
+            .expect("last totals lock")
+            .insert(key, Arc::clone(rows));
+    }
+
+    /// [`Self::session_totals_shared`] for BACKGROUND callers — the budget
+    /// sampler and budget gates (S9-303). Never resets ClickHouse's idle
+    /// clock, so an always-on agent no longer keeps the server up through the
+    /// budget path. While the server is parked it does not wake it: it serves
+    /// the last rollup this key produced (spend cannot have been written
+    /// since — the writer holds events while parked), or `None` when there is
+    /// none yet (the caller decides: skip, or fall back to a foreground read).
+    /// `None` also on a failed scan.
+    pub async fn session_totals_background(
         &self,
         days: u32,
         otto_only: bool,
-    ) -> Result<Vec<SessionTotals>> {
-        self.rows(&format!(
+    ) -> Option<Arc<Vec<SessionTotals>>> {
+        let ch = self.ch()?;
+        let key = (days, otto_only);
+        let last = || {
+            self.last_totals
+                .lock()
+                .expect("last totals lock")
+                .get(&key)
+                .cloned()
+        };
+        if ch.is_parked() {
+            return last();
+        }
+        self.flush_sync.flush_and_wait(false, READ_FLUSH_WAIT).await;
+        let mut memo = self.totals_cache.lock().await;
+        let gen = self.usage_generation();
+        if let Some((k, at_gen, at, rows)) = &*memo {
+            if *k == key && *at_gen == gen && at.elapsed() < SESSION_TOTALS_TTL {
+                return Some(Arc::clone(rows));
+            }
+        }
+        match ch
+            .query_rows_background(&session_totals_sql(days, otto_only), false)
+            .await
+        {
+            Ok(Some(raw)) => match decode_rows::<SessionTotals>(raw) {
+                Ok(rows) => {
+                    let rows = Arc::new(rows);
+                    self.remember_totals(&mut memo, key, gen, &rows);
+                    Some(rows)
+                }
+                Err(e) => {
+                    tracing::debug!("usage: background totals decode failed: {e}");
+                    None
+                }
+            },
+            // Parked between the check and the query.
+            Ok(None) => last(),
+            Err(e) => {
+                tracing::debug!("usage: background totals scan failed: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Per-session raw sums over the last `days` (see
+/// [`UsageEngine::session_totals`]).
+fn session_totals_sql(days: u32, otto_only: bool) -> String {
+    format!(
             "SELECT session_id,
                     any(workspace_id) AS workspace_id,
                     any(provider) AS provider,
@@ -940,10 +1089,10 @@ impl UsageEngine {
              GROUP BY session_id",
             since = since(days),
             ws = ws_filter(otto_only)
-        ))
-        .await
-    }
+        )
+}
 
+impl UsageEngine {
     /// Fold per-session sums into per-feature buckets using a caller-supplied
     /// `session_id → feature label` classifier. The engine has no view of the
     /// SQLite session metadata that defines a "feature", so the server passes a
@@ -1028,7 +1177,7 @@ impl UsageEngine {
     /// The model with the most events for `provider` over the last 30 days —
     /// `None` when the engine is down or has no history for it.
     async fn dominant_model(&self, provider: &str) -> Option<String> {
-        let ch = self.ch_read()?;
+        let ch = self.ch_read().await?;
         let provider = ch_string(provider);
         let rows = ch
             .query_rows(&format!(
@@ -1081,7 +1230,7 @@ impl UsageEngine {
         // No explicit token count — derive from recent-run averages for this
         // feature + provider pair over the last 30 days. We query the per-session
         // totals and compute the average cost per session for matching sessions.
-        let Some(ch) = self.ch_read() else {
+        let Some(ch) = self.ch_read().await else {
             return ForecastResp {
                 projected_cost_usd: 0.0,
                 basis: "usage engine not available".into(),
@@ -1169,6 +1318,29 @@ impl UsageEngine {
         session_id: &str,
         since: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<SessionTotals> {
+        self.session_totals_for_with(session_id, since, false).await
+    }
+
+    /// [`Self::session_totals_for`] for BACKGROUND work — a swarm turn's cost
+    /// at turn end (S9-303). Exact: the writer flushes this turn's buffered
+    /// rows first and the read waits for that (it used to race the flush it
+    /// requested, so turns shorter than the interval recorded `None`). It may
+    /// restart a parked server for the flush + query, but never resets the
+    /// idle clock, so autonomous turns no longer keep ClickHouse up.
+    pub async fn session_totals_for_background(
+        &self,
+        session_id: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<SessionTotals> {
+        self.session_totals_for_with(session_id, since, true).await
+    }
+
+    async fn session_totals_for_with(
+        &self,
+        session_id: &str,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        background: bool,
+    ) -> Option<SessionTotals> {
         // session ids are ULIDs, but escape defensively for the embedded query.
         let sid = ch_string(session_id);
         // `ts` is a DateTime64(3); a `'YYYY-MM-DD HH:MM:SS.mmm'` literal compares
@@ -1176,8 +1348,7 @@ impl UsageEngine {
         let since_clause = since
             .map(|t| format!(" AND ts >= '{}'", t.format("%Y-%m-%d %H:%M:%S%.3f")))
             .unwrap_or_default();
-        let rows: Vec<SessionTotals> = self
-            .rows(&format!(
+        let sql = format!(
                 "SELECT '{sid}' AS session_id,
                         any(workspace_id) AS workspace_id,
                         any(provider) AS provider,
@@ -1190,9 +1361,14 @@ impl UsageEngine {
                         round(sum(cost_usd), 6) AS cost_usd
                  FROM usage_events
                  WHERE session_id = '{sid}'{since_clause}"
-            ))
-            .await
-            .ok()?;
+            );
+        let rows: Vec<SessionTotals> = if background {
+            let ch = self.ch()?;
+            self.flush_sync.flush_and_wait(true, READ_FLUSH_WAIT).await;
+            decode_rows(ch.query_rows_background(&sql, true).await.ok()??).ok()?
+        } else {
+            self.rows(&sql).await.ok()?
+        };
         // The aggregate always yields exactly one row; treat zero events as
         // "no usage yet" so the caller writes null rather than a misleading 0.
         rows.into_iter().find(|t| t.events > 0)
@@ -1246,7 +1422,7 @@ impl UsageEngine {
         otto_only: bool,
         scope: UsageScope<'_>,
     ) -> Result<UsageSummary> {
-        let Some(ch) = self.ch_read() else {
+        let Some(ch) = self.ch_read().await else {
             return Ok(UsageSummary {
                 days,
                 by_kind: Vec::new(),
@@ -1390,7 +1566,7 @@ impl UsageEngine {
             otto_only,
             ..Default::default()
         };
-        let Some(ch) = self.ch_read() else {
+        let Some(ch) = self.ch_read().await else {
             return Ok(report);
         };
         let since = since(days);
@@ -1497,7 +1673,7 @@ impl UsageEngine {
         since: &str,
         until: &str,
     ) -> Result<Vec<DailyModelUsage>> {
-        let Some(ch) = self.ch_read() else {
+        let Some(ch) = self.ch_read().await else {
             return Err(otto_core::Error::Upstream("usage engine offline".into()));
         };
         let cond = format!(
@@ -1650,7 +1826,7 @@ impl UsageEngine {
 
     /// Run a query and deserialize each row into `T`.
     async fn rows<T: serde::de::DeserializeOwned>(&self, sql: &str) -> Result<Vec<T>> {
-        let Some(ch) = self.ch_read() else {
+        let Some(ch) = self.ch_read().await else {
             return Ok(Vec::new());
         };
         let raw = ch.query_rows(sql).await?;
@@ -1765,13 +1941,18 @@ fn spawn_writer(
     mut rx: mpsc::UnboundedReceiver<UsageEvent>,
     heal: Arc<HealSignal>,
     usage_gen: Arc<AtomicU64>,
-    flush_req: Arc<tokio::sync::Notify>,
+    sync: Arc<FlushSync>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut w = WriterBuf::default();
         // The flush timer is armed only while events are buffered (from the
         // first one): an idle daemon has no periodic wake-up at all.
         let mut deadline: Option<tokio::time::Instant> = None;
+        // Buffer size that triggers the next size-based flush. After a flush
+        // that deferred (parked) or failed it moves FLUSH_BATCH past the
+        // current size (S9-301): a held buffer is retried on the timer, a read
+        // or the wake hook — never once per received event.
+        let mut size_trigger = FLUSH_BATCH;
         loop {
             let tick = async {
                 match deadline {
@@ -1779,13 +1960,17 @@ fn spawn_writer(
                     None => std::future::pending().await,
                 }
             };
-            tokio::select! {
+            let outcome = tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Some(ev) => {
                         w.push(ev);
-                        if w.buf.len() >= FLUSH_BATCH {
-                            flush(&ch, &mut w, &heal, &usage_gen, false).await;
+                        if w.buf.len() < size_trigger {
+                            deadline.get_or_insert_with(|| {
+                                tokio::time::Instant::now() + FLUSH_INTERVAL
+                            });
+                            continue;
                         }
+                        flush(&ch, &mut w, &heal, &usage_gen, false).await
                     }
                     None => {
                         // Final flush (reinit / shutdown): may wake a parked
@@ -1794,10 +1979,24 @@ fn spawn_writer(
                         break;
                     }
                 },
-                // A dashboard read (or a lazy restart) wants fresh rows now.
-                _ = flush_req.notified() => flush(&ch, &mut w, &heal, &usage_gen, false).await,
+                // A read (or a lazy restart) wants fresh rows now.
+                _ = sync.notify.notified() => {
+                    let (target, wake) = sync.take();
+                    // Events recorded before the request are already queued:
+                    // take them too, so the ack covers them.
+                    while let Ok(ev) = rx.try_recv() {
+                        w.push(ev);
+                    }
+                    let outcome = flush(&ch, &mut w, &heal, &usage_gen, wake).await;
+                    sync.ack(target);
+                    outcome
+                }
                 _ = tick => flush(&ch, &mut w, &heal, &usage_gen, false).await,
-            }
+            };
+            size_trigger = match outcome {
+                FlushOutcome::Written => FLUSH_BATCH,
+                FlushOutcome::Held => w.buf.len() + FLUSH_BATCH,
+            };
             deadline = match (w.buf.is_empty(), deadline) {
                 (true, _) => None,
                 // A failed / deferred flush keeps its events: retry a full
@@ -1807,6 +2006,15 @@ fn spawn_writer(
             };
         }
     })
+}
+
+/// Whether one writer flush emptied the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlushOutcome {
+    /// Written (or nothing to write).
+    Written,
+    /// Kept buffered: deferred for a parked server, or the insert failed.
+    Held,
 }
 
 /// The writer's buffered events plus when the oldest arrived (the MAX_DEFER
@@ -1849,22 +2057,31 @@ fn parked_action(w: &WriterBuf, final_flush: bool, max_defer: Duration) -> Parke
 
 /// Write the buffered events as ONE background insert (S9-02). A parked
 /// server is left parked unless [`parked_action`] says the events have waited
-/// long enough (or this is the final flush). Failures keep the events.
+/// long enough (or `wake`: the final flush, or a foreground read that wakes
+/// it anyway). Failures keep the events.
+///
+/// The parked check runs BEFORE the payload is serialized (S9-301): a
+/// deferral is a lock + a clock read, not a `to_string` of up to RETAIN_MAX
+/// events thrown away.
 async fn flush(
     ch: &Arc<ClickHouse>,
     w: &mut WriterBuf,
     heal: &HealSignal,
     usage_gen: &AtomicU64,
-    final_flush: bool,
-) {
+    wake: bool,
+) -> FlushOutcome {
     if w.buf.is_empty() {
-        return;
+        return FlushOutcome::Written;
+    }
+    if ch.is_parked() && parked_action(w, wake, MAX_DEFER) == ParkedAction::Defer {
+        return FlushOutcome::Held;
     }
     let payload = ndjson(&w.buf);
     let res = match ch.insert_ndjson_background("usage_events", &payload).await {
         Ok(true) => Ok(()),
-        Ok(false) => match parked_action(w, final_flush, MAX_DEFER) {
-            ParkedAction::Defer => return,
+        // Parked between the check above and the insert.
+        Ok(false) => match parked_action(w, wake, MAX_DEFER) {
+            ParkedAction::Defer => return FlushOutcome::Held,
             ParkedAction::Wake => match ch.wake_background().await {
                 // The lease holds parking off for the insert; dropping it
                 // does not reset the idle clock.
@@ -1897,15 +2114,33 @@ async fn flush(
         if !ch.server_alive() {
             heal.store(true, Ordering::SeqCst);
         }
-        return;
+        return FlushOutcome::Held;
     }
     w.buf.clear();
     w.since = None;
     usage_gen.fetch_add(1, Ordering::SeqCst);
+    FlushOutcome::Written
+}
+
+/// Stamp an unstamped event with the current time (S9-302), in the RFC3339
+/// millisecond form `date_time_input_format=best_effort` parses into the
+/// `DateTime64(3)` column.
+fn stamp_ts(ev: &mut UsageEvent) {
+    if ev.ts.as_deref().is_none_or(str::is_empty) {
+        ev.ts = Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `ndjson` calls on this thread — the writer tests count serializations.
+    static NDJSON_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Serialize events to newline-delimited JSON for `JSONEachRow` insertion.
 fn ndjson(events: &[UsageEvent]) -> String {
+    #[cfg(test)]
+    NDJSON_CALLS.with(|c| c.set(c.get() + 1));
     let mut s = String::new();
     for ev in events {
         if let Ok(line) = serde_json::to_string(ev) {
@@ -2501,6 +2736,112 @@ mod writer_policy_tests {
             full.push(UsageEvent::default());
         }
         assert_eq!(parked_action(&full, false, MAX_DEFER), ParkedAction::Wake);
+    }
+
+    fn ndjson_calls() -> usize {
+        NDJSON_CALLS.with(|c| c.get())
+    }
+
+    /// Drive a writer over `ch` with `n` events, then a background read's
+    /// flush-and-wait; returns the serializations it did.
+    async fn writer_serializations(ch: Arc<ClickHouse>, n: usize) -> (usize, bool) {
+        let before = ndjson_calls();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sync = Arc::new(FlushSync::default());
+        let heal = Arc::new(HealSignal::default());
+        let writer = spawn_writer(
+            Arc::clone(&ch),
+            rx,
+            heal,
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&sync),
+        );
+        for _ in 0..n {
+            tx.send(UsageEvent::default()).unwrap();
+        }
+        // A BACKGROUND read's flush: must not wake a parked server; the ack
+        // still arrives (the writer answered, it just kept the rows).
+        let acked = sync.flush_and_wait(false, Duration::from_secs(5)).await;
+        let seen = ndjson_calls() - before;
+        writer.abort();
+        (seen, acked)
+    }
+
+    /// S9-301: 3k events while the server is parked cause ZERO
+    /// serializations (and so zero inserts) — the parked check runs before
+    /// the payload is built, and a deferred buffer is not re-flushed per event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parked_writer_never_serializes_until_overdue() {
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", true));
+        let (seen, acked) = writer_serializations(Arc::clone(&ch), 3 * FLUSH_BATCH / 2).await;
+        assert!(acked, "a deferred flush is still acked");
+        assert_eq!(seen, 0, "parked: no payload may be built before overdue");
+        assert!(
+            ch.is_parked(),
+            "a background flush must not wake the server"
+        );
+    }
+
+    /// S9-301: after an insert FAILS, the held buffer is not retried on
+    /// every following event (each retry used to re-serialize up to
+    /// RETAIN_MAX events and make an HTTP attempt): one attempt at
+    /// FLUSH_BATCH, the next only FLUSH_BATCH events later (or on the timer /
+    /// a read).
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_flush_is_not_retried_per_event() {
+        // Nothing listens on port 9 (discard) on loopback: connection refused.
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", false));
+        let before = ndjson_calls();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let sync = Arc::new(FlushSync::default());
+        let writer = spawn_writer(
+            Arc::clone(&ch),
+            rx,
+            Arc::new(HealSignal::default()),
+            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&sync),
+        );
+        for _ in 0..(FLUSH_BATCH + FLUSH_BATCH / 2) {
+            tx.send(UsageEvent::default()).unwrap();
+        }
+        // Let the writer drain the channel (it yields at each insert attempt).
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = ndjson_calls() - before;
+        writer.abort();
+        assert_eq!(
+            seen, 1,
+            "one failed attempt at FLUSH_BATCH, none per event after"
+        );
+    }
+
+    /// S9-303: a read's flush-and-wait is acked even when nothing is
+    /// buffered, so an idle reader never sits out the whole wait.
+    #[tokio::test(flavor = "current_thread")]
+    async fn flush_and_wait_acks_an_empty_writer() {
+        let ch = Arc::new(ClickHouse::for_tests("http://127.0.0.1:9", true));
+        let (seen, acked) = writer_serializations(ch, 0).await;
+        assert!(acked);
+        assert_eq!(seen, 0);
+    }
+
+    /// S9-302: `record` stamps the event time, so a row deferred for minutes
+    /// is not dated by its INSERT (`DEFAULT now64(3)`); a caller's own `ts`
+    /// is kept.
+    #[test]
+    fn unstamped_events_get_the_record_time() {
+        let before = chrono::Utc::now() - chrono::Duration::milliseconds(1);
+        let mut ev = UsageEvent::default();
+        stamp_ts(&mut ev);
+        let ts = chrono::DateTime::parse_from_rfc3339(ev.ts.as_deref().unwrap()).unwrap();
+        assert!(ts >= before && ts <= chrono::Utc::now());
+        let mut own = UsageEvent {
+            ts: Some("2026-01-02T03:04:05.006Z".into()),
+            ..Default::default()
+        };
+        stamp_ts(&mut own);
+        assert_eq!(own.ts.as_deref(), Some("2026-01-02T03:04:05.006Z"));
     }
 
     // S9-01: the writer flushes at most every 90 s (or per 2k rows), not every
