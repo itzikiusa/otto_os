@@ -143,13 +143,13 @@ fn known_ignored(key: &(String, &'static str)) -> bool {
     false
 }
 
+/// Per vault root: when the tracked recovery dirs were probed, and the answer.
+type TrackedCache = Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>;
+
 /// Recovery dirs whose contents the vault's git repo tracks, per root, with
 /// when that was probed — `status` is polled, `git ls-files` is not free.
-fn tracked_cache(
-) -> &'static Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>> {
-    static CACHE: OnceLock<
-        Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>,
-    > = OnceLock::new();
+fn tracked_cache() -> &'static TrackedCache {
+    static CACHE: OnceLock<TrackedCache> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 

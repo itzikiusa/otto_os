@@ -954,6 +954,7 @@ fn plan_file(
 
 /// Sentinel present in every Otto-managed hook command (tests identify Otto's
 /// groups by it).
+#[cfg(test)]
 const OTTO_HOOK_SENTINEL: &str = "OTTO_INGEST_TOKEN";
 
 /// The single shell command every Otto hook runs: forward the hook's JSON

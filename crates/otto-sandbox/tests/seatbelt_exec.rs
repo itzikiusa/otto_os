@@ -732,7 +732,7 @@ fn seatbelt_agent_at_home_cannot_write_dotfiles_or_launch_agents() {
         &home,
         &home,
         &root.join("Otto"),
-        &[home.clone()],
+        std::slice::from_ref(&home),
         NetworkPolicy::Full,
     );
     assert!(!can_write(&pol, &home.join(".zshrc")));
