@@ -2825,4 +2825,29 @@ mod tests {
         assert!(is_write("DROP TABLE users"));
         assert!(is_write("INSERT INTO users VALUES (1)"));
     }
+
+    /// The per-column collation (S16-302) is on the wire only when the engine
+    /// reported one — the Table Designer re-states it on MySQL CHANGE COLUMN.
+    #[test]
+    fn column_def_collation_serializes_only_when_known() {
+        let mut c = ColumnDef {
+            name: "code".into(),
+            data_type: "varchar(10)".into(),
+            nullable: true,
+            default: None,
+            key: None,
+            extra: None,
+            comment: None,
+            collation: None,
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert!(v.get("collation").is_none());
+        c.collation = Some("utf8mb4_bin".into());
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["collation"], "utf8mb4_bin");
+        // Older payloads without the field still deserialize.
+        let back: ColumnDef =
+            serde_json::from_str(r#"{"name":"a","data_type":"int","nullable":false}"#).unwrap();
+        assert_eq!(back.collation, None);
+    }
 }
