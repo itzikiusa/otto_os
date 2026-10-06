@@ -55,14 +55,14 @@ connection library unusable for every non-root account.)
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
 | 1 | GET /api/v1/health | public | — | `{"ok":true}` |
-| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid bearer (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
+| 2 | GET /api/v1/meta | public | — | MetaResp (incl. `alt_loopback_base`, see "Transport lanes"). Without a valid full-account bearer — a share link (verified or OTP-pending) and an MCP token do not count (S8-308) — (once onboarding is done) only `version`, `api_version`, `needs_onboarding` are filled — `tools`/`providers`/`model_flags` empty, `default_provider`/`alt_loopback_base` null, `network_listener` false. Tool probes are cached 60 s (single-flight). |
 | 3 | POST /api/v1/onboarding/root | public, only while 0 users exist (else 409) | OnboardRootReq | LoginResp |
-| 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled) |
+| 4 | POST /api/v1/auth/login | public | LoginReq | LoginResp (401 on bad creds/disabled; 429 + `Retry-After` when the client (`ip\|user`, or `ip:<ip or IPv6 /64>` across all usernames — 20 failures) or the username is locked, or when the throttle map is saturated and the attempt can't be tracked (fail closed; never the desktop); 503 `busy` + `Retry-After: 1` when the bounded argon2 verifier (4 concurrent, off the async workers) stays saturated for 2 s) |
 | 5 | POST /api/v1/auth/logout | member | — | 204 |
 | 6 | GET /api/v1/auth/me | member | — | `MeResp {user, real_user, impersonating}` — `user` = effective (auth target); `real_user` = token owner (= `user` for normal sessions); `impersonating: bool` |
 | 7 | GET /api/v1/users | root | — | `User[]` |
 | 8 | POST /api/v1/users | root | CreateUserReq | User (409 dup username) |
-| 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq | User |
+| 9 | PATCH /api/v1/users/{id} | root | UpdateUserReq `{display_name?, password?, disabled?, current_password?}` | User. Changing your OWN password requires `current_password` (400 when missing, 403 when wrong — counted on the login throttle's username key; never 401). Root resetting another user's password does not. |
 | 10 | DELETE /api/v1/users/{id} | root | — | 204 (soft: sets disabled; root user cannot be disabled → 400) |
 | 11 | GET /api/v1/workspaces | member | — | `WorkspaceWithRole[]` (root sees all as admin) |
 | 12 | POST /api/v1/workspaces | member | CreateWorkspaceReq | Workspace (creator becomes admin member) |
@@ -125,7 +125,7 @@ connection library unusable for every non-root account.)
 | 56b | GET /api/v1/repos/{id}/prs/{number}/checks | ws viewer | — | `PrChecksResp {ci: CiStatus, checks: PrCheck[] {name, state, url?, started_at?, completed_at?}}` |
 | 56c | GET /api/v1/repos/{id}/prs/{number}/readiness | ws viewer | — | `PrReadiness {ci_status, approvals, mergeable, conflicts, review?, unpushed, branch_freshness}` — PR-keyed twin of `/reviews/{id}/merge-readiness`; `unpushed`/`branch_freshness` computed from the local checkout when the source branch exists locally |
 | 57 | GET /api/v1/settings | root | — | `{ "<key>": <value_json>, ... }` |
-| 58 | PUT /api/v1/settings | root | same shape | same shape |
+| 58 | PUT /api/v1/settings | root | same shape | same shape. `trusted_client_ip_header` (string): which forwarded-client header the Host guard trusts for a loopback request that named a non-loopback DNS host (a tunnel on this Mac) — e.g. `"CF-Connecting-IP"` trusts it for every allowed tunnel host; `""`/`"none"` trusts none; **unset** = `CF-Connecting-IP` only for the `share_base_url` host and never when that host is a Tailscale Funnel `*.ts.net` name. Comma lists use the last entry. |
 
 Usage & metrics (embedded ClickHouse; types in `crates/otto-usage`). Reads need
 `Usage:View`: **root sees every session (`scope:"all"`); a non-root caller sees only the
@@ -619,7 +619,14 @@ is the auth. It is **IP rate-limited** (the share throttle; `429` with
 `Retry-After` when locked), checks `otp_hash == sha256(otp)` AND `otp_expires_at >
 now`, and on success sets `verified_at` and **clears `otp_hash`** (single-use — a
 fresh code requires a resend). A wrong / expired / reused code records a throttle
-failure and returns `401`. After verification the guest may attach (`/ws/term`)
+failure and returns `401`. Every WRONG guess at a live code also counts on the
+share itself (`otp_failures`): the 5th burns the code (`otp_hash` cleared) and is
+answered `401 {code: "otp_burned"}` — even the right code fails afterwards until
+`POST /share/extend` mails a fresh one (the hard, IP-independent bound; S8-301).
+`503 {code: "busy"}` + `Retry-After: 1` when the bounded argon2 verifier is
+saturated (nothing is counted). The throttle key is the tunnel-aware client IP
+with IPv6 bucketed by /64, and a throttle map full of live keys fails closed
+(`429` for an untracked client). After verification the guest may attach (`/ws/term`)
 and `GET` the session until `max_expires_at` (≤12h); once the window elapses the
 share re-pends and must be re-verified (Task 7.4 extension re-emails the LOCKED
 original recipient only).
@@ -633,7 +640,12 @@ new 6-digit OTP (`OsRng`), stores only its `sha256` (`otp_hash`, ~10-min expiry)
 **clears `verified_at`** (re-pending the share so the guest must re-verify), and
 opens a fresh **≤12h** window (`max_expires_at`, the bearer-token `expires_at`
 tracks it). Only `kind='share'` rows **with** a `recipient_email` are extendable —
-a plain (non-OTP) / missing / revoked share returns `400`. The code is emailed via
+a plain (non-OTP) / missing / revoked share returns `400`; a share that is
+**verified and still inside its window** returns `409` (a link holder must not be
+able to kick the verified guest back to OTP-pending; S8-307); past the 7-day
+lifetime → `403`. The per-share budget (3 extends/hour → `429`) is keyed on the
+share id and only taken once the token resolved to an extendable share, so junk
+tokens can't spend or saturate it; a failed send gives the slot back (S8-306). The code is emailed via
 the **share owner's** verified email sender; if the owner no longer has a verified
 sender → `400`. The guest then re-verifies the new code via
 `POST /api/v1/share/verify` to re-open the window.

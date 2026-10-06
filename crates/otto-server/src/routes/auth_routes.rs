@@ -78,17 +78,29 @@ async fn handle_login(
 ) -> Response {
     let ip_key = login_throttle::ip_key(peer, &req.username);
     let user_key = login_throttle::username_key(&req.username);
+    // Username-independent per-client key (S8-303) — remote clients only: the
+    // desktop shares 127.0.0.1 with every local tool and must not lock itself.
+    let client_key = peer.filter(|_| !local).map(login_throttle::client_key);
     // The keys whose lock refuses this attempt: the desktop skips the global
-    // username lock (see `login`), every other client is held to both.
-    let gating: &[&str] = if local {
-        &[&ip_key]
-    } else {
-        &[&ip_key, &user_key]
-    };
+    // username lock (see `login`), every other client is held to all three.
+    let mut gating: Vec<&str> = vec![ip_key.as_str()];
+    if !local {
+        gating.push(user_key.as_str());
+    }
+    if let Some(k) = &client_key {
+        gating.push(k.as_str());
+    }
 
     // Either key being locked rejects the attempt; report the longer wait.
-    if let Some(retry_after) = attempts.max_locked(gating) {
+    if let Some(retry_after) = attempts.max_locked(&gating) {
         return too_many_requests(retry_after);
+    }
+    // Fail closed (S8-303): a flood filled the tally map and this remote
+    // attempt's failures could not be counted — refuse it rather than let it
+    // guess unthrottled. Never the desktop (a remote flood must not lock the
+    // owner out of their own Mac).
+    if !local && attempts.untracked_while_full(&gating) {
+        return too_many_requests(login_throttle::SATURATED_RETRY);
     }
 
     let ip = peer.map(|p| p.to_string());
@@ -107,12 +119,34 @@ async fn handle_login(
             .await;
             Json(resp).into_response()
         }
-        Err(ApiError(Error::Unauthorized)) => {
-            attempts.record_failure(&ip_key);
-            attempts.record_failure(&user_key);
+        Err(LoginFailure::Busy) => {
+            let body = Problem {
+                code: "busy".to_string(),
+                message: "too many sign-in checks in flight; try again in a moment".to_string(),
+            };
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "1".to_string())],
+                Json(body),
+            )
+                .into_response()
+        }
+        Err(LoginFailure::Denied { known_user }) => {
+            // A REAL account's keys are pinned: they are tracked even when a
+            // junk-username flood has filled the map (a bounded set).
+            if known_user {
+                attempts.record_failure_pinned(&ip_key);
+                attempts.record_failure_pinned(&user_key);
+            } else {
+                attempts.record_failure(&ip_key);
+                attempts.record_failure(&user_key);
+            }
+            if let Some(k) = &client_key {
+                attempts.record_failure(k);
+            }
             // Re-check so the attempt that *crosses* either threshold is itself
             // answered with the lockout, not a bare 401.
-            let locked = attempts.max_locked(gating);
+            let locked = attempts.max_locked(&gating);
             // No acting user on a failed login (the username may not even exist),
             // so user_id is None; the attempted username is the target.
             ctx.audit(NewAuditEntry {
@@ -133,32 +167,59 @@ async fn handle_login(
                 ApiError(Error::Unauthorized).into_response()
             }
         }
-        Err(e) => e.into_response(),
+        Err(LoginFailure::Other(e)) => e.into_response(),
     }
 }
 
-/// Credential check shared by `login`; returns `Error::Unauthorized` for unknown
-/// user, bad password, or disabled account (so the caller can tally failures).
-async fn try_login(ctx: &ServerCtx, req: &LoginReq) -> ApiResult<LoginResp> {
+/// Why [`try_login`] did not issue a token.
+enum LoginFailure {
+    /// Unknown user, bad password or disabled account (tallied as a failure).
+    /// `known_user` = the username exists (its throttle keys are pinned).
+    Denied {
+        known_user: bool,
+    },
+    /// The argon2 verify bound is saturated (S8-303) — 503, not a failure.
+    Busy,
+    Other(ApiError),
+}
+
+impl From<Error> for LoginFailure {
+    fn from(e: Error) -> Self {
+        LoginFailure::Other(ApiError(e))
+    }
+}
+
+/// Credential check shared by `login`; `Denied` for unknown user, bad password,
+/// or disabled account (so the caller can tally failures). argon2 runs off the
+/// async workers behind the shared verify bound (S8-303).
+async fn try_login(ctx: &ServerCtx, req: &LoginReq) -> Result<LoginResp, LoginFailure> {
     let record = match UsersRepo::new(ctx.pool.clone())
         .get_by_username(&req.username)
         .await
     {
-        Ok(record) => record,
-        Err(Error::NotFound(_)) => {
-            // Pay the same argon2 cost as a known user (S8-10): returning
-            // before the hash leaked which usernames exist through timing.
-            let _ = otto_rbac::verify_password(&req.password, dummy_password_hash());
-            return Err(Error::Unauthorized.into());
-        }
+        Ok(record) => Some(record),
+        Err(Error::NotFound(_)) => None,
         Err(e) => return Err(e.into()),
     };
-
-    // Verify BEFORE looking at `disabled`, so a disabled account costs the
+    // Pay the same argon2 cost for an unknown user as for a known one
+    // (S8-10): returning before the hash leaked which usernames exist.
+    let hash = record
+        .as_ref()
+        .map_or(dummy_password_hash(), |r| r.password_hash.as_str());
+    let password_ok = match otto_rbac::verify_password_bounded(&req.password, hash).await {
+        Ok(Ok(ok)) => ok,
+        // The dummy hash can't fail to parse in practice; never 500 on it.
+        Ok(Err(_)) if record.is_none() => false,
+        Ok(Err(e)) => return Err(e.into()),
+        Err(otto_rbac::VerifySaturated) => return Err(LoginFailure::Busy),
+    };
+    let Some(record) = record else {
+        return Err(LoginFailure::Denied { known_user: false });
+    };
+    // `disabled` is checked AFTER the verify, so a disabled account costs the
     // same as an enabled one.
-    let password_ok = otto_rbac::verify_password(&req.password, &record.password_hash)?;
     if record.user.disabled || !password_ok {
-        return Err(Error::Unauthorized.into());
+        return Err(LoginFailure::Denied { known_user: true });
     }
 
     let token = AuthRepo::new(ctx.pool.clone())

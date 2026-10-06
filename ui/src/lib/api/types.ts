@@ -2403,6 +2403,8 @@ export interface UpdateUserReq {
   display_name?: string | null;
   password?: string | null;
   disabled?: boolean | null;
+  /** Required when changing your OWN password (S8-310). */
+  current_password?: string | null;
 }
 
 export interface CreateWorkspaceReq {

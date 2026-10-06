@@ -24,8 +24,10 @@ Auth: `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `otto-bearer` subprotocol on success, keeping the bearer token out of the URL).
 A `?token=<bearer token>` query parameter is refused (401). A token that verifies is never refused; an IP whose tokens fail
 validation too many times gets 429 (instead of 401) for further FAILED attempts.
-The IP is the tunnel-aware client IP (`CF-Connecting-IP` for a loopback request
-naming the Public link domain, else the socket peer). A store error is 503 and
+The IP is the tunnel-aware client IP (the `trusted_client_ip_header` setting's
+header — by default `CF-Connecting-IP` for a loopback request naming a non-Funnel
+Public link domain — else the socket peer; IPv6 is keyed by /64, and a full
+throttle map fails closed for untracked IPs). A store error is 503 and
 never counted.
 
 **Attach intent — `?view=1` (optional).** By default an attach that may type

@@ -554,10 +554,29 @@ pub async fn extend_share(
             .into_response();
     }
 
-    // 1b. Per-share extend budget (S8-06): every extend de-verifies the guest
-    //     and emails the recipient from the owner's sender, so a link holder
-    //     must not be able to do it at will.
-    if !extend_budget_ok(&req.token) {
+    let repo = AuthRepo::new(ctx.pool.clone());
+
+    // 1b. Resolve the share BEFORE spending anything on it (S8-306): junk
+    //     tokens must not consume (or saturate) the per-share budget. `None` ⇒
+    //     not an OTP share ⇒ 400 + a throttle failure (so this can't be used to
+    //     probe which tokens are extendable). A share past its lifetime (403)
+    //     or verified and still open (409, S8-307) is refused here too.
+    let share_id = match repo.extendable_share_id(&req.token).await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            otto_sessions::share_throttle::global().record_failure(ip);
+            return ApiError(Error::Invalid(
+                "this share is not extendable (only email-OTP shares can be extended)".into(),
+            ))
+            .into_response();
+        }
+        Err(e) => return ApiError(e).into_response(),
+    };
+
+    // 1c. Per-share extend budget (S8-06), keyed on the real share id: every
+    //     extend de-verifies the guest and emails the recipient from the
+    //     owner's sender, so a link holder must not be able to do it at will.
+    if !extend_budget_ok(&share_id) {
         let body = otto_core::api::Problem {
             code: "too_many_requests".to_string(),
             message: format!(
@@ -573,23 +592,22 @@ pub async fn extend_share(
             .into_response();
     }
 
-    let repo = AuthRepo::new(ctx.pool.clone());
-
     // 2. Re-issue the OTP (re-pends the share + fresh ≤12h window). The recipient
-    //    and owner come from the DB row — NEVER from the request. `None` ⇒ not an
-    //    extendable OTP share ⇒ 400.
+    //    and owner come from the DB row — NEVER from the request. `None` ⇒ the
+    //    share changed under us (revoked) ⇒ 400.
     let (otp, recipient, owner_id) = match repo.extend_share_otp(&req.token).await {
         Ok(Some(v)) => v,
         Ok(None) => {
-            // Record a throttle failure so this can't be brute-forced to probe
-            // which tokens are extendable OTP shares.
-            otto_sessions::share_throttle::global().record_failure(ip);
+            extend_budget_refund(&share_id);
             return ApiError(Error::Invalid(
                 "this share is not extendable (only email-OTP shares can be extended)".into(),
             ))
             .into_response();
         }
-        Err(e) => return ApiError(e).into_response(),
+        Err(e) => {
+            extend_budget_refund(&share_id);
+            return ApiError(e).into_response();
+        }
     };
 
     // 3. Resolve the SHARE OWNER's verified sender and email the fresh code to the
@@ -597,10 +615,15 @@ pub async fn extend_share(
     //    has a verified sender.
     let mailer = match gmail_mailer_for(&ctx, &owner_id).await {
         Ok(m) => m,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            extend_budget_refund(&share_id);
+            return e.into_response();
+        }
     };
     // No share_url on extend (the guest already has the link) → code-only body.
+    // A failed send gives the slot back: the guest never got a code.
     if let Err(e) = mailer.send_otp(&recipient, &otp, "").await {
+        extend_budget_refund(&share_id);
         return ApiError(Error::Upstream(format!(
             "failed to re-email the access code to {recipient}: {e}"
         )))
@@ -627,33 +650,55 @@ const EXTEND_MAX_PER_WINDOW: usize = 3;
 /// Sliding window for [`EXTEND_MAX_PER_WINDOW`].
 const EXTEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// Take one slot of the per-share extend budget, keyed on the token's hash
-/// (never the raw token). In-memory and per-process like the IP throttle; the
-/// map is pruned on every call and capped so junk tokens can't grow it.
-fn extend_budget_ok(token: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    use std::time::Instant;
-    static SLOTS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
-    let key = otto_rbac::tokens::token_hash(token);
-    let mut map = SLOTS
+/// Live keys the extend budget tracks before evicting the stalest one.
+const EXTEND_BUDGET_MAX_KEYS: usize = 10_000;
+
+type ExtendSlots = std::collections::HashMap<Id, Vec<std::time::Instant>>;
+
+fn extend_slots() -> std::sync::MutexGuard<'static, ExtendSlots> {
+    static SLOTS: std::sync::OnceLock<std::sync::Mutex<ExtendSlots>> = std::sync::OnceLock::new();
+    SLOTS
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let now = Instant::now();
+        .unwrap_or_else(|p| p.into_inner())
+}
+
+/// Take one slot of the per-share extend budget, keyed on the SHARE ID — only
+/// called once the token resolved to a real, extendable OTP share (S8-306),
+/// so junk tokens never reach it. In-memory and per-process like the IP
+/// throttle. A full map evicts the entry whose newest slot is oldest instead
+/// of refusing every share (only real shares get here, so it can't be
+/// flooded with junk).
+fn extend_budget_ok(share_id: &Id) -> bool {
+    let mut map = extend_slots();
+    let now = std::time::Instant::now();
     map.retain(|_, v| {
         v.retain(|t| now.duration_since(*t) < EXTEND_WINDOW);
         !v.is_empty()
     });
-    if map.len() >= 10_000 && !map.contains_key(&key) {
-        return false;
+    if map.len() >= EXTEND_BUDGET_MAX_KEYS && !map.contains_key(share_id) {
+        let stalest = map
+            .iter()
+            .min_by_key(|(_, v)| v.last().copied())
+            .map(|(k, _)| k.clone());
+        if let Some(k) = stalest {
+            map.remove(&k);
+        }
     }
-    let slots = map.entry(key).or_default();
+    let slots = map.entry(share_id.clone()).or_default();
     if slots.len() >= EXTEND_MAX_PER_WINDOW {
         return false;
     }
     slots.push(now);
     true
+}
+
+/// Give back the slot [`extend_budget_ok`] just took (the extend failed before
+/// a code reached the guest — e.g. the mail send failed).
+fn extend_budget_refund(share_id: &Id) {
+    if let Some(v) = extend_slots().get_mut(share_id) {
+        v.pop();
+    }
 }
 
 /// `POST /api/v1/share/verify` — redeem an emailed OTP for a share token
@@ -690,26 +735,56 @@ pub async fn verify_share(
             .into_response();
     }
 
-    // 2. Verify the code (single-use; clears otp_hash on success).
-    let verified = match AuthRepo::new(ctx.pool.clone())
-        .verify_share_otp(&req.token, &req.otp)
+    // 2. Verify the code (single-use; clears otp_hash on success). Every miss
+    //    also counts on the share itself and burns the code after
+    //    `SHARE_OTP_MAX_FAILURES` (S8-301) — the hard bound IP rotation can't
+    //    dodge. argon2 runs off the async workers behind a shared bound.
+    use otto_rbac::tokens::ShareOtpOutcome;
+    let outcome = match AuthRepo::new(ctx.pool.clone())
+        .verify_share_otp_outcome(&req.token, &req.otp)
         .await
     {
         Ok(v) => v,
         Err(e) => return ApiError(e).into_response(),
     };
 
-    if !verified {
+    if outcome == ShareOtpOutcome::Busy {
+        let body = otto_core::api::Problem {
+            code: "busy".to_string(),
+            message: "too many sign-in checks in flight; try again in a moment".to_string(),
+        };
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "1".to_string())],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    if outcome != ShareOtpOutcome::Verified {
         // Wrong / expired / already-used code → record a failure and reject 401.
         otto_sessions::share_throttle::global().record_failure(ip);
+        let burned = outcome == ShareOtpOutcome::Burned;
         ctx.audit(NewAuditEntry {
             user_id: None,
-            action: "share.verify.fail".into(),
+            action: if burned {
+                "share.verify.burned".into()
+            } else {
+                "share.verify.fail".into()
+            },
             target: None,
             detail: None,
             ip: Some(ip.to_string()),
         })
         .await;
+        if burned {
+            let body = otto_core::api::Problem {
+                code: "otp_burned".to_string(),
+                message: "too many wrong codes — this code no longer works; request a new one"
+                    .to_string(),
+            };
+            return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
+        }
         return ApiError(Error::Unauthorized).into_response();
     }
 
