@@ -51,7 +51,7 @@ export const SETTINGS_SECTIONS = [
   // ── Integrations ──
   { id: 'git-accounts', label: 'Git accounts', group: 'integrations', keywords: 'github gitlab bitbucket token pr push https credentials' },
   { id: 'jira', label: 'Jira accounts', group: 'integrations', keywords: 'atlassian confluence issues tickets token' },
-  { id: 'channels', label: 'Channels', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
+  { id: 'channels', label: 'Slack, Telegram & webhooks', group: 'integrations', keywords: 'slack telegram webhook bridge inbound bot' },
   { id: 'mcp-servers', label: 'MCP servers', group: 'integrations', keywords: 'model context protocol tools workspace' },
   { id: 'language-servers', label: 'Language servers', group: 'integrations', keywords: 'lsp completion gopls rust-analyzer typescript install path' },
   { id: 'sharing', label: 'Sharing', group: 'integrations', keywords: 'email sender share guest one-time code otp gmail smtp email remote' },

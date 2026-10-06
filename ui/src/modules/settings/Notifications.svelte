@@ -184,7 +184,7 @@
     <div class="section-title">Channel notifications</div>
     <p class="section-note">
       Each one posts a one-line message to this workspace’s Slack or Telegram channel (set up in
-      <button class="link" onclick={() => router.go('settings/channels')}>Channels</button>). All are off by default.
+      <button class="link" onclick={() => router.go('settings/channels')}>Slack, Telegram &amp; webhooks</button>). All are off by default.
     </p>
     {#if flagsError}
       <div class="flags-error">

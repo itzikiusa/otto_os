@@ -122,7 +122,7 @@
 
   /** Which delivery destinations are set up (null = unknown — offer them all).
    *  Slack/Telegram need an enabled workspace integration with a bot token
-   *  (Settings → Channels); email needs the owner's verified sender (Settings →
+   *  (Settings → Slack, Telegram & webhooks); email needs the owner's verified sender (Settings →
    *  Sharing). Offering an unconfigured one only failed at the first run. */
   let destReady = $state<{ slack: boolean; telegram: boolean; email: boolean } | null>(null);
   async function loadDestReady(): Promise<void> {
@@ -1019,7 +1019,7 @@
           {#if destReady && (!destReady.slack || !destReady.telegram)}
             <span id="sched-dest-hint-ch" class="field-hint" class:bad={(fDestType === 'slack' && !destReady.slack) || (fDestType === 'telegram' && !destReady.telegram)}>
               {fDestType === 'slack' && !destReady.slack ? 'Slack isn’t set up for this workspace.' : fDestType === 'telegram' && !destReady.telegram ? 'Telegram isn’t set up for this workspace.' : 'Slack / Telegram need a workspace integration.'}
-              <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Channels</button>
+              <button type="button" class="btn small ghost" onclick={() => router.go('settings/channels')}>Set up in Settings → Slack, Telegram & webhooks</button>
             </span>
           {/if}
           {#if destReady && !destReady.email}
