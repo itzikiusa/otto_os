@@ -42,6 +42,7 @@ use crate::agent::{FailReason, RunOutcome};
 use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
 pub use crate::report_delivery::{
     deliver_webhook, delivery_message, destination_kind, extract_summary, report_hash,
+    report_hash_matches,
 };
 use crate::AutomationCtx;
 
@@ -324,8 +325,7 @@ async fn complete_run(
                     .await
                     .ok()
                     .flatten()
-                    .as_deref()
-                    == Some(hash.as_str());
+                    .is_some_and(|prev| report_hash_matches(&prev, &out.report));
 
             let (delivered, derr, skipped) = if unchanged {
                 (false, None, true)

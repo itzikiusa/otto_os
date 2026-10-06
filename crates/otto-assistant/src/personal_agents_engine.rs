@@ -815,8 +815,7 @@ async fn complete_agent_run<C: AssistantCtx>(
                 .await
                 .ok()
                 .flatten()
-                .as_deref()
-                == Some(hash.as_str());
+                .is_some_and(|prev| C::report_hash_matches(&prev, &out.report));
             // Proactive findings go to the agent's feed only — never outward.
             let (delivered, derr, skipped) = if unchanged || plan.mode == "proactive" {
                 (false, None, true)
