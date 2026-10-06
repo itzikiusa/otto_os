@@ -103,9 +103,6 @@
      *  re-fetched diff with the same key keeps viewed marks, expansions and
      *  the open composer for paths that still exist (a push re-fetches). */
     stateKey?: string;
-    /** Revision the diff's NEW side is at (a commit / PR head). History and
-     *  Blame open there instead of the local HEAD. */
-    rev?: string;
   }
   let {
     diff,
@@ -119,7 +116,6 @@
     wip,
     loadFile,
     stateKey,
-    rev,
   }: Props = $props();
 
   let mode = $state<'unified' | 'split'>('unified');
@@ -1027,19 +1023,26 @@
 
   /** File header ⋯ — the diff is the only place a path is at hand, so this is
    *  where History / Blame hang off. The panels live in RepoView; `gitBridge`
-   *  carries the request there without prop-drilling the whole graph. */
+   *  carries the request there without prop-drilling the whole graph.
+   *
+   *  Offered only with `repoId`, i.e. the WORKING-TREE diff (WipPanel), where
+   *  the local HEAD is the right revision — so no `rev` is sent. A commit
+   *  diff in the graph opens Blame at its own sha (GraphView's file menu); a
+   *  PR diff has no drawer to open into and passes no `repoId` (S15-309: a
+   *  `rev` prop that no caller set was removed rather than left as dead
+   *  plumbing). */
   function fileToolsMenu(e: MouseEvent, file: FileDiff): void {
     if (!repoId) return;
     ctxMenu.show(e, [
       {
         label: 'History',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path, rev }),
+        action: () => gitBridge.openFileTool({ kind: 'history', repoId, path: file.path }),
       },
       {
         label: 'Blame',
         icon: 'note',
-        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path, rev }),
+        action: () => gitBridge.openFileTool({ kind: 'blame', repoId, path: file.path }),
       },
     ]);
   }
