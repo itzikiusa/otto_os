@@ -179,7 +179,7 @@
 
   // Load notices once on mount.
   $effect(() => {
-    void notifications.load();
+    void notifications.ensureLoaded();
   });
 
   function toggle(): void {

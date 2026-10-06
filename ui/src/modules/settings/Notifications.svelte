@@ -17,7 +17,7 @@
 
   // Load once on mount if the store hasn't fetched yet.
   $effect(() => {
-    if (!notifications.loaded) void notifications.load();
+    void notifications.ensureLoaded();
   });
 
   function save(patch: Partial<NotificationSettings>): void {
