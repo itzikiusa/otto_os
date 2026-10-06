@@ -11,6 +11,7 @@
   import Icon from '../../lib/components/Icon.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import type { DbExportFormat, ExportToPathResp } from '../../lib/api/types';
   import { postNdjsonStream } from '../../lib/api/client';
   import Modal from '../../lib/components/Modal.svelte';
@@ -121,7 +122,7 @@
   }
 
   async function runPathExport(): Promise<void> {
-    if (!canExport) return;
+    if (!canExport || !auth.isRoot) return;
     if (!connectionId || !statement || exportingPath) return;
     const name = exportName.trim() || defaultExportName();
     const dir = exportDir.trim() || '~/Downloads';
@@ -206,6 +207,12 @@
       file — for sets too large to pull into the browser. Choose the format, destination folder,
       and an optional row limit.
     </p>
+    {#if !auth.isRoot}
+      <p class="exp-hint" role="note">
+        Only the root user can write files on the Otto host computer. Download the rows from the
+        results toolbar in your browser instead.
+      </p>
+    {/if}
 
     <label class="exp-row">
       <span class="exp-label">Format</span>
@@ -265,7 +272,7 @@
     >
       {exportingPath ? 'Cancel export' : 'Cancel'}
     </button>
-    <button class="btn primary" onclick={() => void runPathExport()} disabled={exportingPath}>
+    <button class="btn primary" onclick={() => void runPathExport()} disabled={exportingPath || !auth.isRoot}>
       {exportingPath ? 'Exporting…' : 'Export all'}
     </button>
   {/snippet}
