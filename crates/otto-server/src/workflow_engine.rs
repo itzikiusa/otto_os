@@ -1267,6 +1267,12 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
             s.insert(skip_marker_key(run_id, node_id));
         }
     }
+    async fn check_run_location(&self, ws: &Workspace, input: &Value) -> Result<(), String> {
+        ensure_run_location(self, ws, input).await.map_err(|e| match e {
+            otto_core::Error::Invalid(m) => m,
+            other => other.to_string(),
+        })
+    }
 }
 
 /// Spawn a workflow run through the daemon-wide concurrency gate. This is THE
@@ -7245,6 +7251,123 @@ pub(crate) async fn ensure_repo_in_workspace(
             "repo '{repo_id}' is not registered in this workflow's workspace"
         ))),
     }
+}
+
+/// S3-302: where a run may work. Its `working_directory` (comma-separated
+/// paths), `repos` declarations (repo, worktree path, `repo_id`) and an
+/// explicit `repo_id` must all stay inside the workflow's OWN workspace — one
+/// of its registered repos (or a linked worktree of one) or the workspace
+/// root, and paths inside them. Checked where a run starts from caller input
+/// (the manual-run route, chat); the error names the offending value.
+pub(crate) async fn ensure_run_location(
+    ctx: &ServerCtx,
+    ws: &Workspace,
+    input: &Value,
+) -> otto_core::Result<()> {
+    let repos = ctx.git_store.list_repos(&ws.id).await?;
+    let pairs: Vec<(String, String)> = repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let text = |k: &str, v: &Value| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(rid) = text("repo_id", input) {
+        ensure_repo_in_workspace(ctx, &ws.id, &rid).await?;
+    }
+    if let Some(wd) = text("working_directory", input) {
+        for path in wd.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            ensure_path_in_workspace(ws, &pairs, path).await?;
+        }
+    }
+    for e in crate::workflow_context::parse_repo_entries(input.get("repos").unwrap_or(&Value::Null))
+    {
+        let registered = repos.iter().any(|r| r.id == e.repo || r.name == e.repo);
+        if !registered {
+            if e.repo.contains('/') || e.repo.starts_with('~') {
+                ensure_path_in_workspace(ws, &pairs, &e.repo).await?;
+            } else {
+                return Err(otto_core::Error::Invalid(format!(
+                    "repo '{}' is not registered in workspace '{}'",
+                    e.repo, ws.name
+                )));
+            }
+        }
+        if let Some(rid) = &e.repo_id {
+            ensure_repo_in_workspace(ctx, &ws.id, rid).await?;
+        }
+        if e.kind == "worktree" {
+            ensure_path_in_workspace(ws, &pairs, &e.name).await?;
+        }
+        if let Some(wt) = &e.worktree {
+            ensure_path_in_workspace(ws, &pairs, wt).await?;
+        }
+    }
+    Ok(())
+}
+
+/// One path of [`ensure_run_location`]: absolute (`~` expanded), and inside
+/// the workspace root, one of `repos` (`(id, path)` of the workspace's
+/// registered repos), or a linked worktree whose origin is one of them.
+async fn ensure_path_in_workspace(
+    ws: &Workspace,
+    repos: &[(String, String)],
+    raw: &str,
+) -> otto_core::Result<()> {
+    let expanded = expand_tilde(raw.trim());
+    let path = std::path::Path::new(&expanded);
+    if !path.is_absolute() {
+        return Err(otto_core::Error::Invalid(format!(
+            "working directory '{raw}' must be an absolute path"
+        )));
+    }
+    // A path that does not exist yet is judged by its deepest existing
+    // ancestor (canonical) plus the rest — so it may not climb out with `..`.
+    let target = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) if path.components().any(|c| c == std::path::Component::ParentDir) => {
+            return Err(otto_core::Error::Invalid(format!(
+                "working directory '{raw}' may not contain '..'"
+            )));
+        }
+        Err(_) => {
+            let mut base = path.to_path_buf();
+            let mut rest = Vec::new();
+            let canon = loop {
+                if let Ok(c) = std::fs::canonicalize(&base) {
+                    break c;
+                }
+                match (base.file_name().map(|n| n.to_os_string()), base.parent()) {
+                    (Some(name), Some(parent)) => {
+                        rest.push(name);
+                        base = parent.to_path_buf();
+                    }
+                    _ => break base,
+                }
+            };
+            rest.iter().rev().fold(canon, |acc, n| acc.join(n))
+        }
+    };
+    let root = std::fs::canonicalize(&ws.root_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(&ws.root_path));
+    if target.starts_with(&root) {
+        return Ok(());
+    }
+    let target_s = target.to_string_lossy().into_owned();
+    if match_repo_path(&target_s, repos).is_some() {
+        return Ok(());
+    }
+    if let Some(main) = git_main_worktree(&target_s).await {
+        if match_repo_path(&main, repos).is_some() {
+            return Ok(());
+        }
+    }
+    Err(otto_core::Error::Invalid(format!(
+        "working directory '{raw}' is outside workspace '{}' — a run may only work in this \
+         workspace's registered repos or its root folder ({})",
+        ws.name, ws.root_path
+    )))
 }
 
 /// Gather the set of PR targets a `git_pr` node should open — one per changed
