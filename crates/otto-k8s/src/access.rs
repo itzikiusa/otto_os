@@ -377,7 +377,6 @@ pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> 
             >= Capability::Admin)
 }
 
-
 #[cfg(test)]
 mod namespace_scope_tests {
     use super::*;

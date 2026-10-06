@@ -113,12 +113,7 @@ fn topup_statements(
     statements_where(&filter, age, retention, after_t)
 }
 
-fn statements_where(
-    filter: &str,
-    age: i64,
-    retention: u32,
-    after_t: Option<u64>,
-) -> Vec<String> {
+fn statements_where(filter: &str, age: i64, retention: u32, after_t: Option<u64>) -> Vec<String> {
     // `AND <bucket> > after_t` for a tier of `grain` seconds.
     let newer = |grain: i64| match after_t {
         Some(t) => format!(" AND {} > toDateTime({t})", bucket_expr("ts", grain)),
@@ -382,7 +377,9 @@ mod tests {
         // only up to that moment (later rows are the view's).
         let view_at = execs
             .iter()
-            .position(|e| e.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS k8s_samples_1h_mv TO"))
+            .position(|e| {
+                e.starts_with("CREATE MATERIALIZED VIEW IF NOT EXISTS k8s_samples_1h_mv TO")
+            })
             .expect("hour view restored");
         let topups: Vec<(usize, &String)> = execs
             .iter()
@@ -399,7 +396,9 @@ mod tests {
         let (y, t) = (topups[0].1, topups[1].1);
         assert!(y.contains(&yesterday), "{y}");
         assert!(
-            y.contains("intDiv(toUInt32(toUnixTimestamp(ts)), 3600) * 3600) > toDateTime(1790000000)"),
+            y.contains(
+                "intDiv(toUInt32(toUnixTimestamp(ts)), 3600) * 3600) > toDateTime(1790000000)"
+            ),
             "{y}"
         );
         assert!(t.contains(&today.format("%Y-%m-%d").to_string()), "{t}");

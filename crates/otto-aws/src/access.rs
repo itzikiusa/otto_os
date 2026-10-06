@@ -195,4 +195,3 @@ pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> 
             .await?
             >= Capability::Admin)
 }
-
