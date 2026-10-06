@@ -148,6 +148,9 @@ impl AssistantCtx for ServerCtx {
     fn report_hash(report: &str) -> String {
         crate::report_delivery::report_hash(report)
     }
+    fn report_hash_matches(stored: &str, report: &str) -> bool {
+        crate::report_delivery::report_hash_matches(stored, report)
+    }
     fn write_report<'a>(abs: &'a Path, report: &'a str) -> BoxFut<'a, Result<()>> {
         Box::pin(crate::report_delivery::write_report(abs, report))
     }

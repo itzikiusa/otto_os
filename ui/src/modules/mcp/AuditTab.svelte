@@ -57,12 +57,12 @@
     try {
       const page = await mcpCpApi.cpAudit(query(0));
       if (gen !== generation) return;
-      rows = page;
-      nextOffset = PAGE;
-      // The server reads PAGE rows and THEN drops the ones this caller can't
-      // see, so a short page doesn't mean the end (non-admins lost "Load more"
-      // and older rows). Only an empty page proves there's nothing older.
-      hasMore = page.length > 0;
+      rows = page.rows;
+      // The server reads PAGE ledger rows and THEN drops the ones this caller
+      // can't see, so a short (even empty) page doesn't mean the end: it says
+      // where the ledger continues and whether it has more (S17-304).
+      nextOffset = page.next_offset;
+      hasMore = page.has_more;
       loadError = null;
     } catch (e) {
       if (gen === generation) loadError = loadErrorText(e);
@@ -81,9 +81,9 @@
       const page = await mcpCpApi.cpAudit(query(nextOffset));
       if (gen !== generation) return;
       const seen = new Set(rows.map((r) => r.id));
-      rows = [...rows, ...page.filter((r) => !seen.has(r.id))];
-      nextOffset += PAGE;
-      hasMore = page.length > 0;
+      rows = [...rows, ...page.rows.filter((r) => !seen.has(r.id))];
+      nextOffset = page.next_offset;
+      hasMore = page.has_more;
       moreError = null;
     } catch (e) {
       if (gen === generation) moreError = loadErrorText(e);

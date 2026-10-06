@@ -865,6 +865,28 @@ async fn the_audit_list_does_not_query_per_row() {
         many <= 9,
         "200 rows cost {many} statements vs {one} for 1 — visibility is per row again"
     );
+    // S17-304: the paged envelope decides `has_more` from the LEDGER read
+    // (visibility filtering can shorten a page — even to empty — without it
+    // being the end), and `next_offset` counts ledger rows.
+    let (st, page) = d
+        .send("GET", &d.human, "/mcp/audit?paged=true&limit=150", None)
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 150);
+    assert_eq!(page["next_offset"], 150);
+    assert_eq!(page["has_more"], true);
+    let (st, page) = d
+        .send(
+            "GET",
+            &d.human,
+            "/mcp/audit?paged=true&limit=150&offset=150",
+            None,
+        )
+        .await;
+    assert_eq!(st, 200, "{page}");
+    assert_eq!(page["rows"].as_array().unwrap().len(), 50);
+    assert_eq!(page["next_offset"], 200);
+    assert_eq!(page["has_more"], false);
 }
 
 /// The Enforced variant of [`the_audit_list_does_not_query_per_row`]

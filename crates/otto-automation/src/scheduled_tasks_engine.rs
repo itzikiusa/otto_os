@@ -42,6 +42,7 @@ use crate::agent::{FailReason, RunOutcome};
 use crate::report_delivery::{augment_report_prompt, deliver_destination, write_report};
 pub use crate::report_delivery::{
     deliver_webhook, delivery_message, destination_kind, extract_summary, report_hash,
+    report_hash_matches,
 };
 use crate::AutomationCtx;
 
@@ -293,12 +294,34 @@ async fn complete_run(
     // route then answers "finishing" instead of a false "not running".
     cancel: RunCancelGuard,
 ) -> Result<String> {
+    complete_run_with(
+        ctx,
+        task,
+        run_id,
+        trigger,
+        cancel,
+        execute(ctx, task, run_id),
+    )
+    .await
+}
+
+/// [`complete_run`] over a given execution future — boot's re-attached
+/// workflow waiter ([`resume_workflow_handoff`]) settles through the same
+/// report / delivery / cursor path as a live run.
+async fn complete_run_with(
+    ctx: &impl AutomationCtx,
+    task: &ScheduledTask,
+    run_id: &str,
+    trigger: &str,
+    cancel: RunCancelGuard,
+    exec: impl std::future::Future<Output = ExecResult>,
+) -> Result<String> {
     let repo = ctx.scheduled_tasks();
     let run_id = run_id.to_string();
     // A user's Stop drops the execution future (its permit, its shell's
     // process group, its wait) and stops what it started — see `stop_run`.
     let result = tokio::select! {
-        r = execute(ctx, task, &run_id) => r,
+        r = exec => r,
         _ = until_cancelled(&cancel.signal) => Err(stop_run(ctx, &run_id).await),
     };
     drop(cancel);
@@ -324,8 +347,7 @@ async fn complete_run(
                     .await
                     .ok()
                     .flatten()
-                    .as_deref()
-                    == Some(hash.as_str());
+                    .is_some_and(|prev| report_hash_matches(&prev, &out.report));
 
             let (delivered, derr, skipped) = if unchanged {
                 (false, None, true)
@@ -1123,6 +1145,66 @@ async fn execute_workflow(
     // next tick's overlap was stored as a failure). Nothing is held but this
     // task's own in-flight claim — its next tick would only skip anyway while
     // the workflow runs — and a Stop still cancels both (see `stop_run`).
+    // A daemon restart meanwhile re-attaches this wait (S3-303).
+    wait_workflow_outcome(&repo, &workflow.name, run_id).await
+}
+
+/// Boot (S3-303): re-attach the waiter of a scheduled run that had handed off
+/// to a workflow when the previous daemon life ended. The wait lived only in
+/// memory, so reaping the row as "interrupted" recorded a false failure while
+/// boot recovery resumed the workflow itself. Spawns and returns at once (boot
+/// must not block); the run settles through the normal completion path —
+/// report, delivery, cursor — and a Stop still cancels the workflow.
+pub fn resume_workflow_handoff(ctx: &impl AutomationCtx, run: ScheduledTaskRun) {
+    let Some(wf_run_id) = run.workflow_run_id.clone() else {
+        return;
+    };
+    let ctx = ctx.clone();
+    tokio::spawn(async move {
+        let repo = ctx.scheduled_tasks();
+        let task = match repo.get(&run.task_id).await {
+            Ok(t) => t,
+            Err(e) => {
+                record_finish(
+                    repo,
+                    &run.id,
+                    FinishRun {
+                        status: "error".into(),
+                        error: Some(format!("interrupted by daemon restart: {e}")),
+                        workflow_run_id: Some(wf_run_id),
+                        ..Default::default()
+                    },
+                )
+                .await;
+                return;
+            }
+        };
+        // Nothing else runs this task yet (boot), but hold the claim so the
+        // first tick doesn't stack an occurrence on the re-attached wait.
+        let _guard = in_flight().claim(&task.id);
+        let cancel = run_cancels().register(&run.id);
+        let wf_repo = otto_state::WorkflowsRepo::new(ctx.pool().clone());
+        let name = match task.workflow_id.as_deref() {
+            Some(id) => wf_repo
+                .get(&id.to_string())
+                .await
+                .map(|w| w.name)
+                .unwrap_or_else(|_| task.name.clone()),
+            None => task.name.clone(),
+        };
+        info!(run = %run.id, workflow_run = %wf_run_id, "scheduled task: re-attached workflow hand-off after restart");
+        let wait = wait_workflow_outcome(&wf_repo, &name, wf_run_id);
+        let _ = complete_run_with(&ctx, &task, &run.id, &run.trigger, cancel, wait).await;
+    });
+}
+
+/// Poll a handed-off workflow run until it is terminal and map it to the
+/// task run's outcome (no deadline — see [`execute_workflow`]).
+async fn wait_workflow_outcome(
+    repo: &otto_state::WorkflowsRepo,
+    workflow_name: &str,
+    run_id: String,
+) -> ExecResult {
     loop {
         tokio::time::sleep(WORKFLOW_POLL).await;
         // Perf W2: poll the status only; the full row (50–200 KB of
@@ -1151,7 +1233,7 @@ async fn execute_workflow(
             continue;
         };
         let status = status.as_str();
-        let report = workflow_report(&workflow.name, &r);
+        let report = workflow_report(workflow_name, &r);
         let summary = extract_summary(&report);
         // A canceled workflow did not do the task's job — reporting it `ok`
         // (as this used to) hid a stopped run behind a green badge.
@@ -1562,6 +1644,51 @@ mod tests {
     #[tokio::test]
     async fn review4_once_pause_canceled_resume_before_settlement() {
         paused_once_settlement("canceled", true).await;
+    }
+
+    /// S3-15: when the FULL finish write keeps failing, `record_finish`
+    /// falls back to a minimal `error` row instead of leaving the run
+    /// `running` (which made the task look busy until a restart).
+    #[tokio::test]
+    async fn record_finish_falls_back_to_a_minimal_error_row() {
+        let pool = otto_state::db::test_pool().await;
+        sqlx::query("INSERT INTO workspaces(id,name,root_path,created_at) VALUES('ws','ws','/tmp','2026-10-05T00:00:00Z')")
+            .execute(&pool).await.unwrap();
+        let repo = otto_state::ScheduledTasksRepo::new(pool.clone());
+        let task = repo
+            .create(otto_state::NewScheduledTask::defaults(
+                "ws".into(),
+                "t".into(),
+            ))
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(NewScheduledRun {
+                task_id: task.id.clone(),
+                workspace_id: "ws".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        // Any write carrying a summary fails (the full write does; the
+        // minimal fallback carries none).
+        sqlx::query("CREATE TRIGGER reject_full_finish BEFORE UPDATE ON scheduled_task_runs WHEN NEW.summary != '' BEGIN SELECT RAISE(ABORT, 'injected finish failure'); END")
+            .execute(&pool).await.unwrap();
+        record_finish(
+            &repo,
+            &run.id,
+            FinishRun {
+                status: "ok".into(),
+                summary: "all good".into(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let got = repo.get_run(&run.id).await.unwrap();
+        assert_eq!(got.status, "error");
+        let err = got.error.unwrap_or_default();
+        assert!(err.contains("couldn’t be saved"), "{err}");
+        assert!(err.contains("injected finish failure"), "{err}");
     }
 
     #[tokio::test]

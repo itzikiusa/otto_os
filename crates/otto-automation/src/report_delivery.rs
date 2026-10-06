@@ -51,10 +51,45 @@ pub fn destination_kind(dest: &Value) -> &str {
 /// (first 8 bytes, hex): the value is PERSISTED, so it must be stable across
 /// Rust releases — `DefaultHasher`'s SipHash is not (S3-11), and a toolchain
 /// bump would have re-delivered every unchanged report.
+///
+/// VERSIONED (`s1:` prefix, S3-307): stored values written before the switch
+/// are unprefixed 16-hex SipHash (or, briefly, unprefixed SHA-256) — compare a
+/// stored value with [`report_hash_matches`], never with `==`, so the upgrade
+/// itself doesn't re-deliver every unchanged report once.
 pub fn report_hash(report: &str) -> String {
+    format!("{REPORT_HASH_V1}{}", sha256_16(&normalize_report(report)))
+}
+
+/// The current [`report_hash`] version prefix.
+const REPORT_HASH_V1: &str = "s1:";
+
+fn normalize_report(report: &str) -> String {
+    report.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sha256_16(normalized: &str) -> String {
     use sha2::{Digest, Sha256};
-    let normalized: String = report.split_whitespace().collect::<Vec<_>>().join(" ");
     hex::encode(&Sha256::digest(normalized.as_bytes())[..8])
+}
+
+/// Does a STORED notify-on-change hash (`last_ok_report_hash`) describe the
+/// same content as `report`? A versioned value compares exactly; a legacy
+/// unprefixed value is matched against both algorithms it may have been
+/// written with — the pre-S3-11 `DefaultHasher` (stable within the toolchain
+/// that wrote it) and the brief unprefixed SHA-256 — so the first run after
+/// the upgrade still recognises an unchanged report (S3-307).
+pub fn report_hash_matches(stored: &str, report: &str) -> bool {
+    if stored.starts_with(REPORT_HASH_V1) {
+        return stored == report_hash(report);
+    }
+    let normalized = normalize_report(report);
+    if stored == sha256_16(&normalized) {
+        return true;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    normalized.hash(&mut h);
+    stored == format!("{:016x}", h.finish())
 }
 
 /// Append the "write your report to FILE" instruction (codex/agy write no
@@ -248,18 +283,35 @@ pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]
 
 #[cfg(test)]
 mod tests {
-    use super::report_hash;
+    use super::{report_hash, report_hash_matches};
 
     /// S3-11: the persisted notify-on-change hash is a fixed algorithm — this
     /// exact value must never change across toolchains — and whitespace-only
     /// differences still hash equal.
     #[test]
     fn report_hash_is_stable_and_whitespace_insensitive() {
-        assert_eq!(report_hash("hello world"), "b94d27b9934d3e08");
+        assert_eq!(report_hash("hello world"), "s1:b94d27b9934d3e08");
         assert_eq!(
             report_hash("  hello\n\n world \t"),
             report_hash("hello world")
         );
         assert_ne!(report_hash("hello world"), report_hash("hello  worlds"));
+    }
+
+    /// S3-307: a legacy (unprefixed) stored hash — SipHash from before S3-11
+    /// or the brief unprefixed SHA-256 — still counts as "unchanged" for the
+    /// same content, so the upgrade doesn't re-deliver every report once.
+    #[test]
+    fn report_hash_matches_legacy_values() {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        "hello world".hash(&mut h);
+        let siphash = format!("{:016x}", h.finish());
+        for stored in [siphash.as_str(), "b94d27b9934d3e08", "s1:b94d27b9934d3e08"] {
+            assert!(report_hash_matches(stored, " hello\n world"), "{stored}");
+            assert!(!report_hash_matches(stored, "hello worlds"), "{stored}");
+        }
+        assert!(report_hash_matches(&report_hash("x  y"), "x y"));
+        assert!(!report_hash_matches("s1:b94d27b9934d3e09", "hello world"));
     }
 }

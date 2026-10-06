@@ -334,7 +334,7 @@ workspace from the row.
 | — | POST /api/v1/ingest/swarm/product | session token | `{title?,body_md}` | 204 |
 | — | POST /api/v1/ingest/swarm/mockup | session token | `{title,format,content}` | 204 |
 | — | POST /api/v1/ingest/swarm/discovery-report | session token | `{report_md}` | 204 |
-| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | — | `{ok:true}` |
+| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | `?kind=plan\|recruit` (optional; absent stops both, unknown → 400) | `{ok:true, stopped:bool}` — `stopped` false when no such turn was running |
 
 Notes:
 - `config.max_parallel_sessions` is the per-swarm concurrency cap (the Coordinator's
@@ -381,7 +381,8 @@ Notes:
   supplies a story/run id); if no discovery run resolves, nothing is written. Fire-and-forget
   (always 204).
 - `POST /workspaces/{id}/swarm/swarms/{sid}/agent-stop` (ws editor) stops a single running
-  swarm-agent turn for `{sid}` without pausing the whole swarm; returns `{ok:true}`.
+  swarm-agent turn for `{sid}` without pausing the whole swarm; `?kind=plan|recruit` stops only
+  that turn (a concurrent recruit survives "Stop planning"); returns `{ok:true, stopped}`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
   that decomposes it into subtasks for the reports.
 - `SwarmRun.tokens_input` / `tokens_output` / `cost_usd` are backfilled on the run's
@@ -3320,7 +3321,7 @@ are root; workflow trigger routes ride the Workflows prefix; the webhook is publ
 | POST /workspaces/{wid}/agents/{sid}/context-packet/preview | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{redacted, redactions, size_bytes}` (preview only) |
 | POST /workspaces/{wid}/agents/{sid}/context-packet/send | ws member (Agents:Edit, session owner/admin) | `{kind, payload}` | `{ok, size_bytes, redactions}` (injects the redacted packet) |
 | GET /capabilities | root | — | `ModuleCapability[]` (per-feature ready/degraded/missing_setup + deps + fixes) |
-| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level) |
+| GET /support-bundle | root | — | `SupportBundle` (versions, redacted settings, capabilities, recent audit, migration level, `orphaned_workflow_runs_swept` — runs the workflow orphan sweep errored since daemon start) |
 | POST /workflows/{id}/webhook/{token} | public-by-token | run input body | `WorkflowRun` (token validated against workflow_triggers). Reserved run-input keys in the body are dropped (see **Reserved run-input keys**); a non-object body becomes `input.payload`. **409** while the workflow already has a `pending`/`running` run (one-at-a-time admission, atomic with the insert — same as schedule/event triggers) |
 | GET /workflows/{id}/triggers | ws viewer (Workflows:View) | — | `WorkflowTrigger[]` |
 | POST /workflows/{id}/triggers | ws editor (Workflows:Edit) | `UpsertTriggerReq {kind, spec}` | `WorkflowTrigger` |
@@ -3349,10 +3350,17 @@ result goes and where agents run; which trigger may set them:
 | `origin_*` (e.g. `origin_workspace_id`), `channel`, `chat`, `thread` | yes | — | dropped | dropped |
 | `result_channel`, `result_chat`, `result_thread`, `result_webhook`, `callback_url` | yes | yes (`result_*`) | yes | dropped |
 | `working_directory`, `repos`, `worktree`, `worktree_path`, `cwd` | `working_directory` | webhook spec: `working_directory`, `repos` | yes | dropped |
+| `repo_id`, `base`, `pr`, `pr_branch` | — | webhook spec | yes (`repo_id` must be in the workflow's workspace, else **400**) | dropped |
 
 Results always post through the **workflow's own** workspace integration: an
 `origin_workspace_id` naming another workspace is ignored (chat triggers only
 resolve workflows of the receiving workspace).
+
+Repos are **workspace-scoped** for every run: an explicit `repo_id` (run input or node
+params), a `repos[]` declaration (by id or name) and a `working_directory`/worktree path
+all resolve only to repos registered in the workflow's own workspace. A path whose
+deepest registered repo lives in another workspace resolves to nothing (the step fails
+with "no repo_id") rather than borrowing that repo's checkout or git account.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
 `otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
@@ -3383,7 +3391,9 @@ candidate's workflow is re-checked against the inbound `workspace_id` before bei
 channel bound by workspace B's Slack/Telegram integration never fires a workflow (or leaks that
 channel's messages) into workspace A. The name-addressed commands above (1 and 2) apply the
 same gate: `find_by_name` resolves only within the message's own workspace, so a member of
-workspace A's channel can never start workspace B's workflow.
+workspace A's channel can never start workspace B's workflow. Net effect: only the trigger
+*listing* is global — every path (1–3) can start only workflows of the receiving workspace, and
+the run reports through that same workspace's integration.
 
 Loop guard: Slack drops any event carrying a `bot_id` (including the nested `message` of a
 `message_changed` edit) before it reaches the bridge; Telegram's `getUpdates` long-poll
@@ -4020,7 +4030,7 @@ enforce the entity's workspace role.
 | CP20 | GET /api/v1/mcp/approvals | mcp:view (ws-filtered) | `?status=` | `McpApproval[]` — additive `requested_by_session_id?` (the agent session that raised it). A retried governed call reuses its still-pending approval (same tool + args hash + workspace + requester) instead of filing a duplicate |
 | CP20a | GET /api/v1/mcp/approvals/count | mcp:view (ws-filtered) | `?status=` | `McpApprovalCount` `{count}` — the number of approvals CP20 would show (same workspace scoping and per-(server, tool) visibility), uncapped, from one grouped count. The MCP page's pending badge reads it instead of fetching up to 200 rows |
 | CP21 | POST /api/v1/mcp/approvals/{id}/decide | mcp:admin + human credential (`403` for an agent session's / MCP / share token); approver≠requester, except agent-raised requests, which their human owner may decide | `{approved, note?}` | McpApproval |
-| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200), `offset` | `McpCallLogRow[]` — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows; the Audit tab's "Load more" advances `offset` by `limit` |
+| CP22 | GET /api/v1/mcp/audit | mcp:view (ws-filtered) | filters, `limit` (default 200, max 1000), `offset`, `paged?` | `McpCallLogRow[]`; with `paged=true` the envelope `McpAuditPage {rows, next_offset, has_more}` instead — `has_more` is true when the LEDGER read filled `limit` and `next_offset` = `offset` + ledger rows read, so a page the visibility check shortened (even to empty) still pages on (the Audit tab uses it) — additive `caller_session_id?`; `otto.*` rows carry the resolved (else calling session's) `workspace_id`; for non-root callers a workspace-less `otto.*` row is listed only when `caller_user_id` is the caller. `limit`/`offset` page the ledger BEFORE the per-row visibility check, so a page can hold fewer than `limit` rows |
 | CP23 | GET /api/v1/mcp/stats | mcp:view (ws-filtered) | — | `McpToolStats[]` (same row scoping as CP22) |
 
 ### Otto as an MCP server (outward) + live-agent gateway

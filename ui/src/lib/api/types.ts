@@ -613,6 +613,17 @@ export interface McpAuditQuery {
   offset?: number;
 }
 
+/** `GET /mcp/audit?paged=true` — one page of the rows the caller may see.
+ *  Visibility is checked AFTER the ledger read, so `rows` can be short (even
+ *  empty) mid-ledger: page on `has_more` / `next_offset`, never on length. */
+export interface McpAuditPage {
+  rows: McpCallLogRow[];
+  /** Ledger offset of the next page (`offset` + ledger rows read). */
+  next_offset: number;
+  /** The ledger read was a full `limit` — older rows may exist. */
+  has_more: boolean;
+}
+
 /** Per-tool aggregate stats (cost = bytes proxy; latency / error counts). */
 export interface McpToolStats {
   server_id: string | null;

@@ -2145,14 +2145,29 @@ async fn delete_trigger_h(
 
 /// Stop an in-flight plan/recruit for this swarm: kills the live agent
 /// session(s) and prevents further retries.
+#[derive(serde::Deserialize)]
+struct AgentStopQuery {
+    /// `plan` | `recruit` — stop only that turn (S17-307); absent stops both.
+    kind: Option<String>,
+}
+
 async fn agent_stop(
     State(ctx): State<SwarmRt>,
     Extension(user): Extension<AuthUser>,
     Path((ws, sid)): Path<(Id, Id)>,
+    axum::extract::Query(q): axum::extract::Query<AgentStopQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     swarm_in_ws(&ctx, &user, &ws, &sid, WorkspaceRole::Editor).await?;
-    crate::runtime::agent_run::stop(&ctx, &sid).await;
-    Ok(Json(json!({ "ok": true })))
+    let kind = q.kind.as_deref().filter(|k| !k.is_empty());
+    if let Some(k) = kind {
+        if !crate::runtime::agent_run::AGENT_KINDS.contains(&k) {
+            return Err(ApiError(Error::Invalid(format!(
+                "unknown agent kind '{k}' (want plan|recruit)"
+            ))));
+        }
+    }
+    let stopped = crate::runtime::agent_run::stop(&ctx, &sid, kind).await;
+    Ok(Json(json!({ "ok": true, "stopped": stopped })))
 }
 
 async fn check(ctx: &SwarmRt, user: &AuthUser, ws: &Id, role: WorkspaceRole) -> ApiResult<()> {
@@ -2654,7 +2669,7 @@ async fn recruit(
                 .first()
                 .map(|a| a.id.clone())
                 .unwrap_or_else(|| "recruiter".to_string());
-            let cancel = crate::runtime::agent_run::begin(sid);
+            let cancel = crate::runtime::agent_run::begin(sid, "recruit");
             let (raw, rid) = crate::runtime::agent_run::run_swarm_agent(
                 &ctx,
                 &workspace,
@@ -2673,7 +2688,7 @@ async fn recruit(
                 &cancel,
             )
             .await;
-            crate::runtime::agent_run::end(sid);
+            crate::runtime::agent_run::end(sid, "recruit");
             let raw = raw.ok_or_else(|| {
                 ApiError(Error::Upstream(
                     "recruiter produced nothing (stopped or stuck)".into(),
@@ -2784,7 +2799,7 @@ async fn plan(
     // Multi-agent plan: run one planner per angle as a REAL, openable session
     // (watchable live in the Runs list, Stop-able), then a summarizer reconciles
     // the candidate task lists. Each turn has no wall-clock cap + stuck-retry.
-    let cancel = crate::runtime::agent_run::begin(&project.swarm_id);
+    let cancel = crate::runtime::agent_run::begin(&project.swarm_id, "plan");
     let mut candidates: Vec<String> = Vec::new();
     let angles = crate::recruiter::PLANNER_ANGLES;
     for (i, angle) in angles.iter().enumerate() {
@@ -2846,7 +2861,7 @@ async fn plan(
             .first()
             .and_then(|c| crate::recruiter::extract_json(c))
     };
-    crate::runtime::agent_run::end(&project.swarm_id);
+    crate::runtime::agent_run::end(&project.swarm_id, "plan");
     let v = final_json.ok_or_else(|| {
         ApiError(Error::Upstream(
             "planner produced no tasks (stopped or stuck)".into(),
