@@ -96,7 +96,9 @@ pub struct Memory {
     /// Unix epoch seconds; set when the memory is soft-deleted. `None` = live.
     pub forgotten_at: Option<i64>,
     /// Random token required to undo a forget. Cleared after undo or permanent
-    /// delete.
+    /// delete. NEVER serialized: it is handed out only by `forget` — in every
+    /// list/get JSON it would let any Viewer read the secret (S7-307).
+    #[serde(default, skip_serializing)]
     pub undo_token: Option<String>,
 }
 
@@ -867,8 +869,6 @@ impl MemoriesRepo {
         self.get(ws, id).await
     }
 
-    /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
-    /// `undo_token`. Returns the token so the caller can hand it to the client.
     /// An unguessable single-use undo token: SHA-256 over three ULIDs (each
     /// carrying 80 bits from the thread CSPRNG — 240 random bits in all). It
     /// used to hash only (id, ws, epoch, nanos), which an observer of the
@@ -879,6 +879,8 @@ impl MemoriesRepo {
         hex::encode(Sha256::digest(seed.as_bytes()))
     }
 
+    /// Soft-delete a memory: set `active=0`, `forgotten_at`, and mint an opaque
+    /// `undo_token`. Returns the token so the caller can hand it to the client.
     pub async fn soft_forget(&self, ws: &str, id: &str) -> Result<String> {
         // Verify the row exists in this workspace first (returns NotFound if absent).
         let _ = self.get(ws, id).await?;
@@ -903,16 +905,30 @@ impl MemoriesRepo {
     /// Undo a soft-delete: restore `active=1`, clear `forgotten_at` and
     /// `undo_token`, set state back to `accepted`. Returns the restored memory.
     pub async fn undo_forget(&self, ws: &str, undo_token: &str) -> Result<Memory> {
+        self.undo_forget_scoped(ws, None, undo_token).await
+    }
+
+    /// [`Self::undo_forget`] pinned to memory `id` when given: the
+    /// `/memory/{mid}/forget/undo` route restores ONLY `mid`, never whatever
+    /// row the token names (S7-307).
+    pub async fn undo_forget_scoped(
+        &self,
+        ws: &str,
+        id: Option<&str>,
+        undo_token: &str,
+    ) -> Result<Memory> {
         // Locate the row by its undo token, scoped to the workspace.
         // Tokens expire with the undo window (measured from `forgotten_at`).
         let oldest = Utc::now().timestamp() - UNDO_FORGET_WINDOW_SECS;
         let row = sqlx::query(
             "SELECT id FROM memories WHERE undo_token=? AND workspace_id=? \
-             AND forgotten_at IS NOT NULL AND forgotten_at >= ?",
+             AND forgotten_at IS NOT NULL AND forgotten_at >= ? AND (? IS NULL OR id = ?)",
         )
         .bind(undo_token)
         .bind(ws)
         .bind(oldest)
+        .bind(id)
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("memory.undo_forget.find"))?
@@ -1231,14 +1247,20 @@ impl MemoriesRepo {
         )
         .execute(&self.pool)
         .await;
-        if created.is_err() {
-            return Ok(false);
+        if let Err(e) = created {
+            // Only a build WITHOUT FTS5 is a permanent "no" (→ LIKE fallback).
+            // Anything else (SQLITE_BUSY past the busy timeout while boot
+            // tasks hold the writer, an IO hiccup) is transient: an `Err` the
+            // caller retries, never a cached "unavailable" (S7-308).
+            if e.to_string().contains("no such module") {
+                return Ok(false);
+            }
+            return Err(dberr("memory.ensure_fts")(e));
         }
-        // Without the map every index write would fail: report FTS as
-        // unavailable (LIKE fallback) and retry on the next daemon start.
-        if self.ensure_fts_map().await.is_err() {
-            return Ok(false);
-        }
+        // Without the map every index write would fail: transient, retried.
+        self.ensure_fts_map()
+            .await
+            .map_err(dberr("memory.ensure_fts_map"))?;
         // Once per daemon: repair whatever drifted while the index was
         // written outside the memory's own transaction (older builds), or a
         // savepointed FTS write failed. A failed repair leaves FTS usable.
@@ -1476,6 +1498,17 @@ mod fts_map_tests {
             .fetch_all(&r.pool)
             .await
             .unwrap()
+    }
+
+    /// S7-308: a transient failure (here: the pool is gone) is an `Err` the
+    /// service retries, not `Ok(false)` — that cached "FTS unavailable" for
+    /// the daemon's lifetime and silently degraded every search to LIKE.
+    #[tokio::test]
+    async fn transient_fts_failure_is_an_error_not_unavailable() {
+        let pool = crate::db::test_pool().await;
+        let r = MemoriesRepo::new(pool.clone());
+        pool.close().await;
+        assert!(r.ensure_fts().await.is_err());
     }
 
     /// r3-01-04: an upsert replaces the memory's FTS row in place through the

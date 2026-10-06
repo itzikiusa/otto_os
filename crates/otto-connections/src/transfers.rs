@@ -111,10 +111,10 @@ async fn authorize_transfer<S: ConnectionsCtx>(
     let conn = ctx.connections().get(id).await?;
     check_conn_role(ctx, &user, &conn, WorkspaceRole::Editor).await?;
     let governed = ctx.connections().is_enforced(id).await?;
-    if governed && !user.is_root {
-        return Err(Error::Forbidden(
-            "daemon-local transfer paths require root for governed connections".into(),
-        ));
+    // A transfer reads or writes a DAEMON-HOST path: root-only for every
+    // connection, Legacy included (S6-302).
+    if !user.is_root {
+        return Err(Error::Forbidden(crate::http::HOST_PATH_ROOT_ONLY.into()));
     }
     if !governed && crate::http::owner_private_enabled(ctx).await {
         crate::http::require_conn_owner_or_root(&user, &conn)?;
@@ -183,13 +183,12 @@ pub(crate) async fn start<S: ConnectionsCtx>(
     if !(1..=600).contains(&timeout) {
         return Err(Error::Invalid("timeout_secs must be between 1 and 600".into()).into());
     }
-    if ctx.connections().is_enforced(&id).await? {
+    // Root-only for every connection (S6-302): the local side is a path on
+    // the daemon host.
+    {
         let current = otto_state::UsersRepo::new(ctx.pool()).get(&user.id).await?;
         if !current.is_root || current.disabled {
-            return Err(Error::Forbidden(
-                "daemon-local transfer paths require root for governed connections".into(),
-            )
-            .into());
+            return Err(Error::Forbidden(crate::http::HOST_PATH_ROOT_ONLY.into()).into());
         }
     }
     let operation = if upload { "sftp_write" } else { "sftp_read" };
@@ -653,6 +652,65 @@ for line in sys.stdin:
     /// `OTTO_BENCH_P95_MS` to turn a regression into a failure: every mode's
     /// browse p95 must stay under that many milliseconds. Unset (manual
     /// runs), it only prints.
+    /// S6-302: the local side of an SFTP transfer / download / upload is a
+    /// path on the daemon host — a non-root Editor of a LEGACY connection is
+    /// refused before anything touches it; root keeps it.
+    #[tokio::test]
+    async fn non_root_cannot_name_daemon_host_paths_on_legacy_connections() {
+        let fixture = Fixture::new().await;
+        assert!(!fixture
+            .ctx
+            .connections()
+            .is_enforced(&fixture.connection.id)
+            .await
+            .unwrap());
+        let editor_id = otto_core::new_id();
+        sqlx::query("INSERT INTO users(id,username,password_hash,display_name,is_root,disabled,created_at) VALUES(?,?, 'hash','Editor',0,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+            .bind(&editor_id).bind(&editor_id).execute(&fixture.ctx.pool).await.unwrap();
+        let editor = otto_state::UsersRepo::new(fixture.ctx.pool.clone())
+            .get(&editor_id)
+            .await
+            .unwrap();
+        let planted = fixture.root.join("planted.zshenv");
+        let err = start(
+            State(fixture.ctx.clone()),
+            Extension(AuthUser(editor.clone())),
+            Path(fixture.connection.id.clone()),
+            Json(SftpTransferReq {
+                direction: "download".into(),
+                local_path: planted.to_string_lossy().into_owned(),
+                remote_path: "/etc/motd".into(),
+                timeout_secs: Some(5),
+            }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| e.0)
+        .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+        assert!(!planted.exists());
+        assert!(matches!(
+            authorize_transfer(
+                &fixture.ctx,
+                &editor_id,
+                &fixture.connection.id,
+                &fixture.connection.params,
+                "sftp_read"
+            )
+            .await,
+            Err(Error::Forbidden(_))
+        ));
+        // The direct download/upload routes share the helper.
+        let err = crate::http::require_root_for_host_path(&fixture.ctx, &editor)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.0, Error::Forbidden(_)), "{:?}", err.0);
+        crate::http::require_root_for_host_path(&fixture.ctx, &fixture.user)
+            .await
+            .map_err(|e| e.0)
+            .expect("root keeps daemon-host transfers");
+    }
+
     #[tokio::test]
     #[ignore = "manual synthetic SFTP latency measurement; timing is not a CI assertion"]
     async fn synthetic_sftp_browse_latency() {

@@ -14,6 +14,7 @@
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { toasts } from '../../lib/toast.svelte';
   import { database } from '../../lib/stores/database.svelte';
+  import { auth } from '../../lib/stores/auth.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { postNdjsonStream } from '../../lib/api/client';
   import type { ImportFormat, ImportReq, ImportResult } from '../../lib/api/types';
@@ -48,7 +49,8 @@
   // In-flight stream controller — the footer Cancel aborts it while importing.
   let importAbort: AbortController | null = null;
 
-  const canImport = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
+  // Reading a daemon-host file is the host owner's power: root only (S6-302).
+  const canImport = $derived(auth.isRoot && !!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_data','database','edit',databaseAccessChild(database.activeDb)));
   $effect(()=>{if(database.selectedConnId)void resourceAccess.load('connection',database.selectedConnId,databaseAccessChild(database.activeDb));});
   const connName = $derived(database.selectedConn?.name ?? 'this connection');
 
@@ -188,6 +190,12 @@
       <strong>batched INSERTs</strong>, through the same write guard as a query — so a Prod/read-only
       connection asks you to type its name first. v1 supports SQL engines (MySQL/ClickHouse).
     </p>
+    {#if !auth.isRoot}
+      <p class="imp-hint" role="note">
+        Only the root user can read files on the Otto host computer. Ask the root user to run this
+        import.
+      </p>
+    {/if}
 
     <label class="imp-row">
       <span class="imp-label">Format</span>

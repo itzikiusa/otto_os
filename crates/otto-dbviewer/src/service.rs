@@ -906,15 +906,22 @@ impl DbViewerService {
         Ok(())
     }
 
-    async fn require_local_path_access(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
-        if self.is_enforced(conn_id).await? {
-            let conn = self.connections.get(conn_id).await?;
-            if !crate::access::current_user(&self.connections.pool(), &conn, user_id)
-                .await?
-                .is_root
-            {
-                return Err(Error::Forbidden("daemon-local file paths require root for governed connections; use browser export".into()));
-            }
+    /// Export-to-path / import-from-path name a file ON THE DAEMON HOST: an
+    /// export can overwrite `~/.zshenv` or plant a LaunchAgent, an import reads
+    /// `~/.ssh/id_ed25519` into a table the caller controls. That is the host
+    /// owner's power, so it is root-only for EVERY connection, Legacy included
+    /// (S6-302); everyone else uses the browser export / upload.
+    pub async fn require_local_path_access(&self, conn_id: &Id, user_id: &Id) -> Result<()> {
+        let conn = self.connections.get(conn_id).await?;
+        if !crate::access::current_user(&self.connections.pool(), &conn, user_id)
+            .await?
+            .is_root
+        {
+            return Err(Error::Forbidden(
+                "Only the root user can read or write files on the Otto host computer; \
+                 use the browser export or file upload instead"
+                    .into(),
+            ));
         }
         Ok(())
     }

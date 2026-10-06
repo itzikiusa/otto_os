@@ -4707,6 +4707,8 @@ export interface InstallBundledResp {
   backed_up: boolean;
   /** Path of the backup taken before overwriting, when backed_up is true. */
   backup_path: string | null;
+  /** Provider skill paths (`~/.claude/skills/<name>`, …) left untouched because a user-owned skill of that name lives there. Omitted when empty. */
+  user_owned?: string[];
 }
 
 /** Result of installing every bundled skill (optionally a single category). */
@@ -4717,6 +4719,8 @@ export interface InstallAllBundledResp {
   skipped: string[];
   /** Skills that failed to install; the rest of the batch still ran. */
   failed: { name: string; error: string }[];
+  /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
+  user_owned: string[];
 }
 
 export interface GlobalSoulReq {
@@ -6938,6 +6942,9 @@ export interface VaultStatus {
   unresolved: number;
   tags: number;
   attachments: number;
+  /** Recovery dirs (`.otto-history`, `.trash`) git already tracks — committed
+   *  before Otto ignored them; untrack with `git rm --cached -r <dir>`. Omitted when none. */
+  tracked_recovery?: string[];
 }
 
 export interface VaultDirEntry {

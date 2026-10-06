@@ -989,7 +989,10 @@ pub fn policy_for(method: &Method, matched_path: &str) -> PolicyDecision {
     }
     // Secret-store status + the confirmed "Secure secrets…" migration — root
     // daemon maintenance (handlers require root).
-    if matches!(p, "/admin/secrets/status" | "/admin/secrets/secure") {
+    if matches!(
+        p,
+        "/admin/secrets/status" | "/admin/secrets/secure" | "/admin/secrets/reset-store"
+    ) {
         return Require(Settings, Admin);
     }
     if matches!(
@@ -1491,6 +1494,7 @@ pub fn route_class(method: &Method, matched_path: &str) -> Option<RouteClass> {
             | "/state/archive"
             | "/admin/secrets/status"
             | "/admin/secrets/secure"
+            | "/admin/secrets/reset-store"
     ) {
         return Some(S);
     }

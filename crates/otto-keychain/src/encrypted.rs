@@ -153,8 +153,9 @@ impl From<KeyError> for Error {
             ),
             KeyError::Missing => Error::Conflict(
                 "secret store: secrets.enc exists but its master key is missing from the \
-                 Keychain — restore the \"Otto\" Keychain item, or reset the secret store \
-                 (the unreadable file is moved aside, not deleted)"
+                 Keychain — restore the \"Otto\" Keychain item (picked up within a minute), \
+                 or use Settings → Secrets → Reset secret store (the unreadable file is \
+                 moved aside, not deleted)"
                     .into(),
             ),
             KeyError::Failed(m) => Error::Internal(format!("secret store: {m}")),
@@ -166,7 +167,9 @@ enum KeyState {
     Idle,
     Loading,
     Ready(Arc<MasterKey>),
-    Missing,
+    /// No key, as of `Instant` — re-probed after the retry interval, so a
+    /// restored Keychain item is picked up without a daemon restart (S7-305).
+    Missing(Instant),
     Failed(String, Instant),
 }
 
@@ -182,6 +185,9 @@ struct CellInner {
 pub struct MasterKeyCell {
     source: Arc<dyn MasterKeySource>,
     timeout: Duration,
+    /// How long a `Missing` / `Failed` answer is cached before the Keychain
+    /// is asked again.
+    retry_after: Duration,
     inner: Arc<CellInner>,
 }
 
@@ -190,11 +196,18 @@ impl MasterKeyCell {
         Self {
             source,
             timeout,
+            retry_after: KEY_RETRY_AFTER,
             inner: Arc::new(CellInner {
                 state: Mutex::new(KeyState::Idle),
                 cv: Condvar::new(),
             }),
         }
+    }
+
+    /// Override how long a `Missing` / `Failed` answer is cached (tests).
+    pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
+        self.retry_after = retry_after;
+        self
     }
 
     /// `"unlocked"` (key in memory), `"locked"` (a Keychain call is waiting),
@@ -203,7 +216,7 @@ impl MasterKeyCell {
         match &*self.inner.state.lock().unwrap_or_else(|p| p.into_inner()) {
             KeyState::Ready(_) => "unlocked",
             KeyState::Loading => "locked",
-            KeyState::Idle | KeyState::Missing => "not_loaded",
+            KeyState::Idle | KeyState::Missing(_) => "not_loaded",
             KeyState::Failed(..) => "error",
         }
     }
@@ -217,8 +230,10 @@ impl MasterKeyCell {
         loop {
             match &*st {
                 KeyState::Ready(k) => return Ok(k.clone()),
-                KeyState::Missing if !create => return Err(KeyError::Missing),
-                KeyState::Failed(m, at) if at.elapsed() < KEY_RETRY_AFTER => {
+                KeyState::Missing(at) if !create && at.elapsed() < self.retry_after => {
+                    return Err(KeyError::Missing)
+                }
+                KeyState::Failed(m, at) if at.elapsed() < self.retry_after => {
                     return Err(KeyError::Failed(m.clone()))
                 }
                 KeyState::Loading => {
@@ -233,7 +248,7 @@ impl MasterKeyCell {
                         .unwrap_or_else(|p| p.into_inner());
                     st = g;
                 }
-                // Idle, Missing+create, or a Failed past its back-off.
+                // Idle, Missing+create, or a Missing/Failed past its back-off.
                 _ => {
                     *st = KeyState::Loading;
                     let source = self.source.clone();
@@ -243,7 +258,7 @@ impl MasterKeyCell {
                         .spawn(move || {
                             let next = match load_or_create(&*source, create) {
                                 Ok(Some(k)) => KeyState::Ready(Arc::new(k)),
-                                Ok(None) => KeyState::Missing,
+                                Ok(None) => KeyState::Missing(Instant::now()),
                                 Err(e) => KeyState::Failed(e.to_string(), Instant::now()),
                             };
                             *inner.state.lock().unwrap_or_else(|p| p.into_inner()) = next;

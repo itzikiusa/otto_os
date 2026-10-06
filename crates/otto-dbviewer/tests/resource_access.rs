@@ -730,3 +730,45 @@ async fn proposed_edits_use_saved_secret_without_persisting_and_reject_delegated
     assert_eq!(before.params, after.params);
     assert_eq!(before.secret_ref, after.secret_ref);
 }
+
+/// S6-302: export-to-path / import-from-path name a file on the daemon host,
+/// so they are root-only on a LEGACY (default, unenforced) connection too — a
+/// non-root Editor could otherwise plant `~/.zshenv` or read `~/.ssh` keys.
+#[tokio::test]
+async fn daemon_host_paths_are_root_only_even_for_legacy_connections() {
+    let f = Fixture::new(ConnectionKind::Mysql, 9).await;
+    // `profile` carries no access policy: the Legacy default.
+    let policy = ResourceAccessRepo::new(f.pool.clone())
+        .get_policy(ResourceKind::Connection, &f.profile)
+        .await
+        .unwrap();
+    assert_eq!(policy.mode, AccessMode::Legacy);
+    for conn in [&f.profile, &f.conn] {
+        let err = f
+            .service
+            .require_local_path_access(conn, &f.reader.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+        f.service
+            .require_local_path_access(conn, &f.root.id)
+            .await
+            .expect("root keeps host-path export/import");
+    }
+    let dest = std::env::temp_dir().join(format!("otto-s6-302-{}.csv", std::process::id()));
+    let err = f
+        .service
+        .export_to_path(
+            &f.profile,
+            &f.reader.id,
+            "SELECT 1",
+            None,
+            otto_dbviewer::export::ExportFormat::Csv,
+            None,
+            &dest,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
+    assert!(!dest.exists(), "nothing written");
+}

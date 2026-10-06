@@ -161,6 +161,7 @@
       } else {
         toasts.success('Installed', s.name);
       }
+      noteUserOwned(resp.user_owned ?? []);
       await load();
     } catch (e) {
       toastError(`Couldn’t install ${s.name}`, e);
@@ -191,6 +192,15 @@
     } finally {
       setBusy(s.name, false);
     }
+  }
+
+  /** An agent CLI already had its own skill of that name: Otto left it alone. */
+  function noteUserOwned(paths: string[]): void {
+    if (paths.length === 0) return;
+    toasts.info(
+      'Kept your own skills',
+      `These agent CLI skill folders already hold a skill you own, so Otto did not replace them:\n${paths.join('\n')}`,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -226,6 +236,7 @@
       } else {
         toasts.success(`Installed ${plural(n, `${category} skill`)}`);
       }
+      noteUserOwned(resp.user_owned ?? []);
       await load();
     } catch (e) {
       toastError(`Couldn’t install the ${category} skills`, e);
