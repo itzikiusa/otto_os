@@ -287,16 +287,38 @@ impl HeldConn {
         payload.extend_from_slice(&seq.to_be_bytes());
         payload.extend_from_slice(data);
         if let Err(e) = self.send(frame::INPUT, &payload) {
+            // Never (fully) on the wire: the stream was gone or is hung up
+            // after a partial write, so the holder cannot ack it — NOT
+            // delivered, safe to send again.
             lock_unpoisoned(&self.pending).take();
             return Err(io::Error::new(io::ErrorKind::ConnectionReset, e));
         }
-        match rx.recv() {
-            Ok(res) => res,
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "pty holder connection lost",
-            )),
-        }
+        settle_sent_input(rx.recv())
+    }
+}
+
+/// The error kind of a held write whose frame WAS sent but whose INPUT_ACK
+/// was lost with the holder connection (S1-23): the holder may or may not
+/// have written it to the tty. Distinct from `ConnectionReset` (not
+/// delivered — a retry is safe), so a caller never resends input that may
+/// already be in the terminal. Like `ConnectionReset`, it fails only that
+/// job: the writer keeps running across the reconnect.
+pub(crate) const DELIVERY_UNKNOWN: io::ErrorKind = io::ErrorKind::ConnectionAborted;
+
+/// Outcome of an input job already on the wire: a connection loss before its
+/// ack (`fail_pending(ConnectionReset)`, or the job's channel dropped) means
+/// delivery is unknown, not "not delivered".
+fn settle_sent_input(ack: Result<Ack, std::sync::mpsc::RecvError>) -> Ack {
+    match ack {
+        Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionReset => Err(io::Error::new(
+            DELIVERY_UNKNOWN,
+            "pty holder connection lost before the input was acknowledged — it may or may not have reached the terminal",
+        )),
+        Ok(res) => res,
+        Err(_) => Err(io::Error::new(
+            DELIVERY_UNKNOWN,
+            "pty holder connection lost before the input was acknowledged — it may or may not have reached the terminal",
+        )),
     }
 }
 
@@ -656,4 +678,32 @@ fn reconnect(conn: &HeldConn, mirror: &Mirror) -> Reconnect {
         }
     }
     Reconnect::Unreachable
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    /// S1-23: a sent job whose ack was lost reports "delivery unknown", never
+    /// the retry-safe `ConnectionReset`; acks and a gone child pass through.
+    #[test]
+    fn a_lost_ack_is_delivery_unknown_not_a_reset() {
+        let reset = Ok(Err(io::Error::new(io::ErrorKind::ConnectionReset, "lost")));
+        assert_eq!(
+            settle_sent_input(reset).unwrap_err().kind(),
+            DELIVERY_UNKNOWN
+        );
+        assert_eq!(
+            settle_sent_input(Err(std::sync::mpsc::RecvError))
+                .unwrap_err()
+                .kind(),
+            DELIVERY_UNKNOWN
+        );
+        assert!(settle_sent_input(Ok(Ok(()))).is_ok());
+        let gone = Ok(Err(io::Error::new(io::ErrorKind::BrokenPipe, "gone")));
+        assert_eq!(
+            settle_sent_input(gone).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
 }
