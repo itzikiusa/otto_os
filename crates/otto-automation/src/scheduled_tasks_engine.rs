@@ -839,8 +839,20 @@ async fn execute_shell(ctx: &impl AutomationCtx, task: &ScheduledTask) -> ExecRe
     let cmd = task.prompt.clone();
     // Confined like a `shell` agent session when the process sandbox applies
     // to `shell` (S3-04) — any Editor can author a shell task.
-    let confine: Option<ShellArgv> =
-        sandbox.map(|p| p.wrap("/bin/sh", &["-c".to_string(), cmd.clone()]));
+    // Under the sandbox the shared package caches are read-only, so package
+    // managers cache into a private per-task dir under temp (`env` sets it
+    // inside the profile, ahead of the shell).
+    let confine: Option<ShellArgv> = sandbox.map(|p| {
+        let cache = std::env::temp_dir()
+            .join("otto-agent-cache")
+            .join(format!("scheduled-{}", task.id));
+        let mut argv: Vec<String> = otto_sandbox::agent_cache_env(&cache)
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        argv.extend(["/bin/sh".to_string(), "-c".to_string(), cmd.clone()]);
+        p.wrap("/usr/bin/env", &argv)
+    });
     // The retry policy applies to shell tasks too: a failing command (spawn error,
     // timeout, or non-zero exit) is retried up to `1 + max_retries` times.
     let (res, attempts) = run_shell_with_retry(

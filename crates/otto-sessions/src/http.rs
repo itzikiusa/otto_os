@@ -390,6 +390,7 @@ async fn visible_out<S: SessionsCtx>(
 async fn create_session<S: SessionsCtx>(
     State(ctx): State<S>,
     Extension(AuthUser(user)): Extension<AuthUser>,
+    auth: Option<Extension<otto_core::auth::AuthContext>>,
     Path(ws_id): Path<Id>,
     Json(mut req): Json<CreateSessionReq>,
 ) -> ApiResult<Json<Session>> {
@@ -422,6 +423,20 @@ async fn create_session<S: SessionsCtx>(
     }
 
     let ws = ctx.workspaces().get(&ws_id).await?;
+    // S11-302: an agent session's own credential (its API token or its MCP
+    // credential) may only start sessions inside the workspace, its own
+    // folder or a worktree of the same repo. A person's token is unaffected.
+    if let Some(Extension(auth)) = &auth {
+        if let Some(caller) = auth
+            .managed_session_id
+            .as_ref()
+            .or(auth.mcp_session_id.as_ref())
+        {
+            ctx.manager()
+                .check_agent_cwd(&ws, caller, req.cwd.as_deref())
+                .await?;
+        }
+    }
     let session = ctx.manager().create(&ws, &user.id, req, None).await?;
     Ok(Json(session))
 }

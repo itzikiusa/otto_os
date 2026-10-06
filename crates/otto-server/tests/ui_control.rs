@@ -715,3 +715,48 @@ async fn nested_resume_meta_is_server_owned() {
         }
     }
 }
+
+/// S11-302: an agent's own credential cannot open a worker whose folder (a
+/// Seatbelt write grant, pre-trusted) lies outside the workspace, its own
+/// folder or a worktree of the same repo — and nobody can start an agent
+/// session at `/` (or `$HOME`, a parent of it).
+#[tokio::test]
+async fn agent_credential_cannot_open_sessions_outside_its_workspace() {
+    let d = boot().await;
+    let outside = env!("CARGO_TARGET_TMPDIR");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut outside_dirs = vec!["/".to_string(), outside.to_string()];
+    if !home.is_empty() && std::path::Path::new(&home).is_dir() {
+        outside_dirs.push(home);
+    }
+    for cwd in &outside_dirs {
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions/open",
+                json!({"provider": "claude", "cwd": cwd, "prompt": "hi"}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent opened a worker in {cwd}: {body}");
+        let (st, body) = d
+            .post(
+                &d.agent,
+                "/workspaces/ws1/sessions",
+                json!({"kind": "agent", "provider": "claude", "cwd": cwd}),
+                None,
+            )
+            .await;
+        assert_eq!(st, 403, "agent created a session in {cwd}: {body}");
+    }
+    // A person may pick any ordinary folder, but never `/` itself.
+    let (st, body) = d
+        .post(
+            &d.human,
+            "/workspaces/ws1/sessions",
+            json!({"kind": "agent", "provider": "claude", "cwd": "/"}),
+            None,
+        )
+        .await;
+    assert_eq!(st, 400, "a session at / must be refused: {body}");
+}
