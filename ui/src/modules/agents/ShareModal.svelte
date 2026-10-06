@@ -44,6 +44,9 @@
   /** Whether another device can open the minted link (false ⇒ loopback-only:
    *  no Public link domain and no network listener — S20-01). */
   let mintedRemote = $state(true);
+  /** `lan`: the link is the LAN listener (same Wi-Fi only, self-signed
+   *  certificate) — S20-303. */
+  let mintedLan = $state(false);
   /** Which share the URL/QR panel shows — revoking ANOTHER link keeps it. */
   let mintedShareId: string | null = null;
   let qrCanvas: HTMLCanvasElement | null = $state(null);
@@ -150,6 +153,7 @@
       mintedToken = resp.token;
       // Older daemons omit the flag — treat absence as reachable (old behaviour).
       mintedRemote = resp.reachable_remotely !== false;
+      mintedLan = resp.reach === 'lan';
       mintedShareId = resp.info.id;
       // Optimistically prepend the new share to the list.
       shares = [resp.info, ...shares];
@@ -373,6 +377,14 @@
             <canvas bind:this={qrCanvas} class="sm-qr"></canvas>
             <p class="sm-qr-hint">Scan to open on your phone</p>
           </div>
+          {#if mintedLan}
+            <!-- The LAN listener: no public route, and its certificate is
+                 Otto's own self-signed one. Say both up front. -->
+            <p class="sm-role-note" role="note" data-testid="share-lan-only">
+              <Icon name="info" size={12} />
+              Works on your Wi-Fi only; your phone will warn about Otto’s self-signed certificate.
+            </p>
+          {/if}
         {:else}
           <!-- The origin is loopback (the desktop app always talks to 127.0.0.1):
                a phone scanning this would open ITSELF. Say so instead of a QR. -->
