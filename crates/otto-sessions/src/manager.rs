@@ -102,34 +102,62 @@ fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
 /// `curl -X POST`; file edits stay (the agent writes its memory + report) and
 /// are confined to its folder by the forced Seatbelt profile
 /// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
-/// daemon (otto-server `personal_agent_policy`). Claude-only flag; other
-/// providers rely on the sandbox + the daemon-side policy.
+/// daemon (otto-server `personal_agent_policy`). Claude gets tool flags; codex
+/// gets the untrusted-checkout refinements below (and [`read_only_strip`]);
+/// other providers rely on the sandbox + the daemon-side policy.
 ///
-/// Two review-only refinements (code review runs against PR checkouts whose
+/// Review-only refinements (code review runs against PR checkouts whose
 /// content an outsider wrote):
 /// - `meta.allow_subagents = true` keeps the sub-agent tool (an orchestrator
 ///   reviewer delegates each lens to one) while the shell stays removed;
-/// - `meta.project_settings = false` adds `--setting-sources user`, so the
-///   checkout's `.claude/settings*.json` (hooks, MCP servers, permission
-///   rules) never loads — a repo hook would otherwise run on SessionStart.
+/// - `meta.project_settings = false` marks an UNTRUSTED checkout. For claude it
+///   adds `--setting-sources user`, so the checkout's `.claude/settings*.json`
+///   (hooks, MCP servers, permission rules) never loads — a repo hook would
+///   otherwise run on SessionStart — plus `--strict-mcp-config` (no MCP server
+///   at all: a reviewer only reads files and writes its findings JSON, and a
+///   user-scope MCP is an exfiltration channel) and removes WebFetch /
+///   WebSearch (an injected "fetch https://x/?k=<secret>" is the other one).
+///   For codex it adds `-c project_doc_max_bytes=0`, so the checkout's
+///   AGENTS.md is never loaded as INSTRUCTIONS (it is still readable as code).
 fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
-    if provider != "claude" || meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
+    if meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
         return vec![];
     }
-    let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
-    let mut args = vec![
-        "--disallowed-tools".to_string(),
-        if subagents {
-            "Bash NotebookEdit".to_string()
-        } else {
-            "Bash NotebookEdit Task".to_string()
-        },
-    ];
-    if meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false) {
-        args.push("--setting-sources".to_string());
-        args.push("user".to_string());
+    let untrusted = meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false);
+    match provider {
+        "claude" => {
+            let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
+            let mut denied = vec!["Bash", "NotebookEdit"];
+            if !subagents {
+                denied.push("Task");
+            }
+            if untrusted {
+                denied.extend(["WebFetch", "WebSearch"]);
+            }
+            let mut args = vec!["--disallowed-tools".to_string(), denied.join(" ")];
+            if untrusted {
+                args.push("--setting-sources".to_string());
+                args.push("user".to_string());
+                args.push("--strict-mcp-config".to_string());
+            }
+            args
+        }
+        "codex" if untrusted => vec!["-c".to_string(), "project_doc_max_bytes=0".to_string()],
+        _ => vec![],
     }
-    args
+}
+
+/// Removes provider flags a **read-only** session must not carry, from argv the
+/// provider registry built. Codex's `--search` (the model-side live web-search
+/// tool) is dropped: a read-only run has no business browsing, and on an
+/// untrusted checkout it is an exfiltration channel a prompt injection can
+/// steer. (codex keeps its approvals bypass: its own Seatbelt cannot nest
+/// inside Otto's forced read-only profile, which confines its whole process
+/// tree instead.)
+fn read_only_strip(provider: &str, meta: &serde_json::Value, args: &mut Vec<String>) {
+    if provider == "codex" && meta.get("read_only").and_then(|v| v.as_bool()) == Some(true) {
+        args.retain(|a| a != "--search");
+    }
 }
 
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
@@ -2972,6 +3000,7 @@ impl SessionManager {
                     &meta_val,
                 ));
                 spec.args.extend(lean_turn_args(&provider, &meta_val));
+                read_only_strip(&provider, &meta_val, &mut spec.args);
                 spec.args.extend(read_only_args(&provider, &meta_val));
                 // Record the provider_session_id NOW only when Otto assigns it
                 // (claude, via `--session-id {sid}`). Providers that mint their
@@ -5614,6 +5643,7 @@ impl SessionManager {
                         .as_deref(),
                     &session.meta,
                 ));
+                read_only_strip(&session.provider, &session.meta, &mut spec.args);
                 spec.args
                     .extend(read_only_args(&session.provider, &session.meta));
                 spec
@@ -9481,8 +9511,11 @@ mod tests {
         assert!(read_only_args("claude", &serde_json::json!({})).is_empty());
         assert!(read_only_args("claude", &serde_json::json!({ "read_only": "yes" })).is_empty());
         assert!(read_only_args("codex", &on).is_empty());
-        // No project settings unless the caller opts out of them.
+        // No project settings / MCP / web lockdown unless the caller marks the
+        // checkout untrusted (a personal agent keeps its MCP + web tools).
         assert!(!args.iter().any(|a| a == "--setting-sources"));
+        assert!(!args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args[1].split(' ').any(|t| t == "WebFetch"));
     }
 
     /// A review session: shell gone, sub-agents kept for orchestrator lenses,
@@ -9498,10 +9531,63 @@ mod tests {
         assert!(!args[1].split(' ').any(|t| t == "Task"));
         let at = args.iter().position(|a| a == "--setting-sources").unwrap();
         assert_eq!(args[at + 1], "user");
+        // S2-301(b): no web tools and no MCP server at all on an untrusted checkout.
+        assert!(args[1].split(' ').any(|t| t == "WebFetch"));
+        assert!(args[1].split(' ').any(|t| t == "WebSearch"));
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args.iter().any(|a| a == "--mcp-config"));
         // project_settings without read_only does nothing (never a silent opt-in).
         assert!(
             read_only_args("claude", &serde_json::json!({ "project_settings": false })).is_empty()
         );
+    }
+
+    /// S2-301(a)(d): the full spawn argv a REVIEWER gets, per provider. codex
+    /// loses live web search and never loads the checkout's AGENTS.md as
+    /// instructions; claude loses shell + web tools + every MCP server.
+    #[test]
+    fn review_argv_per_provider_is_locked_down() {
+        let reg = crate::providers::ProviderRegistry::new(None);
+        let meta = serde_json::json!({
+            "source": "review", "read_only": true, "project_settings": false
+        });
+        let argv = |provider: &str| {
+            let mut spec = reg.build_spec(provider, "sid-1", "/tmp/co", false).unwrap();
+            read_only_strip(provider, &meta, &mut spec.args);
+            spec.args.extend(read_only_args(provider, &meta));
+            spec.args
+        };
+        let codex = argv("codex");
+        assert!(!codex.iter().any(|a| a == "--search"), "{codex:?}");
+        let at = codex
+            .iter()
+            .position(|a| a == "-c")
+            .expect("project-doc override");
+        assert_eq!(codex[at + 1], "project_doc_max_bytes=0");
+        let claude = argv("claude");
+        let at = claude
+            .iter()
+            .position(|a| a == "--disallowed-tools")
+            .unwrap();
+        for tool in ["Bash", "Task", "WebFetch", "WebSearch", "NotebookEdit"] {
+            assert!(
+                claude[at + 1].split(' ').any(|t| t == tool),
+                "{tool}: {claude:?}"
+            );
+        }
+        assert!(claude.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!claude.iter().any(|a| a == "--mcp-config"));
+
+        // A read-only personal agent (trusted folder) keeps codex web search
+        // stripped but its project docs; a normal codex session keeps --search.
+        let personal = serde_json::json!({ "read_only": true });
+        let mut spec = reg.build_spec("codex", "sid-2", "/tmp/co", false).unwrap();
+        read_only_strip("codex", &personal, &mut spec.args);
+        assert!(!spec.args.iter().any(|a| a == "--search"));
+        assert!(read_only_args("codex", &personal).is_empty());
+        let mut spec = reg.build_spec("codex", "sid-3", "/tmp/co", false).unwrap();
+        read_only_strip("codex", &serde_json::json!({}), &mut spec.args);
+        assert!(spec.args.iter().any(|a| a == "--search"));
     }
 
     /// claude with a model set → ["--model", name].

@@ -8,6 +8,10 @@ use otto_core::Id;
 pub struct PrWorktree {
     pub path: String,
     pub branch: String,
+    /// The `refs/otto/pr-review/*` ref fetched to build this tree (fork PRs),
+    /// deleted on teardown — the worktree branch holds the commit while the
+    /// review runs (S2-309).
+    pub review_ref: Option<String>,
 }
 
 /// Materialize a PR's head into an isolated linked worktree (best-effort).
@@ -69,11 +73,22 @@ pub async fn materialize_pr_worktree(
             tracing::warn!(review = %review_id, "{base} is not the PR head; using the PR head ref");
         }
     }
+    // A `refs/otto/pr-review/*` ref this call fetched: owned by the tree it
+    // builds (deleted on teardown), or deleted right here when none is built.
+    let mut review_ref: Option<String> = None;
     if candidates.is_empty() {
         match git.fetch_pr_head(pr_number, head_sha, git_token).await {
-            Ok(h) if is_head(h.clone()).await => candidates.push(h),
+            Ok(h) if is_head(h.clone()).await => {
+                if h.starts_with("refs/otto/pr-review/") {
+                    review_ref = Some(h.clone());
+                }
+                candidates.push(h)
+            }
             Ok(h) => {
-                tracing::warn!(review = %review_id, "PR head ref {h} is not the reviewed head")
+                tracing::warn!(review = %review_id, "PR head ref {h} is not the reviewed head");
+                if h.starts_with("refs/otto/pr-review/") {
+                    let _ = git.delete_pr_review_ref(&h).await;
+                }
             }
             Err(e) => tracing::warn!(review = %review_id, "PR head unavailable: {e}"),
         }
@@ -93,12 +108,16 @@ pub async fn materialize_pr_worktree(
                 return Some(PrWorktree {
                     path: wt_path,
                     branch: wt_branch,
+                    review_ref,
                 });
             }
             Err(e) => {
                 tracing::warn!(review = %review_id, "worktree of PR head {head} failed: {e}")
             }
         }
+    }
+    if let Some(r) = review_ref {
+        let _ = git.delete_pr_review_ref(&r).await;
     }
     tracing::warn!(review = %review_id, "no checkout of PR #{pr_number}'s head; reviewing in repo path (partial)");
     None
@@ -117,6 +136,9 @@ pub async fn teardown_pr_worktree(repo_path: &str, wt: PrWorktree) {
     let git = otto_git::LocalGit::new(repo_path);
     let _ = git.worktree_remove(&wt.path).await;
     let _ = git.delete_branch(&wt.branch, true).await;
+    if let Some(r) = wt.review_ref.as_deref() {
+        let _ = git.delete_pr_review_ref(r).await;
+    }
 }
 
 #[cfg(test)]
@@ -206,5 +228,59 @@ mod tests {
             "must review the fork's head, not origin/main"
         );
         teardown_pr_worktree(&repo.path, wt).await;
+    }
+
+    /// S2-309: the per-head `refs/otto/pr-review/<n>-<sha12>` ref a fork PR's
+    /// checkout is fetched into is deleted on teardown (it pinned the fork's
+    /// objects against gc forever).
+    #[tokio::test]
+    async fn teardown_deletes_the_fetched_pr_review_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        std::fs::create_dir(&upstream).unwrap();
+        sh(&upstream, &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.join("f.txt"), "base\n").unwrap();
+        sh(&upstream, &["add", "."]);
+        sh(&upstream, &["commit", "-qm", "base"]);
+        // The PR head lives only under the host's `refs/pull/7/head`.
+        sh(&upstream, &["checkout", "-q", "-b", "pr"]);
+        std::fs::write(upstream.join("f.txt"), "pr change\n").unwrap();
+        sh(&upstream, &["commit", "-qam", "pr"]);
+        let head = sh(&upstream, &["rev-parse", "HEAD"]);
+        sh(&upstream, &["update-ref", "refs/pull/7/head", &head]);
+        sh(&upstream, &["checkout", "-q", "main"]);
+        sh(&upstream, &["branch", "-qD", "pr"]);
+        let clone = tmp.path().join("clone");
+        sh(
+            tmp.path(),
+            &[
+                "clone",
+                "-q",
+                upstream.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        let repo = otto_core::domain::Repo {
+            id: "r".into(),
+            workspace_id: "w".into(),
+            name: "n".into(),
+            path: clone.to_string_lossy().into_owned(),
+            remote_url: None,
+            provider: None,
+            git_account_id: None,
+            created_at: chrono::Utc::now(),
+            forge: None,
+        };
+        let id = otto_core::new_id();
+        let wt = materialize_pr_worktree(&repo, &id, 7, None, Some(&head), "-r", None)
+            .await
+            .expect("a checkout of the PR head");
+        let review_ref = wt.review_ref.clone().expect("fetched into a review ref");
+        assert!(review_ref.starts_with("refs/otto/pr-review/7-"));
+        let refs = sh(&clone, &["for-each-ref", "refs/otto/"]);
+        assert!(refs.contains(&review_ref), "{refs}");
+        teardown_pr_worktree(&repo.path, wt).await;
+        let refs = sh(&clone, &["for-each-ref", "refs/otto/"]);
+        assert!(refs.is_empty(), "ref left behind: {refs}");
     }
 }

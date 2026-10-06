@@ -87,12 +87,20 @@ impl Bitbucket {
         let mut all: Vec<Value> = Vec::new();
         let mut page = self.get_json_cached(path).await?;
         let mut fetched = 1usize;
+        // An absolute `next` is fetched WITH the account's credentials, so it
+        // must stay on the API origin (the shared paginator's rule) — a forged
+        // or proxied cursor must not carry the app password elsewhere.
+        let origin = reqwest::Url::parse(&self.url(path)).ok();
         loop {
             all.extend_from_slice(varr(&page, &["values"]));
             let next = page.get("next").and_then(Value::as_str).map(str::to_string);
             let Some(next) = next.filter(|_| fetched < MAX_PAGES) else {
                 break;
             };
+            if !super::client::same_origin(origin.as_ref(), &self.url(&next)) {
+                tracing::warn!("bitbucket: ignoring cross-origin `next` page link");
+                break;
+            }
             page = self.get_json_cached(&next).await?;
             fetched += 1;
         }

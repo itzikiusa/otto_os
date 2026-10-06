@@ -538,6 +538,8 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         return Ok(());
     }
 
+    // `Some(&run.id)`: the review_id is recorded on the run BEFORE its
+    // reviewers spawn, so a cancel landing anywhere in here still finds it.
     let (review_id, _resolved, no_changes, diff_len) = crate::modules::run_review_for_branch_sized(
         ctx,
         &repo_id,
@@ -547,17 +549,9 @@ async fn stage_review(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
         None,
         None,
         None,
+        Some(&run.id),
     )
     .await?;
-    ctx.runs
-        .set_fields(
-            &run.id,
-            &RunPatch {
-                review_id: Some(review_id.clone()),
-                ..Default::default()
-            },
-        )
-        .await?;
     // An EMPTY diff means no reviewer ran: "0 findings (0 blocking)" would be
     // an unreviewed change dressed as a clean one in the approval prompt
     // (`run_review_for_branch`'s contract). Stop before AwaitingApproval.
@@ -593,7 +587,8 @@ async fn stage_draft_pr(ctx: &ServerCtx, run: &OttoRun) -> Result<()> {
     let user = otto_state::UsersRepo::new(ctx.pool.clone())
         .get(&run.created_by)
         .await?;
-    match crate::modules::draft_pr_core(ctx, &ws, &user, &wt, base.as_deref()).await {
+    match crate::modules::draft_pr_core(ctx, &ws, &user, &wt, base.as_deref(), Some(&run.id)).await
+    {
         Ok(draft) => {
             let json = serde_json::to_string(&draft).unwrap_or_default();
             ctx.runs

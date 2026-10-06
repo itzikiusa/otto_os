@@ -519,6 +519,23 @@ impl Http {
         Self { client, provider }
     }
 
+    /// [`new`](Self::new) for a forge that authenticates with a CUSTOM header
+    /// (GitLab's `PRIVATE-TOKEN`). reqwest's default redirect policy strips
+    /// only `Authorization` / `Cookie` / proxy headers on a cross-host hop, so
+    /// a self-hosted GitLab behind an SSO proxy answering `302 → sso.corp`
+    /// would hand the PAT to the SSO host (S2-305). This client follows
+    /// same-origin redirects only; a cross-origin one is returned as-is (and
+    /// classified as the error it is).
+    pub fn new_same_origin_redirects(provider: &'static str) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .user_agent("otto-ade/0.1")
+            .redirect(same_origin_redirect_policy())
+            .build()
+            .expect("reqwest client");
+        Self { client, provider }
+    }
+
     pub fn client(&self) -> &reqwest::Client {
         &self.client
     }
@@ -1008,10 +1025,29 @@ pub fn parse_next_link(headers: &reqwest::header::HeaderMap) -> Option<String> {
     None
 }
 
+/// Redirect policy for [`Http::new_same_origin_redirects`]: follow up to 10
+/// hops that keep the FIRST request's scheme, host and port; stop (returning
+/// the 3xx) on anything else.
+fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let Some(first) = attempt.previous().first() else {
+            return attempt.stop();
+        };
+        if same_origin(Some(first), attempt.url().as_str()) {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// True when `next` has the same scheme, host and port as the first page.
 /// An unknown origin (the first request couldn't be inspected) or an
 /// unparsable link follows nothing.
-fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
+pub(crate) fn same_origin(origin: Option<&reqwest::Url>, next: &str) -> bool {
     let (Some(o), Ok(n)) = (origin, reqwest::Url::parse(next)) else {
         return false;
     };

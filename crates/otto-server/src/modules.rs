@@ -1584,6 +1584,22 @@ fn unregister_review_agent_cancel(
     }
 }
 
+/// Remove the review's `otto-review-<id>*` temp files when NO agent of it is
+/// registered any more (no original run, no other retry in flight). Checked
+/// and swept under the registry lock, so a retry registering concurrently
+/// either sees its files kept or writes them after the sweep. Sync: run it on
+/// the blocking pool (the temp-dir walk blocks).
+fn sweep_review_temp_files_if_idle(reg: &crate::skill_eval::CancelRegistry, review_id: &str) {
+    let Ok(m) = reg.lock() else {
+        return;
+    };
+    let mine = format!("{review_id}:");
+    if m.keys().any(|k| k.starts_with(&mine)) {
+        return;
+    }
+    remove_review_temp_files_in(&std::env::temp_dir(), &format!("otto-review-{review_id}"));
+}
+
 /// Load ReviewConfig from settings or fall back to the default. The default
 /// config's reviewer agents follow the global default agent
 /// (`default_provider` setting, else "claude"); a stored config is used as-is.
@@ -1890,6 +1906,7 @@ async fn run_review_core(
             findings: Vec::new(),
             fallback: false,
             lens: r.lens.clone(),
+            lens_slugs: r.lens_slugs(),
         })
         .collect();
     agent_states.push(ReviewAgentState {
@@ -1903,6 +1920,7 @@ async fn run_review_core(
         findings: Vec::new(),
         fallback: false,
         lens: String::new(),
+        lens_slugs: Vec::new(),
     });
     ctx.reviews_store
         .set_agents(review_id, &agent_states)
@@ -2997,6 +3015,14 @@ async fn branch_retry_checkout(
         .as_deref()
         .filter(|c| std::path::Path::new(c).is_dir())
     {
+        // A LOCAL review ran in the user's own checkout and diffed its working
+        // tree (uncommitted + untracked included). Committing those changes
+        // moves HEAD, and a worktree at the OLD head would not contain them
+        // at all — the checkout itself is still where the reviewed code lives
+        // (S2-310). Only Run/workflow worktrees fall back to the recorded head.
+        if same_dir(cwd, &repo.path) {
+            return (cwd.to_string(), None);
+        }
         let at = otto_git::LocalGit::new(cwd).rev_parse("HEAD").await.ok();
         let same = match (head, at.as_deref()) {
             (None, _) => true,
@@ -3016,13 +3042,31 @@ async fn branch_retry_checkout(
         let branch = format!("otto-review-{review_id}{suffix}");
         let _ = git.worktree_remove(&path).await;
         match git.worktree_add(&path, &branch, h).await {
-            Ok(()) => return (path.clone(), Some(PrWorktree { path, branch })),
+            Ok(()) => {
+                return (
+                    path.clone(),
+                    Some(PrWorktree {
+                        path,
+                        branch,
+                        review_ref: None,
+                    }),
+                )
+            }
             Err(e) => {
                 tracing::warn!(review = %review_id, "retry worktree at {h} failed: {e}; using repo path")
             }
         }
     }
     (repo.path.clone(), None)
+}
+
+/// True when `a` and `b` name the same directory (symlinks / trailing `/`
+/// resolved; falls back to a plain string compare when either is missing).
+fn same_dir(a: &str, b: &str) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a.trim_end_matches('/') == b.trim_end_matches('/'),
+    }
 }
 
 /// Fetch PR diff + Jira context and delegate to `run_review_core`.
@@ -3801,7 +3845,7 @@ async fn draft_pr(
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty());
-    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head)
+    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head, None)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -3820,12 +3864,16 @@ pub(crate) async fn draft_pr_core(
     user: &otto_core::domain::User,
     repo_path: &str,
     base: Option<&str>,
+    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
-    draft_pr_core_for(ctx, ws, user, repo_path, base, None).await
+    draft_pr_core_for(ctx, ws, user, repo_path, base, None, run_id).await
 }
 
 /// [`draft_pr_core`] for an explicit source branch `head` (`None` ⇒ the
 /// checkout's current branch). The reply's `source_branch` is `head`.
+/// `run_id` (Run with Otto) is stamped into the drafting session's meta so a
+/// run cancel can find and stop it — dropping this future does not kill a
+/// manager-owned session.
 pub(crate) async fn draft_pr_core_for(
     ctx: &ServerCtx,
     ws: &otto_core::domain::Workspace,
@@ -3833,6 +3881,7 @@ pub(crate) async fn draft_pr_core_for(
     repo_path: &str,
     base: Option<&str>,
     head: Option<&str>,
+    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
     // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
     // blocks a modal for as long as it takes, and the old headless PTY gave the
@@ -3849,11 +3898,14 @@ pub(crate) async fn draft_pr_core_for(
     // so it can honor the node's chosen Provider/Model.
     let (prompt, source, base_branch) = pr_draft_prompt_for(ctx, repo_path, base, head).await?;
     let model = pr_draft_model(ctx).await;
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "pr-draft",
         "model": model,
         "lean_turn": true,
     });
+    if let Some(run_id) = run_id {
+        meta["run_id"] = serde_json::json!(run_id);
+    }
     let title = format!("PR draft · {source}");
     let (reply, session_id) = crate::agent_session::run_session_turn(
         ctx,
@@ -3947,8 +3999,21 @@ pub(crate) async fn pr_draft_prompt_for(
         }
     };
     if diff.trim().is_empty() {
-        return Err(Error::Invalid(format!(
-            "no changes between '{source}' and '{base}'"
+        // An explicit head drafts from COMMITS only. When that head is the
+        // checked-out branch and the work is still in the working tree, say so
+        // — a bare "no changes" reads as a bug to someone looking at their
+        // edits (S15-307).
+        let uncommitted = match head {
+            Some(h) => {
+                git.current_branch().await.is_ok_and(|cur| cur == h)
+                    && git.status().await.is_ok_and(|st| !st.changes.is_empty())
+            }
+            None => false,
+        };
+        return Err(Error::Invalid(no_pr_changes_message(
+            &source,
+            base,
+            uncommitted,
         )));
     }
     let truncated = diff.len() > MAX_DIFF;
@@ -4001,6 +4066,20 @@ pub(crate) async fn pr_draft_prompt_for(
     Ok((prompt, source, base.to_string()))
 }
 
+/// The PR-draft "nothing to draft" error. `uncommitted`: the source is the
+/// checked-out branch and its working tree has changes that are not in any
+/// commit yet — the PR would carry none of them.
+pub(crate) fn no_pr_changes_message(source: &str, base: &str, uncommitted: bool) -> String {
+    if uncommitted {
+        format!(
+            "no commits between '{source}' and '{base}' — your changes are not committed yet. \
+             Commit your changes first: the PR includes commits only"
+        )
+    } else {
+        format!("no changes between '{source}' and '{base}'")
+    }
+}
+
 /// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
 /// stage and the workflow `review_run` node). Resolves `base` (an explicit
 /// ref/SHA, or `None` ⇒ the repo's detected default branch — never a
@@ -4042,6 +4121,7 @@ pub(crate) async fn run_review_for_branch(
         jira_context,
         run_context,
         mode_override,
+        None,
     )
     .await
     .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
@@ -4051,6 +4131,12 @@ pub(crate) async fn run_review_for_branch(
 /// length — the caller's wait budget is sized off it, and recomputing the
 /// whole review diff (one git spawn per untracked file) just for its length
 /// doubled the stage's git work.
+///
+/// `for_run`: a Run-with-Otto run to record the new `review_id` on BEFORE the
+/// background review is spawned. A run cancel drops the stage future at any
+/// await; recording it afterwards (in the stage) left a window where the
+/// review was running but the run did not name it, so cancel could not stop
+/// its reviewers (S2-302 / S15-306).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review_for_branch_sized(
     ctx: &ServerCtx,
@@ -4061,6 +4147,7 @@ pub(crate) async fn run_review_for_branch_sized(
     jira_context: Option<String>,
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
+    for_run: Option<&Id>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
@@ -4073,6 +4160,17 @@ pub(crate) async fn run_review_for_branch_sized(
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await?;
     let review_id = review.id.clone();
+    if let Some(run_id) = for_run {
+        ctx.runs
+            .set_fields(
+                run_id,
+                &otto_state::runs::RunPatch {
+                    review_id: Some(review_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
     let no_changes = diff_text.trim().is_empty();
     let diff_len = diff_text.len();
 
@@ -4307,6 +4405,30 @@ pub(crate) fn agent_retryable(status: &str) -> bool {
     matches!(status, "done" | "error" | "skipped")
 }
 
+/// Why a single-agent Retry is refused (`None` ⇒ allowed). Besides the agent
+/// itself being settled, the REVIEW must be: while it is still Running, the
+/// original run's end-of-review temp sweep deletes the retried agent's
+/// re-materialised `.diff` / `.prompt` / findings file mid-read, and its
+/// summarizer runs without the retried agent's findings (S2-303) — the same
+/// rule the summarizer retry already applies.
+pub(crate) fn agent_retry_block(
+    review_status: ReviewStatus,
+    index: usize,
+    agent_status: &str,
+) -> Option<String> {
+    if !agent_retryable(agent_status) {
+        return Some(format!(
+            "agent {index} is still {agent_status} — stop it before retrying"
+        ));
+    }
+    if review_status == ReviewStatus::Running {
+        return Some(
+            "the review is still running — retry this agent once the review has finished".into(),
+        );
+    }
+    None
+}
+
 /// Re-run a single review agent (e.g. one that never received its prompt). Uses
 /// the prompt persisted when the review started, kills the agent's old (stuck)
 /// session, and spawns a fresh one in the background.
@@ -4347,11 +4469,8 @@ async fn retry_review_agent(
     // and replaced its cancel flag: the original recovery loop then respawned
     // into the same index + findings file, and its orphaned flag left neither
     // Stop nor Cancel able to reach it. A stuck agent is Stopped first.
-    if !agent_retryable(&review.agents[index].status) {
-        return Err(crate::error::ApiError(Error::Conflict(format!(
-            "agent {index} is still {} — stop it before retrying",
-            review.agents[index].status
-        ))));
+    if let Some(why) = agent_retry_block(review.status, index, &review.agents[index].status) {
+        return Err(crate::error::ApiError(Error::Conflict(why)));
     }
     review_budget_gate(&ctx, &repo.workspace_id)
         .await
@@ -4407,6 +4526,9 @@ async fn retry_review_agent(
     }
 
     let provider = review.agents[index].provider.clone();
+    // An orchestrator row re-spawns as an orchestrator (sub-agent tool + the
+    // per-lens findings files its persisted prompt names) — S2-304.
+    let lens_slugs = review.agents[index].lens_slugs.clone();
     // Retry this reviewer with the SAME model it was configured with (empty →
     // provider default) so the retry matches the original run.
     let model = review.agents[index].model.clone();
@@ -4416,6 +4538,12 @@ async fn retry_review_agent(
     // pre-0100 reviews have no stored diff and keep the old behavior). The
     // restored length also feeds the grace-period heuristic, which previously
     // collapsed to the 10-minute floor whenever the temp file was gone.
+    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
+    // prior Stop) so the retried agent is stoppable exactly like the original.
+    // Registered BEFORE the diff is re-materialised: a sibling retry's
+    // end-of-retry temp sweep (below) skips while any agent of this review is
+    // registered, so it can never delete the file this retry is about to use.
+    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let diff_file = std::env::temp_dir().join(format!("otto-review-{review_id}.diff"));
     let mut diff_len = std::fs::metadata(&diff_file)
         .map(|m| m.len() as usize)
@@ -4445,9 +4573,6 @@ async fn retry_review_agent(
             .collect();
         stage_review_skills(&ctx.context_library, &names)
     };
-    // Register a FRESH per-agent cancel flag (replacing any tripped one from a
-    // prior Stop) so the retried agent is stoppable exactly like the original.
-    let agent_cancel = register_review_agent_cancel(&ctx.review_agent_cancels, &review_id, index);
     let agent_cancels_reg = ctx.review_agent_cancels.clone();
     let slots = reviewer_slots();
     let ctx_bg = ctx.clone();
@@ -4485,15 +4610,19 @@ async fn retry_review_agent(
             None,
             Some(&agent_cancel), // per-agent Stop works on retried agents too
             review_skills_dir.as_deref(),
-            // The persisted prompt carries the lens list, but the retry route
-            // does not parse it — the guard's note falls back to today's text.
-            &[],
+            &lens_slugs,
         )
         .await;
         if let Some(wt) = pr_wt {
             teardown_pr_worktree(&repo.path, wt).await;
         }
         unregister_review_agent_cancel(&agent_cancels_reg, &review_id_bg, index);
+        // The last retry of this (settled) review out sweeps the temp files it
+        // re-materialised — only `run_review` swept them before (S2-310).
+        let () = crate::offload::blocking(move || {
+            sweep_review_temp_files_if_idle(&agent_cancels_reg, &review_id_bg)
+        })
+        .await;
     });
 
     Ok(Json(
@@ -7437,5 +7566,103 @@ mod agent_input_rule_tests {
         assert!(agent_input_rule(Some(&me), &worker, &worker_meta, false).is_err());
         // Another lead's worker: no.
         assert!(agent_input_rule(Some(&me), &worker, &other_worker_meta, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod review_retry_tests {
+    use super::{agent_retry_block, same_dir, sweep_review_temp_files_if_idle};
+    use otto_core::domain::{ReviewAgentState, ReviewStatus};
+
+    /// S2-303: a settled agent is retryable only once the review has settled.
+    #[test]
+    fn agent_retry_needs_a_settled_agent_and_a_settled_review() {
+        assert!(agent_retry_block(ReviewStatus::Done, 0, "done").is_none());
+        assert!(agent_retry_block(ReviewStatus::Error, 0, "error").is_none());
+        assert!(agent_retry_block(ReviewStatus::Cancelled, 0, "skipped").is_none());
+        let why = agent_retry_block(ReviewStatus::Running, 0, "done").unwrap();
+        assert!(why.contains("still running"), "{why}");
+        let why = agent_retry_block(ReviewStatus::Done, 2, "running").unwrap();
+        assert!(why.contains("agent 2 is still running"), "{why}");
+    }
+
+    /// S2-304: an orchestrator row carries its lens slugs through agents_json,
+    /// so the retry route re-spawns it WITH its sub-agent tool; fan-out rows
+    /// (and pre-field rows) stay without one.
+    #[test]
+    fn orchestrator_row_keeps_its_lens_slugs_for_retry() {
+        let row: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "orchestrator", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+            "lens_slugs": ["correctness", "security"],
+        }))
+        .unwrap();
+        let back = serde_json::to_value(&row).unwrap();
+        assert_eq!(
+            back["lens_slugs"],
+            serde_json::json!(["correctness", "security"])
+        );
+        let meta = crate::review_session::review_session_meta("r1", 0, !row.lens_slugs.is_empty());
+        assert_eq!(meta["allow_subagents"], true);
+
+        let fan_out: ReviewAgentState = serde_json::from_value(serde_json::json!({
+            "name": "correctness", "provider": "claude", "model": "",
+            "status": "error", "note": "", "comment_count": 0,
+        }))
+        .unwrap();
+        assert!(fan_out.lens_slugs.is_empty());
+        assert!(serde_json::to_value(&fan_out)
+            .unwrap()
+            .get("lens_slugs")
+            .is_none());
+        let meta = crate::review_session::review_session_meta("r1", 0, false);
+        assert!(meta.get("allow_subagents").is_none());
+    }
+
+    /// S2-310: a local review's recorded cwd IS the repo checkout — matched
+    /// through symlinks / a trailing slash — so its retry stays there even
+    /// after HEAD moved; a Run worktree elsewhere is not the repo.
+    #[test]
+    fn local_review_checkout_is_recognised_as_the_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let r = repo.to_string_lossy().into_owned();
+        assert!(same_dir(&r, &format!("{r}/")));
+        assert!(same_dir(&link.to_string_lossy(), &r));
+        let wt = tmp.path().join("otto-run-1");
+        std::fs::create_dir_all(&wt).unwrap();
+        assert!(!same_dir(&wt.to_string_lossy(), &r));
+    }
+
+    /// S2-310: a retry's temp files are swept once no agent of the review is
+    /// registered — never while a sibling retry still is.
+    #[test]
+    fn retry_sweeps_temp_files_only_when_no_agent_is_left() {
+        let reg: crate::skill_eval::CancelRegistry = Default::default();
+        let rid = format!("t{}", otto_core::new_id());
+        let diff = std::env::temp_dir().join(format!("otto-review-{rid}.diff"));
+        std::fs::write(&diff, "d").unwrap();
+        let _flag = super::register_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(diff.exists(), "a sibling retry is still registered");
+        super::unregister_review_agent_cancel(&reg, &rid, 1);
+        sweep_review_temp_files_if_idle(&reg, &rid);
+        assert!(!diff.exists(), "the last retry out sweeps");
+    }
+
+    /// S15-307: an empty draft on the checked-out branch with uncommitted work
+    /// says to commit first; otherwise the plain "no changes".
+    #[test]
+    fn empty_pr_draft_names_uncommitted_work() {
+        let msg = super::no_pr_changes_message("feat", "main", true);
+        assert!(msg.contains("Commit your changes first"), "{msg}");
+        assert!(msg.contains("'feat'") && msg.contains("'main'"), "{msg}");
+        assert_eq!(
+            super::no_pr_changes_message("feat", "main", false),
+            "no changes between 'feat' and 'main'"
+        );
     }
 }

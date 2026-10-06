@@ -1433,6 +1433,7 @@ mod tests {
             findings: Vec::new(),
             fallback: false,
             lens: lens.into(),
+            lens_slugs: Vec::new(),
         }
     }
 
