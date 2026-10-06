@@ -26,6 +26,7 @@ on:
   pull_request:
     paths:
       - 'crates/otto-agent-run/**'
+      - 'crates/otto-apiclient/**'
       - 'crates/otto-assistant/**'
       - 'crates/otto-automation/**'
       - 'crates/otto-aws/**'
@@ -50,6 +51,7 @@ on:
       - 'crates/otto-ssh/**'
       - 'crates/otto-swarm/**'
       - 'crates/otto-telemetry/**'
+      - 'crates/otto-vault/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
       - 'Cargo.toml'
@@ -61,6 +63,7 @@ on:
     branches: [main]
     paths:
       - 'crates/otto-agent-run/**'
+      - 'crates/otto-apiclient/**'
       - 'crates/otto-assistant/**'
       - 'crates/otto-automation/**'
       - 'crates/otto-aws/**'
@@ -85,6 +88,7 @@ on:
       - 'crates/otto-ssh/**'
       - 'crates/otto-swarm/**'
       - 'crates/otto-telemetry/**'
+      - 'crates/otto-vault/**'
       - 'crates/otto-workflows/**'
       - 'crates/ottod/**'
       - 'Cargo.toml'
@@ -172,7 +176,7 @@ jobs:
       - name: cargo clippy (macOS cfg)
         run: >-
           cargo clippy
-          -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
           --all-targets -- -D warnings
 
       # Unit tests plus each crate's integration binaries — except
@@ -182,7 +186,7 @@ jobs:
       - name: cargo nextest
         run: >-
           cargo nextest run
-          -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
+          -p otto-apiclient -p otto-automation -p otto-browser -p otto-keychain -p otto-pty -p otto-sandbox -p otto-server -p otto-sessions -p otto-ssh -p otto-telemetry -p ottod
           --profile ci --no-fail-fast
           -E 'not (package(otto-server) & binary(it))'
 
