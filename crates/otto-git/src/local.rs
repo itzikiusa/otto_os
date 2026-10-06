@@ -4688,9 +4688,29 @@ impl LocalGit {
     /// [`Self::confined_worktree_file`] rejects `.git` components, `..`,
     /// absolute paths, a symlinked final component and any parent that
     /// resolves (symlinks followed) outside the tree or into the git dir.
+    ///
+    /// Data-loss boundary: a recomposed text body never replaces a BINARY
+    /// working file (its segments are empty, so the body would be `""` — one
+    /// click truncated `logo.png` to 0 bytes), and an empty body never
+    /// recreates an ABSENT working file (a modify/delete conflict would come
+    /// back as an empty file instead of a deletion). Both are resolved by
+    /// [`Self::resolve_take_side`], which preserves bytes / removes the path.
     pub async fn write_resolution(&self, path: &str, content: &str) -> Result<()> {
         self.conflict_sides(path).await?;
         let abs = self.confined_worktree_file(path, true).await?;
+        match tokio::fs::read(&abs).await {
+            Ok(bytes) if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() => {
+                return Err(Error::Invalid(format!(
+                    "{path} is a binary conflict — take a whole side or keep the working file"
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && content.is_empty() => {
+                return Err(Error::Invalid(format!(
+                    "{path} is absent from the working tree — take a side or delete it"
+                )));
+            }
+            _ => {}
+        }
         tokio::fs::write(&abs, content)
             .await
             .map_err(|e| Error::Internal(format!("write {path}: {e}")))?;
@@ -5557,6 +5577,46 @@ mod tests {
                 "stale action cannot delete a resolved file"
             );
         }
+    }
+
+    /// S15-301: "Mark file resolved" on a binary conflict posted `""`; the
+    /// daemon truncated the blob and staged it. On a deleted-by-us conflict
+    /// it resurrected the file as empty. Both writes are refused now and
+    /// leave the conflict (and the bytes) untouched.
+    #[tokio::test]
+    async fn write_resolution_refuses_binary_and_absent_working_files() {
+        let (_tmp, dir) = fixture_on_branch("main");
+        let git = LocalGit::new(&dir);
+        std::fs::write(dir.join("blob"), b"base\0bytes").unwrap();
+        write(&dir, "gone.txt", "base\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "test: base"]);
+        sh_git(&dir, &["checkout", "-b", "other"]);
+        std::fs::write(dir.join("blob"), b"other\0bytes").unwrap();
+        write(&dir, "gone.txt", "theirs changed\n");
+        sh_git(&dir, &["commit", "-am", "test: other"]);
+        sh_git(&dir, &["checkout", "main"]);
+        std::fs::write(dir.join("blob"), b"ours\0bytes").unwrap();
+        sh_git(&dir, &["rm", "-q", "gone.txt"]);
+        sh_git(&dir, &["commit", "-am", "test: ours"]);
+        let _ = git.run(&["merge", "other"]).await;
+
+        let blob = git.conflict_file("blob").await.unwrap();
+        assert!(blob.is_binary && blob.segments.is_empty());
+        for body in ["", "text\n"] {
+            let err = git.write_resolution("blob", body).await.unwrap_err();
+            assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        }
+        assert_eq!(std::fs::read(dir.join("blob")).unwrap(), b"ours\0bytes");
+
+        let gone = git.conflict_file("gone.txt").await.unwrap();
+        assert!(!gone.worktree_present && gone.segments.is_empty());
+        let err = git.write_resolution("gone.txt", "").await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(!dir.join("gone.txt").exists());
+
+        let conflicted = git.conflicted_paths().await.unwrap();
+        assert_eq!(conflicted.len(), 2, "both stay conflicted: {conflicted:?}");
     }
 
     #[tokio::test]
