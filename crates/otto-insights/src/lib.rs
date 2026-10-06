@@ -520,8 +520,42 @@ fn fmt_systime(t: std::time::SystemTime) -> String {
 
 const INSIGHTS_SKILL: &str = "insights";
 
-/// Timeout for one insights run (the skill collects, classifies, renders HTML).
-const RUN_TIMEOUT: Duration = Duration::from_secs(900);
+/// Hard cap on one insights run (the skill collects, classifies, renders
+/// HTML). Liveness is NOT this wall clock (S4-19b): a run is over when its
+/// report lands, its session exits/archives, or the session sits idle past
+/// [`RUN_IDLE_GRACE`] — this cap only bounds a session that keeps "working"
+/// forever. (A fixed 15 min used to declare a slow-but-working run dead,
+/// letting a second Run spawn a duplicate agent, and archived it mid-run.)
+const RUN_HARD_CAP: Duration = Duration::from_secs(2 * 3600);
+/// A run whose session has been idle this long without landing its report
+/// is stalled (the skill gave up or waits on input nobody will give).
+const RUN_IDLE_GRACE: Duration = Duration::from_secs(10 * 60);
+/// How often the post-run watcher re-checks liveness.
+const RUN_POLL: Duration = Duration::from_secs(30);
+
+/// Is a run's SESSION still working (S4-19b)? Pure, for tests: not exited or
+/// archived, inside the hard cap, and — when idle — idle for less than the
+/// grace (a session goes idle between tool calls and while it waits on the
+/// model, so a short idle spell is normal).
+fn session_working(
+    status: otto_core::domain::SessionStatus,
+    archived: bool,
+    last_active_at: DateTime<Utc>,
+    started_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    use otto_core::domain::SessionStatus as S;
+    let cap = chrono::Duration::from_std(RUN_HARD_CAP).unwrap_or_default();
+    let idle_grace = chrono::Duration::from_std(RUN_IDLE_GRACE).unwrap_or_default();
+    if archived || now - started_at > cap {
+        return false;
+    }
+    match status {
+        S::Exited => false,
+        S::Idle => now - last_active_at < idle_grace,
+        _ => true,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // In-progress runs — one per report period
@@ -605,19 +639,22 @@ impl ActiveRuns {
 static ACTIVE_RUNS: std::sync::LazyLock<Mutex<ActiveRuns>> =
     std::sync::LazyLock::new(|| Mutex::new(ActiveRuns::default()));
 
-/// Is this registered run still working? Its session must be alive, its report
-/// must not have changed since it started, and it must be inside the timeout.
+/// Is this registered run still working? Its session must be working (see
+/// [`session_working`]) and its report must not have changed since it started.
 async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool {
     if let Some(age) = pending_age(run) {
         // A slot reserved while its session spawns (S4-19a): alive until the
         // spawn settles it, bounded so a crashed spawn can't wedge the period.
         return age < pending_spawn_grace();
     }
-    if Utc::now() - run.started_at > chrono::Duration::from_std(RUN_TIMEOUT).unwrap_or_default() {
-        return false;
-    }
     let session_live = match ctx.manager().get(&run.run_id).await {
-        Ok(s) => s.status != otto_core::domain::SessionStatus::Exited && !s.archived,
+        Ok(s) => session_working(
+            s.status,
+            s.archived,
+            s.last_active_at,
+            run.started_at,
+            Utc::now(),
+        ),
         Err(_) => false,
     };
     if !session_live {
@@ -629,6 +666,18 @@ async fn run_alive<C: InsightsCtx>(ctx: &C, dir: &Path, run: &ActiveRun) -> bool
         .ok()
         .and_then(|s| s.html_revision);
     now_rev == run.report_revision
+}
+
+/// Poll until the run session `id` is archived (or gone), at most
+/// [`RUN_HARD_CAP`] plus one poll.
+async fn wait_run_archived<C: InsightsCtx>(ctx: &C, id: &otto_core::Id) {
+    let deadline = tokio::time::Instant::now() + RUN_HARD_CAP + RUN_POLL;
+    while tokio::time::Instant::now() < deadline {
+        match ctx.manager().get(id).await {
+            Ok(s) if !s.archived => tokio::time::sleep(RUN_POLL).await,
+            _ => return,
+        }
+    }
 }
 
 /// Run-id prefix of a slot reserved under the registry lock while the PTY
@@ -877,6 +926,8 @@ pub async fn run_insights<C: InsightsCtx>(
     let session = ctx.manager().create(&ws, &user_id, req, None).await?;
     let sid = session.id.clone();
     info!(session = %sid, kind = kind.word(), offset, provider = %provider, "insights: started run");
+    let (dir_for_watch, report_key_for_watch, report_revision_for_watch) =
+        (dir.clone(), report_key.clone(), report_revision.clone());
     {
         // Swap the reservation for the real run (same period slot).
         let mut registry = ACTIVE_RUNS.lock().await;
@@ -896,16 +947,25 @@ pub async fn run_insights<C: InsightsCtx>(
     // Inject the prompt once the TUI has drawn + settled, then let it run
     // headlessly (no result-file watch — the skill writes its own artifacts).
     let host = ctx.clone();
+    let watched = ActiveRun {
+        run_id: sid.to_string(),
+        report_key: report_key_for_watch,
+        report_revision: report_revision_for_watch,
+        started_at: Utc::now(),
+    };
     tokio::spawn(async move {
         if !host.submit_prompt(&sid, &prompt).await {
             warn!(session = %sid, "insights: session TUI never became ready");
         }
-        // Give the run a generous window to finish, then archive the throwaway
-        // session so it doesn't linger in the Agents list. Insights is a global
-        // scheduled job and its report artifacts are written to disk
-        // independently, so the session itself is disposable — mirrors the
-        // review-session cleanup (which archives when done).
-        tokio::time::sleep(RUN_TIMEOUT).await;
+        // Once the run is over — report landed, session exited, stalled idle,
+        // or the hard cap (S4-19b: never a fixed 15 min while it still
+        // works) — archive the throwaway session so it doesn't linger in the
+        // Agents list. Insights is a global scheduled job and its report
+        // artifacts are written to disk independently, so the session itself
+        // is disposable — mirrors the review-session cleanup.
+        while run_alive(&host, &dir_for_watch, &watched).await {
+            tokio::time::sleep(RUN_POLL).await;
+        }
         let _ = host.manager().archive(&sid).await;
     });
 
@@ -1312,7 +1372,11 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
                 // grace window so we don't re-trigger the same period mid-run
                 // (idempotency would catch it once artifacts land, but this avoids
                 // double-spawning before the index is written).
-                tokio::time::sleep(RUN_TIMEOUT).await;
+                // Wait for the run's session to be archived by its watcher
+                // (S4-19b: liveness, not a fixed window), bounded by the cap.
+                if let Some(id) = session_id.as_ref() {
+                    wait_run_archived(&ctx, id).await;
+                }
                 flight.lock().await.remove(word);
 
                 // After the grace window, check whether the period's report landed.
@@ -1337,6 +1401,29 @@ impl<C: InsightsCtx> InsightsScheduler<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S4-19b: liveness follows the session, not a 15-minute wall clock — a
+    /// run still working at 40 min is alive; a stalled idle one, an exited or
+    /// archived one, or one past the hard cap is not.
+    #[test]
+    fn run_liveness_follows_the_session_not_the_clock() {
+        use otto_core::domain::SessionStatus as S;
+        let now = Utc::now();
+        let started = now - chrono::Duration::minutes(40);
+        let recent = now - chrono::Duration::minutes(1);
+        let stale = now - chrono::Duration::minutes(30);
+        assert!(session_working(S::Working, false, recent, started, now));
+        assert!(session_working(S::Running, false, stale, started, now));
+        assert!(
+            session_working(S::Idle, false, recent, started, now),
+            "a short idle spell between tool calls is normal"
+        );
+        assert!(!session_working(S::Idle, false, stale, started, now), "stalled");
+        assert!(!session_working(S::Exited, false, recent, started, now));
+        assert!(!session_working(S::Working, true, recent, started, now), "archived");
+        let ancient = now - chrono::Duration::hours(3);
+        assert!(!session_working(S::Working, false, recent, ancient, now), "hard cap");
+    }
 
     /// S4-19a: a spawn reservation is recognised (and bounded); real runs aren't.
     #[test]
