@@ -113,6 +113,9 @@
 //                     drawn in var(--accent-solid): the darkened fill colour is
 //                     under 3:1 on dark grounds (WCAG 1.4.11) → var(--accent-text),
 //                     the global :focus-visible token (app.css), or no local rule.
+//   destructive-confirm  `confirmer.ask(…)` whose `confirmLabel` starts with
+//                     Delete / Remove / Revoke / Stop / Discard / … but passes no
+//                     `danger:` → `danger: true` (the red confirm button).
 //   local-spinner     a component rule set spinning its own ring (`animation:
 //                     … spin …`, incl. otto-spin) → the global `.spinner`
 //                     (`--spinner-size` for the diameter).
@@ -344,6 +347,7 @@ const RULES = {
   'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
   'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
   'focus-ring-token': 'focus ring in var(--accent-solid) — under 3:1 on dark grounds; use var(--accent-text) like the global :focus-visible (app.css)',
+  'destructive-confirm': 'confirmer.ask whose confirmLabel deletes / removes / revokes / stops without danger: true — destructive confirms use the red button (components.md)',
   'segmented-state': 'picker / view-switch button (in .segmented, .seg*, role="group" or <nav>) marked active|on|selected without aria-pressed / aria-current / role="tab|radio" — the state is invisible to a screen reader (components.md §3)',
   'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
   'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
@@ -781,7 +785,9 @@ for (const f of files) {
   }
 }
 
-// script-code rules: setInterval / document-level style writes / smooth scroll.
+// script-code rules: setInterval / document-level style writes / smooth scroll
+// / destructive confirms.
+const DESTRUCTIVE_LABEL = /^(?:Delete|Remove|Revoke|Stop|Discard|Purge|Erase|Wipe|Drop|Uninstall|Reset|Disconnect|Kill|Terminate|Cancel run|Force)\b/;
 const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
 const BODY_STYLE =
   /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
@@ -797,6 +803,26 @@ for (const f of files) {
   }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
+  }
+  // destructive-confirm: a confirm whose button deletes / removes / revokes /
+  // stops / discards must be the red `danger` variant (S17-305).
+  for (const m of code.matchAll(/\bconfirmer\.ask\s*\(/g)) {
+    let depth = 0;
+    let end = -1;
+    for (let i = m.index + m[0].length - 1; i < code.length; i++) {
+      const ch = code[i];
+      if (ch === '(') depth++;
+      else if (ch === ')' && --depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    if (end === -1) continue;
+    const call = code.slice(m.index, end + 1);
+    const label = /\bconfirmLabel\s*:\s*[`'"]([^`'"]*)/.exec(call);
+    if (!label || !DESTRUCTIVE_LABEL.test(label[1].trim())) continue;
+    if (/\bdanger\s*:/.test(call)) continue;
+    hit('destructive-confirm', f, m.index, `confirmLabel: '${label[1].trim()}' without danger`);
   }
 }
 

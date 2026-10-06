@@ -196,7 +196,7 @@
 
   async function remove(a: IssueAccount): Promise<void> {
     if (deleting[a.id]) return;
-    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', confirmLabel: 'Delete account' }))) return;
+    if (!(await confirmer.ask(`Delete account “${a.label}”? Its token is removed from the Keychain.`, { title: 'Delete account?', danger: true, confirmLabel: 'Delete account' }))) return;
     deleting = { ...deleting, [a.id]: true };
     try {
       await api.del(`/issue/accounts/${a.id}`);

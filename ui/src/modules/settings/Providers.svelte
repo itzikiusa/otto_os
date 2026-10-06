@@ -421,7 +421,7 @@
     if (
       !(await confirmer.ask(
         `Remove the custom provider “${n}”? It disappears from every picker; sessions already running on it keep working. You’d have to re-enter its command to add it back.`,
-        { title: 'Remove provider?', confirmLabel: 'Remove' },
+        { title: 'Remove provider?', danger: true, confirmLabel: 'Remove' },
       ))
     )
       return;

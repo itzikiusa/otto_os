@@ -216,7 +216,7 @@
    *  (another skill, the page's Review / Evaluator tabs). */
   export async function confirmLeave(): Promise<boolean> {
     if (!editorDirty) return true;
-    const ok = await confirmer.ask(`You have unsaved changes to ${selName ?? 'this skill'}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
+    const ok = await confirmer.ask(`You have unsaved changes to ${selName ?? 'this skill'}. Leaving the editor discards them.`, { title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing' });
     if (ok) editorDirty = false;
     return ok;
   }

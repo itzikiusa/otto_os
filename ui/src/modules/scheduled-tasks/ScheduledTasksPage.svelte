@@ -277,7 +277,7 @@
     if ((creating || editId) && formState() !== formSnapshot) {
       const ok = await confirmer.ask(editId ? 'Discard your changes to this task?' : 'Discard this new task?', {
         title: 'Discard changes',
-        confirmLabel: 'Discard',
+        danger: true, confirmLabel: 'Discard',
       });
       if (!ok) return false;
     }

@@ -68,7 +68,7 @@
   }
 
   async function cancel(): Promise<void> {
-    if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
+    if (!(await confirmer.ask('Stop this run? The agent stops and the run can’t be resumed — you would launch a new one.', { title: 'Stop this run?', danger: true, confirmLabel: 'Stop run', cancelLabel: 'Keep running' }))) return;
     error = '';
     busy = true;
     try {

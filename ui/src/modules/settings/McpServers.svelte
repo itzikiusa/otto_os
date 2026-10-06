@@ -286,7 +286,7 @@
     if (
       !(await confirmer.ask(
         `Remove MCP server “${s.name}”? It stops being written to this workspace’s .mcp.json for new sessions${s.secret_env_keys.length ? ', and its secret values are removed from the Keychain' : ''}.`,
-        { title: 'Remove MCP server', confirmLabel: 'Remove' },
+        { title: 'Remove MCP server', danger: true, confirmLabel: 'Remove' },
       ))
     )
       return;

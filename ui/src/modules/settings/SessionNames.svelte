@@ -95,7 +95,7 @@
     if (
       !(await confirmer.ask(
         `Delete custom theme “${t.label}” and its ${plural(t.capacity, 'name')}?${active ? ' New sessions go back to numbered names.' : ''} Sessions already named from it keep their names.`,
-        { title: 'Delete theme?', confirmLabel: 'Delete theme' },
+        { title: 'Delete theme?', danger: true, confirmLabel: 'Delete theme' },
       ))
     )
       return;

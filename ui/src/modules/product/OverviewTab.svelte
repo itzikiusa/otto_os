@@ -142,7 +142,7 @@
   async function approveDraftLeave(): Promise<boolean> {
     if (!draftDirty) return true;
     const allowed = await confirmer.ask('You have unsaved changes to this draft. Leaving now discards them.', {
-      title: 'Discard unsaved changes?', confirmLabel: 'Discard', cancelLabel: 'Keep editing',
+      title: 'Discard unsaved changes?', danger: true, confirmLabel: 'Discard', cancelLabel: 'Keep editing',
     });
     if (allowed) { draftTitle = story?.title ?? ''; draftBody = source?.body_md ?? ''; }
     return allowed;

@@ -167,7 +167,7 @@
     if (formState() !== initialSnapshot) {
       const ok = await confirmer.ask('Discard this goal loop? The draft and your edits are lost.', {
         title: 'Discard goal loop',
-        confirmLabel: 'Discard',
+        danger: true, confirmLabel: 'Discard',
       });
       if (!ok) return false;
     }

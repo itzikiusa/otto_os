@@ -622,7 +622,7 @@
   async function discard(): Promise<void> {
     const ok = await confirmer.ask('Discard your unsaved edits? The design goes back to the last saved version.', {
       title: 'Discard edits',
-      confirmLabel: 'Discard',
+      danger: true, confirmLabel: 'Discard',
     });
     if (ok) {
       source = baseSource;

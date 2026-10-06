@@ -339,7 +339,7 @@
   }
 
   async function revert(): Promise<void> {
-    const ok = await confirmer.ask('Discard your unsaved changes to this kit?', { title: 'Revert changes', confirmLabel: 'Discard changes' });
+    const ok = await confirmer.ask('Discard your unsaved changes to this kit?', { title: 'Revert changes', danger: true, confirmLabel: 'Discard changes' });
     if (!ok) return;
     const parsed = parseBrandDoc(baseText);
     if (parsed) doc = parsed;

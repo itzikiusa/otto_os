@@ -41,7 +41,7 @@
   async function revoke(s: MyShare): Promise<void> {
     const ok = await confirmer.ask(
       `Revoke the ${s.role} link to “${name(s)}”? Guests attached through it are disconnected and it can’t be used again.`,
-      { title: 'Revoke share link', confirmLabel: 'Revoke link' },
+      { title: 'Revoke share link', danger: true, confirmLabel: 'Revoke link' },
     );
     if (!ok) return;
     revoking = new Set([...revoking, s.id]);
@@ -63,7 +63,7 @@
     if (!n || revokingAll) return;
     const ok = await confirmer.ask(
       `Revoke all ${n} of your share links, on every session? Every guest is disconnected and none of the links can be used again.`,
-      { title: 'Revoke all share links', confirmLabel: `Revoke ${n} ${n === 1 ? 'link' : 'links'}` },
+      { title: 'Revoke all share links', danger: true, confirmLabel: `Revoke ${n} ${n === 1 ? 'link' : 'links'}` },
     );
     if (!ok) return;
     revokingAll = true;

@@ -107,7 +107,7 @@
   }
   // Stop is terminal (a stopped loop can't be resumed), unlike Pause.
   async function stop(): Promise<void> {
-    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', confirmLabel: 'Stop loop' }))) return;
+    if (!(await confirmer.ask('Stop this goal loop? A stopped loop can’t be resumed — use Pause to continue later.', { title: 'Stop goal loop', danger: true, confirmLabel: 'Stop loop' }))) return;
     await act(() => loops.stop(id), 'Couldn’t stop the goal loop');
   }
   /** ⋯ next to Pause/Resume: the destructive verbs stay one step away from the primary. */

@@ -96,7 +96,7 @@
     if (!section) return;
     const ok = await confirmer.ask(`Delete “${sectionLabel(section)}” from this page? Undo (⌘Z) or any earlier version brings it back.`, {
       title: 'Delete section',
-      confirmLabel: 'Delete section',
+      danger: true, confirmLabel: 'Delete section',
     });
     if (ok) {
       onchange(ops.removeSection(doc, section.id));
