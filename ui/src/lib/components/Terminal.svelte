@@ -225,6 +225,7 @@
   import type { SessionStatus, TermSearchMatch, WsSearchResultFrame, WsTermFlowFrame, WsTermProbeAckFrame, WsTermProbeFrame, WsTermResyncFrame, WsTermScrollbackRequestFrame } from '../api/types';
   import type { CompactClient } from './termCompactQueue';
   import { EMBED_SCROLLBACK, QuietRepaint, TermFlow, WriteQueue, hasCursorOrErase, resizeDecision, withInOrderReset } from './termFlow';
+  import { reconnectDelay } from './guestReconnect';
   import { KeyLatency, ProbeClock, fmtMs, fmtPair, loopMonitor, termLatencyEnabled, type EchoStats } from './termLatency';
   import { textToBase64, base64ToBytes, bytesToBase64 } from '../b64';
   import { terminalTheme } from '../termtheme';
@@ -526,23 +527,30 @@
   let exitProbes = 0;
   const MAX_EXIT_PROBES = 30;
 
-  /** Guest (share-link) sockets refused before ever opening, in a row. A
-   *  lapsed/revoked share is refused at the upgrade forever; retrying it every
-   *  5 s with no cap just fed the daemon's failure throttle (S1-05). Owners
-   *  keep retrying (a daemon restart also refuses for a while); a guest stops
-   *  after `MAX_GUEST_REFUSALS` and keeps the "Reconnect now" button. */
+  /** Guest (share-link) sockets refused before ever opening, in a row, and
+   *  when the first of them was. A lapsed/revoked share is refused at the
+   *  upgrade forever; retrying it every 5 s with no cap just fed the daemon's
+   *  failure throttle (S1-05), but a daemon restart also refuses for a while.
+   *  {@link reconnectDelay}: fast at first, then every 30 s for 10 minutes
+   *  (S14-303); the share page's access re-check calls {@link reconnect}. */
   let guestRefusals = 0;
-  const MAX_GUEST_REFUSALS = 8;
+  let guestFirstRefusalAt: number | null = null;
 
   function scheduleReconnect(afterExit = false): void {
     if (closedByUs || reconnectTimer) return;
-    if (shareToken && guestRefusals >= MAX_GUEST_REFUSALS) {
+    if (exitCode !== null && !afterExit) return;
+    const delay = reconnectDelay({
+      guest: !!shareToken,
+      attempts: reconnectAttempts,
+      refusals: guestRefusals,
+      firstRefusalAt: guestFirstRefusalAt,
+      now: Date.now(),
+    });
+    if (delay === null) {
       reconnecting = false;
       return;
     }
-    if (exitCode !== null && !afterExit) return;
     reconnecting = true;
-    const delay = Math.min(500 * 2 ** reconnectAttempts, 5000);
     reconnectAttempts++;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -912,6 +920,7 @@
     s.onopen = () => {
       opened = true;
       guestRefusals = 0;
+      guestFirstRefusalAt = null;
       connected = true;
       reconnecting = false;
       reconnectAttempts = 0;
@@ -1052,7 +1061,10 @@
       connected = false;
       compactQueue.cancel(compactClient);
       if (closedByUs) return;
-      if (!opened) guestRefusals++;
+      if (!opened) {
+        if (guestRefusals === 0) guestFirstRefusalAt = Date.now();
+        guestRefusals++;
+      }
       if (exitCode === null) {
         disconnected = true;
         scheduleReconnect();
@@ -2841,6 +2853,24 @@
     term?.focus();
   }
 
+  /** Reconnect now if this terminal lost its socket (not one that ended):
+   *  the share page calls it when its access re-check succeeds again, so a
+   *  guest whose retries gave up during a long daemon restart comes back on
+   *  its own (S14-303). A no-op while connected or mid-connect. */
+  export function reconnect(): void {
+    if (connected || exitCode !== null || closedByUs) return;
+    if (!disconnected && !reconnecting) return;
+    resetRetries();
+    connect({ view: false });
+  }
+
+  /** A user (or the share page) asked to try again: start a fresh ladder. */
+  function resetRetries(): void {
+    reconnectAttempts = 0;
+    guestRefusals = 0;
+    guestFirstRefusalAt = null;
+  }
+
   /** "Redraw terminal" (pane ⋯ menu, ⌘K): sync the grid and rebuild the
    *  screen from a fresh server snapshot — the rebuild a reconnect or Reset
    *  does, without dropping the socket. One-click recovery for a garbled TUI. */
@@ -3023,12 +3053,12 @@
     {:else if reconnecting}
       <div class="term-overlay dim">
         <span class="ov-status">Reconnecting…</span>
-        <button class="btn" onclick={() => { reconnectAttempts = 0; guestRefusals = 0; connect({ view: false }); }}>Reconnect now</button>
+        <button class="btn" onclick={() => { resetRetries(); connect({ view: false }); }}>Reconnect now</button>
       </div>
     {:else if disconnected}
       <div class="term-overlay">
         <span class="ov-status danger">Disconnected</span>
-        <button class="btn" onclick={() => connect({ view: false })}>Reconnect</button>
+        <button class="btn" onclick={() => { resetRetries(); connect({ view: false }); }}>Reconnect</button>
       </div>
     {:else if !connected}
       <div class="term-overlay dim"><span class="ov-status">Connecting…</span></div>
