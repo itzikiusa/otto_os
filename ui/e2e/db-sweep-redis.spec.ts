@@ -444,7 +444,7 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     // tablet/desktop it's the "Connections" tab — opening a connection switches
     // the sidebar to Schema, so click back to Connections to reveal the list.
     if (!isPhone(page)) {
-      await page.locator('.side-switch .ss', { hasText: 'Connections' }).click();
+      await page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).click();
     }
     await expect(page.locator('.conn-list')).toBeVisible();
     await expect(
@@ -462,6 +462,6 @@ test.describe('DB Explorer — Redis (mobile sweep)', () => {
     // layout once a connection is open — its presence proves the key browser
     // area renders and is reachable.
     await expect(page.locator('.side-switch')).toBeVisible({ timeout: 20_000 });
-    await expect(page.locator('.side-switch .ss', { hasText: 'Schema' })).toBeVisible();
+    await expect(page.locator('.side-switch [role="tab"]', { hasText: 'Schema' })).toBeVisible();
   });
 });

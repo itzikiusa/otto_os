@@ -136,7 +136,7 @@
       }
       if (res.done) {
         // Guarded: a blocked storage write must not turn a finished import
-        // into "Couldn't import" (and skip ondone / onclose).
+        // into "Couldn’t import" (and skip ondone / onclose).
         lsSet(LS_FORMAT, importFormat);
         const dir = path.replace(/\/[^/]*$/, '');
         if (dir) lsSet(LS_DIR, dir);

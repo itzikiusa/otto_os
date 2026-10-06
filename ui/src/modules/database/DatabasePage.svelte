@@ -35,7 +35,8 @@
   import ExportDialog from './ExportDialog.svelte';
   import { stmtPreview } from './sql-util';
   import { databaseAccessChild } from '../../lib/access-options';
-  import { database, engineGlyph, type DbMainTab } from '../../lib/stores/database.svelte';
+  import { database, engineGlyph, type DbMainTab, type DbSideTab } from '../../lib/stores/database.svelte';
+  import Tabs, { type TabItem } from '../../lib/components/Tabs.svelte';
   import { brokers } from '../../lib/stores/brokers.svelte';
   import { ws, DB_PANE_ID } from '../../lib/stores/workspace.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
@@ -776,6 +777,15 @@
     return parts.join(' · ');
   }
 
+  // Sidebar views. On a phone the connection list is its own accordion, so
+  // the strip there starts at Schema ("connections" shows as Schema).
+  const SIDE_TABS: TabItem<DbSideTab>[] = [
+    { id: 'connections', label: 'Connections' },
+    { id: 'schema', label: 'Schema' },
+    { id: 'saved', label: 'Saved' },
+    { id: 'history', label: 'History' },
+  ];
+  const MOBILE_SIDE_TABS = SIDE_TABS.slice(1);
   const mainTabs: { id: DbMainTab; label: string; icon: IconName; show: () => boolean }[] = [
     { id: 'query', label: 'Query', icon: 'terminal', show: () => true },
     { id: 'builder', label: 'Builder', icon: 'layers', show: () => database.supportsBuilder },
@@ -1026,10 +1036,8 @@
             </div>
           {/if}
         </div>
-        <div class="side-switch" class:acc-collapsed={!schemaOpen} role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
-          <button class="ss" class:active={database.sideTab === 'schema' || database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'schema' || database.sideTab === 'connections'} tabindex={database.sideTab === 'schema' || database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
+        <div class="side-switch" class:acc-collapsed={!schemaOpen}>
+          <Tabs label="Sidebar view" tabs={MOBILE_SIDE_TABS} value={database.sideTab === 'connections' ? 'schema' : database.sideTab} onchange={(id) => database.setSideTab(id)} />
         </div>
         <div class="side-body" class:acc-collapsed={!schemaOpen}>
           {@render schemaSideBody()}
@@ -1039,18 +1047,13 @@
       <!-- TABLET / DESKTOP: one tab strip. "Connections" is the picker tab, so
            the list takes the full sidebar height instead of a capped section. -->
       <div class="side-switch">
-        <!-- The tabs get their own tablist: the strip also carries plain
-             buttons (Refresh), which a tablist may not own. -->
-        <div class="ss-tabs" role="tablist" aria-label="Sidebar view" tabindex="-1" onkeydown={onTabKey}>
-          <button class="ss" class:active={database.sideTab === 'connections'} role="tab" aria-selected={database.sideTab === 'connections'} tabindex={database.sideTab === 'connections' ? 0 : -1} onclick={() => database.setSideTab('connections')}>Connections</button>
-          <button class="ss" class:active={database.sideTab === 'schema'} role="tab" aria-selected={database.sideTab === 'schema'} tabindex={database.sideTab === 'schema' ? 0 : -1} onclick={() => database.setSideTab('schema')}>Schema</button>
-          <button class="ss" class:active={database.sideTab === 'saved'} role="tab" aria-selected={database.sideTab === 'saved'} tabindex={database.sideTab === 'saved' ? 0 : -1} onclick={() => database.setSideTab('saved')}>Saved</button>
-          <button class="ss" class:active={database.sideTab === 'history'} role="tab" aria-selected={database.sideTab === 'history'} tabindex={database.sideTab === 'history' ? 0 : -1} onclick={() => database.setSideTab('history')}>History</button>
-        </div>
-        <span class="grow"></span>
-        {#if database.sideTab === 'schema' && database.selectedConnId}
-          <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
-        {/if}
+        <Tabs label="Sidebar view" tabs={SIDE_TABS} value={database.sideTab} onchange={(id) => database.setSideTab(id)}>
+          {#snippet trailing()}
+            {#if database.sideTab === 'schema' && database.selectedConnId}
+              <button class="icon-btn" onclick={() => database.refreshSchema()} title="Refresh schema" aria-label="Refresh schema"><Icon name="refresh" size={12} /></button>
+            {/if}
+          {/snippet}
+        </Tabs>
       </div>
       <div class="side-body">
         {#if database.sideTab === 'connections'}
@@ -1131,7 +1134,7 @@
       <!-- Each tab is the main <button role="tab">; the status glyph, the ⋯ menu
            (the right-click menu, reachable without a mouse) and the close button
            are its siblings inside a presentational wrapper. -->
-      <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}>
+      <div class="conn-tabs" role="tablist" aria-label="Open connections" tabindex="-1" onkeydown={onTabKey} bind:this={connTabsEl}><!-- ui-guards: allow — closable document tabs (status glyph, ⋯ menu, close per tab): <Tabs> has no slot for per-tab controls -->
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           {@const on = database.activePane === null && database.selectedConnId === c.id}
@@ -2107,39 +2110,8 @@
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
-  .ss-tabs { display: contents; }
   .side-switch {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    padding: 8px 8px 6px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .side-switch::-webkit-scrollbar {
-    display: none;
-  }
-  .side-switch .ss {
     flex-shrink: 0;
-  }
-  .ss {
-    height: 24px;
-    padding: 0 6px;
-    border: none;
-    border-radius: var(--radius-s);
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-  }
-  .ss:hover {
-    background: var(--hover);
-  }
-  .ss.active {
-    background: var(--accent-soft);
-    color: var(--accent-text);
   }
   .side-body {
     flex: 1;
@@ -2802,10 +2774,6 @@
     }
     .conn-name {
       font-size: var(--fs-l);
-    }
-    .ss {
-      height: 30px;
-      font-size: var(--fs-m);
     }
     /* The status row (engine chip + Test) can wrap rather than overflow. */
     .conn-status {

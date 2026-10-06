@@ -87,7 +87,7 @@ async function fixture(page: Page): Promise<{ calls: QueryCall[]; revoke: () => 
 }
 
 async function openConnection(page: Page, name: string): Promise<void> {
-  const picker = page.locator('.side-switch .ss', { hasText: 'Connections' }).first();
+  const picker = page.locator('.side-switch [role="tab"]', { hasText: 'Connections' }).first();
   if (await picker.isVisible()) await picker.click();
   await page.locator('.conn-list .conn-name', { hasText: name }).first().click();
   await expect(page.locator('.conn-tab.active .conn-tab-name')).toHaveText(name);
