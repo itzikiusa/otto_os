@@ -10,6 +10,8 @@
     disabled?: boolean;
     /** Tooltip — e.g. why a tab is disabled. */
     title?: string;
+    /** data-testid on this tab's button. */
+    testid?: string;
   }
 </script>
 
@@ -150,6 +152,7 @@
         tabindex={t.id === value ? 0 : -1}
         disabled={t.disabled}
         title={t.title || undefined}
+        data-testid={t.testid}
         onclick={() => {
           if (t.id !== value) onchange(t.id);
         }}

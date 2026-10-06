@@ -356,7 +356,6 @@
     "src/modules/database/DatabasePage.svelte": 3,
     "src/modules/database/QueryEditor.svelte": 1,
     "src/modules/database/ResultsGrid.svelte": 1,
-    "src/modules/design-hall/studio3d/Studio3D.svelte": 1,
     "src/modules/git/GitTabs.svelte": 1,
     "src/modules/panels/BrowserPanel.svelte": 1,
     "src/modules/personal-agents/AgentPage.svelte": 1,
