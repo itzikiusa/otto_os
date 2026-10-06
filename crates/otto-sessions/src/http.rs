@@ -19,6 +19,7 @@ use otto_core::{Error, Id};
 use otto_state::WorkspacesRepo;
 
 use crate::manager::SessionManager;
+use crate::screen::SessionScreen;
 
 /// Owner-or-admin gate for a single session: `Ok` iff the canonical
 /// [`session_owner_or_admin`] helper allows the caller (root, the session's
@@ -142,6 +143,8 @@ pub fn api_router<S: SessionsCtx>() -> Router<S> {
         .route("/sessions/{id}/archive", post(archive_session::<S>))
         .route("/sessions/{id}/unarchive", post(unarchive_session::<S>))
         .route("/sessions/{id}/kill", post(kill_session::<S>))
+        // Live terminal screen as plain text (Home "Otto School" monitors).
+        .route("/sessions/{id}/screen", get(session_screen::<S>))
         // Static segment beats the `{id}` capture in axum's route priority.
         .route("/sessions/bulk", post(bulk_sessions::<S>))
         // Distinct prefix so it can't collide with `/sessions/{id}`.
@@ -465,6 +468,30 @@ async fn get_session<S: SessionsCtx>(
     ensure_session_owner_or_admin(&ctx, &user, &session).await?;
     let persistence = persistence_for(&ctx, std::slice::from_ref(&session)).await;
     Ok(Json(with_live(&ctx, session, persistence)))
+}
+
+/// GET /sessions/{id}/screen — the CURRENT terminal screen as plain text
+/// ([`crate::screen`]). Same gate as the transcript reads: ws viewer +
+/// owner-or-admin. Not live → `live: false` (never spawns or resumes).
+async fn session_screen<S: SessionsCtx>(
+    State(ctx): State<S>,
+    Extension(AuthUser(user)): Extension<AuthUser>,
+    Path(id): Path<Id>,
+) -> ApiResult<Json<SessionScreen>> {
+    let session = ctx.manager().get(&id).await?;
+    ctx.roles()
+        .check(&user, &session.workspace_id, WorkspaceRole::Viewer)
+        .await?;
+    ensure_session_owner_or_admin(&ctx, &user, &session).await?;
+    let Some(handle) = ctx.manager().live_handle(&id) else {
+        return Ok(Json(SessionScreen::offline()));
+    };
+    // The emulator mutex is shared with the PTY reader: read it off the
+    // async workers so a busy reader never stalls one.
+    let screen = tokio::task::spawn_blocking(move || SessionScreen::capture(&handle))
+        .await
+        .map_err(|e| ApiErr(Error::Internal(format!("screen read: {e}"))))?;
+    Ok(Json(screen))
 }
 
 /// `session.meta` keys a PATCH may never change (an unchanged round-trip is

@@ -62,6 +62,8 @@ mod router_mount;
 mod run_repo_scope;
 #[path = "runtime_lag.rs"]
 mod runtime_lag;
+#[path = "session_screen.rs"]
+mod session_screen;
 #[path = "share_api.rs"]
 mod share_api;
 #[path = "share_otp.rs"]
