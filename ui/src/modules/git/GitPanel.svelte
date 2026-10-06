@@ -8,6 +8,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { router } from '../../lib/router.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
   import RepoView from './RepoView.svelte';
 
   let panelTab = $state('changes');
@@ -26,11 +27,13 @@
   {:else if !git.primary}
     <div class="gp-empty">
       {#if git.reposError}
-        <p class="dim">Couldn’t load this workspace’s repositories.</p>
-        <button
-          class="btn small"
-          onclick={() => ws.currentId && void git.retryRepos(ws.currentId, ws.activeSession?.cwd)}
-        >Retry</button>
+        <LoadState
+          what="this workspace’s repositories"
+          variant="compact"
+          error={git.reposError}
+          empty
+          onretry={() => ws.currentId && void git.retryRepos(ws.currentId, ws.activeSession?.cwd)}
+        />
       {:else if git.notARepo}
         <p class="dim">This session’s folder isn’t a git repository.</p>
       {:else}

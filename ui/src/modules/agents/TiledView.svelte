@@ -85,9 +85,9 @@
   });
   /** The weights as rendered — the stored ones normalized to the live row
    *  lengths (see tileTracks.ts). */
-  const live = $derived(liveTracks(tracks[shapeKey], tileRows.map((tiles) => tiles.length)));
-  const rowFr = $derived(live.rows);
-  const colFr = $derived(live.cols);
+  const rendered = $derived(liveTracks(tracks[shapeKey], tileRows.map((tiles) => tiles.length)));
+  const rowFr = $derived(rendered.rows);
+  const colFr = $derived(rendered.cols);
   const gridStyle = $derived(`grid-template-rows: ${rowFr.map((f) => `minmax(220px, ${f}fr)`).join(' 8px ')};`);
   const rowStyle = (r: number): string => `grid-template-columns: ${colFr[r].map((f) => `minmax(0, ${f}fr)`).join(' 8px ')};`;
   function saveTracks(): void {

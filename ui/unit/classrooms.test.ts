@@ -398,5 +398,5 @@ test('a kicked row is held in the model until its walk-out finishes (S14-304)', 
   // The held rows join the merged list unless a fresher source still has them…
   assert.match(src, /for \(const \[id, row\] of walking\) if \(!m\.has\(id\)\) m\.set\(id, row\);\s*for \(const id of removed\) m\.delete\(id\);/);
   // …and are released only when the scene's walk-out promise settles.
-  assert.match(src, /walking = new Map\(\[\.\.\.walking, \[id, row\]\]\);\s*return handle\.kickOut\(id\)\.finally\(/);
+  assert.match(src, /walking = new Map\(walking\)\.set\(id, row\);\s*return handle\.kickOut\(id\)\.finally\(/);
 });

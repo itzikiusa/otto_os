@@ -398,7 +398,7 @@
       animate: (id) => {
         const row = sessions.find((x) => x.id === id);
         if (!handle || !row) return Promise.resolve();
-        walking = new Map([...walking, [id, row]]);
+        walking = new Map(walking).set(id, row);
         return handle.kickOut(id).finally(() => {
           const next = new Map(walking);
           next.delete(id);
