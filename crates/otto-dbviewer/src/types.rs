@@ -532,6 +532,13 @@ pub struct ColumnDef {
     pub extra: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// The column's collation when the engine reports one per column (MySQL
+    /// string columns: `information_schema.columns.collation_name`). The Table
+    /// Designer re-states it, because MySQL's `CHANGE COLUMN` restates the
+    /// whole column and would otherwise silently re-collate it to the table
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

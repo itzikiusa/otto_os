@@ -1112,7 +1112,7 @@
     // the CSV lands in a spreadsheet — neutralize with a leading apostrophe.
     // Non-string values (a bare -5 is data, not a formula) are left alone.
     if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = `'${s}`;
-    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; // not-sql: CSV field quoting
   }
 
   const exportScope = $derived.by(() => {

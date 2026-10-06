@@ -13,6 +13,7 @@
   import { toasts } from '../../lib/toast.svelte';
   import type { DbForeignKey, DbIndexDef, SchemaNode } from '../../lib/api/types';
   import { copyTextOrThrow } from '../../lib/clipboard';
+  import { quoteIdent, stringLiteral } from './sql-dialect';
 
   const scope = $derived(databaseAccessChild(database.selectedObjectPath ?? database.activeDb));
   const canSchema = $derived(!!database.selectedConnId && resourceAccess.can('connection',database.selectedConnId,'db_schema','database','edit',scope));
@@ -170,9 +171,7 @@
   /** Engine-correct identifier quoting for the statements this panel prepares —
    *  Postgres uses double quotes, MySQL/ClickHouse backticks. */
   function q(name: string): string {
-    return engine === 'postgres'
-      ? `"${name.replace(/"/g, '""')}"`
-      : '`' + name.replace(/`/g, '``') + '`';
+    return quoteIdent(engine, name);
   }
   // The prepared statements run in a query tab against the ACTIVE db, which
   // need not be this object's db — qualify from the selected object's path
@@ -377,7 +376,7 @@
   function sqlLiteral(v: unknown): string {
     if (v === null) return 'NULL';
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-    return `'${String(v).replace(/'/g, "''")}'`;
+    return stringLiteral(engine, String(v));
   }
   /** The SQL predicate for the condition rows, or the preserved one untouched. */
   function sqlPredicate(): string | null {
