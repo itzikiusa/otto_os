@@ -89,19 +89,40 @@ fn jar_scope(wid: &Id, user_id: &Id) -> Id {
 /// [`jar_scope`]: cookies captured in workspace A are never replayed for
 /// workspace B, and on a shared workspace user A's login session is never
 /// replayed on — or listed to — user B (S6-19). Automation runs use their
-/// actor's jar. In-memory per daemon run, like the old global.
+/// actor's jar. In-memory per daemon run, like the old global; a jar no
+/// client holds and nobody used for [`JAR_IDLE_TTL`] is dropped (S6-310 —
+/// per-user keys made the map grow with every user × workspace).
 fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
-    static JARS: OnceLock<StdMutex<HashMap<Id, Arc<reqwest_cookie_store::CookieStoreMutex>>>> =
-        OnceLock::new();
+    static JARS: OnceLock<StdMutex<HashMap<Id, (Arc<CookieJar>, Instant)>>> = OnceLock::new();
     let jars = JARS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = jars.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(scope.clone())
-        .or_insert_with(|| {
+    let now = Instant::now();
+    sweep_idle_jars(&mut map, now);
+    let (jar, used) = map.entry(scope.clone()).or_insert_with(|| {
+        (
             Arc::new(reqwest_cookie_store::CookieStoreMutex::new(
                 reqwest_cookie_store::CookieStore::default(),
-            ))
-        })
-        .clone()
+            )),
+            now,
+        )
+    });
+    *used = now;
+    jar.clone()
+}
+
+type CookieJar = reqwest_cookie_store::CookieStoreMutex;
+
+/// How long a cookie jar nobody touches is kept once no cached client holds
+/// it (clients themselves go after [`TUNNEL_IDLE_TTL`]).
+const JAR_IDLE_TTL: Duration = Duration::from_secs(12 * 3600);
+
+/// Drop jars idle past [`JAR_IDLE_TTL`] that only the map still references —
+/// a jar a live client holds is kept, so a send and a listing never diverge
+/// onto two jars for one scope.
+fn sweep_idle_jars(map: &mut HashMap<Id, (Arc<CookieJar>, Instant)>, now: Instant) {
+    map.retain(|_, (jar, used)| {
+        Arc::strong_count(jar) > 1 || now.saturating_duration_since(*used) < JAR_IDLE_TTL
+    });
 }
 
 /// Shared outbound HTTP client per (workspace, allow_local). Follows
@@ -109,11 +130,16 @@ fn cookie_jar(scope: &Id) -> Arc<reqwest_cookie_store::CookieStoreMutex> {
 /// `allow_local` (the workspace's explicit opt-in) swaps the SSRF-guarded
 /// resolver + redirect policy for a plain bounded client — the pre-flight
 /// check is skipped by the caller under the same flag.
+/// Idle entries are dropped after [`TUNNEL_IDLE_TTL`] (S6-310), which also
+/// releases their hold on the scope's cookie jar.
 fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
-    static CLIENTS: OnceLock<StdMutex<HashMap<String, reqwest::Client>>> = OnceLock::new();
+    static CLIENTS: OnceLock<StdMutex<HashMap<String, (reqwest::Client, Instant)>>> =
+        OnceLock::new();
     let clients = CLIENTS.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = clients.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(format!("{wid}|{allow_local}"))
+    map.retain(|_, (_, used)| used.elapsed() < TUNNEL_IDLE_TTL);
+    let (client, used) = map
+        .entry(format!("{wid}|{allow_local}"))
         .or_insert_with(|| {
             let builder = if allow_local {
                 reqwest::Client::builder().redirect(reqwest::redirect::Policy::limited(10))
@@ -124,13 +150,15 @@ fn http_client(wid: &Id, allow_local: bool) -> reqwest::Client {
                 // + re-validated.
                 net_guard::guarded_client_builder()
             };
-            builder
+            let client = builder
                 .user_agent("Otto-ApiClient/1.0")
                 .cookie_provider(cookie_jar(wid))
                 .build()
-                .unwrap_or_default()
-        })
-        .clone()
+                .unwrap_or_default();
+            (client, Instant::now())
+        });
+    *used = Instant::now();
+    client.clone()
 }
 
 /// Workspace opt-in for local/private targets: reads
@@ -4692,6 +4720,25 @@ mod tests {
         );
         assert_ne!(jar_scope(&wid, &a), jar_scope(&wid, &b));
         cookie_jar(&jar_scope(&wid, &a)).lock().unwrap().clear();
+    }
+
+    /// S6-310: an idle jar no client holds is dropped; one a live client
+    /// still holds, or one used recently, is kept.
+    #[test]
+    fn idle_cookie_jars_are_swept_unless_held() {
+        let t0 = Instant::now();
+        let later = t0 + JAR_IDLE_TTL + Duration::from_secs(1);
+        let jar = || Arc::new(CookieJar::new(reqwest_cookie_store::CookieStore::default()));
+        let held = jar();
+        let _client_ref = held.clone();
+        let mut map: HashMap<Id, (Arc<CookieJar>, Instant)> = HashMap::new();
+        map.insert("idle".into(), (jar(), t0));
+        map.insert("held".into(), (held, t0));
+        map.insert("fresh".into(), (jar(), later));
+        sweep_idle_jars(&mut map, later);
+        let mut keys: Vec<&Id> = map.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["fresh", "held"]);
     }
 
     #[test]

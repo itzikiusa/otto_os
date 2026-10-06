@@ -9774,6 +9774,10 @@ export interface K8sMonitorStatus {
   pods_scraped: number;
   pods_failed: number;
   cycle_ms: number;
+  /** Set on `monitor/workloads` for a namespace-scoped caller: the row is
+   *  cluster-wide, so counts/`cycle_ms` are zeroed, `last_error` is blank and
+   *  `metrics_server` keeps only its status word (timestamps survive). */
+  restricted?: boolean;
 }
 
 export interface K8sMonitorPreset {

@@ -1175,11 +1175,41 @@ fn refuse_connection_state_command(parts: &[String]) -> Result<()> {
         "CLIENT" if sub.as_deref() == Some("REPLY") => {
             "CLIENT REPLY would desynchronise the shared connection"
         }
+        // Per-connection modes: tracking turns on push invalidations, the
+        // eviction / LRU flags and the name would apply to every tab's and
+        // agent's commands, and CACHING only makes sense with TRACKING.
+        "CLIENT"
+            if matches!(
+                sub.as_deref(),
+                Some("TRACKING" | "CACHING" | "NO-EVICT" | "NO-TOUCH" | "SETNAME" | "SETINFO")
+            ) =>
+        {
+            "per-connection client modes would apply to every tab and agent sharing it"
+        }
+        // CLIENT KILL with filters skips the caller (SKIPME yes, the
+        // default), so it can only end OTHER clients — an admin action the
+        // native ACL governs. The legacy `CLIENT KILL addr:port` form and an
+        // explicit `SKIPME no` can kill the shared connection itself.
+        "CLIENT"
+            if sub.as_deref() == Some("KILL")
+                && (parts.len() == 3
+                    || parts.windows(2).any(|w| {
+                        w[0].eq_ignore_ascii_case("SKIPME") && w[1].eq_ignore_ascii_case("no")
+                    })) =>
+        {
+            "it can drop the shared connection itself — use a filter (ID / TYPE / USER / ADDR) \
+             with the default SKIPME yes"
+        }
+        // Cluster read routing for this connection.
+        "READONLY" | "READWRITE" => "cluster read routing is fixed for the shared connection",
         _ => return refuse_blocking_command(&name, sub.as_deref(), parts),
     };
     Err(types::invalid(format!(
         "redis: {name}{} changes the shared connection's state and is not allowed here — {why}",
-        if name == "CLIENT" { " REPLY" } else { "" }
+        match (name.as_str(), sub.as_deref()) {
+            ("CLIENT", Some(sub)) => format!(" {sub}"),
+            _ => String::new(),
+        }
     )))
 }
 
@@ -1192,9 +1222,12 @@ fn refuse_blocking_command(name: &str, sub: Option<&str>, parts: &[String]) -> R
     let blocking = match name {
         "BLPOP" | "BRPOP" | "BLMOVE" | "BRPOPLPUSH" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX"
         | "BZMPOP" | "WAIT" | "WAITAOF" => true,
+        // Options precede `STREAMS`; everything after it is key names and
+        // IDs, so a stream literally named "block" is not the option.
         "XREAD" | "XREADGROUP" => parts
             .iter()
             .skip(1)
+            .take_while(|a| !a.eq_ignore_ascii_case("STREAMS"))
             .any(|a| a.eq_ignore_ascii_case("BLOCK")),
         "CLIENT" => sub == Some("PAUSE"),
         "DEBUG" => sub == Some("SLEEP"),
@@ -1413,6 +1446,18 @@ mod tests {
             "QUIT",
             "HELLO 3",
             "AUTH user pass",
+            // S6-305: per-connection modes and self-kill.
+            "CLIENT TRACKING ON",
+            "client caching yes",
+            "CLIENT NO-EVICT on",
+            "CLIENT NO-TOUCH on",
+            "CLIENT SETNAME tab-1",
+            "CLIENT SETINFO LIB-NAME x",
+            "CLIENT KILL 127.0.0.1:6379",
+            "CLIENT KILL ID 7 SKIPME no",
+            "client kill type normal skipme NO",
+            "READONLY",
+            "readwrite",
         ] {
             let e = refuse_connection_state_command(&p(line)).unwrap_err();
             assert!(e.to_string().contains("shared connection"), "{line}: {e}");
@@ -1450,6 +1495,13 @@ mod tests {
             "XREAD COUNT 10 STREAMS s 0",
             "ZPOPMIN z",
             "CLIENT ID",
+            // A stream key literally named "block" after STREAMS is not the
+            // option (S6-305).
+            "XREAD STREAMS block 0",
+            "XREADGROUP GROUP g c COUNT 1 STREAMS BLOCK >",
+            // Filtered CLIENT KILL skips the caller by default.
+            "CLIENT KILL TYPE normal",
+            "CLIENT KILL ID 7",
         ] {
             assert!(refuse_connection_state_command(&p(ok)).is_ok(), "{ok}");
         }

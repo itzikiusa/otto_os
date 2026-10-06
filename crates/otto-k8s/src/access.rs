@@ -1,7 +1,6 @@
 //! Cluster permissions, namespace isolation and action operation mapping.
 use crate::resources::Kind;
 use axum::body::Body;
-use futures_util::StreamExt;
 use otto_core::access::{AccessActor, AccessPolicy, ResourceKind, ResourceRef};
 use otto_core::domain::{Capability, Feature, User};
 use otto_core::{Error, Id, Result};
@@ -185,6 +184,78 @@ fn namespaces_allowing_any_in(
         .collect()
 }
 
+/// A per-request snapshot of the caller's Kubernetes tier and group
+/// memberships, so a handler that asks about MANY clusters or namespaces
+/// loads them once and each cluster's live policy once, then evaluates in
+/// memory with the same deny-wins [`ResourceAccess::evaluate_policy`] as
+/// [`allowed`] (S6-309: the fleet scope used to cost ~3 queries per
+/// `allowed()` × (2 + granted namespaces) per cluster, on every request).
+pub struct Evaluator {
+    user: User,
+    groups: Vec<Id>,
+    has_tier: bool,
+}
+
+impl Evaluator {
+    pub async fn load(pool: &DbPool, user: &User) -> Result<Self> {
+        let has_tier = GrantsRepo::new(pool.clone())
+            .capability_of(user, Feature::Kubernetes)
+            .await?
+            >= Capability::View;
+        let groups = if has_tier {
+            otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
+                .groups_for_user(&user.id)
+                .await?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            user: user.clone(),
+            groups,
+            has_tier,
+        })
+    }
+
+    /// Cluster `id`'s live policy; `None` when the caller lacks the
+    /// Kubernetes tier or the cluster is gone (both deny, as in [`allowed`]).
+    pub async fn policy(&self, pool: &DbPool, id: &Id) -> Result<Option<AccessPolicy>> {
+        if !self.has_tier {
+            return Ok(None);
+        }
+        match otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
+            .get_live_policy(ResourceKind::K8sCluster, id)
+            .await
+        {
+            Ok(policy) => Ok(Some(policy)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`allowed`] against an already-loaded `policy`; an invalid namespace
+    /// or an evaluation error denies.
+    pub fn allows(&self, policy: &AccessPolicy, id: &Id, op: &str, ns: Option<&str>) -> bool {
+        let Ok(child) = namespace(ns) else {
+            return false;
+        };
+        let resource = ResourceRef {
+            kind: ResourceKind::K8sCluster,
+            id: id.clone(),
+            child,
+        };
+        ResourceAccess::evaluate_policy(
+            &self.user.id,
+            self.user.is_root,
+            self.user.disabled,
+            &self.groups,
+            policy,
+            &resource,
+            op,
+        )
+        .is_ok_and(|d| d.allowed)
+    }
+}
+
 pub async fn check(
     pool: &DbPool,
     user: &User,
@@ -260,55 +331,24 @@ pub async fn initialize(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
 
 /// Recheck the grant while following logs, including when no data arrives.
 pub fn guard_body(body: Body, pool: DbPool, user: User, id: Id, ns: String) -> Body {
-    let stream = futures_util::stream::unfold(
-        (
-            body.into_data_stream(),
-            pool,
-            user,
-            id,
-            ns,
-            None::<std::time::Instant>,
-        ),
-        |(mut stream, pool, user, id, ns, mut last_checked)| async move {
-            loop {
-                // Re-authorize at most once per [`GUARD_RECHECK`] (S6-08): a
-                // check is 4+ SQLite queries, and a fast stream (64 KiB S3
-                // chunks, a followed multi-pod log) otherwise ran one per
-                // chunk. The idle tick below still rechecks a stalled stream.
-                if recheck_due(last_checked, std::time::Instant::now()) {
-                    let current = match otto_state::UsersRepo::new(pool.clone()).get(&user.id).await
-                    {
-                        Ok(user) => user,
-                        Err(_) => return None,
-                    };
-                    if !matches!(GrantsRepo::new(pool.clone()).capability_of(&current, Feature::Kubernetes).await, Ok(cap) if cap >= Capability::View)
-                    {
-                        return None;
-                    }
-                    if !matches!(
-                        allowed(&pool, &current, &id, "logs", Some(&ns)).await,
-                        Ok(true)
-                    ) {
-                        return None;
-                    }
-                    last_checked = Some(std::time::Instant::now());
-                }
-                tokio::select! {
-                    data = stream.next() => return data.map(|data| (data, (stream, pool, user, id, ns, last_checked))),
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
-                }
+    // Rechecked at most once per second and on idle ticks
+    // ([`otto_connections::stream_guard`], shared with the other crate).
+    otto_connections::stream_guard::guard_body(body, move || {
+        let (pool, user, id, ns) = (pool.clone(), user.clone(), id.clone(), ns.clone());
+        async move {
+            let Ok(current) = otto_state::UsersRepo::new(pool.clone()).get(&user.id).await else {
+                return false;
+            };
+            if !matches!(GrantsRepo::new(pool.clone()).capability_of(&current, Feature::Kubernetes).await, Ok(cap) if cap >= Capability::View)
+            {
+                return false;
             }
-        },
-    );
-    Body::from_stream(stream)
-}
-
-/// Longest a streamed body runs on a stale authorization (see `guard_body`).
-pub const GUARD_RECHECK: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// True when a streamed body's grant is due for a recheck.
-fn recheck_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
-    last.is_none_or(|t| now.saturating_duration_since(t) >= GUARD_RECHECK)
+            matches!(
+                allowed(&pool, &current, &id, "logs", Some(&ns)).await,
+                Ok(true)
+            )
+        }
+    })
 }
 
 /// Native credential attachment is host authority, not delegated resource configuration.
@@ -335,34 +375,6 @@ pub async fn can_configure(pool: &DbPool, user: &User, id: &Id) -> Result<bool> 
             .capability_of(user, Feature::Kubernetes)
             .await?
             >= Capability::Admin)
-}
-
-#[cfg(test)]
-mod guard_recheck_tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    /// S6-08: a streamed body re-authorizes once per `GUARD_RECHECK`, not
-    /// once per chunk — the first chunk always checks.
-    #[test]
-    fn recheck_runs_at_most_once_per_interval() {
-        let t0 = Instant::now();
-        assert!(recheck_due(None, t0));
-        assert!(!recheck_due(Some(t0), t0));
-        assert!(!recheck_due(Some(t0), t0 + Duration::from_millis(999)));
-        assert!(recheck_due(Some(t0), t0 + GUARD_RECHECK));
-        // 1,000 chunks inside one second cost exactly one check.
-        let mut last = None;
-        let mut checks = 0;
-        for i in 0..1000u64 {
-            let now = t0 + Duration::from_micros(i * 900);
-            if recheck_due(last, now) {
-                checks += 1;
-                last = Some(now);
-            }
-        }
-        assert_eq!(checks, 1);
-    }
 }
 
 #[cfg(test)]
