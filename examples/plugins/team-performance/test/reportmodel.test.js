@@ -11,7 +11,7 @@ const RM = require('../lib/reportmodel.js');
 function withoutScripts(html) {
   let prev;
   let out = String(html);
-  do { prev = out; out = out.replace(/<script\b[\s\S]*?<\/script\s*>/gi, ''); } while (out !== prev);
+  do { prev = out; out = out.replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, ''); } while (out !== prev);
   return out;
 }
 
@@ -523,7 +523,7 @@ test('security: <img src=x onerror=1> in EVERY string field reaches no unescaped
   input.report_kind = 'dev';
   const html = RM.renderReport(RM.buildReportModel(input), { summary: X, strengths: [X], goals: [X] }, { comments: [{ anchor: X, label: X, text: X, author: X }] });
   assert.doesNotMatch(html, /<img/i);
-  const [, script] = /<script\b[^>]*>([\s\S]*)<\/script\s*>/i.exec(html);
+  const [, script] = /<script\b[^>]*>([\s\S]*)<\/script[^>]*>/i.exec(html);
   assert.doesNotMatch(html.replace(script, ''), /onerror=1(?!&)/, 'no live handler attribute outside escaped text');
   assert.doesNotMatch(script, /<img|<\/script/i, 'embedded JSON escapes "<"');
   assert.ok((html.match(/&lt;img src=x onerror=1&gt;/g) || []).length > 20, 'payload rendered as text');
