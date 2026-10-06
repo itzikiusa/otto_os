@@ -76,12 +76,14 @@ test('Kubernetes namespace popup closes on Tab and keeps focus after selection',
 
 test('Kubernetes detail arrow keys move selection and focus together', async ({ page }) => {
   await openPage(page, `kubernetes/ux-cluster/pods/default/${pod.name}`);
-  const tabs = page.getByTestId('k8s-drawer').getByRole('tab');
-  await tabs.filter({ hasText: /^Overview$/ }).focus();
+  // By accessible name: the shared <Tabs> pads each tab's textContent with
+  // template whitespace (" Overview "), which an anchored hasText regex misses.
+  const tab = (name: string) => page.getByTestId('k8s-drawer').getByRole('tab', { name, exact: true });
+  await tab('Overview').focus();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Manifest$/ })).toBeFocused();
+  await expect(tab('Manifest')).toBeFocused();
   await page.keyboard.press('ArrowRight');
-  await expect(tabs.filter({ hasText: /^Describe$/ })).toBeFocused();
+  await expect(tab('Describe')).toBeFocused();
 });
 
 test('AWS detail arrow keys move selection and focus together', async ({ page }) => {

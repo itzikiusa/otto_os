@@ -1484,7 +1484,17 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
         return true;
     }
     let upper = statement.to_ascii_uppercase();
-    (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
+    // `SELECT … INTO TEMP t` (PostgreSQL: a session temp table) and
+    // `SELECT … INTO @v` / `SELECT @v := …` (MySQL: a session user variable).
+    // Any `INTO` word in a SELECT/WITH counts — over-flagging only costs a
+    // fresh pooled connection; under-flagging leaks state to the next request.
+    let select_writes_session = matches!(kw.as_str(), "SELECT" | "WITH" | "TABLE" | "VALUES")
+        && (upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .any(|w| w == "INTO")
+            || upper.contains(":="));
+    select_writes_session
+        || (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
         || upper.contains("GET_LOCK(")
         || upper.contains("PG_ADVISORY_LOCK")
         || upper.contains("SET_CONFIG(")

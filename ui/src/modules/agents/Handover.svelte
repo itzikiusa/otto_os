@@ -236,7 +236,7 @@
 
     <div class="field">
       <label for="ho-focus">What should the agent focus on? <span class="dim">(optional)</span></label>
-      <textarea
+      <textarea dir="auto"
         id="ho-focus"
         class="input"
         bind:value={focus}
@@ -281,7 +281,7 @@
     {#if briefNote}<p class="note">{briefNote}</p>{/if}
     <div class="field">
       <label for="ho-brief">Handover brief</label>
-      <textarea
+      <textarea dir="auto"
         id="ho-brief"
         class="input mono brief"
         bind:value={brief}
@@ -362,7 +362,7 @@
     box-shadow: var(--glass-shadow);
   }
   .seg-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 

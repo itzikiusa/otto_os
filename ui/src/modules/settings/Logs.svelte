@@ -333,7 +333,7 @@
 
       <label class="field search-field">
         <span>Filter</span>
-        <input class="input" type="search" placeholder="slack, telegram, bridge…" bind:value={filterInput} />
+        <input dir="ltr" class="input" type="search" placeholder="slack, telegram, bridge…" bind:value={filterInput} />
       </label>
 
       <div class="checks">

@@ -437,7 +437,7 @@
       background var(--dur-fast) ease-out;
   }
   .tool:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .tool.present:hover {
@@ -549,7 +549,7 @@
   }
   .link-btn:disabled {
     color: var(--text-dim);
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 
@@ -574,7 +574,7 @@
   }
   .row.disabled {
     cursor: not-allowed;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .row-check {
     flex-shrink: 0;

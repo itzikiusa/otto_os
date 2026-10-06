@@ -97,15 +97,22 @@ impl Drop for Busy<'_> {
 
 /// An explicit lifetime lease for a sibling service using the HTTP endpoint.
 /// Shares the request counter with parking, so acquisition and parking are atomic.
+///
+/// A BACKGROUND lease ([`ClickHouse::try_keep_awake_background`]) only blocks
+/// parking while held: it never wakes a parked server and does not reset the
+/// idle clock on release, so a periodic exporter cannot keep the server up.
 pub struct ClickHouseLease {
     ch: std::sync::Arc<ClickHouse>,
     pub endpoint: String,
+    stamp: bool,
 }
 impl Drop for ClickHouseLease {
     fn drop(&mut self) {
         if let Ok(mut p) = self.ch.proc.lock() {
             p.inflight = p.inflight.saturating_sub(1);
-            p.last_use = std::time::Instant::now();
+            if self.stamp {
+                p.last_use = std::time::Instant::now();
+            }
         }
     }
 }
@@ -118,10 +125,49 @@ impl ClickHouse {
         let mut lease = ClickHouseLease {
             ch: self.clone(),
             endpoint: String::new(),
+            stamp: true,
         };
         let (_busy, endpoint) = self.begin().await?;
         lease.endpoint = endpoint;
         Ok(lease)
+    }
+
+    /// Background WAKE: restarts a parked server for one bounded export but,
+    /// unlike [`Self::keep_awake`], never resets the idle clock — once the lease
+    /// drops, the next idle check may park the server again right away.
+    pub async fn wake_background(self: &std::sync::Arc<Self>) -> Result<ClickHouseLease> {
+        let parked = {
+            let mut p = self.proc.lock().unwrap();
+            p.inflight += 1;
+            p.parked
+        };
+        let mut lease = ClickHouseLease {
+            ch: self.clone(),
+            endpoint: String::new(),
+            stamp: false,
+        };
+        if parked {
+            self.unpark().await?;
+        }
+        lease.endpoint = self.proc.lock().unwrap().base_url.clone();
+        Ok(lease)
+    }
+
+    /// Background lease: `None` while the server is parked (or has no child),
+    /// otherwise holds parking off until dropped WITHOUT resetting the idle
+    /// clock. The in-flight mark is taken under the same lock `maybe_park`
+    /// decides under, so the server cannot stop under a held lease.
+    pub fn try_keep_awake_background(self: &std::sync::Arc<Self>) -> Option<ClickHouseLease> {
+        let mut p = self.proc.lock().unwrap();
+        if p.parked || p.child.is_none() {
+            return None;
+        }
+        p.inflight += 1;
+        Some(ClickHouseLease {
+            ch: self.clone(),
+            endpoint: p.base_url.clone(),
+            stamp: false,
+        })
     }
 
     /// Resolve the `clickhouse` binary in priority order: an explicit configured

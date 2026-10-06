@@ -128,11 +128,11 @@
   function onMessage(ev: MessageEvent) {
     const m = ev.data;
     if (!m || m.type !== 'otto:keydown' || typeof m.key !== 'string') return;
-    // Only accept from OUR plugin frame. Some webviews (Tauri/WKWebView)
-    // deliver iframe messages with `source === null`, so we can't require a
-    // strict source match — fall back to the same-origin check when it is.
-    const bySource = ev.source != null && ev.source === frame?.contentWindow;
-    if (!bySource && ev.origin !== origin) return;
+    // Only accept from OUR plugin frame, by window identity. An origin check
+    // is not enough: every plugin (and any other daemon-served document) shares
+    // the daemon origin, so it would let a different frame synthesize app
+    // shortcuts here. A message without a matching `source` is dropped.
+    if (!frame || ev.source == null || ev.source !== frame.contentWindow) return;
     // Re-dispatch as a real keydown so the shell's global key map (keys.ts,
     // capture-phase window listener) handles it exactly as if the app itself
     // were focused — an external plugin inherits every app shortcut.

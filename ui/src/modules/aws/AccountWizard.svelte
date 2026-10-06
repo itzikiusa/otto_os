@@ -194,7 +194,7 @@
           as-is; sign in later from the account card.
         </p>
         {#if profiles.length > 6}
-          <input class="in" type="search" placeholder="Filter profiles…" bind:value={profileFilter} aria-label="Filter profiles" />
+          <input dir="ltr" class="in" type="search" placeholder="Filter profiles…" bind:value={profileFilter} aria-label="Filter profiles" />
         {/if}
         <ul class="profiles" aria-busy={profilesLoading}>
           {#if profilesLoading}
@@ -215,12 +215,12 @@
         </ul>
         <label class="field">
           <span>Profile name</span>
-          <input class="in mono" bind:value={profile} placeholder="default" autocomplete="off" />
+          <input dir="ltr" class="in mono" bind:value={profile} placeholder="default" autocomplete="off" />
         </label>
       {:else}
         <label class="field">
           <span>Access key ID</span>
-          <input class="in mono" bind:value={accessKeyId} placeholder="AKIA…" autocomplete="off" spellcheck="false" />
+          <input dir="ltr" class="in mono" bind:value={accessKeyId} placeholder="AKIA…" autocomplete="off" spellcheck="false" />
         </label>
         <label class="field">
           <span>Secret access key{editing ? ' (leave blank to keep)' : ''}</span>
@@ -235,7 +235,7 @@
           <summary>Advanced</summary>
           <label class="field">
             <span>Endpoint URL <em>(optional)</em></span>
-            <input
+            <input dir="ltr"
               class="in mono"
               type="url"
               bind:value={endpointUrl}
@@ -259,19 +259,19 @@
               {/each}
             </select>
           {:else}
-            <input class="in mono" bind:value={region} placeholder="us-east-1" />
+            <input dir="ltr" class="in mono" bind:value={region} placeholder="us-east-1" />
           {/if}
         </label>
         <label class="field">
           <span>Assume role ARN <em>(optional)</em></span>
-          <input class="in mono" bind:value={roleArn} placeholder="arn:aws:iam::123456789012:role/Admin" spellcheck="false" />
+          <input dir="ltr" class="in mono" bind:value={roleArn} placeholder="arn:aws:iam::123456789012:role/Admin" spellcheck="false" />
         </label>
       </div>
     {:else if step === 2}
       {#if !auth.isRoot}<p class="dim">Owner manages credentials and native AWS settings. You can edit the name and color.</p>{/if}
       <label class="field">
         <span>Name</span>
-        <input class="in" bind:value={name} placeholder="prod-eu / sandbox / data-lake" data-testid="aws-wizard-name" />
+        <input dir="auto" class="in" bind:value={name} placeholder="prod-eu / sandbox / data-lake" data-testid="aws-wizard-name" />
       </label>
       <div class="row2">
         <div class="field">
@@ -320,18 +320,18 @@
                   {#each aws.regions as r (r.code)}<option value={r.code}>{r.code} — {r.name}</option>{/each}
                 </select>
               {:else}
-                <input class="in mono" bind:value={region} />
+                <input dir="ltr" class="in mono" bind:value={region} />
               {/if}
             </label>
             {#if mode === 'profile'}
-              <label class="field"><span>Profile</span><input class="in mono" bind:value={profile} /></label>
+              <label class="field"><span>Profile</span><input dir="ltr" class="in mono" bind:value={profile} /></label>
             {:else}
-              <label class="field"><span>Access key ID</span><input class="in mono" bind:value={accessKeyId} /></label>
+              <label class="field"><span>Access key ID</span><input dir="ltr" class="in mono" bind:value={accessKeyId} /></label>
               <label class="field"><span>New secret (blank = keep)</span><input class="in mono" type="password" bind:value={secret} autocomplete="new-password" /></label>
               <label class="field"><span>New session token</span><input class="in mono" type="password" bind:value={sessionToken} /></label>
             {/if}
-            <label class="field"><span>Assume role ARN</span><input class="in mono" bind:value={roleArn} /></label>
-            <label class="field"><span>Endpoint URL <em>(blank = AWS default)</em></span><input class="in mono" type="url" bind:value={endpointUrl} placeholder="http://localhost:4566" spellcheck="false" data-testid="aws-wizard-endpoint" /></label>
+            <label class="field"><span>Assume role ARN</span><input dir="ltr" class="in mono" bind:value={roleArn} /></label>
+            <label class="field"><span>Endpoint URL <em>(blank = AWS default)</em></span><input dir="ltr" class="in mono" type="url" bind:value={endpointUrl} placeholder="http://localhost:4566" spellcheck="false" data-testid="aws-wizard-endpoint" /></label>
           </div>
         </details>
       {/if}

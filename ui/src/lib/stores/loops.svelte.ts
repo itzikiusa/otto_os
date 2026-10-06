@@ -46,7 +46,8 @@ class LoopsStore {
   private detailRerun: string | null = null;
   private lastDetailJson = '';
 
-  private listWs = '';
+  /** The workspace the list was last loaded for. */
+  listWs = '';
   private listGeneration = 0;
   private workspaceGeneration = 0;
 

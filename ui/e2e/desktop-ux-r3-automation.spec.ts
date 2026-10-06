@@ -203,6 +203,9 @@ test('proof waiver: reason is required, denied approval preserves it, retry reco
   await page.route(`**/api/v1/proof-packs/${pack.id}/waive`, route => fail
     ? route.fulfill({ status: 403, json: { code: 'forbidden', message: 'Approval access temporarily unavailable' } }) : route.continue());
   await page.goto('/#/proof');
+  // The ⋯ menu is built when it opens: the pack verbs (Waive…) are only there
+  // once the page has opened the pack, so wait for it before opening the menu.
+  await expect(page.getByRole('heading', { level: 1, name: 'Release exception review' })).toBeVisible({ timeout: 20_000 });
   await page.getByRole('button', { name: 'More actions', exact: true }).click();
   await page.getByRole('menuitem', { name: /^Waive/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Waive proof gate' });

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { scrollBehavior } from '../../lib/motion';
   import PathField from '../../lib/components/PathField.svelte';
   // Usage dashboard: tokens first (provider/day/model/session rollups; cost is
   // the secondary figure), the ccusage-style Report tab, and — for root only —
@@ -132,7 +133,7 @@
   let settingsEl: HTMLElement | undefined = $state();
   function toggleSettings(): void {
     configOpen = !configOpen;
-    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+    if (configOpen) queueMicrotask(() => settingsEl?.scrollIntoView({ block: 'nearest', behavior: scrollBehavior() }));
   }
 
   // ⌘K verbs while Usage is open.
@@ -573,7 +574,7 @@
         <div class="install-alt">
           <label for="ch-path">Or use a ClickHouse binary you already have</label>
           <div class="path-input">
-            <PathField bind:value={chPath} files><input
+            <PathField bind:value={chPath} files><input dir="ltr"
               id="ch-path"
               class="input mono"
               placeholder="/usr/local/bin/clickhouse"
@@ -623,7 +624,7 @@
               <input id="cfg-interval" class="input" type="number" min="5" max="3600" bind:value={interval} />
 
               <label for="cfg-path">ClickHouse binary</label>
-              <PathField bind:value={chPath} files><input id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
+              <PathField bind:value={chPath} files><input dir="ltr" id="cfg-path" class="input mono" bind:value={chPath} spellcheck="false" /></PathField>
             </div>
             <div class="cfg-actions">
               <button class="btn" disabled={usage.installing} onclick={() => usage.install()}>
@@ -1851,7 +1852,7 @@
     max-width: 640px;
   }
   .checkbox-row.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .window-row {
     display: flex;

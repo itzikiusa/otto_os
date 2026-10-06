@@ -224,7 +224,7 @@
           </div>
           <span class="cell">
             <McpPill kind="risk" value={t.risk_label} small />
-            {#if t.risk_overridden}<span class="pinned" title="Human-pinned override (survives re-discovery)"><Icon name="key" size={10} /></span>{/if}
+            {#if t.risk_overridden}<span class="pinned" title="Human-pinned override (survives re-discovery)"><Icon name="key" size={12} /></span>{/if}
           </span>
           <span class="cell"><McpPill kind="injection" value={t.injection_risk} small /></span>
           <span class="cell">
@@ -307,7 +307,7 @@
         </div>
         <label class="field">
           <span>Arguments (JSON)</span>
-          <textarea bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
+          <textarea dir="ltr" bind:value={argsText} rows="4" class="mono" spellcheck="false"></textarea>
         </label>
         {#if argError}<p class="warn">{argError}</p>{/if}
 

@@ -46,7 +46,14 @@ const OPEN_TABS_KEY = 'otto_git_open_tabs';
 /** localStorage key for the auto-fetch toggle/interval (per-device). */
 const AUTO_FETCH_KEY = 'otto_git_auto_fetch';
 const DEFAULT_AUTO_FETCH_SEC = 120;
-const ACTIVE_AUTO_FETCH_SEC = 30;
+/** The selected repo's cadence. 30 s made `POST /repos/{id}/fetch` the app's
+ *  biggest wall-time consumer (~6/min, p95 3 s, telemetry 2026-10-05). */
+const ACTIVE_AUTO_FETCH_SEC = 60;
+/** Background tabs are swept only while recently used (opened, selected or
+ *  manually fetched); an idle tab resumes on its next activation. */
+const RECENT_USE_MS = 15 * 60_000;
+/** A fetch's own status answers a status read this soon after it. */
+const FETCH_STATUS_REUSE_MS = 2000;
 /** A status read younger than this is shared by a new caller (same burst). */
 const STATUS_SHARE_MS = 300;
 const DEFAULT_SUB: GitSubTab = 'graph';
@@ -188,6 +195,8 @@ class GitStore {
   private autoFetchInFlight = false;
   private autoFetchGen = 0;
   private lastFetchAt: Record<string, number> = {};
+  /** Last time each repo was opened/selected/manually fetched (see RECENT_USE_MS). */
+  private repoUsedAt: Record<string, number> = {};
   private retryFetchAt: Record<string, number> = {};
   private autoFetchFailStreak: Record<string, number> = {};
   private fetches = new Map<string, Promise<RepoStatusResp>>();
@@ -255,6 +264,7 @@ class GitStore {
       this.subTab = { ...this.subTab, [repoId]: sub };
     }
     this.activeRepoId = repoId;
+    this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.requestAutoFetch();
   }
@@ -278,6 +288,7 @@ class GitStore {
   activateRepoTab(repoId: string): void {
     if (!this.openRepoIds.includes(repoId)) return;
     this.activeRepoId = repoId;
+    this.repoUsedAt[repoId] = Date.now();
     this.persistOpenTabs();
     this.requestAutoFetch();
   }
@@ -363,7 +374,7 @@ class GitStore {
     this.primary = repo;
     if (!this.repos.some((r) => r.id === repo.id)) this.repos = [...this.repos, repo];
     try {
-      const s = await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
+      const s = this.freshFetchStatus(repo.id) ?? await api.get<RepoStatusResp>(`/repos/${repo.id}/status`);
       this.primaryStatus = s;
       this.setStatus(repo.id, s);
     } catch {
@@ -412,7 +423,7 @@ class GitStore {
   async refreshPrimary(): Promise<void> {
     if (!this.primary) return;
     try {
-      const s = await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
+      const s = this.freshFetchStatus(this.primary.id) ?? await api.get<RepoStatusResp>(`/repos/${this.primary.id}/status`);
       this.primaryStatus = s;
       this.setStatus(this.primary.id, s);
       void this.loadPrs(this.primary.id);
@@ -436,6 +447,14 @@ class GitStore {
     this.statusById = { ...this.statusById, [repoId]: s };
     if (this.primary?.id === repoId) this.primaryStatus = s;
     return true;
+  }
+
+  /** The status a fetch returned moments ago (it ran `git status` right after
+   *  the fetch), so a caller doesn't spawn a second walk for the same state. */
+  private freshFetchStatus(repoId: string): RepoStatusResp | null {
+    const at = this.lastFetchAt[repoId];
+    const s = this.statusById[repoId];
+    return s && at != null && Date.now() - at < FETCH_STATUS_REUSE_MS ? s : null;
   }
 
   /** In-flight status reads per repo. RepoView's mount, `ensureStatus` and a
@@ -560,7 +579,10 @@ class GitStore {
   fetchRepo(repoId: string, reason: 'manual' | 'background' = 'manual'): Promise<RepoStatusResp> {
     // A manual request can promote a queued background fetch. Explicit work
     // remains valid even if its tab closes or automatic fetching is paused.
-    if (reason === 'manual') this.manualFetches.add(repoId);
+    if (reason === 'manual') {
+      this.manualFetches.add(repoId);
+      this.repoUsedAt[repoId] = Date.now();
+    }
     const existing = this.fetches.get(repoId);
     if (existing) return existing;
     const generation = this.autoFetchGen;
@@ -657,7 +679,11 @@ class GitStore {
             ? this.activeRepoId : pending.values().next().value!;
           pending.delete(id);
           if (!this.openRepoIds.includes(id)) continue;
-          const interval = id === this.activeRepoId ? ACTIVE_AUTO_FETCH_SEC : Math.max(30, this.autoFetchIntervalSec);
+          const active = id === this.activeRepoId;
+          // First sighting counts as a use, so restored tabs refresh once.
+          const used = (this.repoUsedAt[id] ??= Date.now());
+          if (!active && Date.now() - used > RECENT_USE_MS) continue;
+          const interval = active ? ACTIVE_AUTO_FETCH_SEC : Math.max(60, this.autoFetchIntervalSec);
           if (Date.now() < (this.retryFetchAt[id] ?? 0)) continue;
           if (this.lastFetchAt[id] != null && Date.now() - this.lastFetchAt[id] < interval * 1000) continue;
           try { await this.fetchRepo(id, 'background'); } catch { /* quiet background retry with backoff */ }

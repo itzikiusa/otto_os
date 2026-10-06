@@ -471,7 +471,7 @@
       </div>
       <div class="field">
         <label for="si-allow">Skill allow-list</label>
-        <input
+        <input dir="auto"
           id="si-allow"
           class="input"
           bind:value={allowlistText}

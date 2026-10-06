@@ -89,7 +89,7 @@
   {:else if !dashboard}
     <div class="picker">
       <p>Choose the dashboard this box shows:</p>
-      <select class="input" value="" onchange={(e) => pick((e.currentTarget as HTMLSelectElement).value)}>
+      <select aria-label="Dashboard" class="input" value="" onchange={(e) => pick((e.currentTarget as HTMLSelectElement).value)}>
         <option value="" disabled>Pick a dashboard…</option>
         {#each database.dashboards as d (d.id)}
           <option value={d.id}>{d.name}</option>

@@ -4,7 +4,7 @@
   // is pushed automatically (with --set-upstream) right before the PR is opened.
   import Modal from '../../lib/components/Modal.svelte';
   import { toastError } from '../../lib/toastError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import { api } from '../../lib/api/client';
   import { ws } from '../../lib/stores/workspace.svelte';
   import type { BranchInfo, Collaborator, DraftPrResp, Id, PrSummary } from '../../lib/api/types';
@@ -232,9 +232,25 @@
       phase = '';
     }
   }
+
+  /** Esc / backdrop / ✕: a stray key must not throw away a typed (or agent-
+   *  drafted) title, description or reviewer list — ask first. */
+  async function requestClose(): Promise<void> {
+    const edited = title.trim() !== '' || description.trim() !== '' || reviewers.length > 0 || revQuery.trim() !== '';
+    if (edited) {
+      const ok = await confirmer.ask('The title, description and reviewers you entered will be lost.', {
+        title: 'Discard this pull request?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
 </script>
 
-<Modal title="New pull request" width={520} {onclose}>
+<Modal title="New pull request" width={520} onclose={requestClose} dismissable={!busy && !drafting}>
   <div class="createpr-form">
   {#if branchesError}
     <div class="cp-error" role="alert">
@@ -268,7 +284,7 @@
           <button class="rev-chip-x" title="Remove {r}" aria-label="Remove reviewer {r}" onclick={() => removeReviewer(r)}><Icon name="x" size={12} /></button>
         </span>
       {/each}
-      <input
+      <input dir="auto"
         id="pr-reviewers"
         class="chips-text"
         placeholder={reviewers.length === 0 ? (revLookupFailed ? 'username, Enter to add' : 'Type to search…') : ''}
@@ -321,18 +337,18 @@
     <!-- Live draft terminal, embedded right here in the git flow (the pr-draft
          session is a background source — it no longer appears under Agents). -->
     <div class="draft-term">
-      <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+      <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
     </div>
   {/if}
 
   <div class="field">
     <label for="pr-title">Title</label>
-    <input id="pr-title" class="input" bind:value={title} />
+    <input dir="auto" id="pr-title" class="input" bind:value={title} />
   </div>
 
   <div class="field">
     <label for="pr-desc">Description <span class="dim">(markdown)</span></label>
-    <textarea id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
+    <textarea dir="auto" id="pr-desc" class="input" rows="6" bind:value={description}></textarea>
   </div>
   <!-- Outward: say where it goes and who sees it before the button does it. -->
   <p class="cp-where dim">
@@ -391,6 +407,12 @@
     height: auto;
     min-height: 30px;
     padding: 2px 6px;
+  }
+  /* The bare inner field drops its outline: the chip box carries the ring,
+     like `.input:focus` / `.input-group:focus-within`. */
+  .chips-input:focus-within {
+    border-color: var(--accent-text);
+    box-shadow: 0 0 0 3px var(--accent-soft-strong);
   }
   .chips-text {
     flex: 1;

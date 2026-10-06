@@ -8,6 +8,7 @@
   import { auth } from '../../lib/stores/auth.svelte';
   import Modal from '../../lib/components/Modal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import { onTabKey } from '../../lib/tabKeys';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { router } from '../../lib/router.svelte';
@@ -197,7 +198,7 @@
       {#if mode === 'contexts'}
         <p class="hint">Contexts found in <span class="mono">~/.kube/config</span> and <span class="mono">$KUBECONFIG</span>. Otto reads them in place and never modifies the file. Pick one or more.</p>
         <div class="ctx-tools">
-          <input class="input" placeholder="Filter contexts…" bind:value={ctxFilter} aria-label="Filter contexts" />
+          <input dir="ltr" class="input" placeholder="Filter contexts…" bind:value={ctxFilter} aria-label="Filter contexts" />
           <button class="btn ghost" onclick={() => void discover()} disabled={discovering} aria-label="Rescan" title="Rescan"><Icon name="refresh" size={13} /></button>
         </div>
         {#if discovering}
@@ -225,18 +226,22 @@
         <p class="hint">Otto stores the pasted file under its own data dir (0600) and never touches <span class="mono">~/.kube/config</span>.</p>
         <div class="field">
           <label for="k8s-yaml">kubeconfig YAML</label>
-          <textarea id="k8s-yaml" class="input mono" rows="10" bind:value={yamlText} placeholder="apiVersion: v1&#10;kind: Config&#10;…" spellcheck="false"></textarea>
+          <textarea dir="ltr" id="k8s-yaml" class="input mono" rows="10" bind:value={yamlText} placeholder="apiVersion: v1&#10;kind: Config&#10;…" spellcheck="false"></textarea>
         </div>
         <div class="field">
           <label for="k8s-paste-ctx">Context name <span class="dim">(optional — defaults to the file’s current-context)</span></label>
-          <input id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
+          <input dir="ltr" id="k8s-paste-ctx" class="input mono" bind:value={pasteContext} />
         </div>
       {:else}
-        <div class="eks">
-          <Icon name="cloud" size={22} />
-          <p>EKS clusters are imported from the AWS module: pick an account → EKS → “Open in Kubernetes”. Otto runs <span class="mono">aws eks update-kubeconfig</span> into its own kubeconfig and links the cluster to that account.</p>
-          <button class="btn" onclick={() => { onclose(); router.go('aws'); }}><Icon name="external" size={13} /> Go to AWS</button>
-        </div>
+        <EmptyState
+          icon="cloud"
+          title="EKS clusters come from the AWS module"
+          body="Pick an account → EKS → “Open in Kubernetes”. Otto runs aws eks update-kubeconfig into its own kubeconfig and links the cluster to that account."
+          actionLabel="Go to AWS"
+          actionIcon="external"
+          actionKind="secondary"
+          onaction={() => { onclose(); router.go('aws'); }}
+        />
       {/if}
     {:else}
       {#if !existing && !singleName}
@@ -247,23 +252,23 @@
       {:else}
         <div class="field">
           <label for="k8s-name">Name</label>
-          <input id="k8s-name" class="input" bind:value={name} placeholder="prod-eu-1" data-testid="k8s-wizard-name" />
+          <input dir="auto" id="k8s-name" class="input" bind:value={name} placeholder="prod-eu-1" data-testid="k8s-wizard-name" />
         </div>
         {#if existing || mode === 'contexts'}
           <div class="field">
             <label for="k8s-ctx">Context</label>
-            <input id="k8s-ctx" class="input mono" bind:value={contextName} readonly={!existing || !auth.isRoot} />
+            <input dir="ltr" id="k8s-ctx" class="input mono" bind:value={contextName} readonly={!existing || !auth.isRoot} />
             {#if kubeconfigPath}<span class="hint mono">{kubeconfigPath}</span>{/if}
           </div>
         {/if}
       {/if}
       <div class="field">
         <label for="k8s-ns">Default namespace <span class="dim">(blank = all namespaces)</span></label>
-        <input id="k8s-ns" disabled={!auth.isRoot} class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
+        <input dir="ltr" id="k8s-ns" disabled={!auth.isRoot} class="input mono" bind:value={defaultNs} placeholder="default" autocapitalize="off" autocorrect="off" spellcheck={false} />
       </div>
       <div class="field">
         <label for="k8s-known-ns">Namespaces <span class="dim">(comma-separated; offered in the picker even when the cluster forbids listing them — saved with the cluster)</span></label>
-        <input id="k8s-known-ns" class="input mono" bind:value={knownNsText} placeholder="koala-staging, koala-jobs" autocapitalize="off" autocorrect="off" spellcheck={false} data-testid="k8s-known-ns" />
+        <input dir="ltr" id="k8s-known-ns" class="input mono" bind:value={knownNsText} placeholder="koala-staging, koala-jobs" autocapitalize="off" autocorrect="off" spellcheck={false} data-testid="k8s-known-ns" />
       </div>
       <div class="field">
         <span class="lbl">Environment</span>
@@ -371,21 +376,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  .eks {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-m);
-    color: var(--text-dim);
-    font-size: var(--fs-m);
-    line-height: 1.5;
-  }
-  .eks p {
-    margin: 0;
   }
   .picked-summary {
     font-size: var(--fs-m);

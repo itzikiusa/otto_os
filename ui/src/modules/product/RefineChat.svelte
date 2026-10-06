@@ -168,7 +168,7 @@
         {#each agentProviders() as p (p)}<option value={p}>{p}</option>{/each}
       </select>
     </label>
-    <textarea
+    <textarea dir="auto" aria-label="Message"
       class="msg-input"
       placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
       bind:value={inputText}
@@ -354,7 +354,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .msg-input:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 
@@ -376,7 +376,7 @@
     opacity: 0.88;
   }
   .send-btn:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

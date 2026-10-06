@@ -99,7 +99,7 @@
       <div class="dim pad">No pods match <code class="mono">{selector}</code>.</div>
     {/snippet}
       <div class="wp-head" class:metrics={hasMetrics}>
-        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts"><Icon name="refresh" size={11} /><span class="sr-only">Restarts</span></span>
+        <span>Pod</span><span class="num">Ready</span><span>Status</span><span class="num" title="Restarts"><Icon name="refresh" size={12} /><span class="sr-only">Restarts</span></span>
         {#if hasMetrics}<span class="num">CPU</span><span class="num">MEM</span>{/if}
         <span class="num">Age</span><span></span>
       </div>

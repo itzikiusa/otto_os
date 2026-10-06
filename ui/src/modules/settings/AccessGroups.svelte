@@ -296,8 +296,8 @@
         {/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{selected ? selected.name : 'New group'}</legend>
-          <div class="field"><label for="ag-name">Group name</label><input id="ag-name" class="input" bind:value={name} maxlength="120" placeholder="Database readers" /></div>
-          <div class="field"><label for="ag-desc">Description</label><textarea id="ag-desc" class="input" bind:value={description} rows="2" placeholder="Read-only access to production databases"></textarea></div>
+          <div class="field"><label for="ag-name">Group name</label><input dir="auto" id="ag-name" class="input" bind:value={name} maxlength="120" placeholder="Database readers" /></div>
+          <div class="field"><label for="ag-desc">Description</label><textarea dir="auto" id="ag-desc" class="input" bind:value={description} rows="2" placeholder="Read-only access to production databases"></textarea></div>
           <div class="actions">
             {#if selected}<button class="btn small danger" onclick={removeGroup}><Icon name="trash" size={12} /> Delete group…</button>{/if}
             <span class="grow"></span>
@@ -384,8 +384,8 @@
         {/if}
         <fieldset disabled={busy} class="detail">
           <legend class="detail-title">{roleId ? roleName || 'Preset' : 'New preset'}</legend>
-          <div class="field"><label for="rp-name">Preset name</label><input id="rp-name" class="input" bind:value={roleName} maxlength="120" placeholder="Read-only analyst" /></div>
-          <div class="field"><label for="rp-desc">Preset description</label><textarea id="rp-desc" class="input" bind:value={roleDescription} rows="2"></textarea></div>
+          <div class="field"><label for="rp-name">Preset name</label><input dir="auto" id="rp-name" class="input" bind:value={roleName} maxlength="120" placeholder="Read-only analyst" /></div>
+          <div class="field"><label for="rp-desc">Preset description</label><textarea dir="auto" id="rp-desc" class="input" bind:value={roleDescription} rows="2"></textarea></div>
           <div class="field"><label for="rp-kind">Resource type</label><select
               id="rp-kind"
               class="input"

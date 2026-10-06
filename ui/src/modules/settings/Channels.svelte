@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { NO_WORKSPACE } from '../../lib/labels';
   import { sectionLabel } from './sections';
@@ -378,7 +379,7 @@
         {@const h = health(intg, channel)}
         <!-- Right-click is a pointer shortcut; Enabled, Test, Edit, Remove and
              Set up are controls on the card itself. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="channel-card card"
           class:off={configured && !intg?.enabled}
@@ -488,7 +489,7 @@
       <div class="field">
         <label for="ch-url">Inbound URL</label>
         <div class="row-inline">
-          <input id="ch-url" class="input mono inline-field" value={webhookUrl} readonly spellcheck="false" />
+          <input dir="ltr" id="ch-url" class="input mono inline-field" value={webhookUrl} readonly spellcheck="false" />
           <button class="btn small inline-btn" type="button" onclick={() => void copyText(webhookUrl)}>Copy</button>
         </div>
         <span class="hint">
@@ -564,7 +565,7 @@
             ? 'Default chat ID'
             : 'Default reply callback URL'}
       </label>
-      <input
+      <input dir="ltr"
         id="ch-chid"
         class="input mono"
         bind:value={fChannelId}
@@ -587,7 +588,7 @@
     <!-- Allowed users -->
     <div class="field">
       <label for="ch-users">{editChannel === 'webhook' ? 'Allowed callers' : 'Allowed users'}</label>
-      <input
+      <input dir="auto"
         id="ch-users"
         class="input"
         bind:value={fAllowedUsers}
@@ -638,7 +639,7 @@
     {#if fAgentReply}
       <div class="field">
         <label for="ch-reply">Reply instructions</label>
-        <textarea
+        <textarea dir="auto"
           id="ch-reply"
           class="input reply-area"
           rows={4}

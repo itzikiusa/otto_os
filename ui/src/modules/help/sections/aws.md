@@ -89,7 +89,7 @@ Each account can open seven services: **S3**, **SQS**, **EC2**, **Athena**, **EK
 - Grouped cards, such as queue depth, age of oldest message, CPU, network, disk, IOPS, latency, connections and free storage. Each card shows current, min, max and sum or average.
 
 **Agents (Otto MCP tools)**
-- Agents can call `aws_list_accounts`, `aws_s3_list_buckets`, `aws_s3_list_objects`, `aws_s3_preview`, `aws_sqs_list_queues`, `aws_sqs_peek`, `aws_ec2_list_instances`, `aws_athena_list_tables`, `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups`, `aws_logs_filter`, `aws_logs_insights` and `aws_logs_get_insights`. All of these are read-only.
+- Agents can call `aws_list_accounts`, `aws_s3_list_buckets`, `aws_s3_list_objects`, `aws_s3_preview`, `aws_sqs_list_queues`, `aws_ec2_list_instances`, `aws_athena_list_tables`, `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups`, `aws_logs_filter`, `aws_logs_insights` and `aws_logs_get_insights`. All of these are read-only. `aws_sqs_peek` is approval-gated and needs Edit on SQS: a peek leaves messages visible but raises their receive count, so repeated peeks can move them to a dead-letter queue.
 - `aws_sqs_send` and `aws_athena_query` change state or cost money, so they need approval. Agents can't start, stop or reboot EC2 instances.
 
 ## Keyboard shortcuts

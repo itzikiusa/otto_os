@@ -1298,6 +1298,24 @@ export type OttoEvent =
   | { type: 'session_removed'; session_id: Id; workspace_id: Id }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; title: string; body: string }
   | { type: 'notification'; notice: Notice; user_id?: string | null }
+  // Self-improvement engine (otto-improve) — see docs/contracts/ws.md.
+  | { type: 'improvement_run_started'; workspace_id: Id; run_id: Id }
+  | {
+      type: 'improvement_run_finished';
+      workspace_id: Id;
+      run_id: Id;
+      status: 'done' | 'skipped' | 'failed';
+      applied: number;
+      pending: number;
+    }
+  | { type: 'improvement_edit_applied'; workspace_id: Id; run_id: Id; edit_id: Id; target_ref: string }
+  | {
+      type: 'improvement_approval_pending';
+      workspace_id: Id;
+      run_id: Id;
+      edit_id: Id;
+      target_ref: string;
+    }
   | { type: 'trail_appended'; workspace_id: Id; session_id: Id; event: TrailEvent }
   | {
       type: 'api_history_appended';
@@ -2918,6 +2936,10 @@ export interface AddRepoReq {
   clone_url?: string | null;
   name?: string | null;
   git_account_id?: Id | null;
+  /** Parent directory to clone INTO (repo lands at `<clone_dir>/<name>`; a
+   *  leading `~` is expanded). Defaults to the workspace root. Only meaningful
+   *  with `clone_url`. */
+  clone_dir?: string | null;
 }
 
 /** `PATCH /repos/{id}` — (re)bind the repo's hosting account. The field is
@@ -3413,6 +3435,12 @@ export interface CreatePrReq {
   description: string;
   source_branch: string;
   target_branch: string;
+  /** Proof pack to gate this PR on: Otto refuses to open the PR unless the pack
+   *  is `passed`/`waived` (or `allow_unproven` is set). */
+  proof_pack_id?: string | null;
+  /** Open the PR even over an unproven pack — records an audit `approval`
+   *  artifact on the pack. */
+  allow_unproven?: boolean | null;
   /** Open as a draft (GitHub native flag; GitLab `Draft:` title prefix;
    *  Bitbucket Cloud draft field). Absent = ready for review. */
   draft?: boolean;
@@ -3818,6 +3846,8 @@ export type ReviewAgentStatus = 'pending' | 'running' | 'waiting' | 'done' | 'er
 export interface ReviewFinding {
   path: string | null;
   line: number | null;
+  /** Last line (inclusive) of a multi-line finding, when the reviewer gave one. */
+  line_end?: number | null;
   severity: string; // 'info' | 'warn' | 'bug'
   body: string;
   /** Stable sha2 fingerprint for cross-run deduplication (added A1). */
@@ -3874,6 +3904,12 @@ export interface ReviewComment {
   state: ReviewCommentState;
   posted: boolean;
   created_at: string;
+}
+
+/** PATCH /pr-review-comments/{cid}: edit a draft's body and/or restore a declined comment. */
+export interface EditReviewCommentReq {
+  body?: string;
+  restore_draft?: boolean;
 }
 
 export interface Review {
@@ -6529,6 +6565,17 @@ export interface RunInsightsResp {
   run_id?: string | null;
   /** Human-readable explanation when started === false (e.g. skill not installed). */
   reason?: string | null;
+  /** True when a run for this period was already generating and this request
+   *  attached to it (`run_id` is that run) instead of starting a second one. */
+  attached?: boolean;
+}
+
+/** `GET /insights/runs/active` row — an insights run still generating. */
+export interface ActiveInsightsRun {
+  run_id: string;
+  report_key: string;
+  report_revision: string | null;
+  started_at: string;
 }
 
 export interface InsightReportStatus {
@@ -6555,6 +6602,12 @@ export interface ShareInfo {
   created_at: string;
   /** FIXED expiry (created_at + ttl); never slid for share tokens. */
   expires_at: string;
+}
+
+/** `GET /auth/shares` row — one of the caller's live links, any session. */
+export interface MyShare extends ShareInfo {
+  /** The shared session's title; null when the session no longer exists. */
+  session_title: string | null;
 }
 
 /** `POST /api/v1/sessions/{id}/share` request body. */
@@ -7785,6 +7838,13 @@ export interface SnipCopyResp {
 // ── Browser (reader/annotate tabs + on-demand page fetch) ───────────────────
 
 /** A workspace-scoped browser tab. Mirrors `otto_state::browser::BrowserTab`. */
+/** `POST /browser/proxy-ticket` — single-use ticket for the root-level
+ *  `GET /browser/proxy?url=&ticket=` take-over frame (bound to `url`). */
+export interface BrowserProxyTicket {
+  ticket: string;
+  expires_in_secs: number;
+}
+
 export interface BrowserTab {
   id: Id;
   workspace_id: Id;
@@ -8769,6 +8829,7 @@ export interface SqsMessage {
 export interface SqsPeekReq {
   url: string;
   max?: number;
+  /** Ignored: the daemon always peeks with visibility timeout 0. */
   visibility_timeout?: number;
 }
 
@@ -10546,7 +10607,7 @@ export interface DesignPruneReq {
 }
 
 // ---- Design assist (the unified agent turn, variants, learned rules) ------
-// Mirrors crates/otto-server/src/design_assist.rs + otto-design cite/learn.
+// Mirrors crates/otto-design-assist/src/lib.rs + otto-design cite/learn.
 
 /** `POST /design/artifacts/{id}/assist` modes (`variant` is `/variants` only). */
 export type DesignAssistMode = 'generate' | 'refine' | 'critique' | 'a11y';
@@ -11723,8 +11784,16 @@ export interface TelemetryStatus {
   collector_ready: boolean;
   collector_version: string;
   queued: number;
+  /** Per-minute resource maxima + spike/profile logs awaiting the next flush. */
+  buffered_samples: number;
   dropped: number;
   exported: number;
+  /** Records the collector's ClickHouse exporters gave up on (cumulative). */
+  collector_send_failed: number;
+  /** Exporter queue depth at the end of the last flush. */
+  collector_queue_size: number;
+  /** Last successful flush (unix seconds). */
+  last_flush_at: number | null;
   last_error: string | null;
   last_analysis_at: number | null;
   next_analysis_at: number | null;
@@ -11744,6 +11813,8 @@ export interface TelemetryOverview {
 }
 export interface TelemetrySuggestion extends Omit<TelemetryOperation, 'errors'> {
   id: string; kind: string; threshold_ms: number; window_hours: number;
+  /** Exclusive time over the window (the ranking key); null when unmeasured. */
+  self_ms: number | null;
   observed_at: number; action: string; dismissed: boolean;
   peak_cpu_percent: number | null; peak_rss_mb: number | null;
 }

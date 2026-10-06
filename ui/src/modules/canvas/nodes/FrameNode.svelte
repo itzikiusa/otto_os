@@ -8,6 +8,7 @@
   import { focusOnMount } from '../../../lib/focusOnMount';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
+  import { dblclickEdit, onEditRequest } from '../editRequest.svelte';
 
   interface Props {
     id: string;
@@ -21,8 +22,8 @@
 
   let editing = $state(false);
   let draft = $state('');
-  function startEdit(e: MouseEvent): void {
-    e.stopPropagation();
+  function startEdit(e?: MouseEvent): void {
+    e?.stopPropagation();
     draft = label;
     editing = true;
   }
@@ -35,14 +36,15 @@
       nodes: canvas.scene.nodes.map((n) => (n.id === id ? patched : n)),
     });
   }
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, () => startEdit());
 </script>
 
 <div class="frame" class:selected>
   <Resizer {id} visible={selected} minWidth={200} minHeight={140} />
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="frame-label" ondblclick={startEdit}>
+  <div class="frame-label" use:dblclickEdit={startEdit}>
     {#if editing}
-      <input
+      <input dir="auto" aria-label="Frame label"
         bind:value={draft}
         use:focusOnMount
         onblur={commit}
@@ -93,5 +95,8 @@
     color: var(--text);
     font: inherit;
     width: 120px;
+  }
+  .frame-label input:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 </style>

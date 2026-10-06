@@ -569,6 +569,15 @@ pub async fn retry_run_node(
     }
     // Canceled, but its old driver hasn't noticed yet (it polls; mid retry
     // backoff that took up to a minute): a retry now would run next to it.
+    // A driver that just wrote its terminal status is still delivering and
+    // reaping for a moment — give it a short grace before refusing, so a
+    // Retry clicked right after the run ends doesn't bounce with a 409.
+    for _ in 0..30 {
+        if !workflow_engine::driver_alive(&id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     if workflow_engine::driver_alive(&id) {
         return Err(ApiError(Error::Conflict(
             "the run is still stopping — try again in a few seconds".into(),

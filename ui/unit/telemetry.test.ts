@@ -119,7 +119,7 @@ test('production HTTP wrapper omits a nonexistent response status on rejection',
   let spans: any[] = [];
   t.configureTelemetry(true, async (batch: any[]) => { spans = batch; });
   const { api } = loadSource(new URL('../src/lib/api/client.ts', import.meta.url), {
-    '../telemetry': t,
+    '../telemetry': { ...t, clientSpanName: loadSource(new URL('../src/lib/telemetry.ts', import.meta.url), {}).clientSpanName },
     '../stores/serviceHealth.svelte': { serviceHealth: { report() {} } },
     './lane': loadSource(new URL('../src/lib/api/lane.ts', import.meta.url), {}),
   }, { location: { port: '7700', origin: 'http://localhost:7700' }, fetch: async () => { throw new Error('network failed'); } });
@@ -233,4 +233,23 @@ test('a newer disabled configuration wins over a pending runtime import', async 
   assert.equal(calls, 2);
   assert.deepEqual(states, [false]);
   stop();
+});
+
+test('client spans are named by the daemon route template, never a concrete URL', () => {
+  const hooks = loadSource(new URL('../src/lib/telemetry.ts', import.meta.url), {});
+  assert.equal(hooks.clientSpanName('POST', '/api/v1/repos/{id}/fetch'), 'http.client.post.repos..id..fetch');
+  // No header (telemetry off server-side, older daemon) or anything that is
+  // not a template keeps the generic bucket.
+  assert.equal(hooks.clientSpanName('GET', null), 'http.client');
+  assert.equal(hooks.clientSpanName('GET', '/api/v1/repos/my private?x=1'), 'http.client');
+  assert.ok(hooks.clientSpanName('GET', `/api/v1/${'a/'.repeat(90)}`).length <= 96);
+  const t = load();
+  let spans: any[] = [];
+  t.configureTelemetry(true, async (batch: any[]) => { spans = batch; });
+  t.startMeasurement('http.client', 'git', 'client').finish('ok', {}, 'http.client.get.repos..id..status');
+  t.startMeasurement('http.client', 'git', 'client').finish('ok', {}, 'Bad Name/../');
+  return t.flushTelemetry().then(() => {
+    assert.equal(JSON.stringify(spans.map((s) => s.name)), JSON.stringify(['http.client.get.repos..id..status', 'http.client']));
+    t.configureTelemetry(false);
+  });
 });

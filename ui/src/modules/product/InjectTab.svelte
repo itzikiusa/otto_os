@@ -128,7 +128,7 @@
         </select>
 
         <label class="field-label" for="inject-cwd">cwd</label>
-        <PathField bind:value={cwd} disabled={launching}><input
+        <PathField bind:value={cwd} disabled={launching}><input dir="ltr"
           id="inject-cwd"
           class="cwd-input"
           type="text"
@@ -160,7 +160,7 @@
           {#each bundle.sections as sec, idx (idx)}
             <div class="section-block">
               <button class="sec-trigger" onclick={() => toggleSection(idx)}>
-                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[idx] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                 <span class="sec-heading">{sec.heading}</span>
               </button>
               {#if !collapsed[idx]}

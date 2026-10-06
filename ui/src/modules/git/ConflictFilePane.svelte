@@ -5,6 +5,7 @@
   // recomposed file (context + chosen lines), with "conflict k of m" navigation
   // that scrolls the hunk list. When every conflict has a choice the file can
   // be "marked resolved" — we recompose the full file text and POST it.
+  import { scrollBehavior } from '../../lib/motion';
   import type { ConflictFile, ConflictSegment } from '../../lib/api/types';
   import { toastError } from '../../lib/toastError';
   import { git } from '../../lib/stores/git.svelte';
@@ -104,7 +105,7 @@
     if (conflictCount === 0) return;
     const next = ((ord % conflictCount) + conflictCount) % conflictCount;
     current = next;
-    hunkEls[next]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    hunkEls[next]?.scrollIntoView({ behavior: scrollBehavior(), block: 'center' });
   }
 
   // ── Output preview ──────────────────────────────────────────────────────────
@@ -314,7 +315,7 @@
               {/if}
             {:else}
               <button class="out-unresolved" onclick={() => goTo(seg.ord)} title="Jump to conflict {seg.ord + 1}">
-                <Icon name="merge" size={11} />
+                <Icon name="merge" size={12} />
                 conflict {seg.ord + 1} — unresolved
               </button>
             {/if}

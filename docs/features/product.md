@@ -47,13 +47,15 @@ the session manager + improvement engine), and a Svelte UI module.
 | · skills | `crates/otto-product/src/skills.rs` + `crates/otto-product/assets/skills/` | The bundled agent skills, version-gated seed into the library |
 | · memory | `crates/otto-product/src/memory_facade.rs`, `extract.rs` | Ingest structured artifacts into `otto-memory`; deterministic extractors |
 | Persistence | `crates/otto-state/src/product.rs` | `ProductRepo` + the `product_*` tables |
-| Orchestration | `crates/otto-server/src/product_run.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers |
-| Watcher | `crates/otto-server/src/product_watcher.rs` | The background poll/reconcile supervisor |
-| Swarm bridge | `crates/otto-server/src/product_swarm.rs` | `story_to_swarm` (Plan → Swarm) |
+| Orchestration | `crates/otto-product/src/run.rs` + `host.rs` | `run_analysis` / `run_rewrite` / `run_generate_tests` / `run_generate_plan`, retries, summarizers — generic over the `ProductRunHost` trait |
+| · PTY mechanics | `crates/otto-server/src/product_agent.rs` | `ProductRunHost` for `ServerCtx`: spawn a provider as a real session, inject the prompt (codex settle + repaste), watch to a result with bounded recovery |
+| Watcher | `crates/otto-product/src/watcher.rs` | The background poll/reconcile supervisor |
+| Swarm bridge | `crates/otto-product/src/swarm.rs` | `story_to_swarm` (Plan → Swarm), discovery runs |
+| Discovery chat / refinement | `crates/otto-product/src/chat.rs`, `refine.rs` | Conversational story agents — generic over the `ProductStudioHost` trait (`host.rs`), implemented for `ServerCtx` in `crates/otto-server/src/product_host.rs` |
 | Memory route | `crates/otto-server/src/routes/product_memory.rs` | `POST …/memory/ingest` |
 | Issue trackers | `crates/otto-issues/` | The Jira/Confluence clients (`JiraClient`, `ConfluenceClient`) Product proxies through |
-| Design formats | `crates/otto-server/src/design_format.rs`, `design_scene3d.rs`, `design_blender.rs` | The single `DesignFormat` enum (html · mermaid · excalidraw · scene3d), the `scene3d` validator + deterministic Blender-script generator, Blender detection / render jobs |
-| Media | `crates/otto-server/src/product_media.rs`, `mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
+| Design formats | `crates/otto-product/src/design_format.rs`, `design_scene3d.rs`, `crates/otto-server/src/design_blender.rs` | The single `DesignFormat` enum (html · mermaid · excalidraw · scene3d), the `scene3d` validator + deterministic Blender-script generator, Blender detection / render jobs |
+| Media | `crates/otto-product/src/media.rs`, `crates/otto-server/src/mockup_assist.rs` | Attachment upload / content PUT (mime allow-list, sniffing, size caps), the in-place file-backed assist agent |
 | UI | `ui/src/modules/product/` | `ProductPage.svelte` + per-tab components; `types.ts` mirrors the DTOs |
 | · Design Arena | `ui/src/modules/product/design/` | `DesignArena.svelte` (assets / viewport / inspector / assistant shell), `DesignBoard.svelte` (Excalidraw island), `DeviceFrame.svelte`, templates, exporters |
 | · 3D | `ui/src/modules/product/design/scene3d/` | `Scene3DViewport.svelte` (lazy three.js), `Hierarchy.svelte`, `Inspector.svelte`, `types.ts` / `validate.ts` / `ops.ts` (pure doc mutations) / `exportGlb.ts` |
@@ -167,7 +169,7 @@ pending suggestions).
 
 **Behind it** — `POST /workspaces/{id}/product/stories/{sid}/analyze`
 (`AnalyzeReq`) returns **200** with the created `ProductAnalysis` row, then
-`product_run::run_analysis` fans out in the background:
+`otto_product::run::run_analysis` fans out in the background:
 
 - **Defaults when `agents` is empty:** the three lenses above, all on the
   resolved default provider (workspace → global → `claude`).

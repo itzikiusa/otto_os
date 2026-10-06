@@ -35,14 +35,19 @@ export interface OrchestrateCtx {
   /** Rewrite the prompt before planning / fall through to the AI planner. */
   optimize: boolean;
   aiFallback: boolean;
-  /** Return permanent deletes as `confirm-close` instead of running them. */
+  /** Return permanent deletes — and archives that end more than one session
+   *  or a working one — as `confirm-close` instead of running them (the same
+   *  guard the tab bar's multi-close has). */
   confirmDestructive?: boolean;
+  /** Whether a session is an agent mid-turn. Defaults to its listed
+   *  `status` (shells never count); the main window passes the live map. */
+  isWorking?: (id: Id) => boolean;
 }
 
 export type EnglishOutcome =
   | { kind: 'empty' }
   | { kind: 'closed'; count: number; permanent: boolean }
-  | { kind: 'confirm-close'; ids: Id[]; titles: string[]; permanent: boolean }
+  | { kind: 'confirm-close'; ids: Id[]; titles: string[]; permanent: boolean; working: number }
   | { kind: 'nothing-to-close' }
   | { kind: 'sent'; count: number; broadcast: boolean; message: string }
   | { kind: 'not-delivered' }
@@ -55,34 +60,50 @@ export type EnglishOutcome =
 // "close <name>" command (verbs, fillers, nouns, providers, numbers).
 const CLOSE_SKIP = new Set([
   'please', 'pls', 'kindly', 'close', 'kill', 'end', 'stop', 'terminate',
-  'quit', 'remove', 'exit', 'shut', 'down', 'and', 'the', 'all', 'every',
+  'quit', 'remove', 'exit', 'shut', 'down', 'delete', 'destroy', 'and', 'the', 'all', 'every',
   'everything', 'everyone', 'them', 'session', 'sessions', 'pane', 'panes',
   'tab', 'tabs', 'terminal', 'terminals', 'window', 'windows', 'agent', 'agents',
   'claude', 'codex', 'agy', 'shell', 'gemini', 'antigravity', 'gpt', 'bash', 'zsh',
 ]);
 
-/** The folded tokens an open agent session answers to: its handle, title, and
- *  the individual words of both (so "diego" matches "Diego Ferreira"). */
-function sessionAnswerTokens(s: { title: string; meta?: unknown }): Set<string> {
+/** The WHOLE names an open agent session answers to, lowercased: its handle,
+ *  its title and its full name. Never the single words of a multi-word title —
+ *  "fix the tests" must not address a session titled "Fix login tests", and
+ *  "close login" must not archive it. A multi-word name is matched as a phrase
+ *  ({@link matchNameAt}); anything else falls through to the AI planner, whose
+ *  plan the person confirms. */
+export function sessionNames(s: { title: string; meta?: unknown }): Set<string> {
   const meta = s.meta as Record<string, unknown> | undefined;
-  const handle = String(meta?.name_handle ?? s.title).toLowerCase();
-  const full = String(meta?.name_full ?? '').toLowerCase();
-  return new Set(
-    [handle, s.title.toLowerCase(), ...full.split(/\s+/), ...s.title.toLowerCase().split(/\s+/)]
-      .filter(Boolean),
-  );
+  const norm = (v: unknown): string => String(v ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
+  return new Set([norm(meta?.name_handle), norm(s.title), norm(meta?.name_full)].filter(Boolean));
 }
 
-/** Open agent session ids whose answer-tokens include `tok` (lowercased).
- *  Only VISIBLE foreground sessions answer to a name — hidden background
- *  ones (workflow steps, review agents, …) share common title words like
- *  "open"/"tests" and would hijack ordinary commands if they counted. */
-function matchSessionsByToken(ctx: OrchestrateCtx, tok: string): string[] {
-  const ids: string[] = [];
-  for (const s of ctx.nameable) {
-    if (sessionAnswerTokens(s).has(tok)) ids.push(s.id);
+/** Longest name phrase in `tokens` starting at `i` (an optional leading `@`,
+ *  trailing `:`/`,` ends the phrase). Only VISIBLE foreground sessions answer
+ *  to a name — hidden background ones (workflow steps, review agents, …) share
+ *  common title words like "open"/"tests" and would hijack ordinary commands.
+ *  Returns the matched ids and how many tokens the name used. */
+export function matchNameAt(
+  nameable: ReadonlyArray<{ id: string; title: string; meta?: unknown }>,
+  tokens: string[],
+  i: number,
+): { ids: string[]; len: number } {
+  const names = nameable.map((s) => ({ id: s.id, names: sessionNames(s) }));
+  const words: string[] = [];
+  let best: { ids: string[]; len: number } = { ids: [], len: 0 };
+  for (let j = i; j < tokens.length && j - i < 8; j++) {
+    let w = tokens[j].toLowerCase();
+    if (j === i) w = w.replace(/^@/, '');
+    const stop = /[:,]$/.test(w);
+    w = w.replace(/[:,]+$/, '');
+    if (w === '') break;
+    words.push(w);
+    const phrase = words.join(' ');
+    const ids = names.filter((n) => n.names.has(phrase)).map((n) => n.id);
+    if (ids.length > 0) best = { ids, len: j - i + 1 };
+    if (stop) break;
   }
-  return ids;
+  return best;
 }
 
 /** Remove the first `n` whitespace-delimited words from `text`. */
@@ -97,17 +118,44 @@ function stripLeadingWords(text: string, n: number): string {
   return rest.trimStart();
 }
 
-/** Resolve the open agent sessions a "close/delete <name>" command names. */
-function resolveCloseNames(ctx: OrchestrateCtx, text: string): string[] {
+/** Resolve the open agent sessions a "close/delete <name>" command names.
+ *  EVERY remaining word must be filler (verbs, "the", "and", "session"…) or
+ *  part of a whole session name — "close ronaldo and messi" resolves, "close
+ *  the login bug" does not (even with a "Login" session open) and falls
+ *  through to the AI planner's confirm step. */
+export function resolveCloseNames(
+  nameable: ReadonlyArray<{ id: string; title: string; meta?: unknown }>,
+  text: string,
+): string[] {
   const toks = text
     .toLowerCase()
-    .replace(/[:,]/g, ' ')
+    .replace(/,/g, ' ')
     .split(/\s+/)
-    .filter((t) => t.length >= 2 && !CLOSE_SKIP.has(t) && !/^\d+$/.test(t));
-  if (toks.length === 0) return [];
+    .filter(Boolean);
   const ids = new Set<string>();
-  for (const t of toks) for (const id of matchSessionsByToken(ctx, t)) ids.add(id);
-  return [...ids];
+  let named = false;
+  for (let i = 0; i < toks.length; ) {
+    const m = matchNameAt(nameable, toks, i);
+    if (m.len > 0) {
+      for (const id of m.ids) ids.add(id);
+      named = true;
+      i += m.len;
+      continue;
+    }
+    if (!CLOSE_SKIP.has(toks[i].replace(/[:@]/g, ''))) return [];
+    i += 1;
+  }
+  return named ? [...ids] : [];
+}
+
+const EXPLICIT_CLOSE = /^\s*(?:please\s+|pls\s+|kindly\s+)?(?:close|kill|delete|destroy)\b/i;
+
+/** An agent mid-turn. `working` only means recent output, so a plain shell
+ *  never counts (its prompt redraw would make every shell close ask). */
+function isWorking(ctx: OrchestrateCtx, id: Id): boolean {
+  if (ctx.isWorking) return ctx.isWorking(id);
+  const s = ctx.sessions.find((x) => x.id === id);
+  return s?.status === 'working' && s.provider !== 'shell';
 }
 
 /** Close ids now (archive, or delete when `permanent`). */
@@ -133,6 +181,7 @@ async function handleClose(
   const order = ctx.order;
 
   let ids: string[] = [];
+  let byNameAmbiguous = false;
   // A structured target (provider / all / position) is a DELIBERATE close — we
   // warn rather than fall through when it matches nothing.
   const deliberate = !!req && (!!req.provider || req.all || req.positions.length > 0);
@@ -151,17 +200,23 @@ async function handleClose(
   } else {
     // Name-based ("close ronaldo"). If nothing matches, fall through — the text
     // may be a free-form request ("delete the temp files") for the AI.
-    ids = resolveCloseNames(ctx, text);
+    ids = resolveCloseNames(ctx.nameable, text);
     if (ids.length === 0) return null;
+    // "stop messi" / "end messi" / "remove messi" may as well mean "tell messi
+    // to stop" — only an explicit close/kill/delete closes by name unasked.
+    byNameAmbiguous = !EXPLICIT_CLOSE.test(text);
   }
 
   if (ids.length === 0) {
     if (!deliberate) return null;
     return { kind: 'nothing-to-close' };
   }
-  if (permanent && ctx.confirmDestructive) {
+  // Ask first — like the tab bar's multi-close — for a permanent delete, an
+  // archive that ends more than one session, or one that stops a working agent.
+  const working = ids.filter((id) => isWorking(ctx, id)).length;
+  if (ctx.confirmDestructive && (permanent || ids.length > 1 || working > 0 || byNameAmbiguous)) {
     const titles = ids.map((id) => ctx.sessions.find((s) => s.id === id)?.title ?? id);
-    return { kind: 'confirm-close', ids, titles, permanent };
+    return { kind: 'confirm-close', ids, titles, permanent, working };
   }
   const count = await applyClose(ctx, ids, permanent);
   return { kind: 'closed', count, permanent };
@@ -219,21 +274,24 @@ function resolveAddress(
     return null;
   }
 
-  // By name, greedily from the start ("ronaldo …", "ronaldo, messi: …").
+  // By WHOLE name, greedily from the start ("ronaldo …", "ronaldo, messi: …",
+  // "fix login tests: …" for a session titled that). A lone word of a
+  // multi-word title never addresses it — that text goes to the planner.
   const matched: string[] = [];
   let consumedN = 0;
-  for (let i = 0; i < tokens.length; i++) {
-    const bare = tokens[i].toLowerCase().replace(/^@/, '').replace(/[:,]+$/, '');
-    if (bare === '') break;
+  for (let i = 0; i < tokens.length; ) {
+    const bare = tokens[i].toLowerCase().replace(/[:,]+$/, '');
     if ((bare === 'and' || bare === '&') && matched.length > 0) {
       consumedN = i + 1;
+      i += 1;
       continue;
     }
-    const hit = matchSessionsByToken(ctx, bare);
-    if (hit.length === 0) break;
-    for (const id of hit) if (!matched.includes(id)) matched.push(id);
-    consumedN = i + 1;
-    if (tokens[i].endsWith(':')) break;
+    const hit = matchNameAt(ctx.nameable, tokens, i);
+    if (hit.len === 0) break;
+    for (const id of hit.ids) if (!matched.includes(id)) matched.push(id);
+    i += hit.len;
+    consumedN = i;
+    if (tokens[i - 1].endsWith(':')) break;
   }
   if (matched.length === 0) return null; // not addressed → fall through
   const message = stripLeadingWords(s, consumedN).replace(/^[:,]\s*/, '').replace(/^to\s+/i, '').trim();

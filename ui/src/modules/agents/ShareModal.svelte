@@ -289,7 +289,7 @@
           before creating OTP-gated links.
         </div>
       {/if}
-      <input
+      <input dir="ltr"
         id="sm-recipient"
         class="sm-input"
         type="email"
@@ -328,7 +328,7 @@
 
     <div class="sm-row">
       <label class="sm-label" for="sm-label">Label (optional)</label>
-      <input
+      <input dir="auto"
         id="sm-label"
         class="sm-input"
         type="text"
@@ -593,7 +593,7 @@
     color: var(--accent-text);
   }
   .sm-link-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .sm-link-btn.danger {
@@ -688,7 +688,7 @@
     background: color-mix(in srgb, var(--danger) 10%, transparent);
   }
   .sm-revoke-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
 </style>

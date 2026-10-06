@@ -115,7 +115,7 @@
       product.tab = 'overview';
       onclose();
     } catch (e) {
-      formError = e instanceof Error ? e.message : String(e);
+      formError = loadErrorText(e);
     } finally {
       submitting = false;
     }
@@ -202,7 +202,7 @@
           aria-expanded={showManual}
           onclick={() => (showManual = !showManual)}
         >
-          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={11} />
+          <Icon name={showManual ? 'chevronDown' : 'chevronRight'} size={12} />
           Enter {sourceKind === 'jira' ? 'issue key' : 'page ID'} manually
         </button>
       </div>
@@ -212,7 +212,7 @@
           <label class="label" for="import-key">
             {sourceKind === 'jira' ? 'Issue key' : 'Page ID or URL'}
           </label>
-          <input
+          <input dir="auto"
             id="import-key"
             class="input"
             bind:value={manualKey}
@@ -227,7 +227,7 @@
       <div class="field">
         <label class="label" for="import-cwd">Repository path <span class="dim">(optional)</span></label>
         <PathField bind:value={cwd}>
-          <input
+          <input dir="ltr"
             id="import-cwd"
             class="input"
             bind:value={cwd}

@@ -139,8 +139,8 @@
   {#if alerts.length > 0 || (!loading && !loadError)}
     <h5 class="create-head">Add alert</h5>
     <div class="create-row">
-      <input type="text" bind:value={newTopic} placeholder="orders.events" class="field" aria-label="Topic" />
-      <input type="text" bind:value={newGroup} placeholder="billing-service" class="field wide" aria-label="Consumer group" />
+      <input dir="ltr" type="text" bind:value={newTopic} placeholder="orders.events" class="field" aria-label="Topic" />
+      <input dir="auto" type="text" bind:value={newGroup} placeholder="billing-service" class="field wide" aria-label="Consumer group" />
       <label class="thresh-label">
         Threshold
         <input type="number" bind:value={newThreshold} min="1" class="narrow" />

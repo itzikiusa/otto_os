@@ -320,7 +320,7 @@
         <option value="">Any risk</option>
         {#each RISK_LEVELS as r (r)}<option value={r}>{RISK_LABEL[r]}</option>{/each}
       </select>
-      <input class="input search" type="search" placeholder="Filter by title…" bind:value={q} oninput={onQInput} aria-label="Filter work items by title" />
+      <input dir="ltr" class="input search" type="search" placeholder="Filter by title…" bind:value={q} oninput={onQInput} aria-label="Filter work items by title" />
       {#if hasFilters}<button class="btn ghost small" onclick={clearFilters}>Clear filters</button>{/if}
     </div>
     <div class="segmented view-toggle" role="tablist" aria-label="View" tabindex="-1" onkeydown={onTabKey}>

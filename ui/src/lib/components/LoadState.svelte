@@ -69,7 +69,7 @@
     </div>
   {:else}
     <div class="ls-error" class:page={variant === 'page'} role="alert" data-testid="load-error">
-      <div class="ls-icon"><Icon name="warning" size={variant === 'page' ? 26 : 22} /></div>
+      <div class="ls-icon"><Icon name="warning" size={variant === 'page' ? 26 : 24} /></div>
       <h3>Couldn’t load {what}</h3>
       <p class="ls-detail">{error}</p>
       {#if onretry || errorActions}

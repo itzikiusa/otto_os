@@ -4,6 +4,7 @@
   import { toastError } from '../../lib/toastError';
   import { sectionLabel } from './sections';
   import SectionIntro from './SectionIntro.svelte';
+  import { router } from '../../lib/router.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Settings → Skills: the catalogue of skills that ship with Otto ("bundled"),
   // shown grouped by category with their state relative to the installed library
@@ -253,7 +254,7 @@
 <div class="settings-section">
   <PageHeader title={sectionLabel('skills')} subtitle="Skills that ship with Otto" />
   <PageBody width="readable">
-  <SectionIntro>Installing a skill adds it to your library and to each agent CLI’s global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced.</SectionIntro>
+  <SectionIntro>Installing a skill adds it to your library and to each agent CLI’s global skills folder, so Claude, Codex and agy can all use it. Your edited copies are always backed up before being replaced. To <strong>edit, test or evaluate</strong> a skill, open it in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button>; its files live in the <button type="button" class="intro-link" onclick={() => router.go('settings/context-library')}>Context library</button>.</SectionIntro>
 
   <LoadState what="bundled skills" {loading} error={loadError} empty={skills.length === 0} rows={5} onretry={() => void load()}>
     {#snippet emptyView()}
@@ -267,7 +268,7 @@
     <div class="toolbar">
       <label class="filter">
         <Icon name="search" size={12} />
-        <input
+        <input dir="ltr"
           type="search"
           class="filter-input"
           bind:value={query}

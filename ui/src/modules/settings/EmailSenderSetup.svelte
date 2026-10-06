@@ -4,6 +4,7 @@
   import SectionIntro from './SectionIntro.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import ActiveShareLinks from './ActiveShareLinks.svelte';
   // Settings → Sharing: configure a Gmail App Password sender for email-OTP shares.
   // The app password is write-only (never echoed back from the server); the form
   // always shows an empty password field so the user can update it without seeing the
@@ -172,6 +173,9 @@
   <PageBody width="readable">
   <SectionIntro>Configure a Gmail sender so Otto can email a one-time code to each guest before they attach to a shared session. A leaked link alone is useless without the guest’s mailbox.</SectionIntro>
 
+  <!-- ── Every live share link, across sessions ── -->
+  <ActiveShareLinks />
+
   <!-- ── Gmail sender: status + setup form in one card ── -->
   <div class="section-title">Gmail sender</div>
   <LoadState what="the email sender" {loading} error={loadError} empty={!status} onretry={() => void load()} rows={2}>
@@ -205,7 +209,7 @@
 
     <div class="field">
       <label for="es-gmail">Gmail address</label>
-      <input
+      <input dir="ltr"
         id="es-gmail"
         class="input"
         type="email"
@@ -274,7 +278,7 @@
     {/if}
     <div class="field">
       <label for="es-base-url">Domain for share links</label>
-      <input
+      <input dir="ltr"
         id="es-base-url"
         class="input"
         type="url"

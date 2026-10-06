@@ -144,13 +144,17 @@ fn prune_ignored(dir: &Path) {
     for entry in rd.flatten() {
         let name = entry.file_name();
         let p = entry.path();
+        // `file_type` does NOT follow symlinks (`Path::is_dir` does): a
+        // symlinked dir is unlinked as a file, never recursed into — pruning
+        // must not reach through a link and delete files outside the stage.
+        let is_real_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         if is_ignored(&name.to_string_lossy()) {
-            let _ = if p.is_dir() {
+            let _ = if is_real_dir {
                 std::fs::remove_dir_all(&p)
             } else {
                 std::fs::remove_file(&p)
             };
-        } else if p.is_dir() {
+        } else if is_real_dir {
             prune_ignored(&p);
         }
     }
@@ -501,16 +505,10 @@ async fn apply_fixes(
         .get(&review.workspace_id)
         .await
         .map_err(ApiError)?;
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let provider = ctx
+        .resolve_provider(Some(&ws), Some(&req.provider))
         .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.trim(),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
     let row = SkillReviewAgent {
         name: "fixer".into(),
         provider: provider.clone(),
@@ -1380,3 +1378,202 @@ fn merge_summary(
 // ---------------------------------------------------------------------------
 
 include!("skill_review_static.rs");
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // sync fs in test fixtures
+mod staging_tests {
+    use super::*;
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// A skill tree carrying every kind of local-machine artifact.
+    fn messy_skill(root: &Path) {
+        write(&root.join("SKILL.md"), "---\nname: s\n---\n");
+        write(&root.join("scripts/run.py"), "print(1)");
+        write(&root.join(".mcp.json"), r#"{"token":"live-secret"}"#);
+        write(&root.join(".env"), "TOKEN=1");
+        write(&root.join(".env.local"), "TOKEN=2");
+        write(&root.join("scripts/.env.production"), "TOKEN=3");
+        write(&root.join(".git/config"), "[core]");
+        write(&root.join("node_modules/x/index.js"), "");
+        write(&root.join("scripts/__pycache__/run.pyc"), "");
+        write(&root.join(".DS_Store"), "");
+    }
+
+    fn listing(root: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let rel = e
+                    .path()
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                out.push(rel);
+                if e.file_type().unwrap().is_dir() {
+                    walk(base, &e.path(), out);
+                }
+            }
+        }
+        walk(root, root, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn ignored_entries_cover_env_variants_but_not_lookalikes() {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            ".mcp.json",
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".DS_Store",
+        ] {
+            assert!(is_ignored(name), "{name} must be stripped");
+        }
+        for name in [
+            "env",
+            ".envrc",
+            "my.env",
+            "SKILL.md",
+            ".mcp.json.example",
+            "scripts",
+        ] {
+            assert!(!is_ignored(name), "{name} is part of the package");
+        }
+    }
+
+    #[test]
+    fn copy_skill_tree_strips_local_artifacts_at_every_depth() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        messy_skill(src.path());
+        copy_skill_tree(src.path(), &dst.path().join("s")).unwrap();
+        assert_eq!(
+            listing(&dst.path().join("s")),
+            vec!["SKILL.md", "scripts", "scripts/run.py"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_skill_tree_skips_symlinks() {
+        let outside = tempfile::tempdir().unwrap();
+        write(&outside.path().join("secret.txt"), "outside the package");
+        let src = tempfile::tempdir().unwrap();
+        write(&src.path().join("SKILL.md"), "x");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            src.path().join("link.txt"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), src.path().join("linkdir")).unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        copy_skill_tree(src.path(), &dst.path().join("s")).unwrap();
+        assert_eq!(listing(&dst.path().join("s")), vec!["SKILL.md"]);
+    }
+
+    #[test]
+    fn prune_ignored_strips_a_staged_tree_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        messy_skill(dir.path());
+        prune_ignored(dir.path());
+        assert_eq!(
+            listing(dir.path()),
+            vec!["SKILL.md", "scripts", "scripts/run.py"]
+        );
+    }
+
+    /// Regression: pruning followed a symlinked directory (`Path::is_dir`) and
+    /// deleted `.env`/`.mcp.json` files OUTSIDE the staged copy.
+    #[cfg(unix)]
+    #[test]
+    fn prune_ignored_never_reaches_through_a_symlinked_dir() {
+        let outside = tempfile::tempdir().unwrap();
+        write(&outside.path().join(".env"), "keep me");
+        write(&outside.path().join(".mcp.json"), "keep me");
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("SKILL.md"), "x");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("vendor")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("node_modules")).unwrap();
+        prune_ignored(dir.path());
+        assert!(
+            outside.path().join(".env").exists(),
+            "pruning deleted a file outside the stage"
+        );
+        assert!(outside.path().join(".mcp.json").exists());
+        assert!(
+            !dir.path().join("node_modules").exists(),
+            "the ignored link itself is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_skill_dir_rejects_traversal_and_bundled_and_resolves_library_skills() {
+        use crate::routes::browser::tests::{mem_pool, test_ctx};
+        let data = tempfile::tempdir().unwrap();
+        let pool = mem_pool().await;
+        let mut ctx = test_ctx(&pool, data.path().to_path_buf()).await;
+        let lib = tempfile::tempdir().unwrap();
+        ctx.context_library = otto_context::Library::new(lib.path());
+        let skill = ctx.context_library.skill_dir("good").unwrap();
+        write(&skill.join("SKILL.md"), "x");
+
+        for bad in ["../good", "..", ".", "", "a/b", "a\\b", "x\0y"] {
+            for source in ["library", "claude", "codex", "bundled"] {
+                let err = real_skill_dir(&ctx, bad, source).unwrap_err();
+                assert!(
+                    matches!(err, otto_core::Error::Invalid(_)),
+                    "{source}/{bad:?}: {err:?}"
+                );
+            }
+        }
+        assert!(matches!(
+            real_skill_dir(&ctx, "good", "bundled"),
+            Err(otto_core::Error::Invalid(_))
+        ));
+        assert!(matches!(
+            real_skill_dir(&ctx, "missing", "library"),
+            Err(otto_core::Error::NotFound(_))
+        ));
+        let dir = real_skill_dir(&ctx, "good", "library").unwrap();
+        assert_eq!(dir, skill);
+        assert!(dir.starts_with(lib.path()));
+    }
+
+    #[tokio::test]
+    async fn stage_target_copies_a_library_skill_without_secrets() {
+        use crate::routes::browser::tests::{mem_pool, test_ctx};
+        let data = tempfile::tempdir().unwrap();
+        let pool = mem_pool().await;
+        let mut ctx = test_ctx(&pool, data.path().to_path_buf()).await;
+        let lib = tempfile::tempdir().unwrap();
+        ctx.context_library = otto_context::Library::new(lib.path());
+        let skill = ctx.context_library.skill_dir("messy").unwrap();
+        messy_skill(&skill);
+        let staged = stage_target(&ctx, "messy", "library").unwrap();
+        assert!(
+            !staged.path().starts_with(lib.path()),
+            "review runs on a copy"
+        );
+        assert_eq!(
+            listing(staged.path()),
+            vec!["SKILL.md", "scripts", "scripts/run.py"]
+        );
+        assert!(
+            skill.join(".mcp.json").exists(),
+            "the real skill keeps its local files"
+        );
+        assert!(matches!(
+            stage_target(&ctx, "../messy", "library"),
+            Err(otto_core::Error::Invalid(_))
+        ));
+    }
+}

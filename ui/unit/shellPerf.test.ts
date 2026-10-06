@@ -94,7 +94,7 @@ function notificationsModule() {
     './workspace.svelte': { ws: { sessions: [] } },
     '../desktop': { isEmbedded: false },
     '../router.svelte': { router: { go() {} } },
-    '../noticeRoute': { parseNoticeRoute: () => null },
+    '../noticeRoute': { parseNoticeRoute: () => null }, '../confirm.svelte': { confirmer: { ask: async () => true } },
   });
 }
 

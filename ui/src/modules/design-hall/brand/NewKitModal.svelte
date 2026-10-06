@@ -55,7 +55,7 @@
   >
     <label class="field">
       <span>Name</span>
-      <input class="input" bind:value={name} placeholder="Acme brand" maxlength="200" />
+      <input dir="auto" class="input" bind:value={name} placeholder="Acme brand" maxlength="200" />
     </label>
     <fieldset>
       <legend>Start from</legend>

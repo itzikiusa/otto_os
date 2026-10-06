@@ -21,6 +21,10 @@ path = "tests/snips.rs"
 
 [features]
 default = []
+# Test fixtures (`otto_server::test_support`, `ServerCtx::for_tests`). Enabled for
+# this crate's own integration tests by the self dev-dependency below; never in
+# a release build.
+test-util = []
 
 [dependencies]
 hex = { workspace = true }
@@ -29,7 +33,10 @@ tokio-util = { version = "0.7.19", features = ["io"] }
 tempfile.workspace = true
 rustix = { workspace = true, features = ["process"] }
 otto-core.workspace = true
+otto-assistant.workspace = true
 otto-state.workspace = true
+# Scheduled tasks + Goal Loops engines (glue: src/automation_ctx.rs).
+otto-automation.workspace = true
 otto-rbac.workspace = true
 otto-netguard.workspace = true
 tokio.workspace = true
@@ -57,18 +64,23 @@ otto-git.workspace = true
 otto-issues.workspace = true
 otto-channels.workspace = true
 otto-improve.workspace = true
+otto-insights.workspace = true
 otto-context.workspace = true
 otto-skills.workspace = true
 otto-usage.workspace = true
 otto-telemetry.workspace = true
+otto-agent-run.workspace = true
+otto-review.workspace = true
 # Conversation view: the shared transcript parser (design docs/design/conversation-view.md).
 otto-transcript.workspace = true
 otto-product.workspace = true
 otto-canvas.workspace = true
 # Design Hall — the artifact graph (projects / artifacts / versions / links).
 otto-design.workspace = true
+otto-design-assist.workspace = true
 otto-swarm.workspace = true
 otto-workgraph.workspace = true
+otto-workflows.workspace = true
 otto-memory.workspace = true
 otto-vault.workspace = true
 otto-pty.workspace = true
@@ -79,11 +91,9 @@ chrono.workspace = true
 chrono-tz = "0.10.4"
 base64.workspace = true
 tokio-tungstenite.workspace = true
-protox.workspace = true
-prost.workspace = true
-prost-reflect.workspace = true
-prost-types.workspace = true
-tonic.workspace = true
+# API-client engines: gRPC (tonic/protox/prost-reflect) + boa_engine scripts,
+# split out so server edits don't re-check those dependency trees.
+otto-apiclient.workspace = true
 uuid.workspace = true
 rand.workspace = true
 reqwest_cookie_store.workspace = true
@@ -91,15 +101,14 @@ sha2.workspace = true
 # TURN REST credentials: ephemeral HMAC-SHA1, never return the shared secret.
 hmac = "0.13.0"
 sha1 = "0.11.0"
-# Server-side pre/post request scripts for API-client automations: pure-Rust JS
-# engine (no native build deps) running the same `pm` API the UI runner defines.
-boa_engine = "0.22.0"
 
 # Secrets store status + the confirmed "Secure secrets" migration
 # (`/admin/secrets/*`); browser-credential route tests also use its FileStore.
 otto-keychain.workspace = true
 
 [dev-dependencies]
+# Self dev-dependency: turns on `test-util` for tests/*.rs.
+otto-server = { path = ".", features = ["test-util"] }
 # RBAC guard integration tests drive a minimal router via tower's oneshot and
 # read the response body. Pinned to the versions axum 0.8 already resolves.
 tower = { version = "0.5.3", features = ["util"] }
@@ -109,12 +118,6 @@ wiremock = "0.6.5"
 # browser_login's audit-log test captures real `tracing` output (via a custom
 # `MakeWriter`) to assert the domain is logged and the password never is.
 tracing-subscriber.workspace = true
-# The gRPC endpoint test builds a TLS config, which needs the process-level
-# rustls provider `ottod` installs at startup. Same version/feature ottod pins.
-rustls = { version = "0.23.45", default-features = false, features = ["ring"] }
-# The gRPC channel-reuse test (perf N5) dials a minimal h2c server. Same
-# version tonic/hyper already resolve.
-h2 = "0.4.19"
 
 # Local shared-screen OCR; Vision ships with macOS (no cloud credentials).
 [target.'cfg(target_os = "macos")'.dependencies]

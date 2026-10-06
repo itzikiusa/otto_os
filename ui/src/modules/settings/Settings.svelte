@@ -1,35 +1,11 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   // Settings layout: subnav + routed page (#/settings/<page>). The section
   // list itself lives in ./sections.ts (labels, groups, keywords, access) so
   // the nav, each page title and the ⌘K "Settings: …" commands can't drift.
+  // Appearance is the default section, so it ships with the page; every other
+  // section is its own chunk (see VIEWS below).
   import Appearance from './Appearance.svelte';
-  import SessionNames from './SessionNames.svelte';
-  import AdminSessions from './AdminSessions.svelte';
-  import Daemon from './Daemon.svelte';
-  import PluginsSettings from './PluginsSettings.svelte';
-  import Providers from './Providers.svelte';
-  import Users from './Users.svelte';
-  import AccessGroups from './AccessGroups.svelte';
-  import GitAccounts from '../git/GitAccounts.svelte';
-  import IssueAccounts from './IssueAccounts.svelte';
-  import Channels from './Channels.svelte';
-  import Notifications from './Notifications.svelte';
-  import SelfImprovement from './SelfImprovement.svelte';
-  import McpServers from './McpServers.svelte';
-  import InsightsSettings from './InsightsSettings.svelte';
-  import SnipSettings from './SnipSettings.svelte';
-  import BrowserSettings from './BrowserSettings.svelte';
-  import SkillEvalSettings from './SkillEvalSettings.svelte';
-  import ContextSoul from './ContextSoul.svelte';
-  import ContextLibrary from './ContextLibrary.svelte';
-  import SkillsLibrary from './SkillsLibrary.svelte';
-  import Logs from './Logs.svelte';
-  import LanguageServers from './LanguageServers.svelte';
-  import TrustSafety from './TrustSafety.svelte';
-  import EmailSenderSetup from './EmailSenderSetup.svelte';
-  import PersonalAccessTokens from './PersonalAccessTokens.svelte';
-  import BackupRestore from './BackupRestore.svelte';
-  import AssistantSettings from './AssistantSettings.svelte';
   import { router } from '../../lib/router.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
@@ -37,6 +13,8 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import LazyMount from '../../lib/components/LazyMount.svelte';
+  import { lazyComponent, type LazyComponent } from '../../lib/lazy-component.svelte';
   import type { Component } from 'svelte';
   import {
     SETTINGS_GROUPS,
@@ -58,36 +36,39 @@
 
   // The section components, keyed by registry id — the only per-section thing
   // that needs Svelte. The Record type makes a new registry entry without a
-  // view a compile error.
-  const VIEWS: Record<SettingsSectionId, Component> = {
-    appearance: Appearance,
-    'session-names': SessionNames,
-    notifications: Notifications,
-    snipping: SnipSettings,
-    browser: BrowserSettings,
-    tokens: PersonalAccessTokens,
-    'git-accounts': GitAccounts,
-    jira: IssueAccounts,
-    channels: Channels,
-    'mcp-servers': McpServers,
-    'language-servers': LanguageServers,
-    sharing: EmailSenderSetup,
-    assistant: AssistantSettings,
-    providers: Providers,
-    'context-soul': ContextSoul,
-    'self-improvement': SelfImprovement,
-    insights: InsightsSettings,
-    skills: SkillsLibrary,
-    'skill-eval': SkillEvalSettings,
-    'context-library': ContextLibrary,
-    daemon: Daemon,
-    plugins: PluginsSettings,
-    'trust-safety': TrustSafety,
-    logs: Logs,
-    backup: BackupRestore,
-    users: Users,
-    'access-groups': AccessGroups,
-    sessions: AdminSessions,
+  // view a compile error. Each section is a lazy chunk (one promise each, see
+  // lib/lazy-component.svelte.ts): a static map dragged all 28 into the
+  // Settings chunk — CodeMirror via Context Library, the whole Database store
+  // via Appearance — for a page that shows one section at a time.
+  const VIEWS: Record<SettingsSectionId, LazyComponent<Component>> = {
+    appearance: lazyComponent(async () => ({ default: Appearance })),
+    'session-names': lazyComponent(() => import('./SessionNames.svelte')),
+    notifications: lazyComponent(() => import('./Notifications.svelte')),
+    snipping: lazyComponent(() => import('./SnipSettings.svelte')),
+    browser: lazyComponent(() => import('./BrowserSettings.svelte')),
+    tokens: lazyComponent(() => import('./PersonalAccessTokens.svelte')),
+    'git-accounts': lazyComponent(() => import('../git/GitAccounts.svelte')),
+    jira: lazyComponent(() => import('./IssueAccounts.svelte')),
+    channels: lazyComponent(() => import('./Channels.svelte')),
+    'mcp-servers': lazyComponent(() => import('./McpServers.svelte')),
+    'language-servers': lazyComponent(() => import('./LanguageServers.svelte')),
+    sharing: lazyComponent(() => import('./EmailSenderSetup.svelte')),
+    assistant: lazyComponent(() => import('./AssistantSettings.svelte')),
+    providers: lazyComponent(() => import('./Providers.svelte')),
+    'context-soul': lazyComponent(() => import('./ContextSoul.svelte')),
+    'self-improvement': lazyComponent(() => import('./SelfImprovement.svelte')),
+    insights: lazyComponent(() => import('./InsightsSettings.svelte')),
+    skills: lazyComponent(() => import('./SkillsLibrary.svelte')),
+    'skill-eval': lazyComponent(() => import('./SkillEvalSettings.svelte')),
+    'context-library': lazyComponent(() => import('./ContextLibrary.svelte')),
+    daemon: lazyComponent(() => import('./Daemon.svelte')),
+    plugins: lazyComponent(() => import('./PluginsSettings.svelte')),
+    'trust-safety': lazyComponent(() => import('./TrustSafety.svelte')),
+    logs: lazyComponent(() => import('./Logs.svelte')),
+    backup: lazyComponent(() => import('./BackupRestore.svelte')),
+    users: lazyComponent(() => import('./Users.svelte')),
+    'access-groups': lazyComponent(() => import('./AccessGroups.svelte')),
+    sessions: lazyComponent(() => import('./AdminSessions.svelte')),
   };
 
   const pageId = $derived(router.parts[1] || 'appearance');
@@ -221,11 +202,13 @@
 </script>
 
 {#snippet navRow(s: SettingsSection, detail?: string)}
-  <button
+  <button use:rowMenuKeys
     class="settings-nav-item"
     class:active={pageId === s.id}
     aria-current={pageId === s.id ? 'page' : undefined}
     onclick={() => open(s)}
+    onpointerenter={() => VIEWS[s.id].prefetch()}
+    onfocus={() => VIEWS[s.id].prefetch()}
     oncontextmenu={(e) => rowMenu(e, s)}
   >
     <span class="settings-nav-label">{s.label}</span>
@@ -243,7 +226,7 @@
     </div>
     <label class="settings-nav-filter">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         bind:this={filterEl}
         bind:value={query}
         class="settings-filter-input"
@@ -280,7 +263,7 @@
 
   <div class="settings-body">
     {#if View}
-      <View />
+      <LazyMount lazy={View} what={`${section?.label ?? 'these'} settings`} />
     {:else if section}
       <PageHeader title={section.label} />
       <PageBody>

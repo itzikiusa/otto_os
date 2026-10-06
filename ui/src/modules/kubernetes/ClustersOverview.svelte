@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { toastError } from '../../lib/toastError';
   import ResourceAccess from '../../lib/components/ResourceAccess.svelte';
@@ -146,7 +147,7 @@
         <!-- A card, not a button: the name is the one "open" control and its
              ::after stretches over the card, so the ⋯ button isn't nested
              inside another interactive element. -->
-        <div
+        <div use:rowMenu
           role="group"
           aria-label={c.name}
           class="card cluster"

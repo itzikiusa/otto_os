@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../lib/rowMenu';
   import type { ProductPublicationPreview } from '../product/types';
   import { toastError } from '../../lib/toastError';
   import { focusOnMount } from '../../lib/focusOnMount';
@@ -19,6 +20,7 @@
   import PageBody from '../../lib/components/PageBody.svelte';
   import PaneDivider from '../../lib/components/PaneDivider.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
   import { initialSelection, rememberSelection } from '../../lib/lastSelection';
@@ -536,7 +538,10 @@
       popRight = 8;
       return;
     }
-    popRight = Math.max(8, Math.min(m.right - b.right, m.width - width - 8));
+    // Offset from the pane's inline END (inset-inline-end), so RTL mirrors.
+    const rtl = mainEl ? getComputedStyle(mainEl).direction === 'rtl' : false;
+    const fromEnd = rtl ? b.left - m.left : m.right - b.right;
+    popRight = Math.max(8, Math.min(fromEnd, m.width - width - 8));
   }
 
   /** A workflow row's ⋯ / right-click menu. */
@@ -950,7 +955,16 @@
       if (dirty) await save();
       if (!ownsView() || dirty) return null;
       const r = await api.post<WorkflowRun>(`/workflows/${workflowId}/run`, body);
-      if (ownsView()) { requestedRunId = r.id; run = r; }
+      if (ownsView()) {
+        requestedRunId = r.id;
+        run = r;
+        // The engine starts the run before this POST answers, so its first
+        // workflow_run_updated events can reach the page while `run` is still
+        // unset — the fast path drops them, and the view would sit on this
+        // creation snapshot ("Queued") until the run's NEXT event, possibly a
+        // whole step later. Catch up once (rev-guarded, single-flight).
+        if (r.status === 'pending' || r.status === 'running') void refetchRun(r.id);
+      }
       return r;
     } catch (e) {
       toastError('Couldn’t start the run', e);
@@ -1417,6 +1431,36 @@
     dirty = true;
   }
 
+  // swarm_task node: pick the swarm / project instead of pasting raw ids.
+  // Loaded on demand when such a node is selected (null = not loaded / failed —
+  // the inputs fall back to free text so a saved id is still editable).
+  let swarmOpts = $state<{ id: string; name: string }[] | null>(null);
+  let swarmProjectOpts = $state<Record<string, { id: string; name: string }[]>>({});
+  let swarmOptsWs: string | null = null;
+  $effect(() => {
+    const wsId = current?.workspace_id;
+    if (selectedNode?.kind !== 'swarm_task' || !wsId) return;
+    const sid = paramStr('swarm_id');
+    untrack(() => {
+      if (swarmOptsWs !== wsId) {
+        swarmOptsWs = wsId;
+        swarmOpts = null;
+      }
+      if (swarmOpts === null) {
+        api
+          .get<{ id: string; name: string }[]>(`/workspaces/${wsId}/swarm/swarms`)
+          .then((l) => (swarmOpts = l.map((x) => ({ id: x.id, name: x.name }))))
+          .catch(() => {});
+      }
+      if (sid && !swarmProjectOpts[sid]) {
+        api
+          .get<{ projects: { id: string; name: string }[] }>(`/swarm/swarms/${sid}`)
+          .then((d) => (swarmProjectOpts = { ...swarmProjectOpts, [sid]: d.projects.map((x) => ({ id: x.id, name: x.name })) }))
+          .catch(() => {});
+      }
+    });
+  });
+
   function paramStr(field: string): string {
     const p = selectedNode?.params as Record<string, unknown> | undefined;
     const v = p?.[field];
@@ -1751,7 +1795,7 @@
 {#snippet generator(mode: 'side' | 'page')}
   <div class="gen" class:gen-page={mode === 'page'}>
     <label for="wf-prompt">Describe the flow</label>
-    <textarea
+    <textarea dir="auto"
       id="wf-prompt"
       bind:value={prompt}
       rows={mode === 'page' ? 4 : 3}
@@ -1878,7 +1922,7 @@
   {/snippet}
   {#snippet titleContent()}
     {#if current && renamingId === current.id && renameInBar}
-      <input
+      <input dir="auto"
         class="wf-title-edit"
         bind:value={renameValue}
         use:focusOnMount
@@ -1934,7 +1978,7 @@
       {#if runActive}
         <!-- While the VIEWED run is live its Stop takes the primary's place (same
              verb as the confirm dialog's "Stop run"). -->
-        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={11} /> Stop run…</button>
+        <button class="btn small danger" data-keep onclick={stop} title="Stop this run (finishes the current step, then halts)"><Icon name="stop" size={12} /> Stop run…</button>
       {:else}
         <button
           class="btn primary small"
@@ -1995,7 +2039,7 @@
       {#each workflows as wf (wf.id)}
         <div class="wf-row" class:active={current?.id === wf.id} data-testid={`wf-row-${wf.id}`}>
           {#if renamingId === wf.id && !renameInBar}
-            <input
+            <input dir="auto"
               class="row-rename"
               data-testid="wf-rename-input"
               bind:value={renameValue}
@@ -2008,7 +2052,7 @@
               onblur={() => commitRename(wf)}
             />
           {:else}
-            <button class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
+            <button use:rowMenuKeys class="row-main" title={wf.name} onclick={() => void openGuarded(wf)} oncontextmenu={(e) => { e.preventDefault(); rowMenu(e, wf); }}>
               <Icon name="split" size={13} />
               <span class="row-name">{wf.name}</span>
             </button>
@@ -2049,7 +2093,7 @@
     {#if current}
       <!-- Popovers for the header's Node / Runs buttons (see anchorPop). -->
       {#if paletteOpen}
-        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style="right:{popRight}px">
+        <div class="palette wf-pop" role="dialog" aria-label="Add a node" style:inset-inline-end="{popRight}px">
           {#each types as t (t.kind)}
             <button class="pal-item" onclick={() => addNode(t)}>
               <span class="pal-ic" style="--c:{t.color}"><Icon name={asIcon(t.icon, 'box')} size={12} /></span>
@@ -2062,7 +2106,7 @@
         </div>
       {/if}
       {#if runsOpen}
-        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style="right:{popRight}px">
+        <div class="palette runs-pop wf-pop" role="dialog" aria-label="Runs" style:inset-inline-end="{popRight}px">
           <LoadState
             what="runs"
             variant="compact"
@@ -2093,7 +2137,7 @@
             <strong>Prompt</strong>
             <span class="ri-hint">What you want done this run — merged into the JSON below as `prompt` (optional).</span>
           </div>
-          <textarea
+          <textarea dir="auto" aria-label="Run prompt"
             class="ri-prompt"
             rows="3"
             bind:value={runPromptText}
@@ -2104,7 +2148,7 @@
             <span class="ri-hint">JSON the Start trigger emits to the graph — fill in repo_id / story_id / goals as needed. Leave empty to run with no input.</span>
             <button class="btn small ghost" onclick={() => { runInputText = runInputSkeleton(collectKinds()); }} title="Insert the keys this workflow needs, as placeholders to replace">Suggest</button>
           </div>
-          <textarea
+          <textarea dir="ltr"
             class="ri-text mono"
             rows="8"
             bind:value={runInputText}
@@ -2165,7 +2209,7 @@
                 {#if approvalPreview.kind === 'jira'}Create {approvalPreview.request.issue_type} in project {approvalPreview.request.project_key}; visible to people with access to that project.
                 {:else}Create a page in space {approvalPreview.request.space_key}{approvalPreview.request.parent_id ? ` under page ${approvalPreview.request.parent_id}` : ''}; visible to people with access to that space.{/if}
               </p>
-              <textarea class="np-prompt" aria-label="Full publication content" rows="12" readonly value={approvalBody}></textarea>
+              <textarea dir="auto" class="np-prompt" aria-label="Full publication content" rows="12" readonly value={approvalBody}></textarea>
             {/if}
           </section>
         {/if}
@@ -2235,7 +2279,7 @@
           <p class="instructions-hint">
             Standing rules every step follows by the letter — distinct from the workflow’s description.
           </p>
-          <textarea
+          <textarea dir="auto"
             class="ri-text mono"
             rows="8"
             aria-label="Workflow instructions"
@@ -2353,7 +2397,7 @@
                   onclick={stop}
                   title="Stop this run (finishes the current step, then halts)"
                 >
-                  <Icon name="stop" size={11} /> Stop run…
+                  <Icon name="stop" size={12} /> Stop run…
                 </button>
               {/if}
               <button
@@ -2422,7 +2466,7 @@
               {#if selectedRun}<StatusBadge status={runStatus(selectedRun.status)} variant="text" />{/if}
               {#if selectedRun?.duration_ms != null}<span class="dim">· {fmtMs(selectedRun.duration_ms)}</span>{/if}
               <span class="grow"></span>
-              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={11} /> From here</button>
+              <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, false)} title="Run this node and everything downstream"><Icon name="play" size={12} /> From here</button>
               <button class="btn small" disabled={running} onclick={() => runFrom(selectedNode.id, true)} title="Run only this node">Only this</button>
             </div>
             <!-- Shared Provider + Model editor for every agent-running node —
@@ -2456,7 +2500,7 @@
                 <strong>Run…</strong> editor override them per key.
               </p>
               <label for="mt-msg">Message / prompt</label>
-              <textarea
+              <textarea dir="auto"
                 id="mt-msg"
                 class="np-prompt"
                 rows="6"
@@ -2465,7 +2509,7 @@
                 oninput={(e) => onParam('msg', e.currentTarget.value)}
               ></textarea>
               <label for="mt-wd">Working folder (where agents run)</label>
-              <PathField value={paramStr('working_directory')} onpick={(path) => onParam('working_directory', path)}><input
+              <PathField value={paramStr('working_directory')} onpick={(path) => onParam('working_directory', path)}><input dir="ltr"
                 id="mt-wd"
                 type="text"
                 placeholder="~/path/to/repo (default: workspace root)"
@@ -2475,7 +2519,7 @@
               <label for="mt-repo">Repository (for review / PR steps)</label>
               {@render repoPicker('mt-repo', 'None')}
               <label for="mt-base">Base branch</label>
-              <input
+              <input dir="auto"
                 id="mt-base"
                 type="text"
                 placeholder="main"
@@ -2483,7 +2527,7 @@
                 oninput={(e) => onParam('base', e.currentTarget.value)}
               />
               <label for="mt-story">Story ID (for product steps)</label>
-              <input
+              <input dir="auto"
                 id="mt-story"
                 type="text"
                 placeholder="product story id"
@@ -2491,7 +2535,7 @@
                 oninput={(e) => onParam('story_id', e.currentTarget.value)}
               />
               <label for="mt-jira">Jira ticket</label>
-              <input
+              <input dir="auto"
                 id="mt-jira"
                 type="text"
                 placeholder="PROJ-1234"
@@ -2499,7 +2543,7 @@
                 oninput={(e) => onParam('jira_ticket', e.currentTarget.value)}
               />
               <label for="mt-goals">Goals (one per line)</label>
-              <textarea
+              <textarea dir="auto"
                 id="mt-goals"
                 class="np-prompt"
                 rows="6"
@@ -2517,7 +2561,7 @@
               </div>
             {:else if selectedNode.kind === 'agent_prompt'}
               <label for="np-prompt">Prompt</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-prompt"
                 class="np-prompt np-prompt-lg"
                 rows="14"
@@ -2526,7 +2570,7 @@
               ></textarea>
               {@render agentProviderModel()}
               <label for="np-skills">Skills (comma-separated)</label>
-              <input
+              <input dir="auto"
                 id="np-skills"
                 type="text"
                 placeholder="e.g. golang-testing, golang-code-review"
@@ -2540,7 +2584,7 @@
                 Provider/Model below drive that agent phase.
               </p>
               <label for="np-pc-prompt">Prompt (optional — runs an agent when set)</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-pc-prompt"
                 class="np-prompt np-prompt-lg"
                 rows="14"
@@ -2550,7 +2594,7 @@
               ></textarea>
               {@render agentProviderModel()}
               <label for="np-pc-skills">Skills (comma-separated)</label>
-              <input
+              <input dir="auto"
                 id="np-pc-skills"
                 type="text"
                 placeholder="e.g. golang-testing"
@@ -2558,7 +2602,7 @@
                 oninput={(e) => onParamList('skills', e.currentTarget.value)}
               />
               <label for="np-pc-account">Jira account ID (optional — else the default)</label>
-              <input
+              <input dir="auto"
                 id="np-pc-account"
                 type="text"
                 placeholder="inherits the default Jira account"
@@ -2584,7 +2628,7 @@
                 {/each}
               </select>
               <label for="np-url">URL</label>
-              <input
+              <input dir="ltr"
                 id="np-url"
                 type="url"
                 placeholder="https://example.com/api"
@@ -2592,7 +2636,7 @@
                 oninput={(e) => onParam('url', e.currentTarget.value)}
               />
               {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
-              <textarea
+              <textarea dir="ltr"
                 id="np-body"
                 rows="3"
                 placeholder="&#123;&#125;"
@@ -2612,7 +2656,7 @@
               />
             {:else if selectedNode.kind === 'transform'}
               {@render jsonLabel('np-json', 'Merge JSON (object)', 'json')}
-              <textarea
+              <textarea dir="ltr"
                 id="np-json"
                 rows="4"
                 placeholder="&#123;&#125;"
@@ -2632,7 +2676,7 @@
               </select>
             {:else if selectedNode.kind === 'db_query'}
               <label for="np-conn">Connection ID</label>
-              <input
+              <input dir="auto"
                 id="np-conn"
                 type="text"
                 placeholder="DB-Explorer connection id"
@@ -2640,7 +2684,7 @@
                 oninput={(e) => onParam('connection_id', e.currentTarget.value)}
               />
               <label for="np-stmt">SQL / query statement</label>
-              <textarea
+              <textarea dir="ltr"
                 id="np-stmt"
                 rows="4"
                 placeholder="SELECT * FROM users LIMIT 100"
@@ -2658,7 +2702,7 @@
               />
             {:else if selectedNode.kind === 'broker_peek'}
               <label for="np-cid">Cluster ID</label>
-              <input
+              <input dir="ltr"
                 id="np-cid"
                 type="text"
                 placeholder="Broker cluster id"
@@ -2666,7 +2710,7 @@
                 oninput={(e) => onParam('cluster_id', e.currentTarget.value)}
               />
               <label for="np-topic">Topic</label>
-              <input
+              <input dir="ltr"
                 id="np-topic"
                 type="text"
                 placeholder="my-topic"
@@ -2684,7 +2728,7 @@
               />
             {:else if selectedNode.kind === 'channel_notify'}
               <label for="np-msg">Message</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-msg"
                 rows="3"
                 placeholder="Workflow step completed: &#123;reply&#125;"
@@ -2713,7 +2757,7 @@
               <p class="node-hint">Errors the run if the provider budget is exceeded and enforcement is on.</p>
             {:else if selectedNode.kind === 'human_approval'}
               <label for="np-aprompt">Approval prompt</label>
-              <input
+              <input dir="auto"
                 id="np-aprompt"
                 type="text"
                 placeholder="Please review and approve to continue"
@@ -2722,24 +2766,53 @@
               />
               <p class="node-hint">Pauses the run until an operator calls the resume endpoint or clicks Approve above.</p>
             {:else if selectedNode.kind === 'swarm_task'}
-              <label for="np-swarm">Swarm ID</label>
-              <input
-                id="np-swarm"
-                type="text"
-                placeholder="Swarm id"
-                value={paramStr('swarm_id')}
-                oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
-              />
-              <label for="np-proj">Project ID</label>
-              <input
-                id="np-proj"
-                type="text"
-                placeholder="Swarm project id"
-                value={paramStr('project_id')}
-                oninput={(e) => onParam('project_id', e.currentTarget.value)}
-              />
+              {@const sid = paramStr('swarm_id')}
+              {@const projOpts = sid ? swarmProjectOpts[sid] : undefined}
+              <label for="np-swarm">Swarm</label>
+              {#if swarmOpts}
+                <select
+                  id="np-swarm"
+                  value={sid}
+                  onchange={(e) => { onParam('swarm_id', e.currentTarget.value); onParam('project_id', ''); }}
+                >
+                  <option value="">Choose a swarm…</option>
+                  {#each swarmOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
+                  {#if sid && !swarmOpts.some((o) => o.id === sid)}<option value={sid}>Unknown swarm ({sid})</option>{/if}
+                </select>
+                {#if swarmOpts.length === 0}<p class="node-hint">No swarms in this workspace yet — create one on the Swarm page.</p>{/if}
+              {:else}
+                <input dir="auto"
+                  id="np-swarm"
+                  type="text"
+                  placeholder="Swarm id"
+                  value={sid}
+                  oninput={(e) => onParam('swarm_id', e.currentTarget.value)}
+                />
+              {/if}
+              <label for="np-proj">Project</label>
+              {#if projOpts}
+                <select
+                  id="np-proj"
+                  value={paramStr('project_id')}
+                  onchange={(e) => onParam('project_id', e.currentTarget.value)}
+                >
+                  <option value="">Choose a project…</option>
+                  {#each projOpts as o (o.id)}<option value={o.id}>{o.name}</option>{/each}
+                  {#if paramStr('project_id') && !projOpts.some((o) => o.id === paramStr('project_id'))}
+                    <option value={paramStr('project_id')}>Unknown project ({paramStr('project_id')})</option>
+                  {/if}
+                </select>
+              {:else}
+                <input dir="auto"
+                  id="np-proj"
+                  type="text"
+                  placeholder={sid ? 'Swarm project id' : 'Choose a swarm first'}
+                  value={paramStr('project_id')}
+                  oninput={(e) => onParam('project_id', e.currentTarget.value)}
+                />
+              {/if}
               <label for="np-title">Task title</label>
-              <input
+              <input dir="auto"
                 id="np-title"
                 type="text"
                 placeholder="Workflow-generated task title"
@@ -2747,7 +2820,7 @@
                 oninput={(e) => onParam('title', e.currentTarget.value)}
               />
               <label for="np-desc">Description (optional)</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-desc"
                 class="np-prompt"
                 rows="6"
@@ -2767,7 +2840,7 @@
                 {/each}
               </select>
               <label for="np-url">URL</label>
-              <input
+              <input dir="ltr"
                 id="np-url"
                 type="url"
                 placeholder="https://api.example.com/endpoint"
@@ -2775,7 +2848,7 @@
                 oninput={(e) => onParam('url', e.currentTarget.value)}
               />
               {@render jsonLabel('np-body', 'Body (JSON, optional)', 'body')}
-              <textarea
+              <textarea dir="ltr"
                 id="np-body"
                 rows="3"
                 placeholder="&#123;&#125;"
@@ -2784,7 +2857,7 @@
               ></textarea>
             {:else if selectedNode.kind === 'condition'}
               <label for="np-expr">Expression</label>
-              <input
+              <input dir="ltr"
                 id="np-expr"
                 type="text"
                 placeholder="e.g. score >= 80"
@@ -2803,7 +2876,7 @@
                 oninput={(e) => onParam('max_iterations', Number(e.currentTarget.value))}
               />
               <label for="np-until">Until (expression, optional)</label>
-              <input
+              <input dir="auto"
                 id="np-until"
                 type="text"
                 placeholder="e.g. passed == true"
@@ -2816,7 +2889,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Steps — run in order each iteration</span>
                 <button class="btn small ghost" type="button" onclick={addLoopStep}>
-                  <Icon name="plus" size={11} /> Add step
+                  <Icon name="plus" size={12} /> Add step
                 </button>
               </div>
               {#if loopSteps().length === 0}
@@ -2825,7 +2898,7 @@
               {#each loopSteps() as step, i (i)}
                 <div class="rv-row">
                   <div class="rv-top">
-                    <select
+                    <select aria-label="Step kind"
                       class="ls-kind"
                       value={step.kind}
                       onchange={(e) => updateLoopStep(i, { kind: e.currentTarget.value })}
@@ -2833,7 +2906,7 @@
                       {#each LOOP_STEP_KINDS as k (k)}<option value={k}>{k}</option>{/each}
                       {#if !LOOP_STEP_KINDS.includes(step.kind)}<option value={step.kind}>{step.kind}</option>{/if}
                     </select>
-                    <input
+                    <input dir="auto" aria-label="Step name"
                       class="rv-lens"
                       type="text"
                       placeholder="name (e.g. fix)"
@@ -2841,11 +2914,11 @@
                       oninput={(e) => updateLoopStep(i, { name: e.currentTarget.value || undefined })}
                     />
                     <button class="rv-del" type="button" title="Remove step" aria-label="Remove step" onclick={() => removeLoopStep(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   {#if LOOP_AGENT_KINDS.includes(step.kind)}
-                    <textarea
+                    <textarea dir="auto" aria-label="Step prompt"
                       class="rv-instr np-prompt"
                       rows="6"
                       placeholder="prompt / instructions for this agent step"
@@ -2853,7 +2926,7 @@
                       oninput={(e) => updateLoopStepParam(i, 'prompt', e.currentTarget.value)}
                     ></textarea>
                     <div class="ls-pm">
-                      <select
+                      <select aria-label="Step provider"
                         class="ls-prov"
                         value={loopStepParam(i, 'provider')}
                         onchange={(e) => updateLoopStepParam(i, 'provider', e.currentTarget.value || undefined)}
@@ -2861,7 +2934,7 @@
                         <option value="">default ({defaultAgentProvider()})</option>
                         {#each agentProviders() as pv (pv)}<option value={pv}>{pv}</option>{/each}
                       </select>
-                      <input
+                      <input dir="ltr" aria-label="Step model"
                         class="ls-model"
                         type="text"
                         placeholder="model (optional)"
@@ -2870,14 +2943,14 @@
                       />
                     </div>
                   {:else if step.kind === 'review_run'}
-                    <input
+                    <input dir="auto" aria-label="Reviewer providers"
                       class="rv-lens"
                       type="text"
                       placeholder="reviewer providers (comma-separated, e.g. claude, codex)"
                       value={loopStepParamList(i, 'providers')}
                       oninput={(e) => updateLoopStepParam(i, 'providers', e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))}
                     />
-                    <input
+                    <input dir="auto" aria-label="Summarizer provider"
                       class="rv-lens"
                       type="text"
                       placeholder="summarizer provider (optional)"
@@ -2901,7 +2974,7 @@
               <details class="ls-advanced">
                 <summary>Advanced — edit steps as raw JSON</summary>
                 {@render jsonLabel('np-steps', 'Steps (JSON array)', 'steps')}
-                <textarea
+                <textarea dir="ltr"
                   id="np-steps"
                   rows="5"
                   placeholder={'[ { "kind": "agent_prompt", "params": {} } ]'}
@@ -2917,7 +2990,7 @@
               <label for="np-repo">Repository (optional — inherits from the implementer)</label>
               {@render repoPicker('np-repo', 'Inherit from the working folder')}
               <label for="np-base">Base branch (optional — inherits, else main)</label>
-              <input
+              <input dir="auto"
                 id="np-base"
                 type="text"
                 placeholder="inherits from the run, else main"
@@ -2955,7 +3028,7 @@
               <div class="rv-h np-sec">
                 <span class="np-label">Reviewers — one per lens, each its own agents (like PR review)</span>
                 <button class="btn small ghost" type="button" onclick={addReviewer}>
-                  <Icon name="plus" size={11} /> Add
+                  <Icon name="plus" size={12} /> Add
                 </button>
               </div>
               {#if reviewers().length === 0}
@@ -2968,7 +3041,7 @@
               {#each reviewers() as r, i (i)}
                 <div class="rv-row">
                   <div class="rv-top">
-                    <input
+                    <input dir="auto" aria-label="Reviewer lens / skill"
                       class="rv-lens"
                       type="text"
                       placeholder="lens / skill (e.g. correctness-review)"
@@ -2976,7 +3049,7 @@
                       oninput={(e) => updateReviewer(i, { lens: e.currentTarget.value })}
                     />
                     <button class="rv-del" type="button" title="Remove reviewer" aria-label="Remove reviewer" onclick={() => removeReviewer(i)}>
-                      <Icon name="trash" size={11} />
+                      <Icon name="trash" size={12} />
                     </button>
                   </div>
                   <div class="rv-provs">
@@ -2991,7 +3064,7 @@
                       </label>
                     {/each}
                   </div>
-                  <textarea
+                  <textarea dir="auto" aria-label="Reviewer instructions"
                     class="rv-instr np-prompt"
                     rows="5"
                     placeholder="custom instructions for this reviewer (optional)"
@@ -3003,14 +3076,14 @@
               </div>
 
               <label class="np-sec" for="np-sum-prov">Summarizer (consolidates + scores)</label>
-              <input
+              <input dir="auto"
                 id="np-sum-prov"
                 type="text"
                 placeholder="provider (e.g. claude)"
                 value={summarizerField('provider')}
                 oninput={(e) => updateSummarizer('provider', e.currentTarget.value)}
               />
-              <textarea
+              <textarea dir="auto" aria-label="Summarizer instructions"
                 class="np-prompt np-prompt-lg"
                 rows="14"
                 placeholder="summarizer instructions (optional)"
@@ -3037,7 +3110,7 @@
                 </label>
               </div>
               <label class="np-sec" for="np-goals">Goals (one per line, optional)</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-goals"
                 class="np-prompt"
                 rows="7"
@@ -3046,7 +3119,7 @@
                 oninput={(e) => onParamLines('goals', e.currentTarget.value)}
               ></textarea>
               <label class="np-sec" for="np-checks">Checks — commands the reviewer runs (one per line, optional)</label>
-              <textarea
+              <textarea dir="ltr"
                 id="np-checks"
                 class="np-prompt"
                 rows="7"
@@ -3074,7 +3147,7 @@
               </label>
             {:else if selectedNode.kind === 'product_analyze' || selectedNode.kind === 'product_rewrite' || selectedNode.kind === 'product_plan'}
               <label for="np-story">Story ID</label>
-              <input
+              <input dir="auto"
                 id="np-story"
                 type="text"
                 placeholder="product story id"
@@ -3082,7 +3155,7 @@
                 oninput={(e) => onParam('story_id', e.currentTarget.value)}
               />
               <label for="np-instruction">Extra instruction (optional)</label>
-              <input
+              <input dir="auto"
                 id="np-instruction"
                 type="text"
                 placeholder="Focus on…"
@@ -3109,7 +3182,7 @@
               </label>
               {#if paramBool('dry_run', true)}
               <label for="np-story">Story ID</label>
-              <input
+              <input dir="auto"
                 id="np-story"
                 type="text"
                 placeholder="product story id"
@@ -3127,7 +3200,7 @@
               </select>
 
                 <label for="np-account">Account ID</label>
-                <input
+                <input dir="auto"
                   id="np-account"
                   type="text"
                   placeholder="Jira/Confluence account id"
@@ -3136,7 +3209,7 @@
                 />
                 {#if (paramStr('kind') || 'rfc') === 'jira'}
                   <label for="np-project">Project key</label>
-                  <input
+                  <input dir="auto"
                     id="np-project"
                     type="text"
                     placeholder="e.g. PROJ"
@@ -3144,7 +3217,7 @@
                     oninput={(e) => onParam('project_key', e.currentTarget.value)}
                   />
                   <label for="np-issuetype">Issue type</label>
-                  <input
+                  <input dir="auto"
                     id="np-issuetype"
                     type="text"
                     placeholder="Story"
@@ -3153,7 +3226,7 @@
                   />
                 {:else}
                   <label for="np-space">Space key</label>
-                  <input
+                  <input dir="auto"
                     id="np-space"
                     type="text"
                     placeholder="Confluence space key"
@@ -3161,7 +3234,7 @@
                     oninput={(e) => onParam('space_key', e.currentTarget.value)}
                   />
                   <label for="np-parent">Parent page id (optional)</label>
-                  <input
+                  <input dir="auto"
                     id="np-parent"
                     type="text"
                     placeholder="parent page id"
@@ -3169,7 +3242,7 @@
                     oninput={(e) => onParam('parent_id', e.currentTarget.value)}
                   />
                   <label for="np-pubtitle">Title (optional)</label>
-                  <input
+                  <input dir="auto"
                     id="np-pubtitle"
                     type="text"
                     placeholder="page title"
@@ -3182,7 +3255,7 @@
               {/if}
             {:else if selectedNode.kind === 'canvas'}
               <label for="np-cprompt">Prompt</label>
-              <textarea
+              <textarea dir="auto"
                 id="np-cprompt"
                 class="np-prompt"
                 rows="7"
@@ -3210,7 +3283,7 @@
               <label for="np-repo">Repository (optional — inherits from reference)</label>
               {@render repoPicker('np-repo', 'Inherit from the upstream review / working folder')}
               <label for="np-base">Base branch (optional — inherits from reference)</label>
-              <input
+              <input dir="auto"
                 id="np-base"
                 type="text"
                 placeholder="inherits (per-repo base), else main"
@@ -3258,7 +3331,7 @@
             {:else if selectedNode.kind !== 'manual_trigger' && selectedNode.kind !== 'log' && selectedNode.kind !== 'verifier'}
               <!-- Fallback raw-JSON editor for unrecognised or future node kinds -->
               <label for="np-raw">Params (JSON)</label>
-              <textarea
+              <textarea dir="ltr"
                 id="np-raw"
                 rows="5"
                 placeholder="&#123;&#125;"
@@ -3333,7 +3406,7 @@
               </button>
             </div>
             <label for="np-edge-cond">Condition (expression, optional)</label>
-            <input
+            <input dir="auto"
               id="np-edge-cond"
               type="text"
               placeholder="e.g. passed == true"
@@ -3345,8 +3418,7 @@
             <!-- Docked (or bottom) with nothing selected: a centered, intentional
                  empty state — not a stray line floating at the top. -->
             <div class="insp-blank">
-              <Icon name="split" size={30} />
-              <p>Select a node or connection<br />to configure it.</p>
+              <EmptyState icon="split" title="Select a node or connection to configure it" />
             </div>
           {/if}
         </div>
@@ -3373,6 +3445,7 @@
           body="Describe an automation in plain words and an agent wires up the steps — or start blank, or from a template, and build it on the canvas."
         >
           {@render generator('page')}
+          <AutomateGuide current="workflows" />
         </EmptyState>
       </div>
     {:else}
@@ -3470,7 +3543,7 @@
 {#if jsonZoom}
   {@const jz = jsonZoom}
   <Modal title={jz.label} width={900} onclose={() => (jsonZoom = null)}>
-    <textarea
+    <textarea dir="ltr" aria-label={jz.label}
       class="json-zoom mono"
       data-testid="json-zoom-editor"
       value={paramJson(jz.field)}
@@ -3948,18 +4021,6 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    padding: 24px 16px;
-    color: var(--text-dim);
-    text-align: center;
-  }
-  .insp-blank :global(svg) {
-    opacity: 0.5;
-  }
-  .insp-blank p {
-    font-size: var(--fs-s);
-    line-height: 1.5;
-    margin: 0;
   }
   .title-edit {
     background: none;
@@ -4144,7 +4205,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: var(--radius-s);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: var(--fs-xs);
     line-height: 1.5;
     white-space: pre-wrap;
@@ -4675,7 +4736,7 @@
     gap: 8px;
   }
   .mono {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .resumed-banner {
     display: flex;

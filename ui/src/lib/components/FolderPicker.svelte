@@ -206,7 +206,7 @@
   {/if}
 
   <div class="pick-tools">
-    <input class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} data-autofocus />
+    <input dir="ltr" class="input filter-input" placeholder="Filter…" aria-label="Filter folders" bind:this={filterElement} bind:value={filter} data-autofocus />
     <label class="hidden-toggle" title="Show dotfiles (names starting with .)">
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden
@@ -222,7 +222,7 @@
             <div class="favorite-row">
               <button title={path} disabled={loading} class:current={path === view?.path} onclick={() => load(path)}>{folderName(path)}</button>
               <button class="remove-favorite" aria-label={`Remove ${folderName(path)} from favorites`} title="Remove favorite"
-                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}><Icon name="x" size={10} /></button>
+                onclick={() => updateShortcuts(current => toggleFavorite(current, path))}><Icon name="x" size={12} /></button>
             </div>
           {:else}<p class="dim">Save a folder with Add favorite.</p>{/each}
         </div>

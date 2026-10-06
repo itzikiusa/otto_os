@@ -26,22 +26,44 @@ pub fn scan_chunk<'n>(
         .all(|n| !n.bytes().any(|b| b.is_ascii_uppercase())));
     let longest = needles.iter().map(|n| n.len()).max().unwrap_or(0);
     let keep = keep.max(longest.saturating_sub(1));
-    tail.reserve(chunk.len());
-    tail.extend(chunk.iter().map(u8::to_ascii_lowercase));
+    // The tail is never grown by a whole chunk (an 8 KiB chunk used to pin an
+    // 8 KiB+ allocation per scanner per session, since `drain` keeps
+    // capacity): the window is searched as (a) the old tail plus just enough
+    // of the chunk's head to catch a straddling phrase and (b) the chunk
+    // itself, in place. The tail then stays within `2 × keep` bytes.
+    let bridge = chunk.len().min(longest.saturating_sub(1));
+    tail.extend(chunk[..bridge].iter().map(u8::to_ascii_lowercase));
     let hit = needles
         .iter()
         .copied()
-        .find(|n| contains(tail, n.as_bytes()));
-    if tail.len() > keep {
-        tail.drain(..tail.len() - keep);
+        .find(|n| contains(tail, n.as_bytes()) || contains_ci(chunk, n.as_bytes()));
+    if chunk.len() >= keep {
+        tail.clear();
+        tail.extend(
+            chunk[chunk.len() - keep..]
+                .iter()
+                .map(u8::to_ascii_lowercase),
+        );
+    } else {
+        tail.extend(chunk[bridge..].iter().map(u8::to_ascii_lowercase));
+        if tail.len() > keep {
+            tail.drain(..tail.len() - keep);
+        }
     }
     hit
 }
 
+/// `hay` (already lowercase) contains `needle` (lowercase).
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
+    contains_by(hay, needle, |b| b)
+}
+
+/// `hay` (any case) contains `needle` (lowercase), ASCII case-insensitively.
+fn contains_ci(hay: &[u8], needle: &[u8]) -> bool {
+    contains_by(hay, needle, |b| b.to_ascii_lowercase())
+}
+
+fn contains_by(hay: &[u8], needle: &[u8], fold: impl Fn(u8) -> u8) -> bool {
     let Some((&first, rest)) = needle.split_first() else {
         return true;
     };
@@ -51,10 +73,14 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     let last_start = hay.len() - needle.len();
     let mut i = 0;
     while i <= last_start {
-        match hay[i..=last_start].iter().position(|&b| b == first) {
+        match hay[i..=last_start].iter().position(|&b| fold(b) == first) {
             Some(p) => {
                 let at = i + p;
-                if &hay[at + 1..at + needle.len()] == rest {
+                if hay[at + 1..at + needle.len()]
+                    .iter()
+                    .zip(rest)
+                    .all(|(&h, &n)| fold(h) == n)
+                {
                     return true;
                 }
                 i = at + 1;
@@ -68,6 +94,16 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A large chunk must not leave the tail holding a chunk-sized buffer.
+    #[test]
+    fn tail_capacity_shrinks_back_after_a_large_chunk() {
+        let mut tail = Vec::new();
+        let chunk = vec![b'x'; 64 * 1024];
+        scan_chunk(&mut tail, &chunk, &["please log in"], 256);
+        assert_eq!(tail.len(), 256);
+        assert!(tail.capacity() <= 1024, "capacity {}", tail.capacity());
+    }
 
     /// The old scanners trimmed the tail BEFORE searching: a phrase at the
     /// start of an 8 KiB chunk was cut off and never seen.

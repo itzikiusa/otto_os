@@ -8,6 +8,7 @@
   import type { CanvasNode } from '../types';
   import { canvas } from '../../../lib/stores/canvas.svelte';
   import Resizer from './Resizer.svelte';
+  import { dblclickEdit, onEditRequest } from '../editRequest.svelte';
   import { ensureHljs, highlightLine } from '../../../lib/hl';
   import JsonTree from './JsonTree.svelte';
 
@@ -62,6 +63,8 @@
       nodes: canvas.scene.nodes.map((n) => (n.id === id ? patched : n)),
     });
   }
+  // Enter / F2 on the selected node (CanvasFlow) opens the editor too.
+  onEditRequest(() => id, startEdit);
 </script>
 
 <div class="json" class:selected>
@@ -81,10 +84,9 @@
     </button>
   </div>
 
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="body" ondblclick={startEdit}>
+  <div class="body" use:dblclickEdit={startEdit}>
     {#if editing}
-      <textarea
+      <textarea dir="ltr" aria-label="JSON source"
         bind:value={draft}
         use:focusOnMount
         spellcheck="false"
@@ -157,7 +159,7 @@
     border-color: transparent;
   }
   .toggle:disabled {
-    opacity: 0.4;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .body {
@@ -205,5 +207,8 @@
     font-size: var(--fs-s);
     line-height: 1.5;
     padding: 8px 10px;
+  }
+  textarea:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
 </style>

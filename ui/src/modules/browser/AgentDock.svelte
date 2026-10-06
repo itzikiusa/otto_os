@@ -9,7 +9,7 @@
   // (it also appears in Agents), remembered per workspace.
   import Icon from '../../lib/components/Icon.svelte';
   import { toastError } from '../../lib/toastError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusDot from '../../lib/components/StatusDot.svelte';
   import ProviderIcon, { hasProviderIcon } from '../../lib/components/ProviderIcon.svelte';
   import { sessionState } from '../../lib/status';
@@ -178,7 +178,7 @@
          as Agents). readOnly is FALSE — the user types directly to it. -->
     <div class="agent-shell otto-force-dark">
       {#key sessionId}
-        <Terminal {sessionId} readOnly={readOnly} resumable forceDark preferDom />
+        <LazyTerminal {sessionId} readOnly={readOnly} resumable forceDark preferDom />
       {/key}
     </div>
   {/if}

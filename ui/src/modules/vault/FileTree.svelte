@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Vault file explorer — lazy directory tree over the store's TreeNode roots,
   // virtualized (big vaults stay cheap), with ctx-menu file ops and
   // drag-to-folder moves.
@@ -300,7 +301,7 @@
       findText={(n: TreeNode) => (n.entry.kind === 'note' ? n.entry.name.replace(/\.md$/i, '') : n.entry.name)}
     >
       {#snippet row(n: TreeNode)}
-        <div
+        <div use:rowMenu
           class="row {n.entry.kind}"
           class:active={isActive(n)}
           class:reserved={n.entry.reserved}
@@ -356,7 +357,7 @@
             {/if}
           {/if}
           {#if renaming === n.entry.path}
-            <input
+            <input dir="auto"
               class="rename"
               aria-label="New name"
               bind:value={renameValue}
@@ -402,7 +403,7 @@
             <option value={p}>{p}</option>
           {/each}
         </select>
-        <input
+        <input dir="ltr"
           class="sel-input"
           bind:value={groupModel}
           placeholder="Model (optional)"
@@ -411,7 +412,7 @@
         />
       </div>
       <div class="sel-row">
-        <input
+        <input dir="auto"
           class="sel-input"
           bind:this={groupInputEl}
           bind:value={groupPrompt}

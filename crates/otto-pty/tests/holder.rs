@@ -219,7 +219,18 @@ fn exit_while_detached_is_reported_on_adoption() {
     // Detach BEFORE the input that makes the child exit: its EXITED report can
     // then race the hang-up without the detached handle releasing the holder.
     h.detach();
-    h.write(b"z\n").expect("write");
+    // A held handle can be mid-reconnect for a moment (its send path reports
+    // "connection lost" until the reader re-attaches) — that is the designed
+    // behaviour, so retry the input briefly instead of failing on the first try.
+    let mut wrote = Err(otto_core::error::Error::Internal("not attempted".into()));
+    for _ in 0..100 {
+        wrote = h.write(b"z\n");
+        if wrote.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    wrote.expect("write");
     drop(h);
     std::thread::sleep(Duration::from_millis(800));
     assert!(
@@ -263,6 +274,39 @@ fn kill_through_the_holder_escalates_past_an_ignored_hup() {
         || h.has_exited(),
     );
     assert!(!pid_alive(child));
+}
+
+/// A KILL issued while the connection is being re-established used to be
+/// dropped (`ConnectionReset`): the child ran on, orphaned, while the session
+/// looked dead. It now ends the holder over a fresh connection, and the exit
+/// is reported only after that.
+#[test]
+fn kill_while_reconnecting_terminates_over_a_fresh_connection() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("echo READY; exec sleep 60"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    wait_until("READY", Duration::from_secs(10), || {
+        screen_text(&h).contains("READY")
+    });
+    let child = h.pid().unwrap();
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.simulate_holder_reconnecting();
+    h.kill().expect("kill falls back to terminate");
+    assert!(
+        h.has_exited(),
+        "exit reported once the terminate is confirmed"
+    );
+    wait_until("child gone", Duration::from_secs(10), || !pid_alive(child));
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
 }
 
 #[test]

@@ -31,9 +31,10 @@ test('agent detail: arrow keys and End move focus with selection', async ({ page
   const overview = page.getByRole('tab', { name: 'Overview', exact: true });
   await overview.focus();
   await page.keyboard.press('ArrowRight');
-  const schedules = page.getByRole('tab', { name: 'Schedules', exact: true });
-  await expect(schedules).toHaveAttribute('aria-selected', 'true');
-  await expect(schedules).toBeFocused();
+  // Overview's neighbour is Activity (Overview · Activity · Autonomy · Schedules …).
+  const activity = page.getByRole('tab', { name: 'Activity', exact: true });
+  await expect(activity).toHaveAttribute('aria-selected', 'true');
+  await expect(activity).toBeFocused();
   await page.keyboard.press('End');
   await expect(page.getByRole('tab', { name: 'Context', exact: true })).toBeFocused();
 });
@@ -232,7 +233,7 @@ test('agent detail: RTL arrow keys follow visual tab direction', async ({ page }
   await page.evaluate(() => document.documentElement.dir = 'rtl');
   await page.getByRole('tab', { name: 'Overview', exact: true }).focus();
   await page.keyboard.press('ArrowLeft');
-  await expect(page.getByRole('tab', { name: 'Schedules', exact: true })).toBeFocused();
+  await expect(page.getByRole('tab', { name: 'Activity', exact: true })).toBeFocused();
 });
 
 test('rooms: phone conversation keeps its header and composer in view', async ({ page }) => {
@@ -268,7 +269,8 @@ test('goal research flow: draft, edit, launch and inspect within a phone viewpor
     if (r.request().method() === 'POST') { launched = r.request().postDataJSON(); await r.fulfill({ json: loop }); }
     else await r.fulfill({ json: launched ? [loop] : [] });
   });
-  await page.route('**/api/v1/goal-loops/review-loop', r => r.fulfill({ json: { loop, iterations: [] } }));
+  // The detail is read as `/goal-loops/{id}?summary=true`.
+  await page.route(/\/api\/v1\/goal-loops\/review-loop(\?|$)/, r => r.fulfill({ json: { loop, iterations: [] } }));
   await page.goto('/#/loops');
   await page.getByRole('button', { name: 'New goal loop', exact: true }).click();
   await page.locator('#gl-seed').fill('Compare release options');

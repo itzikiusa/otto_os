@@ -759,6 +759,16 @@ async fn live_ws(
         ))
         .into_response();
     }
+    // A read-only agent session never drives a live tab.
+    if let Err(e) = crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::BrowserLive,
+        &auth,
+        Some(&ctx.pool),
+    )
+    .await
+    {
+        return ApiError(e).into_response();
+    }
     let Some(rt) = ctx.browser.live_if_started() else {
         return not_found();
     };

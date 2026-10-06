@@ -102,7 +102,7 @@
   >
     <div class="field">
       <label for="dh-new-title">Title</label>
-      <input id="dh-new-title" class="input" bind:value={title} placeholder="Rewards landing hero" />
+      <input dir="auto" id="dh-new-title" class="input" bind:value={title} placeholder="Rewards landing hero" />
     </div>
     <div class="field">
       <span class="lbl" id="dh-new-studio">Studio</span>

@@ -7,6 +7,7 @@
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import LoopDetail from './LoopDetail.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -16,7 +17,7 @@
   import { untrack } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import { registry } from '../../lib/commands.svelte';
-  import { rememberSelection } from '../../lib/lastSelection';
+  import { recallSelection, rememberSelection } from '../../lib/lastSelection';
 
   const PHASE_LABEL: Record<string, string> = {
     planning: 'Planning',
@@ -48,6 +49,23 @@
     const id = ws.currentId;
     if (id) void loops.loadList(id);
   }
+  // The last-opened loop was remembered (rememberSelection below) but never
+  // restored: reopen it once per workspace when the page lands on the bare
+  // list (no `#/loops/<id>` link) and that loop still exists. Closing it is
+  // respected — this runs once per workspace load, not on every list refresh.
+  let restoredFor: string | null = null;
+  $effect(() => {
+    const w = ws.currentId;
+    const items = list;
+    if (!w || restoredFor === w || loops.loadingList || loops.listWs !== w || items.length === 0) return;
+    untrack(() => {
+      restoredFor = w;
+      if (selectedId || creating || router.parts[1]) return;
+      const last = recallSelection('loops');
+      if (last && items.some((l) => l.id === last)) open(last);
+    });
+  });
+
   // Agent UI control (lib/uiCommands/loops.ts) opens a loop's detail here.
   $effect(() => loopsPagePort.bind({ open, selectedId: () => selectedId }));
 
@@ -125,7 +143,9 @@
           actionLabel="New goal loop"
           actionIcon="plus"
           onaction={() => (creating = true)}
-        />
+        >
+          <AutomateGuide current="loops" />
+        </EmptyState>
       {/snippet}
       <ul class="cards">
         {#each list as l (l.id)}

@@ -4,25 +4,26 @@
 //! integration time.
 
 pub mod agent_refs;
-pub mod agent_run;
+pub use otto_agent_run::agent_run;
 pub mod agent_session;
 pub mod agent_tasks_nudge;
 pub mod api_helpers;
-pub mod api_scripts;
+/// Moved to `otto-apiclient`; re-exported so `crate::api_scripts` paths hold.
+pub use otto_apiclient::scripts as api_scripts;
 pub mod api_secrets;
-pub mod assistant;
+mod assistant_host;
 pub mod auth;
+mod automation_ctx;
+pub mod boot;
 pub mod browser_login_throttle;
-pub mod cadence;
-pub mod cancel_signal;
-pub mod canvas_assist;
+pub use otto_automation::cadence;
+pub use otto_automation::cancel_signal;
 pub mod canvas_refs;
 pub mod cli_update;
 pub mod context_packet;
 pub mod database_changes;
 pub mod db_assist;
 pub mod db_drafter;
-pub mod design_assist;
 pub mod design_blender;
 pub mod design_format;
 pub mod design_hall;
@@ -33,15 +34,13 @@ pub mod eval_score;
 pub mod feature_guard;
 pub mod finding_agent;
 pub mod finding_context;
-pub mod goal_loop;
-mod goal_loop_commands;
-pub mod goal_loop_parse;
-mod goal_loop_policy;
-mod goal_loop_roles;
-pub mod goal_loop_workspace;
+pub use otto_automation::goal_loop;
+pub use otto_automation::goal_loop_parse;
+use otto_automation::goal_loop_roles;
+pub use otto_automation::goal_loop_workspace;
 pub mod history_index;
+pub mod host_guard;
 pub mod improve_channels;
-pub mod insights;
 pub mod k8s_monitor_scheduler;
 pub mod live_events;
 pub mod login_throttle;
@@ -55,29 +54,21 @@ pub mod mockup_assist;
 pub mod model_catalog;
 pub mod modules;
 pub mod monitor;
-pub mod offload;
-mod personal_agent_documents;
+pub use otto_agent_run::offload;
 // Personal agents: tool-layer permission policy + live activity (batch 2026-10-03).
 pub mod personal_agent_activity;
-pub mod personal_agent_memory;
 pub mod personal_agent_policy;
-pub mod personal_agents_engine;
-pub mod personal_agents_scheduler;
 pub mod plugins;
 pub mod policy;
-pub mod product_chat;
-pub mod product_media;
-pub mod product_refine;
-pub mod product_run;
-pub mod product_swarm;
-pub mod product_watcher;
+pub mod product_host;
 pub mod proof;
+pub mod provider_resolve;
 pub mod repo_directory;
-pub mod report_delivery;
+pub use otto_automation::report_delivery;
 pub mod resource_sessions;
-pub mod review_fallback;
-pub mod review_session;
-mod review_summarizer;
+pub use otto_review::fallback as review_fallback;
+pub use otto_review::session as review_session;
+use otto_review::summarizer as review_summarizer;
 pub mod rooms;
 pub mod routes;
 pub mod run_callback;
@@ -89,37 +80,36 @@ pub mod run_scheduler;
 pub mod run_service;
 pub mod run_sources;
 pub mod run_workspace;
-pub mod scheduled_tasks_engine;
-pub mod scheduled_tasks_scheduler;
+pub use otto_automation::scheduled_tasks_engine;
+pub use otto_automation::scheduled_tasks_scheduler;
+#[cfg(test)]
+mod scheduled_tasks_engine_tests;
 mod self_call;
+pub mod shutdown;
 pub mod skill_eval;
 pub mod skill_review;
 pub mod spa;
 pub mod state;
-pub mod swarm_agent_run;
-pub mod swarm_channels;
-pub mod swarm_merge;
-pub mod swarm_run;
-pub mod swarm_runtime;
-pub mod swarm_scheduler;
-pub mod swarm_verify;
-pub mod swarm_wake;
-pub mod swarm_workspace;
+pub mod swarm_host;
 pub mod telemetry;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod transcript_cache;
 pub mod transcript_tail;
 pub mod transport;
-pub mod turn_oracle;
+pub use otto_agent_run::turn_oracle;
 pub mod ui_bridge;
-pub mod ui_commands;
+// Moved to `otto_mcp::outward`; re-exported so `crate::ui_commands` keeps working.
+pub use otto_mcp::outward::ui_commands;
 pub mod vault_docs_agent;
-pub mod workflow_chat;
-mod workflow_checkpoint;
-pub mod workflow_context;
 pub mod workflow_engine;
-pub mod workflow_prepare;
 pub mod workflow_trigger_scheduler;
-mod workflow_validation;
+// Pure workflow pieces live in `otto-workflows`; aliased so `crate::workflow_*` paths resolve.
+pub use otto_workflows::chat as workflow_chat;
+use otto_workflows::checkpoint as workflow_checkpoint;
+pub use otto_workflows::context as workflow_context;
+pub use otto_workflows::prepare as workflow_prepare;
+use otto_workflows::validation as workflow_validation;
 pub mod workgraph_projector;
 pub mod ws_events;
 pub mod ws_fanout;
@@ -135,6 +125,12 @@ pub use error::{ApiError, ApiResult};
 pub use monitor::{
     spawn_budget_sampler, spawn_metrics_sampler, spawn_session_event_listener,
     spawn_usage_recorder, AuthScanner, CredentialMonitor,
+};
+// The Assistant + Personal Agents engines live in `otto-assistant` (wired to
+// the daemon by `assistant_host`); re-exported at their historical paths.
+pub use otto_assistant::{
+    assistant, personal_agent_documents, personal_agent_memory, personal_agents_engine,
+    personal_agents_scheduler,
 };
 pub use state::ServerCtx;
 pub use workflow_trigger_scheduler::spawn_workflow_event_trigger_listener;
@@ -197,6 +193,7 @@ pub fn build_router_with_assets(
         .merge(rooms::public_routes())
         .merge(protected);
     let events_tx = ctx.events.clone();
+    let host_guard_state = host_guard::HostGuardState::new(ctx.pool.clone());
     let telemetry_ctx = ctx.telemetry.clone();
 
     let mut app = Router::new()
@@ -221,6 +218,12 @@ pub fn build_router_with_assets(
         telemetry::middleware,
     ))
     .layer(TraceLayer::new_for_http())
+    // DNS-rebinding guard: refuse a `Host` we don't serve (host_guard.rs).
+    // Inside CORS so a refused request still gets no CORS grant.
+    .layer(axum::middleware::from_fn_with_state(
+        host_guard_state,
+        host_guard::host_guard_with_settings,
+    ))
     .layer(cors_layer())
 }
 
@@ -240,8 +243,16 @@ pub fn build_router_with_assets(
 /// and the SPA use.
 fn cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _parts| {
-            origin.to_str().map(is_allowed_origin).unwrap_or(false)
+        .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, parts| {
+            let request_host = parts
+                .headers
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .map(host_guard::host_of);
+            origin
+                .to_str()
+                .map(|o| is_allowed_origin_for(o, request_host.as_deref()))
+                .unwrap_or(false)
         }))
         .allow_methods([
             Method::GET,
@@ -261,7 +272,11 @@ fn cors_layer() -> CorsLayer {
             header::IF_NONE_MATCH,
             header::HeaderName::from_static("traceparent"),
         ])
-        .expose_headers([header::ETAG, header::HeaderName::from_static("traceparent")])
+        .expose_headers([
+            header::ETAG,
+            header::HeaderName::from_static("traceparent"),
+            header::HeaderName::from_static(telemetry::ROUTE_HEADER),
+        ])
         // Every call carries `Authorization`, so every call is preflighted.
         // Without a max-age WebKit caches a preflight ~5 s (per URL), so a
         // poller paid an extra OPTIONS round-trip on almost every tick. 600 s
@@ -272,12 +287,36 @@ fn cors_layer() -> CorsLayer {
 /// How long a browser may reuse a CORS preflight (`Access-Control-Max-Age`).
 const CORS_PREFLIGHT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// Whether a request `Origin` is trusted by [`cors_layer`].
+/// Whether a request `Origin` is trusted by [`cors_layer`], given the request's
+/// own `Host` (port-stripped).
 ///
-/// Accepts the Tauri webview origins, loopback (any port), RFC-1918 private LAN
-/// ranges, and Tailscale (`*.ts.net`) hosts — the surfaces the desktop app and
-/// the remote/mobile access feature legitimately use. Everything else (arbitrary
-/// public web origins) is rejected.
+/// Loopback + Tauri origins are always trusted (the desktop app, `vite` in dev).
+/// A private-LAN (RFC-1918) or Tailscale (`*.ts.net`) origin is trusted only
+/// when it names the SAME host the request was sent to — i.e. a page this
+/// machine serves on another port (vite `--host`, the network listener). It
+/// used to be any LAN/tailnet origin, which let any other device's web page
+/// (a router admin UI, a coworker's dev server) make CORS calls into the
+/// daemon. `*.ts.net` additionally honours the `OTTO_ALLOWED_HOSTS` pin.
+fn is_allowed_origin_for(origin: &str, request_host: Option<&str>) -> bool {
+    if is_allowed_origin(origin) {
+        return true;
+    }
+    let Some(req_host) = request_host else {
+        return false;
+    };
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = host_guard::host_of(rest);
+    host == req_host && (is_private_lan_host(&host) || host_guard::tailscale_allowed(&host))
+}
+
+/// Origins trusted regardless of the request's `Host`: the Tauri webview
+/// origins and loopback (any port). Everything else (LAN, tailnet, arbitrary
+/// public web origins) goes through [`is_allowed_origin_for`].
 fn is_allowed_origin(origin: &str) -> bool {
     // Tauri native shell.
     if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
@@ -299,12 +338,7 @@ fn is_allowed_origin(origin: &str) -> bool {
         rest.split(':').next().unwrap_or(rest)
     };
 
-    host == "localhost"
-        || host == "127.0.0.1"
-        || host == "[::1]"
-        || host.ends_with(".localhost")
-        || host.ends_with(".ts.net") // Tailscale
-        || is_private_lan_host(host)
+    host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host.ends_with(".localhost")
 }
 
 /// True for RFC-1918 private IPv4 hosts (`10.0.0.0/8`, `172.16.0.0/12`,
@@ -358,6 +392,35 @@ mod cors_tests {
         let h = ok.headers();
         assert_eq!(h[header::ACCESS_CONTROL_MAX_AGE], "600");
         assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "tauri://localhost");
+
+        // A LAN / tailnet origin is trusted only for its OWN host.
+        let lan_preflight = |origin: &'static str, host: &'static str| {
+            let mut r = preflight(origin);
+            r.headers_mut()
+                .insert(header::HOST, HeaderValue::from_static(host));
+            r
+        };
+        let same = app
+            .clone()
+            .oneshot(lan_preflight(
+                "https://192.168.1.20:5173",
+                "192.168.1.20:7443",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            same.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://192.168.1.20:5173"
+        );
+        let other_device = app
+            .clone()
+            .oneshot(lan_preflight("http://192.168.1.1", "192.168.1.20:7443"))
+            .await
+            .unwrap();
+        assert!(other_device
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
 
         let denied = app
             .oneshot(preflight("https://evil.example"))

@@ -270,7 +270,7 @@
                 <button class="ref-body" aria-expanded={!!expanded[ref.id]} onclick={() => void togglePreview(ref)}>
                   <span class="ref-chevron">
                     {#if formatOf(ref) !== 'excalidraw'}
-                      <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={11} />
+                      <Icon name={expanded[ref.id] ? 'chevronDown' : 'chevronRight'} size={12} />
                     {/if}
                   </span>
                   <span class="ref-text">
@@ -299,7 +299,7 @@
                 <div class="ref-preview">
                   {#if formatOf(ref) === 'excalidraw'}
                     <div class="board-card">
-                      <Icon name="shapes" size={18} />
+                      <Icon name="shapes" size={16} />
                       <span>Excalidraw board — open in Canvas to view/edit</span>
                     </div>
                   {:else if previews[ref.id]?.loading}
@@ -323,7 +323,7 @@
     <div class="cp-footer">
       {#if attachOpen}
         <div class="attach-picker">
-          <input
+          <input dir="ltr"
             class="attach-search"
             placeholder="Filter scenes to attach…"
             aria-label="Filter scenes to attach"
@@ -502,7 +502,7 @@
     border-color: var(--accent);
   }
   .footer-btn:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

@@ -34,7 +34,7 @@ Otto UI (iframe)  ──HTTP──▶  ottod  ──reverse-proxy──▶  plug
 | Concern | Where it lives |
 |---|---|
 | Supervisor + reverse-proxy + host-API + iframe server | `crates/otto-server/src/plugins.rs` |
-| Sidecar construction (plugins home, host-API base URL) | `crates/ottod/src/main.rs` (`PluginManager::new`) |
+| Sidecar construction (plugins home, host-API base URL) | `crates/otto-server/src/boot/build.rs` (`plugin_manager`) |
 | Plugins home (where installs are stored) | `$OTTO_PLUGINS_HOME`, default `~/otto-plugins/<slug>/` |
 | Per-plugin writable state dir | `<data_dir>/plugins/<slug>/` (passed as `$OTTO_PLUGIN_DATA_DIR`) |
 | Registry table (installed plugins) | `crates/otto-state/migrations/0062_runtime_plugins.sql` → `plugins` |

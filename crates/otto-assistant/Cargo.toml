@@ -1,0 +1,28 @@
+[package]
+name = "otto-assistant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Otto's personal Assistant (threads, tasks, memory, routing) and the Personal Agents engine + scheduler. Leaf crate: reaches the daemon only through `AssistantCtx`."
+
+[dependencies]
+otto-core.workspace = true
+otto-state.workspace = true
+otto-sessions.workspace = true
+otto-memory.workspace = true
+otto-mcp.workspace = true
+otto-orchestrator.workspace = true
+otto-context.workspace = true
+otto-transcript.workspace = true
+chrono.workspace = true
+chrono-tz = "0.10.4"
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true

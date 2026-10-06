@@ -43,8 +43,8 @@
     z-index: var(--z-popover);
     overflow-y: auto;
     padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-m);
+    border: 1px solid var(--glass-border);
+    border-radius: var(--radius-l);
     background: var(--surface);
     box-shadow: var(--glass-shadow);
     font-size: var(--fs-s);

@@ -301,7 +301,7 @@
     <details class="disclosure">
       <summary>Run once per data row (advanced)</summary>
       <p class="hint">A JSON array of objects. Each object runs every step once, with its keys available as <code>{'{{variables}}'}</code> on top of the environment. Values stay in memory. Up to 1 MiB and 1,000 requests per run.</p>
-      <textarea class="input mono" aria-label="Dataset rows" rows="4" bind:value={datasetText} placeholder={'[{"customer_id":"cus_1"},{"customer_id":"cus_2"}]'} disabled={apiClient.running}></textarea>
+      <textarea dir="ltr" class="input mono" aria-label="Dataset rows" rows="4" bind:value={datasetText} placeholder={'[{"customer_id":"cus_1"},{"customer_id":"cus_2"}]'} disabled={apiClient.running}></textarea>
       {#if datasetError}<p class="err" role="alert">{datasetError}</p>{/if}
     </details>
 
@@ -336,10 +336,10 @@
                   {#each Object.entries(KIND_LABEL) as [k, label] (k)}<option value={k}>{label}</option>{/each}
                 </select>
                 {#if as.kind === 'json_path'}
-                  <input class="input mono k-path" aria-label="JSONPath" placeholder="$.data.id" value={as.path ?? ''} disabled={!canEdit}
+                  <input dir="ltr" class="input mono k-path" aria-label="JSONPath" placeholder="$.data.id" value={as.path ?? ''} disabled={!canEdit}
                     oninput={(e) => updateAssertion(i, ai, { path: (e.currentTarget as HTMLInputElement).value })} />
                 {:else if as.kind === 'header'}
-                  <input class="input mono k-path" aria-label="Header name" placeholder="Content-Type" value={as.path ?? ''} disabled={!canEdit}
+                  <input dir="ltr" class="input mono k-path" aria-label="Header name" placeholder="Content-Type" value={as.path ?? ''} disabled={!canEdit}
                     oninput={(e) => updateAssertion(i, ai, { path: (e.currentTarget as HTMLInputElement).value })} />
                 {/if}
                 <select class="input k-op" aria-label="Comparison" value={as.op} disabled={!canEdit}
@@ -347,7 +347,7 @@
                   {#each Object.entries(OP_LABEL) as [o, label] (o)}<option value={o}>{label}</option>{/each}
                 </select>
                 {#if !NO_VALUE_OPS.has(as.op)}
-                  <input class="input mono k-val" aria-label={as.op === 'matches' ? 'Regular expression' : 'Expected value'}
+                  <input dir="ltr" class="input mono k-val" aria-label={as.op === 'matches' ? 'Regular expression' : 'Expected value'}
                     placeholder={as.op === 'matches' ? '^ORD-\\d+' : '200'} value={as.value} disabled={!canEdit}
                     oninput={(e) => updateAssertion(i, ai, { value: (e.currentTarget as HTMLInputElement).value })} />
                 {/if}
@@ -364,12 +364,12 @@
             {#each step.extract as ex, ei (ei)}
               <div class="rule">
                 <span class="word">Take</span>
-                <input class="input mono k-path" aria-label="JSONPath, header:Name or status to take" title="A JSONPath into the body ($.access_token), header:Name for a response header, or status" placeholder="$.access_token" value={ex.path} disabled={!canEdit}
+                <input dir="ltr" class="input mono k-path" aria-label="JSONPath, header:Name or status to take" title="A JSONPath into the body ($.access_token), header:Name for a response header, or status" placeholder="$.access_token" value={ex.path} disabled={!canEdit}
                   oninput={(e) => updateExtract(i, ei, { path: (e.currentTarget as HTMLInputElement).value })} />
                 <span class="word">as</span>
                 <span class="var-in">
                   <span class="brace" aria-hidden="true">{'{{'}</span>
-                  <input class="input mono k-var" aria-label="Variable name" placeholder="api_token" value={ex.var} disabled={!canEdit}
+                  <input dir="ltr" class="input mono k-var" aria-label="Variable name" placeholder="api_token" value={ex.var} disabled={!canEdit}
                     oninput={(e) => updateExtract(i, ei, { var: (e.currentTarget as HTMLInputElement).value })} />
                   <span class="brace" aria-hidden="true">{'}}'}</span>
                 </span>

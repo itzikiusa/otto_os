@@ -333,7 +333,7 @@
         <section class="card block">
           <div class="field">
             <label class="field-label" for="mx-name">Name</label>
-            <input id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
+            <input dir="auto" id="mx-name" class="input" data-testid="matrix-name" placeholder="e.g. Logging skill bake-off" bind:value={fName} />
           </div>
           <div class="field">
             <span class="field-label" id="mx-prov-lbl">Agents</span>
@@ -348,12 +348,12 @@
           </div>
           <div class="field">
             <label class="field-label" for="mx-skills">Skills <span class="hint-inline">library skill names, comma-separated</span></label>
-            <input id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
+            <input dir="auto" id="mx-skills" class="input" data-testid="matrix-skills" placeholder="golang-testing, golang-code-review" bind:value={fSkills} />
           </div>
           <div class="grid2">
             <div class="field">
               <label class="field-label" for="mx-test">Test command <span class="hint-inline">optional</span></label>
-              <input id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
+              <input dir="ltr" id="mx-test" class="input" data-testid="matrix-test-cmd" placeholder="go test ./..." bind:value={fTestCmd} />
             </div>
             <div class="field">
               <label class="field-label" for="mx-iter">Iterations</label>
@@ -373,14 +373,14 @@
           {#each fPrompts as p, i (i)}
             <div class="prompt">
               <div class="row">
-                <input class="input grow" data-testid="matrix-prompt-label" aria-label="Prompt {i + 1} label" placeholder="Happy path" bind:value={p.label} />
+                <input dir="auto" class="input grow" data-testid="matrix-prompt-label" aria-label="Prompt {i + 1} label" placeholder="Happy path" bind:value={p.label} />
                 {#if fPrompts.length > 1}
                   <button class="icon-btn" type="button" title="Remove prompt" aria-label="Remove prompt {i + 1}" onclick={() => removePrompt(i)}>
                     <Icon name="trash" size={14} />
                   </button>
                 {/if}
               </div>
-              <textarea
+              <textarea dir="auto"
                 class="input"
                 rows="2"
                 data-testid="matrix-prompt-task"

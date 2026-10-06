@@ -6,17 +6,37 @@
   const TTL_MS = 60_000;
   const STATUS_TTL_MS = 15_000;
   const PRS_TTL_MS = 120_000;
-  const cache = new Map<string, { at: number; ttl: number; p: Promise<unknown>; signal?: AbortSignal }>();
+  const cache = new Map<string, { at: number; ttl: number; p: Promise<unknown> }>();
+  /** A shared read, deduplicated per key for `ttl`. The fetch itself is NOT
+   *  bound to the caller's signal: a superseded panel (flipping notes) used to
+   *  abort the in-flight fetch every other note was about to share, so the next
+   *  note refetched it — the k8s overview went out twice in one window. The
+   *  caller's `signal` only stops ITS wait; the fetch completes into the cache. */
   function cached<T>(key: string, load: () => Promise<T>, ttl = TTL_MS, signal?: AbortSignal): Promise<T> {
     const hit = cache.get(key);
-    // An entry whose load was aborted (a superseded note) is a miss — the
-    // abort is synchronous, its rejection (which evicts it) is not.
-    if (hit && Date.now() - hit.at < hit.ttl && !hit.signal?.aborted) return hit.p as Promise<T>;
-    const p = load();
-    const entry = { at: Date.now(), ttl, p, signal };
-    p.catch(() => { if (cache.get(key) === entry) cache.delete(key); }); // failures retry on the next note
-    cache.set(key, entry);
-    return p;
+    let p: Promise<T>;
+    if (hit && Date.now() - hit.at < hit.ttl) {
+      p = hit.p as Promise<T>;
+    } else {
+      p = load();
+      const entry = { at: Date.now(), ttl, p };
+      p.catch(() => { if (cache.get(key) === entry) cache.delete(key); }); // failures retry on the next note
+      cache.set(key, entry);
+    }
+    return signal ? untilAborted(p, signal) : p;
+  }
+  /** `p`, or an AbortError as soon as `signal` aborts (`p` keeps running). */
+  function untilAborted<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+    const aborted = () => new DOMException('The operation was aborted.', 'AbortError');
+    if (signal.aborted) return Promise.reject(aborted());
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(aborted());
+      signal.addEventListener('abort', onAbort, { once: true });
+      p.then(
+        (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+        (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+      );
+    });
   }
   /** Whole-panel results per (workspace, hints): re-mounting the panel (an
    *  Edit → Read toggle, flipping back to a note) within this window renders
@@ -90,7 +110,7 @@
 
   async function k8sHits(signal: AbortSignal): Promise<WorkloadHit[]> {
     if (!hints.services.length) return [];
-    const overview = await cached('k8s:overview', () => k8sApi.monitorOverview('1h', signal), TTL_MS, signal);
+    const overview = await cached('k8s:overview', () => k8sApi.monitorOverview('1h'), TTL_MS, signal);
     const want = hints.k8sCluster ? norm(hints.k8sCluster) : null;
     const clusters = overview
       .filter((r) => r.enabled && (!want || norm(r.cluster.name) === want || r.cluster.id === hints.k8sCluster))
@@ -100,7 +120,7 @@
         try {
           const w = await cached<K8sMonitorWorkloadsResp>(
             `k8s:wl:${r.cluster.id}:${hints.k8sNamespace ?? ''}`,
-            () => k8sApi.monitorWorkloads(r.cluster.id, '1h', hints.k8sNamespace ?? undefined, signal),
+            () => k8sApi.monitorWorkloads(r.cluster.id, '1h', hints.k8sNamespace ?? undefined),
             TTL_MS,
             signal,
           );
@@ -115,13 +135,13 @@
 
   async function repoHits(signal: AbortSignal): Promise<RepoHit[]> {
     if (!hints.repos.length) return [];
-    const dir = await cached<RepoDirectory>('git:directory', () => api.bg.get<RepoDirectory>('/git/repos/directory', signal), TTL_MS, signal);
+    const dir = await cached<RepoDirectory>('git:directory', () => api.bg.get<RepoDirectory>('/git/repos/directory'), TTL_MS, signal);
     const matched = matchRepos(hints.repos, dir.repos).slice(0, 3);
     return Promise.all(
       matched.map(async (repo) => {
         const status = await cached(
           `git:status:${repo.id}`,
-          () => api.bg.get<RepoStatusResp>(`/repos/${repo.id}/status`, signal),
+          () => api.bg.get<RepoStatusResp>(`/repos/${repo.id}/status`),
           STATUS_TTL_MS,
           signal,
         ).catch(() => null);
@@ -183,17 +203,17 @@
       source('Git', failed, () => repoHits(signal)),
       source('Connections', failed, async () =>
         hints.databases.length || hints.services.length
-          ? matchByName(nameHints, await cached(`conn:${wsId}`, () => api.bg.get<Connection[]>(`/workspaces/${wsId}/connections`, signal), TTL_MS, signal), (c) => c.name)
+          ? matchByName(nameHints, await cached(`conn:${wsId}`, () => api.bg.get<Connection[]>(`/workspaces/${wsId}/connections`), TTL_MS, signal), (c) => c.name)
           : [],
       ),
       source('API collections', failed, async () =>
         hints.collections.length
-          ? matchByName(hints.collections, await cached(`coll:${wsId}`, () => api.bg.get<ApiCollection[]>(`/workspaces/${wsId}/api-client/collections`, signal), TTL_MS, signal), (c) => c.name)
+          ? matchByName(hints.collections, await cached(`coll:${wsId}`, () => api.bg.get<ApiCollection[]>(`/workspaces/${wsId}/api-client/collections`), TTL_MS, signal), (c) => c.name)
           : [],
       ),
       source('Dashboards', failed, async () =>
         hints.dashboards.length || hints.services.length
-          ? matchByName([...hints.dashboards, ...hints.services], await cached(`dash:${wsId}`, () => api.bg.get<DbDashboard[]>(`/workspaces/${wsId}/db/dashboards`, signal), TTL_MS, signal), (d) => d.name)
+          ? matchByName([...hints.dashboards, ...hints.services], await cached(`dash:${wsId}`, () => api.bg.get<DbDashboard[]>(`/workspaces/${wsId}/db/dashboards`), TTL_MS, signal), (d) => d.name)
           : [],
       ),
     ]);

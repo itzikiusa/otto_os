@@ -53,7 +53,7 @@
       {/each}
     </select>
   {:else}
-    <input class="mono" value={region} onchange={(e) => pick((e.currentTarget as HTMLInputElement).value.trim() || account.region)} aria-label="Region" size={12} />
+    <input dir="ltr" class="mono" value={region} onchange={(e) => pick((e.currentTarget as HTMLInputElement).value.trim() || account.region)} aria-label="Region" size={12} />
   {/if}
 </label>
 

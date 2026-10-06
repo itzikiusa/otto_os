@@ -13,7 +13,7 @@ use sqlx::Row;
 
 use otto_core::{new_id, Error, Result};
 
-use crate::convert::{dberr, fmt};
+use crate::convert::{dberr, dberr_unique, fmt};
 
 // ---------------------------------------------------------------------------
 // DTOs
@@ -293,6 +293,82 @@ fn row_to_memory(r: &sqlx::sqlite::SqliteRow) -> Result<Memory> {
 // Repo
 // ---------------------------------------------------------------------------
 
+/// What [`MemoriesRepo::save_one`] did with an item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveOutcome {
+    /// A new row was inserted.
+    Created,
+    /// An inactive (forgotten / merged / superseded) duplicate was revived.
+    Reactivated,
+    /// A live duplicate already existed; it is returned unchanged.
+    Existing,
+}
+
+impl SaveOutcome {
+    /// True when the save produced a row that was not live before (created or
+    /// reactivated) — what callers mean by "imported".
+    pub fn is_new(self) -> bool {
+        !matches!(self, SaveOutcome::Existing)
+    }
+}
+
+/// The dedup unique index (`idx_memories_dedup`) covers inactive rows too; a
+/// write that collides with it is a caller-facing 409, not a 500.
+const DUPLICATE_MEMORY: &str =
+    "a memory with the same content already exists in this collection and scope";
+
+async fn insert_conn(
+    conn: &mut sqlx::SqliteConnection,
+    id: &str,
+    ws: &str,
+    by: &str,
+    nm: &NewMemory,
+) -> Result<()> {
+    let now = fmt(Utc::now());
+    let hash = MemoriesRepo::content_hash(&nm.body);
+    sqlx::query(
+        "INSERT INTO memories (id,workspace_id,collection,record_type,scope,story_id,kind,title,body,\
+         entities_json,tags_json,source_kind,source_ref,refs_json,confidence,salience,visibility,content_hash,\
+         active,version,created_by,created_at,updated_at,access_count) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,0)",
+    )
+    .bind(id)
+    .bind(ws)
+    .bind(&nm.collection)
+    .bind(&nm.record_type)
+    .bind(nm.scope.as_str())
+    .bind(&nm.story_id)
+    .bind(&nm.kind)
+    .bind(&nm.title)
+    .bind(&nm.body)
+    .bind(jstr(&nm.entities))
+    .bind(jstr(&nm.tags))
+    .bind(&nm.source_kind)
+    .bind(&nm.source_ref)
+    .bind(jstr(&nm.refs))
+    .bind(nm.confidence.unwrap_or(0.7) as f64)
+    .bind(nm.salience.unwrap_or(0.5) as f64)
+    .bind(if nm.visibility.is_empty() { "shared" } else { &nm.visibility })
+    .bind(&hash)
+    .bind(by)
+    .bind(&now)
+    .bind(&now)
+    .execute(&mut *conn)
+    .await
+    .map_err(dberr_unique("memory.create", DUPLICATE_MEMORY))?;
+    Ok(())
+}
+
+async fn get_conn(conn: &mut sqlx::SqliteConnection, ws: &str, id: &str) -> Result<Memory> {
+    let r = sqlx::query("SELECT * FROM memories WHERE id = ? AND workspace_id = ?")
+        .bind(id)
+        .bind(ws)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(dberr("memory"))?;
+    row_to_memory(&r)
+}
+
 #[derive(Clone)]
 pub struct MemoriesRepo {
     pool: DbPool,
@@ -322,41 +398,84 @@ impl MemoriesRepo {
         hex::encode(h.finalize())
     }
 
+    /// Insert one memory row (no dedup lookup, no FTS). A row whose content
+    /// matches an existing one (active or not — the dedup index covers both)
+    /// is a 409 Conflict, not a 500; [`Self::save_one`] is the dedup-aware path.
     pub async fn create(&self, ws: &str, by: &str, nm: NewMemory) -> Result<Memory> {
+        let mut tx = self.pool.begin().await.map_err(dberr("memory.create"))?;
         let id = new_id();
-        let now = fmt(Utc::now());
+        insert_conn(&mut tx, &id, ws, by, &nm).await?;
+        let m = get_conn(&mut tx, ws, &id).await?;
+        tx.commit().await.map_err(dberr("memory.create"))?;
+        Ok(m)
+    }
+
+    /// Save one memory atomically, deduplicating by normalized content hash
+    /// within its collection/scope/story — ONE `BEGIN IMMEDIATE` transaction
+    /// covering the lookup, the row write and (when `fts`) its FTS row + rowid
+    /// map entry, so the index can't silently drift from the table:
+    ///
+    /// - a live duplicate is returned unchanged ([`SaveOutcome::Existing`]);
+    /// - a forgotten / merged / superseded duplicate is REACTIVATED (the
+    ///   dedup unique index covers inactive rows, so a plain INSERT 500'd and
+    ///   left a batch import half-applied) — [`SaveOutcome::Reactivated`];
+    /// - otherwise a new row is inserted ([`SaveOutcome::Created`]).
+    ///
+    /// The FTS write runs under a savepoint: if it fails the memory still
+    /// commits and the next [`Self::ensure_fts`] reconcile repairs the index.
+    pub async fn save_one(
+        &self,
+        ws: &str,
+        by: &str,
+        nm: NewMemory,
+        fts: bool,
+    ) -> Result<(Memory, SaveOutcome)> {
         let hash = Self::content_hash(&nm.body);
-        sqlx::query(
-            "INSERT INTO memories (id,workspace_id,collection,record_type,scope,story_id,kind,title,body,\
-             entities_json,tags_json,source_kind,source_ref,refs_json,confidence,salience,visibility,content_hash,\
-             active,version,created_by,created_at,updated_at,access_count) \
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,?,?,?,0)",
+        let mut tx = self.pool.begin().await.map_err(dberr("memory.save"))?;
+        let found: Option<(String, i64)> = sqlx::query_as(
+            "SELECT id, active FROM memories WHERE workspace_id = ? AND collection = ? AND scope = ? \
+             AND IFNULL(story_id,'') = IFNULL(?,'') AND content_hash = ?",
         )
-        .bind(&id)
         .bind(ws)
         .bind(&nm.collection)
-        .bind(&nm.record_type)
         .bind(nm.scope.as_str())
         .bind(&nm.story_id)
-        .bind(&nm.kind)
-        .bind(&nm.title)
-        .bind(&nm.body)
-        .bind(jstr(&nm.entities))
-        .bind(jstr(&nm.tags))
-        .bind(&nm.source_kind)
-        .bind(&nm.source_ref)
-        .bind(jstr(&nm.refs))
-        .bind(nm.confidence.unwrap_or(0.7) as f64)
-        .bind(nm.salience.unwrap_or(0.5) as f64)
-        .bind(if nm.visibility.is_empty() { "shared" } else { &nm.visibility })
         .bind(&hash)
-        .bind(by)
-        .bind(&now)
-        .bind(&now)
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
-        .map_err(dberr("memory.create"))?;
-        self.get(ws, &id).await
+        .map_err(dberr("memory.save.find"))?;
+        let (id, outcome) = match found {
+            Some((id, active)) if active != 0 => {
+                let m = get_conn(&mut tx, ws, &id).await?;
+                tx.rollback().await.map_err(dberr("memory.save"))?;
+                return Ok((m, SaveOutcome::Existing));
+            }
+            Some((id, _)) => {
+                sqlx::query(
+                    "UPDATE memories SET active=1, superseded_by=NULL, forgotten_at=NULL, \
+                     undo_token=NULL, state='accepted', version=version+1, updated_at=? \
+                     WHERE id=? AND workspace_id=?",
+                )
+                .bind(fmt(Utc::now()))
+                .bind(&id)
+                .bind(ws)
+                .execute(&mut *tx)
+                .await
+                .map_err(dberr("memory.save.reactivate"))?;
+                (id, SaveOutcome::Reactivated)
+            }
+            None => {
+                let id = new_id();
+                insert_conn(&mut tx, &id, ws, by, &nm).await?;
+                (id, SaveOutcome::Created)
+            }
+        };
+        let m = get_conn(&mut tx, ws, &id).await?;
+        if fts {
+            fts_put_guarded(&mut tx, &m.id, &m.workspace_id, &m.title, &m.body).await;
+        }
+        tx.commit().await.map_err(dberr("memory.save"))?;
+        Ok((m, outcome))
     }
 
     pub async fn get(&self, ws: &str, id: &str) -> Result<Memory> {
@@ -515,7 +634,22 @@ impl MemoriesRepo {
     }
 
     pub async fn update(&self, ws: &str, id: &str, p: MemoryPatch) -> Result<Memory> {
-        let cur = self.get(ws, id).await?;
+        self.update_indexed(ws, id, p, false).await
+    }
+
+    /// [`Self::update`] in one `BEGIN IMMEDIATE` transaction that also
+    /// refreshes the memory's FTS row when `fts` (see [`Self::save_one`]). An
+    /// edit that makes the body collide with another memory of the same
+    /// collection/scope (live or not) is a 409 Conflict.
+    pub async fn update_indexed(
+        &self,
+        ws: &str,
+        id: &str,
+        p: MemoryPatch,
+        fts: bool,
+    ) -> Result<Memory> {
+        let mut tx = self.pool.begin().await.map_err(dberr("memory.update"))?;
+        let cur = get_conn(&mut tx, ws, id).await?;
         let title = p.title.unwrap_or(cur.title);
         let body = p.body.unwrap_or(cur.body);
         let tags = p.tags.unwrap_or(cur.tags);
@@ -541,10 +675,15 @@ impl MemoriesRepo {
         .bind(&now)
         .bind(id)
         .bind(ws)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
-        .map_err(dberr("memory.update"))?;
-        self.get(ws, id).await
+        .map_err(dberr_unique("memory.update", DUPLICATE_MEMORY))?;
+        let m = get_conn(&mut tx, ws, id).await?;
+        if fts {
+            fts_put_guarded(&mut tx, &m.id, &m.workspace_id, &m.title, &m.body).await;
+        }
+        tx.commit().await.map_err(dberr("memory.update"))?;
+        Ok(m)
     }
 
     pub async fn forget(&self, ws: &str, id: &str) -> Result<()> {
@@ -971,6 +1110,96 @@ fn fts_match_query(query: &str) -> Option<String> {
     }
 }
 
+/// Upsert one memory's FTS row through the `mid → rowid` map on `conn`
+/// (an open transaction).
+async fn fts_put_conn(
+    conn: &mut sqlx::SqliteConnection,
+    mid: &str,
+    ws: &str,
+    title: &str,
+    body: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    let rid: Option<i64> = sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
+        .bind(mid)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some(rid) = rid {
+        let n = sqlx::query("UPDATE memories_fts SET ws = ?, title = ?, body = ? WHERE rowid = ?")
+            .bind(ws)
+            .bind(title)
+            .bind(body)
+            .bind(rid)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected();
+        if n > 0 {
+            return Ok(());
+        }
+    }
+    let ins = sqlx::query("INSERT INTO memories_fts (mid, ws, title, body) VALUES (?,?,?,?)")
+        .bind(mid)
+        .bind(ws)
+        .bind(title)
+        .bind(body)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("INSERT OR REPLACE INTO memories_fts_ids (mid, rid) VALUES (?, ?)")
+        .bind(mid)
+        .bind(ins.last_insert_rowid())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Delete one memory's FTS row + map entry on `conn` (an open transaction).
+async fn fts_del_conn(
+    conn: &mut sqlx::SqliteConnection,
+    mid: &str,
+) -> std::result::Result<(), sqlx::Error> {
+    let rid: Option<i64> = sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
+        .bind(mid)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some(rid) = rid {
+        sqlx::query("DELETE FROM memories_fts WHERE rowid = ?")
+            .bind(rid)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM memories_fts_ids WHERE mid = ?")
+            .bind(mid)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// [`fts_put_conn`] under a SAVEPOINT inside the caller's write transaction:
+/// the index write commits WITH the memory row, and an index failure rolls
+/// back only itself (the memory still saves; [`MemoriesRepo::reconcile_fts`]
+/// repairs the gap on the next start) instead of failing the user's save.
+async fn fts_put_guarded(
+    conn: &mut sqlx::SqliteConnection,
+    mid: &str,
+    ws: &str,
+    title: &str,
+    body: &str,
+) {
+    if sqlx::query("SAVEPOINT memory_fts")
+        .execute(&mut *conn)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if let Err(e) = fts_put_conn(conn, mid, ws, title, body).await {
+        tracing::warn!(memory = mid, error = %e, "memory FTS write failed; reconciled on next start");
+        let _ = sqlx::query("ROLLBACK TO memory_fts")
+            .execute(&mut *conn)
+            .await;
+    }
+    let _ = sqlx::query("RELEASE memory_fts").execute(&mut *conn).await;
+}
+
 impl MemoriesRepo {
     /// Create the FTS5 index if this SQLite build supports it, returning whether
     /// FTS5 is available. Idempotent; backfills any not-yet-indexed memories on
@@ -988,7 +1217,18 @@ impl MemoriesRepo {
         }
         // Without the map every index write would fail: report FTS as
         // unavailable (LIKE fallback) and retry on the next daemon start.
-        Ok(self.ensure_fts_map().await.is_ok())
+        if self.ensure_fts_map().await.is_err() {
+            return Ok(false);
+        }
+        // Once per daemon: repair whatever drifted while the index was
+        // written outside the memory's own transaction (older builds), or a
+        // savepointed FTS write failed. A failed repair leaves FTS usable.
+        match self.reconcile_fts().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(repaired = n, "memory FTS index reconciled"),
+            Err(e) => tracing::warn!(error = %e, "memory FTS reconcile failed"),
+        }
+        Ok(true)
     }
 
     /// The `mid → FTS rowid` map every index write goes through (perf
@@ -1042,44 +1282,12 @@ impl MemoriesRepo {
     /// Upsert a memory's text into the FTS index: an UPDATE by rowid through
     /// the map when indexed, else INSERT + map row — one transaction (it used
     /// to be two autocommit writes around a whole-index scan). Silent no-op
-    /// when FTS5 is unavailable.
+    /// when FTS5 is unavailable. Saves/updates index inside their own
+    /// transaction ([`Self::save_one`]); this is for out-of-band callers.
     pub async fn fts_index(&self, mid: &str, ws: &str, title: &str, body: &str) -> Result<()> {
         let put = async {
             let mut tx = self.pool.begin().await?;
-            let rid: Option<i64> =
-                sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
-                    .bind(mid)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            let mut done = false;
-            if let Some(rid) = rid {
-                done = sqlx::query(
-                    "UPDATE memories_fts SET ws = ?, title = ?, body = ? WHERE rowid = ?",
-                )
-                .bind(ws)
-                .bind(title)
-                .bind(body)
-                .bind(rid)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected()
-                    > 0;
-            }
-            if !done {
-                let ins =
-                    sqlx::query("INSERT INTO memories_fts (mid, ws, title, body) VALUES (?,?,?,?)")
-                        .bind(mid)
-                        .bind(ws)
-                        .bind(title)
-                        .bind(body)
-                        .execute(&mut *tx)
-                        .await?;
-                sqlx::query("INSERT OR REPLACE INTO memories_fts_ids (mid, rid) VALUES (?, ?)")
-                    .bind(mid)
-                    .bind(ins.last_insert_rowid())
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            fts_put_conn(&mut tx, mid, ws, title, body).await?;
             tx.commit().await
         };
         let _: std::result::Result<(), sqlx::Error> = put.await;
@@ -1091,21 +1299,7 @@ impl MemoriesRepo {
     pub async fn fts_remove(&self, mid: &str) -> Result<()> {
         let del = async {
             let mut tx = self.pool.begin().await?;
-            let rid: Option<i64> =
-                sqlx::query_scalar("SELECT rid FROM memories_fts_ids WHERE mid = ?")
-                    .bind(mid)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if let Some(rid) = rid {
-                sqlx::query("DELETE FROM memories_fts WHERE rowid = ?")
-                    .bind(rid)
-                    .execute(&mut *tx)
-                    .await?;
-                sqlx::query("DELETE FROM memories_fts_ids WHERE mid = ?")
-                    .bind(mid)
-                    .execute(&mut *tx)
-                    .await?;
-            }
+            fts_del_conn(&mut tx, mid).await?;
             tx.commit().await
         };
         let res: std::result::Result<(), sqlx::Error> = del.await;
@@ -1116,6 +1310,89 @@ impl MemoriesRepo {
                 .await;
         }
         Ok(())
+    }
+
+    /// Repair drift between `memories` and the FTS index (+ its rowid map),
+    /// in ONE `BEGIN IMMEDIATE` transaction. The index mirrors EVERY memory
+    /// row (search filters `active` itself), so this:
+    ///
+    /// 1. drops map rows pointing at a vanished FTS row, and FTS/map rows of
+    ///    memories that no longer exist (hard deletes, workspace cascades);
+    /// 2. indexes every memory missing from the map (a crash or a failed FTS
+    ///    write left it unindexed — search would silently never find it);
+    /// 3. rewrites FTS rows whose text no longer matches the memory.
+    ///
+    /// Returns how many rows were repaired. Runs once per daemon from
+    /// [`Self::ensure_fts`]; O(n) over `memories`, cheap at memory-store scale.
+    pub async fn reconcile_fts(&self) -> std::result::Result<u64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let mut fixed = 0;
+        fixed += sqlx::query(
+            "DELETE FROM memories_fts_ids WHERE rid NOT IN (SELECT rowid FROM memories_fts)",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        fixed += sqlx::query(
+            "DELETE FROM memories_fts WHERE rowid IN (SELECT rid FROM memories_fts_ids \
+             WHERE mid NOT IN (SELECT id FROM memories))",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        sqlx::query("DELETE FROM memories_fts_ids WHERE mid NOT IN (SELECT id FROM memories)")
+            .execute(&mut *tx)
+            .await?;
+        // Unmapped FTS rows are unreachable through the map (a pre-map crash
+        // remnant): drop them so a re-index can't leave a ghost duplicate.
+        fixed += sqlx::query(
+            "DELETE FROM memories_fts WHERE rowid NOT IN (SELECT rid FROM memories_fts_ids)",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        // FTS5 hands out rowid = max+1, so everything above the current max
+        // was inserted by the backfill below.
+        let max: i64 = sqlx::query_scalar("SELECT IFNULL(MAX(rowid), 0) FROM memories_fts")
+            .fetch_one(&mut *tx)
+            .await?;
+        let missing = sqlx::query(
+            "INSERT INTO memories_fts (mid, ws, title, body) \
+             SELECT id, workspace_id, title, body FROM memories \
+             WHERE id NOT IN (SELECT mid FROM memories_fts_ids)",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if missing > 0 {
+            sqlx::query(
+                "INSERT OR REPLACE INTO memories_fts_ids (mid, rid) \
+                 SELECT mid, rowid FROM memories_fts WHERE rowid > ?",
+            )
+            .bind(max)
+            .execute(&mut *tx)
+            .await?;
+        }
+        fixed += missing;
+        let stale: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT i.rid, m.workspace_id, m.title, m.body FROM memories m \
+             JOIN memories_fts_ids i ON i.mid = m.id JOIN memories_fts f ON f.rowid = i.rid \
+             WHERE f.ws IS NOT m.workspace_id OR f.title IS NOT m.title OR f.body IS NOT m.body",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        for (rid, ws, title, body) in &stale {
+            sqlx::query("UPDATE memories_fts SET ws = ?, title = ?, body = ? WHERE rowid = ?")
+                .bind(ws)
+                .bind(title)
+                .bind(body)
+                .bind(rid)
+                .execute(&mut *tx)
+                .await?;
+        }
+        fixed += stale.len() as u64;
+        tx.commit().await?;
+        Ok(fixed)
     }
 
     /// FTS5 keyword search ranked by bm25 (lower = better). Mirrors
@@ -1215,8 +1492,10 @@ mod fts_map_tests {
         );
     }
 
-    /// An index built before the map: `ensure_fts` builds the map once and
-    /// keeps only the newest row per memory.
+    /// An index built before the map: `ensure_fts_map` builds the map once
+    /// and keeps only the newest row per memory. (Driven directly: the
+    /// `ensure_fts` reconcile that follows would also prune these rows, since
+    /// no `memories` row `m` exists — asserted last.)
     #[tokio::test]
     async fn legacy_index_gets_its_map_built_and_deduplicated() {
         let r = MemoriesRepo::new(crate::db::test_pool().await);
@@ -1236,9 +1515,18 @@ mod fts_map_tests {
             .await
             .unwrap();
         }
-        assert!(r.ensure_fts().await.unwrap());
+        r.ensure_fts_map().await.unwrap();
         assert_eq!(rows(&r).await, vec![("m".to_string(), "new".to_string())]);
         r.fts_index("m", "ws", "T", "newer").await.unwrap();
         assert_eq!(rows(&r).await, vec![("m".to_string(), "newer".to_string())]);
+        // The index mirrors `memories`: a row for a memory that no longer
+        // exists is an orphan the startup reconcile removes (map row too).
+        assert!(r.ensure_fts().await.unwrap());
+        assert_eq!(rows(&r).await, vec![]);
+        let mapped: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memories_fts_ids")
+            .fetch_one(&r.pool)
+            .await
+            .unwrap();
+        assert_eq!(mapped, 0);
     }
 }

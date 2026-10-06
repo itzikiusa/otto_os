@@ -50,7 +50,7 @@
             <span class="ph-badge mono" title="Placeholder syntax">{p.syntax}</span>
             {#if p.count > 1}<span class="ph-count" title="Occurrences">×{p.count}</span>{/if}
           </div>
-          <input
+          <input dir="ltr"
             class="input ph-input mono"
             type="text"
             value={v}

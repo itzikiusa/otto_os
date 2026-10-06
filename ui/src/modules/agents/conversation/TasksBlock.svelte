@@ -31,7 +31,7 @@
       {#each tasks as t, i (t.ext_id ?? `${i}:${t.title}`)}
         <li class={t.status}>
           <span class="mark" aria-hidden="true">
-            {#if t.status === 'completed'}<Icon name="check" size={11} />{:else}<span class="ring"></span>{/if}
+            {#if t.status === 'completed'}<Icon name="check" size={12} />{:else}<span class="ring"></span>{/if}
           </span>
           <span class="ttl">{t.status === 'in_progress' && t.active_form ? t.active_form : t.title}</span>
           <span class="sr-only">— {t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'in progress' : 'to do'}</span>

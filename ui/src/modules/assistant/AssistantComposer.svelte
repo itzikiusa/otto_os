@@ -132,7 +132,7 @@
       <Icon name="plus" size={14} />
     </button>
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => void onFiles(e.currentTarget.files)} />
-    <textarea
+    <textarea dir="auto"
       bind:this={ta}
       bind:value={text}
       rows="1"
@@ -169,7 +169,7 @@
     display: flex;
     align-items: flex-end;
     gap: 6px;
-    max-width: 820px;
+    max-width: var(--prose-readable);
     padding: 6px;
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-l);
@@ -240,7 +240,7 @@
   }
   .route,
   .err {
-    max-width: 820px;
+    max-width: var(--prose-readable);
     margin: 0 0 6px;
     display: flex;
     align-items: center;
@@ -263,7 +263,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    max-width: 820px;
+    max-width: var(--prose-readable);
   }
   .file {
     display: inline-flex;

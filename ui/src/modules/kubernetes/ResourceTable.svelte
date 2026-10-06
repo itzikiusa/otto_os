@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // k9s-style resource table: sticky header row + `VirtualList` body sharing
   // one CSS grid template, health-colored status pill, keyboard-navigable rows
   // (listbox/option semantics — the whole table is one selection widget).
@@ -114,7 +115,7 @@
     <div class="rt-body" bind:this={bodyEl} onscrollcapture={onBodyScroll} role="listbox" aria-label="{kindDef(kind).label} rows" aria-multiselectable="false">
       <VirtualList items={rows} estimateHeight={ROW_H} class="rt-vlist">
         {#snippet row(r, i)}
-          <div
+          <div use:rowMenu
             class="rt-row"
             class:selected={isSel(r)}
             role="option"

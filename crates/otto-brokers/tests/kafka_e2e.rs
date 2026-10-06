@@ -284,8 +284,10 @@ async fn full_surface_against_redpanda() {
     assert_eq!(st, StatusCode::OK);
     assert!(groups.is_array());
 
-    // 10. Metrics — total >= 3; Prometheus scrape of Redpanda should populate
-    //     per-broker resource metrics.
+    // 10. Metrics — total >= 3. The profile's metrics URL is the local
+    //     Redpanda (loopback), which the SSRF guard (audit S1) refuses for a
+    //     direct, untunnelled scrape: the endpoint still answers, without the
+    //     Prometheus half. A real cluster's endpoint is public or tunnelled.
     let (st, metrics) = call(
         &app,
         "GET",
@@ -300,10 +302,33 @@ async fn full_surface_against_redpanda() {
     );
     assert_eq!(
         metrics["prometheus_available"],
-        json!(true),
-        "metrics: {metrics}"
+        json!(false),
+        "a loopback metrics URL must be blocked by the SSRF guard: {metrics}"
     );
-    assert!(!metrics["brokers"].as_array().unwrap().is_empty());
+    assert!(metrics["brokers"].as_array().unwrap().is_empty());
+    match otto_brokers::metrics::scrape(&metrics_url(), false, None).await {
+        Err(otto_core::Error::Forbidden(m)) => {
+            assert!(m.contains("metrics endpoint blocked"), "{m}")
+        }
+        other => panic!("loopback scrape must be Forbidden, got {other:?}"),
+    }
+    //     The parse/aggregate half against Redpanda's REAL exposition: fetch
+    //     it here (the test is the trusted caller) and fold it in exactly as
+    //     the service does after a permitted scrape.
+    let exposition = reqwest::get(metrics_url())
+        .await
+        .expect("Redpanda metrics endpoint reachable")
+        .error_for_status()
+        .expect("Redpanda metrics endpoint answers 200")
+        .text()
+        .await
+        .unwrap();
+    let folded = otto_brokers::metrics::ClusterMetricState::default().build(3, Some(&exposition));
+    assert!(folded.prometheus_available);
+    assert!(
+        !folded.brokers.is_empty(),
+        "Redpanda's exposition must yield per-broker metrics"
+    );
 
     // 11. Schema registry subjects (none registered yet → empty array, 200).
     let (st, subjects) = call(

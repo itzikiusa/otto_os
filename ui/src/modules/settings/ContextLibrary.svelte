@@ -5,6 +5,7 @@
   import { sectionLabel } from './sections';
   import { guardUnsaved } from '../../lib/leaveGuard';
   import SectionIntro from './SectionIntro.svelte';
+  import { router } from '../../lib/router.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
   // Context Library (root-only): author and edit the Otto-owned library of
   // skills, souls, and context snippets — the single source of truth that gets
@@ -316,7 +317,7 @@
     {/snippet}
   </PageHeader>
   <PageBody width="readable">
-  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions.</SectionIntro>
+  <SectionIntro>The single source of truth materialized into each workspace’s CLIs. Edits here reach agents at the <strong>next session spawn</strong>, not running sessions. This is the raw file view: install or update bundled skills in <button type="button" class="intro-link" onclick={() => router.go('settings/skills')}>Settings → Skills</button>, and edit, test or evaluate one in <button type="button" class="intro-link" onclick={() => router.go('skills-eval')}>Skills Lab</button> — all three read and write this same library.</SectionIntro>
 
   <!-- Tabs (a real tablist: ←/→, Home/End) -->
   <div class="segmented lib-tabs" role="tablist" aria-label="Library">
@@ -425,7 +426,7 @@
           {:else}
             <div class="field">
               <label for="lib-name">Name</label>
-              <input
+              <input dir="ltr"
                 id="lib-name"
                 class="input mono"
                 bind:value={editName}

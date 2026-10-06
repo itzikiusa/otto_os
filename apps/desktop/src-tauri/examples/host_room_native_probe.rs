@@ -1,6 +1,9 @@
 //! Isolated native acceptance of production hosted-room commands. All bundled
 //! assets are replaced by a blank fixture; no product boot, daemon, real room,
 //! persistent credentials, microphone, screen capture or registry is touched.
+#[path = "../src/throttle.rs"]
+mod throttle;
+use throttle::NO_THROTTLE;
 #[path = "../src/host_rooms.rs"]
 mod host_rooms;
 

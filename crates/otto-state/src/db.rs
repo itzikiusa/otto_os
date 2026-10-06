@@ -64,7 +64,13 @@ pub async fn open(path: &Path) -> Result<DbPool> {
     repair_renumbered_vault_migrations(&pool).await?;
     repair_renumbered_migrations(&pool, RENUMBERED).await?;
 
-    sqlx::migrate!()
+    let migrator = sqlx::migrate!();
+    // A schema migration is the one boot step that rewrites the user's whole
+    // database irreversibly, and a deploy that rolls back to the previous app
+    // can't un-apply it. Snapshot first — only when something is pending, so
+    // an ordinary restart never pays the copy.
+    snapshot_before_migrations(&pool, path, &migrator).await;
+    migrator
         .run(&pool)
         .await
         .map_err(|e| Error::Internal(format!("migrate: {e}")))?;
@@ -244,6 +250,147 @@ async fn repair_renumbered_migrations(pool: &SqlitePool, table: &[(i64, &str, i6
     Ok(())
 }
 
+/// Pre-migration snapshots kept in `<data dir>/backups/` (newest first).
+const KEEP_MIGRATION_SNAPSHOTS: usize = 3;
+
+/// Embedded (up) migration versions the database has not applied yet.
+/// `applied` holds the successfully-applied versions from `_sqlx_migrations`.
+fn pending_versions(applied: &[i64], embedded: &[i64]) -> Vec<i64> {
+    let applied: std::collections::HashSet<i64> = applied.iter().copied().collect();
+    let mut pending: Vec<i64> = embedded
+        .iter()
+        .copied()
+        .filter(|v| !applied.contains(v))
+        .collect();
+    pending.sort_unstable();
+    pending
+}
+
+/// Snapshot file name: `<db file>.pre-<last applied version>-<UTC stamp>`.
+fn snapshot_name(db_file: &str, last_applied: i64, now: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "{db_file}.pre-{last_applied}-{}",
+        now.format("%Y%m%dT%H%M%SZ")
+    )
+}
+
+/// Which of `names` (files in the backups dir) to delete so only the newest
+/// `keep` snapshots of `db_file` survive. Ordered by the fixed-width UTC stamp
+/// at the end of the name, not by the version, so a downgrade-then-upgrade
+/// still keeps the most RECENT copies. Files that don't match the snapshot
+/// pattern are never selected.
+fn snapshots_to_prune(db_file: &str, names: &[String], keep: usize) -> Vec<String> {
+    let prefix = format!("{db_file}.pre-");
+    let mut snaps: Vec<(&str, &String)> = names
+        .iter()
+        .filter_map(|n| {
+            let rest = n.strip_prefix(&prefix)?;
+            let (version, stamp) = rest.rsplit_once('-')?;
+            let valid = version.parse::<i64>().is_ok()
+                && stamp.len() == 16
+                && stamp.ends_with('Z')
+                && stamp.as_bytes()[8] == b'T';
+            valid.then_some((stamp, n))
+        })
+        .collect();
+    // Newest first.
+    snaps.sort_by(|a, b| b.0.cmp(a.0));
+    snaps
+        .into_iter()
+        .skip(keep)
+        .map(|(_, n)| n.clone())
+        .collect()
+}
+
+/// When migrations are pending on an EXISTING database, write a consistent
+/// copy (`VACUUM INTO`) to `<dir>/backups/` and keep the newest
+/// [`KEEP_MIGRATION_SNAPSHOTS`]. Best-effort by design: a full disk must not
+/// brick the daemon, so a failed snapshot is logged loudly and boot goes on.
+async fn snapshot_before_migrations(
+    pool: &SqlitePool,
+    path: &Path,
+    migrator: &sqlx::migrate::Migrator,
+) {
+    let has_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if !has_table {
+        return; // fresh database — nothing to protect
+    }
+    let applied: Vec<i64> =
+        match sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("migrate snapshot: cannot read applied migrations: {e}");
+                return;
+            }
+        };
+    let embedded: Vec<i64> = migrator
+        .iter()
+        .filter(|m| !m.migration_type.is_down_migration())
+        .map(|m| m.version)
+        .collect();
+    let pending = pending_versions(&applied, &embedded);
+    let (Some(&last_applied), false) = (applied.iter().max(), pending.is_empty()) else {
+        return;
+    };
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name().and_then(|f| f.to_str())) else {
+        return;
+    };
+    let backups = dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backups) {
+        tracing::error!(
+            "migrate snapshot: create {}: {e} — migrating WITHOUT a snapshot",
+            backups.display()
+        );
+        return;
+    }
+    let target = backups.join(snapshot_name(file, last_applied, chrono::Utc::now()));
+    let started = std::time::Instant::now();
+    // `VACUUM INTO` reads one consistent snapshot through the writer and never
+    // touches the live file; the target must not exist (the stamp is unique).
+    let res = sqlx::query("VACUUM INTO ?")
+        .bind(target.to_string_lossy().into_owned())
+        .execute(pool)
+        .await;
+    match res {
+        Ok(_) => tracing::info!(
+            "migrate snapshot: {} pending migration(s) {:?}; saved {} in {} ms",
+            pending.len(),
+            pending,
+            target.display(),
+            started.elapsed().as_millis()
+        ),
+        Err(e) => {
+            let _ = std::fs::remove_file(&target);
+            tracing::error!(
+                "migrate snapshot: VACUUM INTO {} failed: {e} — migrating WITHOUT a snapshot",
+                target.display()
+            );
+            return;
+        }
+    }
+    let names: Vec<String> = std::fs::read_dir(&backups)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    for old in snapshots_to_prune(file, &names, KEEP_MIGRATION_SNAPSHOTS) {
+        match std::fs::remove_file(backups.join(&old)) {
+            Ok(()) => tracing::info!("migrate snapshot: pruned old snapshot {old}"),
+            Err(e) => tracing::warn!("migrate snapshot: prune {old}: {e}"),
+        }
+    }
+}
+
 /// In-memory pool with all migrations applied — for tests only. A single
 /// connection keeps the `sqlite::memory:` schema alive for the pool's lifetime.
 pub async fn test_pool() -> DbPool {
@@ -297,6 +444,82 @@ mod tests {
             .unwrap();
         }
         pool
+    }
+
+    #[test]
+    fn pending_versions_lists_unapplied_embedded_in_order() {
+        assert_eq!(pending_versions(&[1, 2, 3], &[1, 2, 3]), Vec::<i64>::new());
+        assert_eq!(pending_versions(&[1, 2], &[3, 1, 2, 4]), vec![3, 4]);
+        // A gap (a branch migration applied out of order) is still pending.
+        assert_eq!(pending_versions(&[1, 3], &[1, 2, 3]), vec![2]);
+        // Applied-but-unknown versions (a newer DB) are not "pending".
+        assert_eq!(pending_versions(&[1, 2, 9], &[1, 2]), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn snapshot_retention_keeps_the_newest_by_stamp() {
+        let t = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let names: Vec<String> = vec![
+            snapshot_name("otto.db", 150, t("2026-10-01T10:00:00Z")),
+            snapshot_name("otto.db", 152, t("2026-10-03T10:00:00Z")),
+            // An older stamp with a HIGHER version (downgrade then upgrade).
+            snapshot_name("otto.db", 160, t("2026-09-01T10:00:00Z")),
+            snapshot_name("otto.db", 151, t("2026-10-02T10:00:00Z")),
+            // Never selected: other files, other dbs, malformed stamps.
+            "otto.db".into(),
+            "notes.txt".into(),
+            "other.db.pre-1-20200101T000000Z".into(),
+            "otto.db.pre-x-20200101T000000Z".into(),
+            "otto.db.pre-1-2020".into(),
+        ];
+        assert_eq!(names[0], "otto.db.pre-150-20261001T100000Z");
+        let pruned = snapshots_to_prune("otto.db", &names, 3);
+        assert_eq!(pruned, vec![names[2].clone()]);
+        assert!(snapshots_to_prune("otto.db", &names, 10).is_empty());
+        assert_eq!(snapshots_to_prune("otto.db", &names, 0).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn open_snapshots_only_when_migrations_are_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("otto.db");
+        let backups = dir.path().join("backups");
+        let count = || {
+            std::fs::read_dir(&backups)
+                .map(|rd| rd.count())
+                .unwrap_or(0)
+        };
+        // Fresh DB: nothing to protect, no snapshot.
+        drop(open(&path).await.unwrap());
+        assert_eq!(count(), 0);
+        // Up to date: a plain restart never pays the copy.
+        drop(open(&path).await.unwrap());
+        assert_eq!(count(), 0);
+        // Forget the newest migration → it is pending again → one snapshot.
+        // (Its DDL already ran, so re-running it may fail; the snapshot is
+        // taken BEFORE the migrator, which is what this asserts.)
+        {
+            let pool = open(&path).await.unwrap();
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let _ = open(&path).await;
+        assert_eq!(count(), 1);
+        let name = std::fs::read_dir(&backups)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .into_string()
+            .unwrap();
+        assert!(name.starts_with("otto.db.pre-"), "{name}");
     }
 
     async fn versions(pool: &SqlitePool) -> Vec<i64> {

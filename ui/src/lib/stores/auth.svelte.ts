@@ -1,15 +1,37 @@
 // Auth / boot state: GET /meta → onboarding | login | ready.
 
 import { api, setToken, getToken, ApiError, UNAUTHORIZED_EVENT, setAltLoopbackBase } from '../api/client';
-import { lsGet, lsSet, lsRemove } from '../storage';
+import { lsRemove, ssGet, ssSet, ssRemove } from '../storage';
 import type { CapabilitiesResp, LoginResp, MeResp, MetaResp, User } from '../api/types';
 import type { Capability, Feature } from '../api/types';
 
 export type BootPhase = 'loading' | 'onboarding' | 'login' | 'ready' | 'offline';
 
-/** localStorage key used to persist the admin's own token across page reloads
- *  while an impersonation session is active. Cleared on `stopImpersonating`. */
+/** sessionStorage key holding the admin's own token while an impersonation
+ *  session is active, so Exit survives a reload of THIS tab. Deliberately not
+ *  localStorage: the owner's long-lived bearer must not sit in persistent,
+ *  origin-wide storage (any same-origin script / a stolen profile could read
+ *  it long after the impersonation ended). Cleared on `stopImpersonating`. */
 const ADMIN_TOKEN_KEY = 'otto_admin_token';
+
+// Older builds persisted the admin token in localStorage — purge any leftover.
+lsRemove(ADMIN_TOKEN_KEY);
+
+/** The admin token kept for the current impersonation (memory first). */
+let adminTokenMem: string | null = null;
+
+function saveAdminToken(token: string): void {
+  adminTokenMem = token;
+  ssSet(ADMIN_TOKEN_KEY, token);
+}
+
+/** Read AND clear the saved admin token. */
+function takeAdminToken(): string | null {
+  const t = adminTokenMem ?? ssGet(ADMIN_TOKEN_KEY);
+  adminTokenMem = null;
+  ssRemove(ADMIN_TOKEN_KEY);
+  return t;
+}
 
 // Capability ladder: index = strength (higher = more permissive).
 const CAP_ORDER: Capability[] = ['none', 'view', 'edit', 'admin'];
@@ -95,7 +117,7 @@ class AuthStore {
   private applyMe(resp: MeResp): void {
     this.me = resp.user;
     this.realUser = resp.real_user;
-    // Restore the isImpersonating state persisted in localStorage on reload
+    // Restore the isImpersonating state persisted in sessionStorage on reload
     // (the admin token survives because we persisted it before swapping).
   }
 
@@ -161,8 +183,17 @@ class AuthStore {
       }
       this.phase = 'ready';
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setToken(null);
-      this.phase = 'login';
+      // Only a rejected token means "sign in again". A timeout / 5xx / dropped
+      // connection on /auth/me (daemon restarting, sleep/wake) used to land on
+      // the login screen with a perfectly valid token: stay offline instead —
+      // App polls boot(true) every 2 s — or, for an in-place re-boot of a
+      // running app, keep the shell up.
+      if (e instanceof ApiError && e.status === 401) {
+        setToken(null);
+        this.phase = 'login';
+      } else if (this.phase !== 'ready') {
+        this.phase = 'offline';
+      }
     }
   }
 
@@ -187,8 +218,8 @@ class AuthStore {
   /**
    * Begin impersonating `userId`.
    *
-   * Saves the current (admin) token to localStorage under `otto_admin_token`
-   * so it can be recovered after a page reload, swaps the active bearer to the
+   * Keeps the current (admin) token in memory + this tab's sessionStorage
+   * (`otto_admin_token`) so it can be recovered after a reload, swaps the active bearer to the
    * short-lived impersonation token, then re-boots so the whole app (identity,
    * capabilities, banner) reflects the target user.
    */
@@ -202,7 +233,7 @@ class AuthStore {
     );
 
     // Persist the admin token so Exit works even after a page reload.
-    lsSet(ADMIN_TOKEN_KEY, adminToken);
+    saveAdminToken(adminToken);
     setToken(impToken);
 
     // Re-load identity + capabilities as the impersonated user.
@@ -214,7 +245,7 @@ class AuthStore {
    * End the active impersonation session.
    *
    * Calls `/admin/impersonate/stop` to revoke the impersonation token on the
-   * server, restores the saved admin token (from in-memory or localStorage),
+   * server, restores the saved admin token (from memory or this tab's sessionStorage),
    * clears the persisted key, then re-boots so the app reverts to the admin.
    */
   async stopImpersonating(): Promise<void> {
@@ -224,9 +255,7 @@ class AuthStore {
       // Revoke is best-effort; proceed regardless (token may already be expired).
     }
 
-    const savedAdmin =
-      lsGet(ADMIN_TOKEN_KEY);
-    lsRemove(ADMIN_TOKEN_KEY);
+    const savedAdmin = takeAdminToken();
 
     if (savedAdmin) {
       setToken(savedAdmin);
@@ -260,8 +289,7 @@ class AuthStore {
       await api.get<MeResp>('/auth/me');
     } catch (e) {
       if (!(e instanceof ApiError && e.status === 401) || token !== getToken()) return;
-      const savedAdmin = lsGet(ADMIN_TOKEN_KEY);
-      lsRemove(ADMIN_TOKEN_KEY);
+      const savedAdmin = takeAdminToken();
       if (savedAdmin && savedAdmin !== token) {
         setToken(savedAdmin);
         try {
@@ -288,7 +316,7 @@ class AuthStore {
     } catch {
       /* token may already be invalid */
     }
-    lsRemove(ADMIN_TOKEN_KEY);
+    takeAdminToken();
     setToken(null);
     this.me = null;
     this.realUser = null;

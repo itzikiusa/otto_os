@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use otto_core::Result;
-use otto_state::memory::{ListFilter, SearchFilter};
+use otto_state::memory::{ListFilter, SaveOutcome, SearchFilter};
 use otto_state::DbPool;
 use otto_state::MemoriesRepo;
 
@@ -102,39 +102,46 @@ impl MemoryService {
         }
     }
 
-    /// Keep the FTS index in sync for a saved/updated memory.
-    async fn fts_index_one(&self, m: &Memory) {
-        if self.fts_ready().await {
-            let _ = self
-                .repo
-                .fts_index(&m.id, &m.workspace_id, &m.title, &m.body)
-                .await;
-        }
-    }
-
     /// Persist memories, skipping exact duplicates (NOOP returns the existing row),
     /// indexing each new row into FTS on write.
     pub async fn save(&self, ws: &str, by: &str, items: Vec<NewMemory>) -> Result<Vec<Memory>> {
         if let Some(r) = &self.remote {
             return r.save(ws, items).await;
         }
+        Ok(self
+            .save_detailed(ws, by, items)
+            .await?
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect())
+    }
+
+    /// [`Self::save`], reporting per item whether it was created, revived
+    /// from an inactive duplicate, or already live. Each item is ONE write
+    /// transaction covering the dedup lookup, the row and its FTS entry
+    /// ([`MemoriesRepo::save_one`]). Local store only (a remote host reports
+    /// no outcomes).
+    pub async fn save_detailed(
+        &self,
+        ws: &str,
+        by: &str,
+        items: Vec<NewMemory>,
+    ) -> Result<Vec<(Memory, SaveOutcome)>> {
+        if self.remote.is_some() {
+            return Err(otto_core::Error::Invalid(
+                "detailed save must run on the memory host".into(),
+            ));
+        }
+        let fts = self.fts_ready().await;
         let mut out = Vec::with_capacity(items.len());
         for nm in items {
-            let hash = MemoriesRepo::content_hash(&nm.body);
-            if let Some(ex) = self
-                .repo
-                .find_by_hash(ws, &nm.collection, nm.scope, nm.story_id.as_deref(), &hash)
-                .await?
-            {
-                out.push(ex);
-                continue;
+            let (m, outcome) = self.repo.save_one(ws, by, nm, fts).await?;
+            if outcome.is_new() {
+                if let Some(v) = &self.vault {
+                    let _ = v.write(ws, &m, &[]);
+                }
             }
-            let m = self.repo.create(ws, by, nm).await?;
-            self.fts_index_one(&m).await;
-            if let Some(v) = &self.vault {
-                let _ = v.write(ws, &m, &[]);
-            }
-            out.push(m);
+            out.push((m, outcome));
         }
         Ok(out)
     }
@@ -157,18 +164,19 @@ impl MemoryService {
         if let Some(r) = &self.remote {
             return r.update(ws, id, &p).await;
         }
-        let m = self.repo.update(ws, id, p).await?;
-        self.fts_index_one(&m).await;
-        Ok(m)
+        let fts = self.fts_ready().await;
+        self.repo.update_indexed(ws, id, p, fts).await
     }
 
     pub async fn forget(&self, ws: &str, id: &str) -> Result<()> {
         if let Some(r) = &self.remote {
             return r.forget(ws, id).await;
         }
-        self.repo.forget(ws, id).await?;
-        let _ = self.repo.fts_remove(id).await;
-        Ok(())
+        // The FTS index mirrors every memory row (search filters `active`,
+        // and `include_inactive` recall still needs the text indexed), so a
+        // forget leaves it — removing it here would just be re-added by the
+        // startup reconcile.
+        self.repo.forget(ws, id).await
     }
 
     pub async fn links(&self, ws: &str, id: &str) -> Result<Vec<MemoryLink>> {

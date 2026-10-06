@@ -212,9 +212,16 @@ test('engine missing: asks first, names the size, lighter option, then downloads
     }
     return r.fulfill({ json: statusJson(true) });
   });
+  // The 202 (the job as it STARTED, 0 bytes) is held until the first progress
+  // event has landed: the start snapshot must not wipe newer progress.
+  let releaseInstall!: () => void;
+  const installHeld = new Promise<void>((resolve) => { releaseInstall = resolve; });
+  let installAnswered = false;
   await page.route('**/api/v1/browser/live/install', async (r) => {
     installBody = r.request().postDataJSON();
     phase = 'installing';
+    await installHeld;
+    installAnswered = true;
     await r.fulfill({
       status: 202,
       json: {
@@ -233,12 +240,15 @@ test('engine missing: asks first, names the size, lighter option, then downloads
   await expect(setup.getByRole('button', { name: 'Download Chrome (180 MB)' })).toBeVisible();
   await setup.getByLabel(/Use the lighter engine/).check();
   await setup.getByRole('button', { name: 'Download lighter engine (98 MB)' }).click();
-  expect(installBody).toEqual({ build: 'chrome-headless-shell' });
+  await expect.poll(() => installBody).toEqual({ build: 'chrome-headless-shell' });
   await expect.poll(() => eventSockets.length).toBeGreaterThan(0);
   sendEvent(JSON.stringify({
     type: 'browser_engine_install_updated', build: 'chrome-headless-shell', version: '149.0.7827.55',
     state: 'downloading', received_bytes: 40 * 1024 * 1024, total_bytes: 98 * 1024 * 1024, error: null,
   }));
+  // Only now does the install POST answer with its 0-byte start snapshot.
+  releaseInstall();
+  await expect.poll(() => installAnswered).toBe(true);
   await expect(setup.getByRole('progressbar', { name: 'Download progress' })).toHaveAttribute('aria-valuenow', '41', { timeout: 10_000 });
   await expect(setup).toContainText('40 MB of 98 MB');
 });
@@ -408,7 +418,7 @@ test('page dialogs, SSRF blocks and popups are shown in the pane', async ({ page
   live.push({ type: 'dialog', dialog_type: 'confirm', message: 'Leave the booking?', default_prompt: '', url: TAB_URL });
   const dlg = page.getByTestId('live-page-dialog');
   await expect(dlg).toContainText('example.invalid says');
-  await dlg.getByRole('button', { name: 'Confirm' }).click();
+  await dlg.getByRole('button', { name: 'Continue' }).click();
   await expect.poll(() => live.sent.find((m) => m.type === 'dialog')).toEqual({ type: 'dialog', accept: true });
 
   live.push({ type: 'blocked', host: '10.0.0.1', reason: 'ssrf' });

@@ -201,7 +201,7 @@
     <div class="imp-row">
       <span class="imp-label">File</span>
       <div class="imp-dir">
-        <input
+        <input dir="ltr" aria-label="Import file path"
           class="imp-input mono"
           bind:value={filePath}
           spellcheck="false"
@@ -215,7 +215,7 @@
 
     <label class="imp-row">
       <span class="imp-label">{database.capabilities?.engine === 'mongodb' ? 'Collection' : 'Table'}</span>
-      <input
+      <input dir="ltr"
         class="imp-input mono"
         bind:value={table}
         spellcheck="false"

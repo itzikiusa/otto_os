@@ -652,9 +652,16 @@ async fn asset(State(ctx): State<ServerCtx>, AxPath(p): AxPath<AssetPath>) -> Re
     match tokio::fs::read(&c_target).await {
         Ok(bytes) => {
             let ct = mime_for(&c_target);
+            // nosniff: a plugin file is served with an extension-derived type;
+            // never let the browser re-interpret it as script/HTML. (A CSP
+            // `sandbox` without `allow-same-origin` isn't possible here: the
+            // plugin page calls `/api/v1/plugins/{slug}` with the bearer from
+            // `otto:init`, which an opaque origin can't do under our CORS.)
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", ct)
+                .header("x-content-type-options", "nosniff")
+                .header("referrer-policy", "no-referrer")
                 .body(Body::from(bytes))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
@@ -838,15 +845,9 @@ async fn host_agents_run(
     let cwd = req.cwd.unwrap_or_else(|| ".".into());
     // No workspace context here (plugins are host-scoped), so resolve the default
     // agent through the global `default_provider` setting, else "claude".
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
-        .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+    let provider = ctx
+        .resolve_provider_or_fallback(None, req.provider.as_deref(), "plugins.host_agents_run")
+        .await;
     let result = match provider.as_str() {
         "claude" => {
             ctx.orchestrator

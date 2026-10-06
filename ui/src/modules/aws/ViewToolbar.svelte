@@ -70,7 +70,7 @@
   {#if children}<div class="vt-extra">{@render children()}</div>{/if}
   <label class="vt-filter">
     <Icon name="search" size={13} />
-    <input
+    <input dir="ltr"
       bind:this={filterEl}
       bind:value={filter}
       type="search"

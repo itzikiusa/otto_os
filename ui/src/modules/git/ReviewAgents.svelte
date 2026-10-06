@@ -10,7 +10,7 @@
   import { api } from '../../lib/api/client';
   import type { Review } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import { runStatus, type BadgeTone } from '../../lib/status';
   import { sentenceCase, severityLabel } from '../../lib/labels';
@@ -187,7 +187,7 @@
                WS reconnect storm, leaving a running agent's terminal stuck on
                "reconnecting". The {#each} is keyed by agent.name, so the
                component instance is stable across refetches. -->
-          <Terminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
+          <LazyTerminal sessionId={agent.session_id} preferDom resumeOnOpen={false} />
         </div>
       {/if}
       {#if agentExpanded[agent.name] && agent.findings}

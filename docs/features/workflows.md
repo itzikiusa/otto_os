@@ -36,11 +36,13 @@
 > every lens as its own sub-agents) — §4.
 
 The doc is grounded in the code in `crates/otto-server/src/workflow_engine.rs`,
-`crates/otto-server/src/workflow_context.rs` (run context files),
-`crates/otto-server/src/workflow_prepare.rs` (`prepare_context`),
+`crates/otto-workflows/src/context.rs` (run context files; the node catalog,
+graph validation, retry policy, loop checkpoints and event triggers also live in
+`crates/otto-workflows`),
+`crates/otto-workflows/src/prepare.rs` (`prepare_context`),
 `crates/otto-server/src/routes/workflows.rs`,
 `crates/otto-server/src/workflow_trigger_scheduler.rs`,
-`crates/otto-server/src/workflow_chat.rs`, `crates/otto-core/src/expr.rs`,
+`crates/otto-workflows/src/chat.rs`, `crates/otto-core/src/expr.rs`,
 `ui/src/modules/workflows/`, `ui/src/modules/api/AutomationsView.svelte`, the
 migrations under `crates/otto-state/migrations/` (incl. **0089** — versioning +
 run→proof link, **0096** — standing `instructions`), and the authoritative contracts `docs/contracts/api.md`
@@ -72,10 +74,11 @@ ui/src/modules/workflows/RunSteps.svelte        — per-step run detail (status,
 ui/src/modules/workflows/TriggersPanel.svelte   — list/add/edit/preview/toggle/delete schedule|webhook|event|chat triggers
 ui/src/modules/api/AutomationsView.svelte       — API-client collection runner (the *other* "automations")
 
-crates/otto-server/src/workflow_engine.rs              — the executor: node catalog, run loop, per-node exec, branching/retry, proof
+crates/otto-server/src/workflow_engine.rs              — the executor: run loop, per-node exec, branching/retry, proof
+crates/otto-workflows/src/                             — server-free pieces: node catalog, validation, retry, checkpoints, run context files, event-trigger listener (`WorkflowCtx`)
 crates/otto-server/src/routes/workflows.rs             — HTTP handlers: CRUD, generate, run, versions, triggers, webhook, approve, templates
-crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + event-bus listener (both spawned at boot)
-crates/otto-server/src/workflow_chat.rs                — `Action: Workflow` chat-message parser + WorkflowChatTrigger impl
+crates/otto-server/src/workflow_trigger_scheduler.rs   — schedule scheduler + boot glue for the event-bus listener (both spawned at boot)
+crates/otto-workflows/src/chat.rs                      — `Action: Workflow` chat-message parser + WorkflowChatTrigger impl
 crates/otto-core/src/expr.rs                           — the safe expression language (edge conditions, condition/loop, {{ }} templating)
 crates/otto-core (otto_core::workflows)                — the Workflow/WorkflowRun/Node/Edge/Version domain types
 crates/otto-state/migrations/0020_workflows.sql        — workflows + workflow_runs
@@ -175,7 +178,7 @@ turn. A claude parent ends a turn every time a sub-agent reports back, and it
 ends one the instant it has *launched* them ("waiting on the four sweep
 agents") — so "the first `end_turn` wins" used to cut steps off mid-flight. The
 engine instead runs a **turn oracle**
-(`crates/otto-server/src/turn_oracle.rs`) over the provider's own transcript.
+(`crates/otto-agent-run/src/turn_oracle.rs`) over the provider's own transcript.
 A step completes only when **all three** hold:
 
 1. **The turn ended natively.** *claude:* the last message-bearing line is an
@@ -359,7 +362,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 | `budget_gate` | Budget Gate / Flow | Checks the provider spend cap: **errors the run if blocked**; otherwise passes (`exceeded` is warn-only). | `provider` (whose usage budget; empty ⇒ run's resolved default) | **Real** |
 | `human_approval` | Human Approval / Flow | **Pauses the run**; sets `waiting_approval=1` and polls until an operator approves/rejects via the approve endpoint (or times out at `NODE_AGENT_TIMEOUT`). | `prompt` | **Real** |
 | `condition` | Condition / Flow | Evaluates an `expr` on its input; outputs `{ result, value }` merged onto the input. Pair with **edge conditions** to branch. | `expr` (default `true`) | **Real** |
-| `loop` | Loop (Until) / Flow | Bounded **iterate-until**: re-runs inner `steps[]` until `until` holds or `max_iterations`. Reuses inner-node execution; threads run-level keys + prev-step output to each step. Output `{ iterations, satisfied, last, history }`. No nested loops. | `max_iterations` (1–10, default 3), `until` (expr), `steps[]` ({kind,name,params,retry}), `continue_on_error` | **Real** |
+| `loop` | Repeat (Until) / Flow | Bounded **iterate-until**: re-runs inner `steps[]` until `until` holds or `max_iterations`. Reuses inner-node execution; threads run-level keys + prev-step output to each step. Output `{ iterations, satisfied, last, history }`. No nested loops. | `max_iterations` (1–10, default 3), `until` (expr), `steps[]` ({kind,name,params,retry}), `continue_on_error` | **Real** |
 | `swarm_task` | Swarm Task / AI | Enqueues a task in a running Agent-Swarm project (`todo` status; coordinator picks it up). | `swarm_id`, `project_id`, `title`, `description` | **Real** |
 | `api_run` | API Run / Network | Executes an HTTP request **through the API-client engine** so env-var substitution + auth apply. | `method`, `url`, `headers`, `body` | **Real** |
 | `product_analyze` | Product Analyze / Product | Runs a real single-agent turn (the **`grill`** lens) over the story's built context; outputs `{ story_id, analysis, session_id }`. | `story_id`, `instruction?` | **Real** ² |
@@ -402,7 +405,7 @@ any "not wired" stub kinds** — the four former product/review stubs are now wi
 > (and downstream active-path nodes to skip) — not a silent no-op.
 
 ### Prepare relevant data (`prepare_context`)
-A dedicated node (`workflow_prepare.rs`) for the common "go read the ticket
+A dedicated node (`otto-workflows/src/prepare.rs`) for the common "go read the ticket
 before you start" step, run **app-side** rather than by the agent (so a slow or
 unreliable Jira fetch never eats an agent's context or turn budget):
 
@@ -608,7 +611,7 @@ useful macro triggers.
 > `workflow_trigger_scheduler::start` — a 60-second supervisor that scans enabled
 > `schedule` triggers, checks `is_due`, advances the `last_run` cursor first
 > (idempotency: a slow/failing run can't double-fire), and spawns runs — is
-> **started in `crates/ottod/src/main.rs`** at boot (log line *"workflow
+> **started in `crates/otto-server/src/boot/tasks.rs`** at boot (log line *"workflow
 > schedule-trigger scheduler started"*), alongside the event listener and the
 > swarm / scheduled-tasks supervisors. Its `is_due` **delegates to the shared
 > `cadence` engine** (the one Scheduled Tasks use), so workflow schedule triggers
@@ -619,7 +622,7 @@ useful macro triggers.
 ### Chat trigger: `Action: Workflow` (Slack / Telegram / webhook)
 A structured inbound channel message can **start a workflow run by name** instead of
 opening a normal session — wired through the channels `Bridge` via the
-`WorkflowChatTrigger` hook (`workflow_chat.rs`; `ottod` injects
+`WorkflowChatTrigger` hook (`otto-workflows/src/chat.rs`; `ottod` injects
 `WorkflowChatTriggerImpl`, mirroring the swarm/run triggers). The message shape
 (field labels case-insensitive; `Goals:` may be a bullet list **or** an inline
 comma/semicolon list):
@@ -723,7 +726,7 @@ final-output/summary choice. Cancellations and time-outs report too (always with
 `summary.md` — only a `success` run can have a `final-output.md`).
 
 ### Prompts & chat bindings
-Two more ways to start a run by chat, both handled by `otto-server::workflow_chat`
+Two more ways to start a run by chat, both handled by `otto_workflows::chat`
 (`WorkflowChatTriggerImpl`) alongside the structured `Action: Workflow` command
 above — all three resolve in order (legacy structured → simplified command →
 channel binding) against every inbound Slack/Telegram/webhook message, before
@@ -1018,7 +1021,7 @@ loop's worktree) **merge it back into `repos.json`** as the run progresses.
 
 ### Run context files (file-based step handoff)
 
-Every run owns `<data_dir>/workflow-context/<run_id>/` (`workflow_context.rs`)
+Every run owns `<data_dir>/workflow-context/<run_id>/` (`otto-workflows/src/context.rs`)
 — browsable in the run view under **Context files** (same tree + viewer as the
 agent Files panel, scoped to this run). Every write here is best-effort — a
 failure logs a warning and the run continues; context files never fail a node:

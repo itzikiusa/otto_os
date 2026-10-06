@@ -477,6 +477,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "base16ct"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1271,6 +1277,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "crypto-bigint"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+dependencies = [
+ "cpubits",
+ "ctutils",
+ "num-traits",
+ "rand_core 0.10.1",
+ "serdect",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1287,6 +1307,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+]
+
+[[package]]
+name = "crypto-primes"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3633a51a39c69ebbaa4feaa694bd83d241e4093901c84a0963b19d9bb3f0cf8f"
+dependencies = [
+ "crypto-bigint",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1392,6 +1422,17 @@ name = "deadpool-runtime"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
+
+[[package]]
+name = "der"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a878c850e9e421b20262e9b41f9c860e4785fa07541c266b62ff9d1ef998a80a"
+dependencies = [
+ "const-oid",
+ "pem-rfc7468",
+ "zeroize",
+]
 
 [[package]]
 name = "der-parser"
@@ -3704,6 +3745,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-agent-run"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "otto-core",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-telemetry",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "otto-apiclient"
+version = "0.2.0"
+dependencies = [
+ "boa_engine",
+ "futures-util",
+ "h2",
+ "hex",
+ "http",
+ "otto-core",
+ "otto-netguard",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "protox",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
+name = "otto-assistant"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hex",
+ "otto-context",
+ "otto-core",
+ "otto-mcp",
+ "otto-memory",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-state",
+ "otto-transcript",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "otto-automation"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "otto-agent-run",
+ "otto-channels",
+ "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-sessions",
+ "otto-state",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-aws"
 version = "0.2.0"
 dependencies = [
@@ -3800,6 +3926,7 @@ dependencies = [
  "axum",
  "otto-core",
  "otto-state",
+ "otto-swarm",
  "serde",
  "serde_json",
  "sqlx",
@@ -3882,6 +4009,7 @@ name = "otto-core"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "hex",
  "serde",
  "serde_json",
@@ -3948,6 +4076,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-design-assist"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "otto-core",
+ "otto-design",
+ "otto-improve",
+ "otto-memory",
+ "otto-sessions",
+ "otto-skills",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-git"
 version = "0.2.0"
 dependencies = [
@@ -3987,6 +4135,27 @@ dependencies = [
  "otto-sessions",
  "otto-state",
  "otto-transcript",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "otto-insights"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "hex",
+ "otto-context",
+ "otto-core",
+ "otto-sessions",
+ "otto-skills",
+ "otto-state",
+ "otto-telemetry",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4130,14 +4299,20 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64 0.23.1",
  "chrono",
  "http-body-util",
  "include_dir",
  "otto-context",
  "otto-core",
+ "otto-design",
+ "otto-improve",
  "otto-issues",
  "otto-memory",
+ "otto-orchestrator",
+ "otto-sessions",
  "otto-state",
+ "otto-swarm",
  "serde",
  "serde_json",
  "sqlx",
@@ -4145,6 +4320,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 
@@ -4182,6 +4358,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-review"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "otto-agent-run",
+ "otto-context",
+ "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-product",
+ "otto-sessions",
+ "otto-skills",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-sandbox"
 version = "0.2.0"
 dependencies = [
@@ -4195,12 +4392,10 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.23.1",
- "boa_engine",
  "chrono",
  "chrono-tz",
  "dirs 7.0.0",
  "futures-util",
- "h2",
  "hex",
  "hmac",
  "http-body-util",
@@ -4208,6 +4403,10 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-vision",
+ "otto-agent-run",
+ "otto-apiclient",
+ "otto-assistant",
+ "otto-automation",
  "otto-aws",
  "otto-brokers",
  "otto-browser",
@@ -4218,8 +4417,10 @@ dependencies = [
  "otto-core",
  "otto-dbviewer",
  "otto-design",
+ "otto-design-assist",
  "otto-git",
  "otto-improve",
+ "otto-insights",
  "otto-issues",
  "otto-k8s",
  "otto-keychain",
@@ -4230,7 +4431,9 @@ dependencies = [
  "otto-product",
  "otto-pty",
  "otto-rbac",
+ "otto-review",
  "otto-sandbox",
+ "otto-server",
  "otto-sessions",
  "otto-skills",
  "otto-ssh",
@@ -4240,17 +4443,13 @@ dependencies = [
  "otto-transcript",
  "otto-usage",
  "otto-vault",
+ "otto-workflows",
  "otto-workgraph",
- "prost",
- "prost-reflect",
- "prost-types",
- "protox",
  "rand 0.10.3",
  "regex",
  "reqwest",
  "reqwest_cookie_store",
  "rustix",
- "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4261,7 +4460,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tokio-util",
- "tonic",
  "tower",
  "tower-http 0.7.1",
  "tracing",
@@ -4349,9 +4547,15 @@ dependencies = [
  "axum",
  "chrono",
  "include_dir",
+ "otto-agent-run",
+ "otto-channels",
  "otto-context",
  "otto-core",
+ "otto-git",
+ "otto-orchestrator",
+ "otto-sessions",
  "otto-state",
+ "otto-telemetry",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4437,6 +4641,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "otto-workflows"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "otto-channels",
+ "otto-core",
+ "otto-issues",
+ "otto-state",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "otto-workgraph"
 version = "0.2.0"
 dependencies = [
@@ -4457,28 +4678,13 @@ dependencies = [
  "axum-server",
  "dirs 7.0.0",
  "notify",
- "otto-brokers",
- "otto-channels",
- "otto-connections",
- "otto-context",
  "otto-core",
- "otto-dbviewer",
- "otto-improve",
  "otto-keychain",
- "otto-mcp",
- "otto-memory",
- "otto-orchestrator",
- "otto-product",
- "otto-rbac",
  "otto-server",
  "otto-sessions",
- "otto-skills",
  "otto-state",
- "otto-swarm",
  "otto-telemetry",
  "otto-usage",
- "otto-vault",
- "otto-workgraph",
  "rcgen",
  "reqwest",
  "rust-embed",
@@ -4586,6 +4792,15 @@ checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
  "base64 0.23.1",
  "serde_core",
+]
+
+[[package]]
+name = "pem-rfc7468"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6305423e0e7738146434843d1694d621cce767262b2a86910beab705e4493d9"
+dependencies = [
+ "base64ct",
 ]
 
 [[package]]
@@ -4753,6 +4968,26 @@ dependencies = [
  "atomic-waker",
  "fastrand",
  "futures-io",
+]
+
+[[package]]
+name = "pkcs1"
+version = "0.8.0-rc.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
+dependencies = [
+ "der",
+ "spki",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der",
+ "spki",
 ]
 
 [[package]]
@@ -5382,6 +5617,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsa"
+version = "0.10.0-rc.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30b2aa4ba0d89f73d1e332df05be0eeab8840351c36ca5654341dfdb57bb3caf"
+dependencies = [
+ "const-oid",
+ "crypto-bigint",
+ "crypto-primes",
+ "digest 0.11.3",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.10.1",
+ "signature",
+ "spki",
+ "zeroize",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5819,6 +6072,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serdect"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66cf8fedced2fcf12406bcb34223dffb92eaf34908ede12fed414c82b7f00b3e"
+dependencies = [
+ "base16ct",
+ "serde",
+]
+
+[[package]]
 name = "serial2"
 version = "0.2.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5933,6 +6196,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "digest 0.11.3",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6007,6 +6280,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "spki"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
+dependencies = [
+ "base64ct",
+ "der",
 ]
 
 [[package]]
@@ -6145,6 +6428,8 @@ dependencies = [
  "generic-array",
  "log",
  "percent-encoding",
+ "rand 0.10.3",
+ "rsa",
  "serde",
  "sha1 0.11.0",
  "sha2 0.11.0",

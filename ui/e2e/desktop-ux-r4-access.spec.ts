@@ -5,22 +5,31 @@ test.use({serviceWorkers:'block'});
 const user={id:'fixture-admin',username:'root',display_name:'Fixture owner',is_root:true,disabled:false,created_at:'2026-09-25T00:00:00Z'};
 const workspace=(id:string)=>({id,name:`Synthetic ${id}`,root_path:'/tmp/synthetic',role:'admin',created_at:'2026-09-25T00:00:00Z'});
 function held() {let release!:(r:Route)=>void; const promise=new Promise<Route>(r=>release=r);return {promise,hold:(r:Route)=>release(r)};}
-async function setup(page:Page) {
+const PASSWORD='Fixture-password-123';
+/** Walks the first-run wizard to its workspace step. The password step creates
+ *  the root account (`root` answers POST /onboarding/root; default: success),
+ *  and the workspace step checks its folder via /fs/browse before moving on. */
+async function setup(page:Page,root:(r:Route)=>unknown=r=>r.fulfill({json:{token:'fixture-root',user}})) {
+  await page.route('**/api/v1/onboarding/root',root);
+  await page.route('**/api/v1/fs/browse*',r=>r.fulfill({json:{path:new URL(r.request().url()).searchParams.get('path'),parent:'/tmp',is_git_repo:false,entries:[]}}));
   await page.addInitScript(()=>{localStorage.removeItem('otto_token');localStorage.setItem('otto_firstrun_dismissed','1');});
   await page.route('**/api/v1/meta',r=>r.fulfill({json:{needs_onboarding:true,tools:[],version:'fixture'}}));
   await page.route('**/api/v1/auth/me',r=>r.fulfill({json:{user,real_user:user}}));
   await page.route('**/api/v1/auth/capabilities',r=>r.fulfill({json:{capabilities:{}}}));
   await page.route('**/api/v1/workspaces/*/sessions',r=>r.fulfill({json:[]}));
   await page.goto('/#/home');await page.getByRole('button',{name:'Get started'}).click();
-  await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.getByLabel('Password',{exact:true}).fill(PASSWORD);await page.getByLabel('Confirm password').fill(PASSWORD);await page.getByRole('button',{name:'Create account',exact:true}).click();
 }
 async function finishSteps(page:Page) {await page.getByRole('button',{name:'Continue',exact:true}).click();await page.getByRole('button',{name:'Finish setup'}).click();}
 
 test('first account Back then Skip honors the skipped workspace after failure',async({page})=>{
   let roots=0;let writes=0;
-  await page.route('**/api/v1/onboarding/root',r=>{roots++;return r.fulfill({json:{token:'fixture-root',user}});});
   await page.route('**/api/v1/workspaces',r=>{if(r.request().method()==='GET')return r.fulfill({json:[]});writes++;return r.fulfill({status:503,json:{code:'upstream',message:'Synthetic workspace unavailable'}});});
-  await setup(page);await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await finishSteps(page);
+  await setup(page,r=>{roots++;return r.fulfill({json:{token:'fixture-root',user}});});
+  // Created at the password step, so there is no way back to re-enter it.
+  await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();expect(roots).toBe(1);
+  await expect(page.getByRole('button',{name:'Back',exact:true})).toHaveCount(0);
+  await page.getByLabel('Name',{exact:true}).fill('Fixture');await page.getByLabel('Directory',{exact:true}).fill('/tmp/fixture');await page.getByRole('button',{name:'Continue',exact:true}).click();await finishSteps(page);
   await expect(page.getByRole('alert')).toContainText('Synthetic workspace unavailable');
   await page.getByRole('button',{name:'Back',exact:true}).click();await page.getByRole('button',{name:'Back',exact:true}).click();
   await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
@@ -29,14 +38,41 @@ test('first account Back then Skip honors the skipped workspace after failure',a
 
 test('first account recovers a lost root response with entered credentials',async({page})=>{
   let roots=0;let logins=0;
-  await page.route('**/api/v1/onboarding/root',r=>++roots===1?r.abort('connectionfailed'):r.fulfill({status:409,json:{code:'conflict',message:'already onboarded'}}));
-  await page.route('**/api/v1/auth/login',r=>{expect(r.request().postDataJSON()).toEqual({username:'root',password:'Fixture-password-123'});logins++;return r.fulfill({json:{token:'fixture-recovered',user}});});
+  await page.route('**/api/v1/auth/login',r=>{expect(r.request().postDataJSON()).toEqual({username:'root',password:PASSWORD});logins++;return r.fulfill({json:{token:'fixture-recovered',user}});});
   await page.route('**/api/v1/workspaces',r=>r.fulfill({json:[]}));
-  await setup(page);await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
-  // An ambiguous failure can recover immediately; if it remains visible, Retry
-  // must recover the existing account instead of trapping users in a 409 loop.
-  if(await page.getByRole('alert').isVisible())await page.getByRole('button',{name:'Finish setup'}).click();
-  await expect(page.locator('.shell')).toBeVisible();expect(logins).toBe(1);expect(roots).toBeLessThanOrEqual(2);
+  // The account is created but its response is lost: the password step signs
+  // in with the entered credentials instead of failing or creating it again.
+  await setup(page,r=>{roots++;return r.abort('connectionfailed');});
+  await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();
+  expect(logins).toBe(1);expect(roots).toBe(1);
+  await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
+  await expect(page.locator('.shell')).toBeVisible();expect(logins).toBe(1);expect(roots).toBe(1);
+});
+
+test('first account root failure stays on the password step with a retry that creates once',async({page})=>{
+  let roots=0;
+  await page.route('**/api/v1/workspaces',r=>r.fulfill({json:[]}));
+  await setup(page,r=>++roots===1?r.fulfill({status:400,json:{code:'bad_request',message:'Synthetic password rejected'}}):r.fulfill({json:{token:'fixture-root',user}}));
+  const alert=page.getByRole('alert');
+  await expect(alert).toContainText('Couldn’t create the account: Synthetic password rejected');
+  await expect(page.getByRole('heading',{name:'Set the root password'})).toBeVisible();
+  // A rejected request is not ambiguous: no sign-in attempt, and the form keeps its input.
+  await expect(page.getByLabel('Password',{exact:true})).toHaveValue(PASSWORD);
+  await page.getByRole('button',{name:'Try again',exact:true}).click();
+  await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();await expect(alert).toHaveCount(0);
+  await page.getByRole('button',{name:'Skip',exact:true}).click();await finishSteps(page);
+  await expect(page.locator('.shell')).toBeVisible();expect(roots).toBe(2);
+});
+
+test('first account sends a daemon onboarded elsewhere to sign in instead of looping',async({page})=>{
+  let logins=0;
+  await page.route('**/api/v1/auth/login',r=>{logins++;return r.fulfill({status:401,json:{code:'unauthorized',message:'invalid credentials'}});});
+  await setup(page,r=>r.fulfill({status:409,json:{code:'conflict',message:'already onboarded'}}));
+  await expect(page.getByRole('alert')).toContainText('A root account already exists on this Otto daemon');expect(logins).toBe(1);
+  await expect(page.getByRole('button',{name:'Create account'})).toHaveCount(0);
+  await page.unroute('**/api/v1/meta');await page.route('**/api/v1/meta',r=>r.fulfill({json:{needs_onboarding:false,tools:[],version:'fixture'}}));
+  await page.getByRole('button',{name:'Go to sign in',exact:true}).click();
+  await expect(page.getByLabel('Username')).toBeVisible();
 });
 
 test('late workspace list from an old identity cannot replace the current workspace',async({page})=>{
@@ -87,7 +123,8 @@ test('first-account steps announce their heading and associate password validati
   await page.getByLabel('Password',{exact:true}).fill('Fixture-password-123');await page.getByLabel('Confirm password').fill('Mismatch');
   await expect(page.getByLabel('Confirm password')).toHaveAttribute('aria-invalid','true');
   await expect(page.getByRole('status')).toContainText("Passwords don’t match");
-  await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Continue',exact:true}).click();
+  await page.route('**/api/v1/onboarding/root',r=>r.fulfill({json:{token:'fixture-root',user}}));
+  await page.getByLabel('Confirm password').fill('Fixture-password-123');await page.getByRole('button',{name:'Create account',exact:true}).click();
   await expect(page.getByRole('heading',{name:'Create your first workspace'})).toBeFocused();
   await page.getByRole('button',{name:'Skip',exact:true}).click();await expect(page.getByRole('heading',{name:'Usage tracking'})).toBeFocused();
   await page.getByRole('button',{name:'Continue',exact:true}).click();await expect(page.getByRole('heading',{name:'Tool check'})).toBeFocused();
@@ -114,7 +151,6 @@ for(const v of [{theme:'native',scheme:'light',width:375},{theme:'native',scheme
   for(const sample of samples){expect(sample.font,sample.text).toBeGreaterThanOrEqual(11);expect(sample.ratio,sample.text).toBeGreaterThanOrEqual(4.5);}
   await page.screenshot({path:info.outputPath('setup-custom-accent.png')});
   expect((await new AxeBuilder({page}).include('.ob-card').withTags(['wcag2a','wcag2aa','wcag21aa']).analyze()).violations).toEqual([]);
-  await page.route('**/api/v1/onboarding/root',r=>r.fulfill({json:{token:'fixture-root',user}}));
   await page.route('**/api/v1/workspaces',r=>r.fulfill({json:r.request().method()==='POST'?workspace('preview'):[]}));
   await page.getByRole('button',{name:'Continue',exact:true}).click();await finishSteps(page);await expect(page.locator('.shell')).toBeVisible();
   await page.evaluate(async()=>{const p='/src/lib/confirm.svelte.ts';void (await import(p)).confirmer.choose('Review the synthetic workspace actions and keep the draft available.',{title:'Review workspace',options:[{label:'Apply draft',value:'apply',kind:'primary'},{label:'Discard draft',value:'discard',kind:'danger'}]});});

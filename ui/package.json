@@ -33,12 +33,14 @@
     "lodash-es": "4.18.1",
     "nanoid": "3.3.18",
     "@excalidraw/mermaid-to-excalidraw": {
-      "nanoid": "3.3.18"
+      "nanoid": "3.3.18",
+      "mermaid": "$mermaid"
     },
     "dompurify": "3.4.16",
     "@excalidraw/excalidraw": {
       "sass": "1.105.1"
-    }
+    },
+    "mermaid": "$mermaid"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.3",

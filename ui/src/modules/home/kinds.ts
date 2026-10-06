@@ -12,7 +12,8 @@ export type HomeBoxKind =
   | 'db-dashboard'
   | 'k8s'
   | 'insights'
-  | 'usage';
+  | 'usage'
+  | 'classrooms';
 
 export interface HomeBoxKindDef {
   kind: HomeBoxKind;
@@ -90,6 +91,16 @@ export const HOME_KINDS: HomeBoxKindDef[] = [
     w: 6,
     h: 4,
     route: 'usage',
+  },
+  {
+    kind: 'classrooms',
+    label: 'Classrooms',
+    blurb: 'A live 3D campus: workspaces are classrooms, sessions are students at their desks.',
+    icon: 'people',
+    feature: 'agents',
+    w: 8,
+    h: 6,
+    route: 'agents',
   },
 ];
 

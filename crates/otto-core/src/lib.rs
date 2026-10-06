@@ -6,6 +6,9 @@
 pub mod access;
 pub mod api;
 pub mod auth;
+pub mod cadence;
+pub mod cancel;
+pub mod cancel_signal;
 pub mod connection_credentials;
 pub mod domain;
 pub mod error;
@@ -22,6 +25,7 @@ pub mod provider_accounts;
 pub mod redact;
 pub mod run;
 pub mod secrets;
+pub mod text;
 pub mod workflows;
 pub mod workref;
 

@@ -50,7 +50,7 @@ Build proof includes the actual working contents: committed differences from the
 
 See [API contract](../contracts/api.md#goal-loops) and [WS contract](../contracts/ws.md) for HTTP requests and `goal_loop_updated`. List/detail require workspace Viewer; definition, mutation, verification and answers require Editor. Identity is derived from authentication, not an agent-supplied verifier field.
 
-The controller is `crates/otto-server/src/goal_loop.rs`; managed roles are in `goal_loop_roles.rs`; pure verification decisions are in `goal_loop_policy.rs`; working-directory/evidence helpers are in `goal_loop_workspace.rs`. State lives in `GoalLoopsRepo`, with the ledger added by migration `0133_goal_loop_ledger.sql`. UI lives in `ui/src/modules/loops/`.
+The controller is `crates/otto-automation/src/goal_loop.rs`; managed roles are in `goal_loop_roles.rs`; pure verification decisions are in `goal_loop_policy.rs`; working-directory/evidence helpers are in `goal_loop_workspace.rs`. State lives in `GoalLoopsRepo`, with the ledger added by migration `0133_goal_loop_ledger.sql`. UI lives in `ui/src/modules/loops/`.
 
 ## Walkthrough: build, inspect, and finish
 
@@ -164,17 +164,17 @@ For build goals the directory is `<data>/goal-loops/<id>/work`, on `goal-loop/<i
 
 | Layer | Location |
 | --- | --- |
-| Controller, lifecycle and recovery | `crates/otto-server/src/goal_loop.rs` |
-| Managed provider role turns | `crates/otto-server/src/goal_loop_roles.rs` |
-| Command cancellation and process cleanup | `crates/otto-server/src/goal_loop_commands.rs` |
-| Human verification/progress decisions | `crates/otto-server/src/goal_loop_policy.rs` |
-| Worktree provisioning and working-content capture | `crates/otto-server/src/goal_loop_workspace.rs` |
-| Tolerant JSON extraction | `crates/otto-server/src/goal_loop_parse.rs` |
+| Controller, lifecycle and recovery | `crates/otto-automation/src/goal_loop.rs` |
+| Managed provider role turns | `crates/otto-automation/src/goal_loop_roles.rs` |
+| Command cancellation and process cleanup | `crates/otto-automation/src/goal_loop_commands.rs` |
+| Human verification/progress decisions | `crates/otto-automation/src/goal_loop_policy.rs` |
+| Worktree provisioning and working-content capture | `crates/otto-automation/src/goal_loop_workspace.rs` |
+| Tolerant JSON extraction | `crates/otto-automation/src/goal_loop_parse.rs` |
 | HTTP handlers | `crates/otto-server/src/routes/goal_loops.rs` |
 | Domain types/default role prompts | `crates/otto-core/src/domain.rs` |
 | Request DTOs | `crates/otto-core/src/api.rs` |
 | Persistence | `crates/otto-state/src/goal_loops.rs`; migrations `0065` and `0133` |
-| Boot recovery | `crates/ottod/src/main.rs` |
+| Boot recovery | `crates/otto-server/src/boot/recovery.rs` (`recover_goal_loops`) |
 | UI | `ui/src/modules/loops/` |
 
 ## Related features

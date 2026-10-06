@@ -763,7 +763,7 @@
     {#if searchOpen}
       <div class="search" class:wide={narrowHead} role="search">
         <Icon name="search" size={12} />
-        <input
+        <input dir="auto"
           bind:this={searchEl}
           bind:value={query}
           class="search-in"
@@ -773,9 +773,9 @@
           onkeydown={onSearchKey}
         />
         <span class="search-n" data-search-hits={hits.length} aria-live="polite">{hits.length ? `${hitIdx + 1}/${hits.length}` : noMatches && !partialSearch ? 'No matches' : ''}</span>
-        <button class="icon-btn" title="Previous match" aria-keyshortcuts="Shift+Enter" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={11} /></button>
-        <button class="icon-btn" title="Next match" aria-keyshortcuts="Enter" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={11} /></button>
-        <button class="icon-btn" title="Close search" aria-label="Close search" aria-keyshortcuts="Escape" onclick={closeSearch}><Icon name="x" size={11} /></button>
+        <button class="icon-btn" title="Previous match" aria-keyshortcuts="Shift+Enter" aria-label="Previous match" disabled={!hits.length} onclick={() => jumpTo(hitIdx - 1)}><Icon name="chevronUp" size={12} /></button>
+        <button class="icon-btn" title="Next match" aria-keyshortcuts="Enter" aria-label="Next match" disabled={!hits.length} onclick={() => jumpTo(hitIdx + 1)}><Icon name="chevronDown" size={12} /></button>
+        <button class="icon-btn" title="Close search" aria-label="Close search" aria-keyshortcuts="Escape" onclick={closeSearch}><Icon name="x" size={12} /></button>
       </div>
     {:else if !narrowHead}
       <button class="icon-btn" title="Search this conversation" aria-keyshortcuts="Meta+F" aria-label="Search this conversation" onclick={openSearch}><Icon name="search" size={12} /></button>
@@ -887,7 +887,7 @@
               class="chip"
               title={a.url ?? a.path ?? a.label}
               onclick={() => (a.url ? openUrl(a.url) : a.path ? openPreview({ kind: 'file', path: a.path }) : undefined)}
-            ><Icon name={a.url ? 'link' : 'file'} size={11} /> {a.label}</button>
+            ><Icon name={a.url ? 'link' : 'file'} size={12} /> {a.label}</button>
           {/each}
         </div>
       {/if}

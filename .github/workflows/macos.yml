@@ -1,0 +1,113 @@
+name: macOS
+
+# macOS-only behavior the Linux CI never exercises: the Seatbelt sandbox
+# (`sandbox-exec` profiles in otto-sandbox), the PTY/session manager on Darwin
+# (otto-sessions, which confines spawned shells through otto-sandbox), the
+# Keychain store, and the standalone Tauri desktop workspace
+# (apps/desktop/src-tauri — not part of the root workspace).
+#
+# On PRs only when those paths change; nightly + on demand otherwise.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/otto-sandbox/**'
+      - 'crates/otto-keychain/**'
+      - 'crates/otto-sessions/**'
+      - 'apps/desktop/**'
+      - '.github/workflows/macos.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/otto-sandbox/**'
+      - 'crates/otto-keychain/**'
+      - 'crates/otto-sessions/**'
+      - 'apps/desktop/**'
+  schedule:
+    - cron: '53 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  crates:
+    name: Sandbox · sessions · keychain (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: macos-crates
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2.87.25
+        with:
+          tool: cargo-nextest@0.9.146
+
+      - name: cargo clippy (macOS cfg)
+        run: cargo clippy -p otto-sandbox -p otto-sessions -p otto-keychain --all-targets -- -D warnings
+
+      # The Keychain-touching cases are #[ignore]d / opt-in; the default set
+      # still runs the macOS cfg branches (file secret store, ACL helpers).
+      - name: cargo nextest
+        run: cargo nextest run -p otto-sandbox -p otto-sessions -p otto-keychain --profile ci --no-fail-fast
+
+  desktop:
+    name: Desktop app (Tauri, macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      # tauri-build checks that the sidecar (`binaries/ottod-<triple>`) and the
+      # frontend dist exist at compile time. The real ones are built by the
+      # release workflow; lint/test only needs placeholders, so skip building
+      # the daemon + UI here.
+      - name: Stage placeholder sidecar + frontend
+        run: |
+          triple=$(rustc -vV | sed -n 's/^host: //p')
+          mkdir -p binaries ../../../ui/dist
+          printf '#!/bin/sh\nexit 0\n' > "binaries/ottod-${triple}"
+          chmod +x "binaries/ottod-${triple}"
+          [ -f ../../../ui/dist/index.html ] || echo '<!doctype html><title>Otto</title>' > ../../../ui/dist/index.html
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test

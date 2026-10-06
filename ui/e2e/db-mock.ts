@@ -164,6 +164,19 @@ export async function seedMockDbConnection(
   name = 'mock-shop',
   engine: MockEngine = 'mysql',
 ): Promise<string> {
+  // Idempotent per name. Connection profiles are global, and with
+  // `fullyParallel` a worker that returns to a spec file re-runs its
+  // `beforeAll` while the module (and its random name) stays loaded — a second
+  // POST left TWO profiles with the same name: the spec clicked the older one
+  // (`.first()`) while its `page.route` mock answered only the newer id, so
+  // every engine call escaped to the closed port ("All connections are busy.").
+  const existing = await ctx.get(`${base}/api/v1/workspaces/${workspaceId}/connections`);
+  if (existing.ok()) {
+    const hit = ((await existing.json()) as { id: string; name: string; kind: string }[]).find(
+      (c) => c.name === name && c.kind === engine,
+    );
+    if (hit) return hit.id;
+  }
   const r = await ctx.post(`${base}/api/v1/workspaces/${workspaceId}/connections`, {
     data: {
       name,

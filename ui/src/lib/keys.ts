@@ -197,6 +197,60 @@ export function editorOwnsChord(
   return e.key === '[' || e.key === ']';
 }
 
+/** True on a Mac (or iPhone/iPad) client — where ⌘ exists and ⌃ chords
+ *  belong to the text system (⌃K kill-line, ⌃T transpose, ⌃F/⌃B/⌃D/⌃W emacs
+ *  motion & delete in every NSTextView-backed field). */
+export function isMacPlatform(
+  nav: { platform?: string; userAgent?: string } | undefined = typeof navigator !== 'undefined'
+    ? navigator
+    : undefined,
+): boolean {
+  if (!nav) return false;
+  return /Mac|iPhone|iPad|iPod/.test(nav.platform || nav.userAgent || '');
+}
+
+/** Whether a keydown carries the app's command modifier. ⌘ always does. ⌃
+ *  stands in for ⌘ ONLY on a non-Mac client (Windows/Linux remote browsers have
+ *  no ⌘) and never in a focused terminal, where ⌃D/⌃K/⌃B/⌃F/… are the
+ *  shell's (EOF, kill-line, readline motion). On a Mac ⌃K/⌃T/⌃F/⌃D/⌃W are text
+ *  editing chords in every field — treating them as ⌘ hijacked typing and let
+ *  ⌃W close (end) the active session. */
+export function appModifier(
+  e: Pick<KeyboardEvent, 'metaKey' | 'ctrlKey'>,
+  term: boolean,
+  mac: boolean,
+): boolean {
+  return e.metaKey || (e.ctrlKey && !term && !mac);
+}
+
+/** What a window chord does while a dialog (Modal / confirm) is open: the
+ *  window behind it must not change under the user. ⌘W closes the TOP dialog
+ *  (like a macOS sheet), and anything that would open, switch, split or reload
+ *  behind it is dropped. View-only chords (zoom, find, sidebar) still run. */
+export type ModalKeyVerdict = 'run' | 'drop' | 'dismiss';
+
+const DROP_UNDER_MODAL = new Set<string>([
+  'palette', 'askOtto', 'broadcast', 'hardReload', 'settings', 'updateCLIs',
+  'newSession', 'reopenTab', 'nextTab', 'prevTab', 'nextSession', 'prevSession',
+  'jumpSession', 'splitVertical', 'splitHorizontal', 'navBack', 'navForward',
+  'toggleSidePane',
+  // native menu ids (lib/menu.ts)
+  'new-session', 'new-workspace', 'session-restart', 'session-kill', 'settings',
+]);
+
+export function modalKeyVerdict(action: string, modalOpen: boolean): ModalKeyVerdict {
+  if (!modalOpen) return 'run';
+  if (action === 'closeTab' || action === 'close-tab') return 'dismiss';
+  return DROP_UNDER_MODAL.has(action) ? 'drop' : 'run';
+}
+
+/** Close the top dialog the way Esc does — Modal.svelte only lets the TOP
+ *  sheet react, and honours `dismissable={false}` (a busy form stays). */
+export function dismissTopDialog(): void {
+  const target = (document.activeElement as HTMLElement | null) ?? document.body;
+  target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+}
+
 /** `index` is the 1-based session number for the `jumpSession` action. */
 export type KeyDispatcher = (action: KeyAction, e: KeyboardEvent, index?: number) => void;
 
@@ -208,10 +262,7 @@ export function installKeyMap(dispatch: KeyDispatcher): () => void {
     const term =
       keyContext.terminalFocused ||
       !!(document.activeElement as HTMLElement | null)?.closest?.('.xterm');
-    // ⌃ stands in for ⌘ (non-Mac remote clients) EXCEPT in a focused terminal:
-    // there ⌃D/⌃K/⌃B/⌃F/… are the shell's (EOF, kill-line, readline motion),
-    // so only a real ⌘ chord may reach the app map.
-    const mod = e.metaKey || (e.ctrlKey && !term);
+    const mod = appModifier(e, term, isMacPlatform());
 
     // Bare Backspace outside an editable element: WKWebView's legacy default
     // is "navigate back", which silently loses page state when the user just

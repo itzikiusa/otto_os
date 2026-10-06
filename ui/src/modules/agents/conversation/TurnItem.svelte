@@ -146,7 +146,7 @@
 {#snippet sysChip()}
   {#if sysNotes.length}
     <button class="sys-chip" class:on={sysOpen} onclick={() => (sysOpen = !sysOpen)} aria-expanded={sysOpen || showSystem} title="System notes attached to this turn (reminders, hooks, attachments)">
-      <Icon name="info" size={11} /> {sysNotes.length} system
+      <Icon name="info" size={12} /> {sysNotes.length} system
     </button>
   {/if}
 {/snippet}
@@ -169,12 +169,12 @@
   {:else if s.block.kind === 'artifact'}
     {@const a = s.block.artifact}
     <button class="chip artifact" onclick={() => openArtifact(a)} title={a.url ?? a.path ?? a.label}>
-      <Icon name={artifactIcon(a)} size={11} /> {a.label}
-      {#if a.path && !a.url}<Icon name="eye" size={11} />{/if}
+      <Icon name={artifactIcon(a)} size={12} /> {a.label}
+      {#if a.path && !a.url}<Icon name="eye" size={12} />{/if}
     </button>
   {:else if s.block.kind === 'notice'}
     <div class="notice" title={s.block.note.kind}>
-      <Icon name="info" size={11} /> <strong>{s.block.note.title}</strong>
+      <Icon name="info" size={12} /> <strong>{s.block.note.title}</strong>
       {#if s.block.note.body}<span class="dim"> — {s.block.note.body.slice(0, 400)}</span>{/if}
     </div>
   {/if}

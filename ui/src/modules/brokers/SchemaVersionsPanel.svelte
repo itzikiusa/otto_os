@@ -145,14 +145,14 @@
                 onclick={() => selectVersion('A', v.version)}
                 aria-label="Compare side A (before): version {v.version}"
                 title="Compare side A (before): version {v.version}"
-              >{#if selectedA === v.version}<Icon name="check" size={10} />{/if}A</button>
+              >{#if selectedA === v.version}<Icon name="check" size={12} />{/if}A</button>
               <button
                 class="btn small side-btn"
                 aria-pressed={selectedB === v.version}
                 onclick={() => selectVersion('B', v.version)}
                 aria-label="Compare side B (after): version {v.version}"
                 title="Compare side B (after): version {v.version}"
-              >{#if selectedB === v.version}<Icon name="check" size={10} />{/if}B</button>
+              >{#if selectedB === v.version}<Icon name="check" size={12} />{/if}B</button>
             </div>
           </div>
         {/each}

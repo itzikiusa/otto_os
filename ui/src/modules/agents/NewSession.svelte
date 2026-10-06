@@ -13,6 +13,7 @@
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { allProviders, providerReadiness } from '../../lib/providers';
 
   /** Per-provider ceiling on one batch — a typo in the stepper shouldn't be able
@@ -380,11 +381,27 @@
     }
   }
 
+  /** Esc / backdrop / ✕: an opening message or title typed here must not
+   *  vanish on a stray key — ask first when something was entered. */
+  async function requestClose(): Promise<void> {
+    const edited = prompt.trim() !== '' || title.trim() !== '' || extraDirs.length > 0;
+    if (edited) {
+      const ok = await confirmer.ask('The title, opening message and folders you entered will be lost.', {
+        title: 'Discard this new session?',
+        confirmLabel: 'Discard',
+        cancelLabel: 'Keep editing',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    onclose();
+  }
+
 </script>
 
 <svelte:window onkeydown={onGlobalKeydown} />
 
-<Modal title="New session" {onclose}>
+<Modal title="New session" onclose={requestClose} dismissable={!busy}>
   <!-- Workspace: the current one, or none (a workspace-less session in the
        daemon's hidden scratch workspace). With no workspace at all only "No
        workspace" exists, pre-selected. -->
@@ -502,7 +519,7 @@
 
   <div class="field">
     <label for="ns-title">Title <span class="dim">(optional)</span></label>
-    <input id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
+    <input dir="auto" id="ns-title" class="input" bind:value={title} placeholder="Auto-named from your theme (Settings → Session Names)" />
     {#if total > 1 && title.trim() !== ''}
       <span class="hint">Numbered per session — “{title.trim()} 1” … “{title.trim()} {total}”.</span>
     {/if}
@@ -511,7 +528,7 @@
   {#if chosen.some((p) => p !== 'shell')}
     <div class="field">
       <label for="ns-prompt">First message <span class="dim">(optional)</span></label>
-      <textarea
+      <textarea dir="auto"
         id="ns-prompt"
         class="input prompt-input"
         rows="3"
@@ -527,7 +544,7 @@
   <div class="field">
     <label for="ns-cwd">Working folder</label>
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-cwd"
         class="input mono"
         bind:value={cwd}
@@ -566,13 +583,13 @@
               title="Remove directory"
               aria-label="Remove {dir}"
               onclick={() => removeDir(dir)}
-            ><Icon name="x" size={11} /></button>
+            ><Icon name="x" size={12} /></button>
           </li>
         {/each}
       </ul>
     {/if}
     <div class="dir-add">
-      <input
+      <input dir="ltr"
         id="ns-extra-dir"
         class="input mono"
         bind:value={dirDraft}
@@ -606,7 +623,7 @@
         onclick={() => (showPreview = !showPreview)}
         aria-expanded={showPreview}
       >
-        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={11} /></span>
+        <span class="chevron" class:open={showPreview}><Icon name="chevronRight" noflip size={12} /></span>
         Preview context
         <span class="hint">— exactly what Otto would inject before spawning</span>
       </button>
@@ -780,7 +797,7 @@
     border-color: var(--accent);
   }
   .cbtn:disabled {
-    opacity: 0.35;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   /* Touch: the ± targets have to be tappable on a phone, where the card is the

@@ -130,7 +130,7 @@ a:hover {
   opacity: 0.8;
 }
 .btn:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .btn.primary {
@@ -193,7 +193,7 @@ a:hover {
   color: var(--text);
 }
 .icon-btn:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
   background: transparent;
   color: var(--text-dim);
@@ -238,7 +238,7 @@ textarea.input {
   line-height: 1.5;
 }
 .input:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .input:focus {
@@ -357,7 +357,7 @@ button.chip[aria-selected='true'] {
   background: var(--accent-soft);
 }
 button.chip:disabled {
-  opacity: 0.5;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 button.chip:focus-visible {
@@ -456,7 +456,7 @@ button.chip:focus-visible {
   box-shadow: var(--shadow-card);
 }
 .segmented > button:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 
@@ -478,7 +478,7 @@ button.chip:focus-visible {
   transition: background var(--dur-fast) ease-out, border-color var(--dur-fast) ease-out, color var(--dur-fast) ease-out;
 }
 .pill-toggle:disabled {
-  opacity: 0.45;
+  opacity: var(--disabled-opacity);
   cursor: default;
 }
 .pill-toggle.on {
@@ -870,13 +870,14 @@ button.chip:focus-visible {
 
 /* Touch hit areas (layout.md: ≥ 36 px on phone). `.icon-btn` is 24 px,
    `.btn.small` 22 px, `.btn` 26 px, `.pill-toggle` 24 px, a segmented button
-   22 px and a clickable `.chip` 20 px; on a coarse pointer an invisible ::after
+   22 px, a clickable `.chip` 20 px and the Navigator's edit-mode `.row-action`
+   (move / show-hide) 22×20 px; on a coarse pointer an invisible ::after
    grows the HIT area without moving the glyph or the layout (segmented buttons
    grow vertically only — they sit 2 px apart). `:where()` keeps it at zero
    specificity, so a module that positions its own button (`position: absolute`
    close buttons, overlay controls) or uses ::after still wins. */
 @media (pointer: coarse) {
-  :where(.icon-btn, .btn, .pill-toggle, button.chip, .segmented > button) {
+  :where(.icon-btn, .btn, .pill-toggle, button.chip, .segmented > button, button.row-action) {
     position: relative;
   }
   :where(.icon-btn, .btn.small, .pill-toggle)::after {
@@ -899,6 +900,14 @@ button.chip:focus-visible {
     position: absolute;
     inset-block: -7px;
     inset-inline: -1px;
+  }
+  /* Navigator edit-mode arrows / eye sit in a tight row: grow to 36 px tall
+     and a little wider, the later sibling winning the few shared pixels. */
+  :where(button.row-action)::after {
+    content: '';
+    position: absolute;
+    inset-block: -8px;
+    inset-inline: -4px;
   }
 }
 

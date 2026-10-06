@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
@@ -223,7 +224,7 @@
         {@const warn = expiryWarning(a.token_expires_at)}
         {@const r = testResults[a.id]}
         <!-- Right-click is a pointer shortcut; Test / Edit / Delete are buttons on the card. -->
-        <div
+        <div use:rowMenu
           role="presentation"
           class="acct card"
           oncontextmenu={(e) => ctxMenu.show(e, [
@@ -288,11 +289,11 @@
   <Modal title={isEdit ? 'Edit Jira account' : 'Add Jira account'} onclose={closeModal}>
     <div class="field">
       <label for="ia-label">Label</label>
-      <input id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
+      <input dir="auto" id="ia-label" class="input" bind:value={label} placeholder="Work Jira" />
     </div>
     <div class="field">
       <label for="ia-base">Base URL</label>
-      <input
+      <input dir="ltr"
         id="ia-base"
         class="input mono"
         bind:value={baseUrl}
@@ -303,7 +304,7 @@
     </div>
     <div class="field">
       <label for="ia-email">Email</label>
-      <input
+      <input dir="ltr"
         id="ia-email"
         class="input"
         type="email"

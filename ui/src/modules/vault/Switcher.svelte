@@ -81,7 +81,7 @@
 {#if vault.switcherOpen}
   <Modal title="Quick switcher" width={620} onclose={close}>
     <div class="vs-body">
-      <input
+      <input dir="auto"
         bind:this={input}
         bind:value={query}
         class="vs-input"

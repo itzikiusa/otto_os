@@ -34,3 +34,25 @@ test('nothing focused / page body → the global map handles everything', () => 
     assert.equal(editorOwnsChord(key(k), null), false, k);
   }
 });
+
+import { appModifier, isMacPlatform } from '../src/lib/keys.ts';
+
+test('⌃ never stands in for ⌘ on a Mac — ⌃K/⌃T/⌃W are text editing there', () => {
+  const ctrl = { metaKey: false, ctrlKey: true };
+  assert.equal(appModifier(ctrl, false, true), false, 'Mac text field: ⌃ is not the app modifier');
+  assert.equal(appModifier(ctrl, false, false), true, 'non-Mac remote client: ⌃ stands in for ⌘');
+  assert.equal(appModifier(ctrl, true, false), false, 'terminal owns ⌃ everywhere');
+  for (const mac of [true, false]) {
+    for (const term of [true, false]) {
+      assert.equal(appModifier({ metaKey: true, ctrlKey: false }, term, mac), true, 'real ⌘ always counts');
+    }
+  }
+});
+
+test('isMacPlatform recognises Mac / iOS clients only', () => {
+  assert.equal(isMacPlatform({ platform: 'MacIntel' }), true);
+  assert.equal(isMacPlatform({ platform: 'iPad' }), true);
+  assert.equal(isMacPlatform({ platform: '', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }), true);
+  assert.equal(isMacPlatform({ platform: 'Win32' }), false);
+  assert.equal(isMacPlatform({ platform: 'Linux x86_64' }), false);
+});

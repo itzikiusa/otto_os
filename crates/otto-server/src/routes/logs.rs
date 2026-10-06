@@ -474,14 +474,8 @@ pub struct ClientErrorReq {
     pub action: String,
 }
 
-fn clip(s: &str, max: usize) -> String {
-    // Char-boundary safe: a stack from a minified bundle can be one huge line.
-    let mut out: String = s.chars().take(max).collect();
-    if s.chars().count() > max {
-        out.push('…');
-    }
-    out
-}
+// Char-boundary safe: a stack from a minified bundle can be one huge line.
+use otto_core::text::clip_chars as clip;
 
 /// `POST /api/v1/client/errors` — 204. The UI's last-resort error hook (see
 /// `ui/src/main.ts`) posts here before it self-heals, so a fatal client-side

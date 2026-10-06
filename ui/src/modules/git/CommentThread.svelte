@@ -92,7 +92,7 @@
   {#if onreply || canResolve}
     <div class="cmt-actions">
       {#if replying}
-        <textarea class="input" rows="2" bind:value={replyText} disabled={busy} aria-label="Reply" placeholder="Reply…"></textarea>
+        <textarea dir="auto" class="input" rows="2" bind:value={replyText} disabled={busy} aria-label="Reply" placeholder="Reply…"></textarea>
         {#if replyError}<p class="reply-error" role="alert">Couldn’t post reply. {replyError} Try Reply again.</p>{/if}
         <div class="row" style="justify-content: flex-end">
           <button class="btn small" disabled={busy} onclick={() => (replying = false)}>Cancel</button>

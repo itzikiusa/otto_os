@@ -124,7 +124,7 @@ impl SpanRecord {
                 self.kind.as_str(),
                 "client" | "server" | "internal" | "producer" | "consumer"
             )
-            || !matches!(self.status.as_str(), "ok" | "error" | "unset")
+            || !matches!(self.status.as_str(), "ok" | "error" | "unset" | "cancelled")
         {
             bail!("invalid operation metadata");
         }
@@ -224,8 +224,20 @@ pub struct TelemetryStatus {
     pub collector_ready: bool,
     pub collector_version: String,
     pub queued: usize,
+    /// Per-minute resource samples + spike/profile logs awaiting the next flush.
+    #[serde(default)]
+    pub buffered_samples: usize,
     pub dropped: u64,
     pub exported: u64,
+    /// Records the collector's ClickHouse exporters gave up on (cumulative).
+    #[serde(default)]
+    pub collector_send_failed: u64,
+    /// Exporter sending-queue depth at the end of the last flush.
+    #[serde(default)]
+    pub collector_queue_size: u64,
+    /// When buffered telemetry was last written (unix seconds).
+    #[serde(default)]
+    pub last_flush_at: Option<i64>,
     pub last_error: Option<String>,
     pub last_analysis_at: Option<i64>,
     pub next_analysis_at: Option<i64>,
@@ -269,6 +281,10 @@ pub struct Suggestion {
     pub p95_ms: f64,
     pub max_ms: f64,
     pub total_ms: f64,
+    /// Exclusive time (inclusive minus direct children) over the window; the
+    /// ranking key, so a parent is not blamed for its children's latency.
+    #[serde(default)]
+    pub self_ms: Option<f64>,
     pub threshold_ms: f64,
     pub window_hours: u32,
     pub observed_at: i64,

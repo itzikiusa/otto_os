@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { plural } from '../../lib/plural';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   // Insights view — two tabs:
@@ -21,6 +22,8 @@
   import type { InsightKind, InsightReport, InsightRunPeriod } from '../../lib/api/types';
   import { toasts } from '../../lib/toast.svelte';
   import { router } from '../../lib/router.svelte';
+  import { ws } from '../../lib/stores/workspace.svelte';
+  import { confirmer } from '../../lib/confirm.svelte';
   import { registry } from '../../lib/commands.svelte';
   import { viewport } from '../../lib/stores/viewport.svelte';
   import { rel } from '../../lib/stores/now.svelte';
@@ -116,6 +119,7 @@
     if (loaded) return;
     loaded = true;
     void load();
+    void restoreActiveRun();
     return () => {
       disposed = true;
       if (pollTimer) clearTimeout(pollTimer);
@@ -245,22 +249,30 @@
     if (routeKey) router.replace('insights');
   }
 
-  // Fetch the full summary for the open report (the list has an excerpt).
+  // Fetch the full summary for the open report (the list has an excerpt) AND
+  // for the report its deltas compare against: a metric the excerpt cuts off
+  // falls back to the index (tool errors: 0), so comparing the open report's
+  // summary value with the previous one's index value showed "Up 24, worse"
+  // for a day that actually went 41 → 24.
   $effect(() => {
     const r = selected;
     if (!r) return;
-    const k = keyOf(r);
-    if (fullMd[k] != null) return;
+    const prev = untrack(() => previousOf(r));
+    const want = [r, ...(prev ? [prev] : [])].filter((x) => untrack(() => fullMd[keyOf(x)]) == null);
+    if (!want.length) return;
     let current = true;
-    const path = r.html_path ? siblingPath(r.html_path, 'summary') : null;
-    const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
-    void summary
-      .then((text) => {
-        if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
-      })
-      .catch(() => {
-        if (current) fullMd = { ...fullMd, [k]: r.summary };
-      });
+    for (const x of want) {
+      const k = keyOf(x);
+      const path = x.html_path ? siblingPath(x.html_path, 'summary') : null;
+      const summary = path ? insightsApi.readText(path) : insightsApi.reportStatus(k, true).then(({ report }) => report?.summary ?? '');
+      void summary
+        .then((text) => {
+          if (current && text.trim()) fullMd = { ...fullMd, [k]: text };
+        })
+        .catch(() => {
+          if (current) fullMd = { ...fullMd, [k]: x.summary };
+        });
+    }
     return () => { current = false; };
   });
 
@@ -371,7 +383,8 @@
 
   /** Desktop: a native pop-out window on this report's route. Browser: a new
    *  tab whose only content is the report in a sandboxed, opaque-origin
-   *  iframe — never the report itself at the app's origin. */
+   *  iframe — never the report itself at the app's origin. Popups it opens
+   *  stay sandboxed (no `allow-popups-to-escape-sandbox`). */
   async function openWindow(r: InsightReport): Promise<void> {
     const route = `insights/r/${r.kind}/${r.period_start}/${r.period_end}`;
     try {
@@ -382,7 +395,7 @@
       const wrapper =
         '<!doctype html><meta charset="utf-8"><title>Insight report</title>' +
         '<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%}</style>' +
-        `<iframe sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" srcdoc="${attr}"></iframe>`;
+        `<iframe sandbox="allow-scripts allow-popups" srcdoc="${attr}"></iframe>`;
       const url = URL.createObjectURL(new Blob([wrapper], { type: 'text/html' }));
       window.open(url, '_blank', 'noopener');
       // Not revoked: the new tab needs the URL; it's released when the tab closes.
@@ -431,6 +444,47 @@
   // writing — the report then never appeared until a manual reload.
   const POLL_MAX = 100;
   let pollCount = $state(0);
+  /** Seconds already elapsed when a run was picked up again (page re-opened). */
+  let pollBaseSec = $state(0);
+  let stoppingRun = $state(false);
+
+  /** A run started earlier (this page was left, or another window started it)
+   *  is still generating: bring its banner back and resume polling for it. */
+  async function restoreActiveRun(): Promise<void> {
+    try {
+      const runs = await insightsApi.activeRuns();
+      const r = runs[runs.length - 1];
+      if (disposed || !r || pollRunId) return;
+      pollRunId = r.run_id;
+      pollReportKey = r.report_key;
+      reportBeforeRun = r.report_revision;
+      pollCount = 0;
+      pollBaseSec = Math.max(0, Math.floor((Date.now() - Date.parse(r.started_at)) / 1000));
+      schedulePoll();
+    } catch {
+      /* best-effort: without it the page still works, just without the banner */
+    }
+  }
+
+  async function stopRun(): Promise<void> {
+    const id = pollRunId;
+    if (!id || stoppingRun) return;
+    const ok = await confirmer.ask('Stop generating this insights report? The agent session is ended; nothing already published is removed.', {
+      title: 'Stop insights run', confirmLabel: 'Stop run',
+    });
+    if (!ok) return;
+    stoppingRun = true;
+    try {
+      await insightsApi.cancelRun(id);
+      if (pollTimer) clearTimeout(pollTimer);
+      pollRunId = null;
+      toasts.info('Insights run stopped');
+    } catch (e) {
+      toastError('Couldn’t stop the insights run', e);
+    } finally {
+      stoppingRun = false;
+    }
+  }
 
   async function runNow(choice = runChoice): Promise<void> {
     if (loading || loadError || running || pollRunId) return;
@@ -438,6 +492,7 @@
     running = true;
     runFailReason = null;
     pollCount = 0;
+    pollBaseSec = 0;
     const period = p as InsightRunPeriod;
     const offset = Number(o) || 1;
     const fallbackKey = localReportKey(period, offset);
@@ -448,6 +503,7 @@
         runFailReason = resp.reason ?? 'Check that the insights skill is installed.';
         return;
       }
+      if (resp.attached) toasts.info('Already generating this report', 'Showing the run in progress instead of starting another.');
       if (resp.run_id) {
         pollRunId = resp.run_id;
         pollReportKey = resp.report_key ?? fallbackKey;
@@ -631,7 +687,9 @@
             <div class="banner" role="status">
               <Icon name="refresh" size={14} />
               <span>Generating the report — an agent is reading your transcripts. This can take a few minutes; it appears in the list when it’s done.</span>
-              <span class="dim">{Math.floor((pollCount * 3) / 60)}:{String((pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
+              <span class="dim">{Math.floor((pollBaseSec + pollCount * 3) / 60)}:{String((pollBaseSec + pollCount * 3) % 60).padStart(2, '0')} elapsed</span>
+              <button class="btn small" onclick={() => pollRunId && ws.navigateToSession(pollRunId)}><Icon name="terminal" size={12} /> View live session</button>
+              <button class="btn small" disabled={stoppingRun} aria-busy={stoppingRun} onclick={() => void stopRun()}><Icon name="stop" size={12} /> {stoppingRun ? 'Stopping…' : 'Stop'}</button>
             </div>
           {/if}
         </div>

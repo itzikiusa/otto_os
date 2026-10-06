@@ -52,7 +52,7 @@ pub async fn meta(State(ctx): State<ServerCtx>) -> ApiResult<Json<MetaResp>> {
     // UI never labels an excluded provider as the default (and doesn't disagree
     // with what the daemon would actually spawn).
     let default_provider = settings
-        .get("default_provider")
+        .get(otto_state::settings::DEFAULT_PROVIDER_KEY)
         .await?
         .as_ref()
         .and_then(Value::as_str)

@@ -102,7 +102,7 @@
 
 <section class="db-assist">
   <header class="da-head">
-    <span class="da-title"><Icon name="zap" size={15} /> {info.title}</span>
+    <span class="da-title"><Icon name="zap" size={14} /> {info.title}</span>
     {#if !started && providers.length > 1}
       <select
         class="da-provider"
@@ -141,7 +141,7 @@
       aria-label="Close DB assistant"
       title="Close — discards the session and working files"
     >
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -171,7 +171,7 @@
           </div>
         {/if}
         <div class="da-ask">
-          <textarea
+          <textarea dir="auto" aria-label="Ask the database assistant"
             bind:value={draft}
             onkeydown={onKey}
             placeholder={info.placeholder}
@@ -179,7 +179,7 @@
             disabled={database.assistBusy}
           ></textarea>
           <button class="btn primary da-send" onclick={send} disabled={database.assistBusy || !draft.trim()}>
-            {#if database.assistBusy}Starting…{:else}<Icon name="arrowUp" size={15} /> Ask{/if}
+            {#if database.assistBusy}Starting…{:else}<Icon name="arrowUp" size={14} /> Ask{/if}
           </button>
         </div>
         {#if busyLong}

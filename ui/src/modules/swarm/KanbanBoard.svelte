@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Per-project Kanban: columns by task status, cards = tasks. Move status,
   // reassign, run now, delete via a card menu. Add task + Plan-from-goal.
   // Cards support HTML5 drag-and-drop to change status columns.
@@ -509,7 +510,7 @@
 
   {#if adding}
     <div class="add-row">
-      <input
+      <input dir="auto"
         class="input grow"
         aria-label="New task title"
         placeholder="Task title…"
@@ -562,7 +563,7 @@
                    the select checkbox, the title button (Enter / click → the
                    task's actions; x toggles selection) and the meta buttons.
                    Never a control nested inside a role="button" card. -->
-              <div
+              <div use:rowMenu
                 class="card kb-card"
                 role="listitem"
                 class:dragging={draggingId === t.id}
@@ -623,7 +624,7 @@
                 {#if t.status === 'todo' && waiting[t.id]}
                   {@const w = waiting[t.id]}
                   <span class="waiting" title="Ready, but not started: {w.detail} (since {rel(w.since)})">
-                    <Icon name="clock" size={11} /> Waiting: {w.detail}
+                    <Icon name="clock" size={12} /> Waiting: {w.detail}
                   </span>
                 {/if}
               </div>
@@ -644,7 +645,7 @@
   <Modal title={goal ? 'Edit project goal' : 'Set project goal'} width={560} onclose={() => (editingGoal = false)}>
     <div class="field">
       <label for="goal-md">Goal</label>
-      <textarea
+      <textarea dir="auto"
         id="goal-md"
         class="input"
         rows={8}

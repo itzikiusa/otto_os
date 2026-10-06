@@ -76,7 +76,7 @@
     into the running agent session.
   </div>
 
-  <input
+  <input dir="auto" aria-label="Filter product stories"
     class="search-input"
     type="search"
     placeholder="Filter by title or key…"
@@ -172,7 +172,7 @@
     border-color: var(--accent-line);
   }
   .story-row:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .story-key {

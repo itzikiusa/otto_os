@@ -117,6 +117,59 @@ fn daemon_needs_install() -> Result<bool, String> {
     files_differ(&src, &dst).map_err(|e| format!("compare bundled/installed ottod: {e}"))
 }
 
+/// Hard-link (fallback: copy) the current `dst` to `ottod.prev`, replacing
+/// any older one. A hard link shares the old inode, which the following
+/// rename() leaves untouched — no copy cost and no in-place rewrite. Best-effort:
+/// a missing backup must never block installing the new daemon.
+fn keep_previous_daemon(dst: &std::path::Path) {
+    if !dst.exists() {
+        return;
+    }
+    let prev = dst.with_file_name("ottod.prev");
+    let _ = std::fs::remove_file(&prev);
+    if std::fs::hard_link(dst, &prev).is_err() {
+        if let Err(e) = std::fs::copy(dst, &prev) {
+            eprintln!(
+                "otto: could not keep previous daemon as {}: {e}",
+                prev.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod keep_previous_tests {
+    use super::keep_previous_daemon;
+
+    #[test]
+    fn previous_daemon_survives_the_swap() {
+        let dir = std::env::temp_dir().join(format!("otto-sup-prev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("ottod");
+        // Nothing installed yet → nothing kept, no error.
+        let _ = std::fs::remove_file(&dst);
+        keep_previous_daemon(&dst);
+        assert!(!dir.join("ottod.prev").exists());
+        std::fs::write(&dst, "old").unwrap();
+        keep_previous_daemon(&dst);
+        let tmp = dir.join("ottod.tmp");
+        std::fs::write(&tmp, "new").unwrap();
+        std::fs::rename(&tmp, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ottod.prev")).unwrap(),
+            "old"
+        );
+        // A second update replaces the older backup.
+        keep_previous_daemon(&dst);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ottod.prev")).unwrap(),
+            "new"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn files_differ(a: &PathBuf, b: &PathBuf) -> std::io::Result<bool> {
     let a_meta = std::fs::metadata(a)?;
     let b_meta = std::fs::metadata(b)?;
@@ -157,11 +210,18 @@ fn install_daemon() -> Result<String, String> {
     // intact seal, and is atomic on the same volume.
     let tmp = dst.with_extension(format!("tmp.{}", std::process::id()));
     std::fs::copy(&src, &tmp).map_err(|e| format!("copy ottod: {e}"))?;
+    // Keep the binary being replaced as `bin/ottod.prev` so a bad update can
+    // be rolled back by hand (or by deploy.sh) without a rebuild.
+    keep_previous_daemon(&dst);
     std::fs::rename(&tmp, &dst).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("swap ottod into place: {e}")
     })?;
 
+    let logs = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("Library/Logs/Otto");
+    let _ = std::fs::create_dir_all(&logs);
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -182,11 +242,20 @@ fn install_daemon() -> Result<String, String> {
          under contention. Interactive = app-level QoS, like a foreground
          app. The re-bootstrap below applies it on the next app update. -->
     <key>ProcessType</key><string>Interactive</string>
+    <!-- launchd SIGKILLs a job this long after SIGTERM (default 20 s; the
+         daemon caps its own HTTP drain at ~3 s and bounds every teardown
+         step, so 30 s is headroom, never the expected path). -->
+    <key>ExitTimeOut</key><integer>30</integer>
+    <!-- A panic or abort writes to stderr before the tracing file sees it. -->
+    <key>StandardOutPath</key><string>{}/ottod.stdout.log</string>
+    <key>StandardErrorPath</key><string>{}/ottod.stderr.log</string>
 </dict>
 </plist>
 "#,
         dst.display(),
-        secrets_env_xml(&data_dir())
+        secrets_env_xml(&data_dir()),
+        logs.display(),
+        logs.display(),
     );
     let pp = plist_path();
     std::fs::create_dir_all(pp.parent().unwrap()).map_err(|e| e.to_string())?;

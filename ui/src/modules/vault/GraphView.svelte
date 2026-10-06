@@ -8,7 +8,7 @@
   // deterministic index-stride edge sampling past a draw budget, viewport
   // culling on nodes AND edges, a uniform spatial grid for hover/click/drag
   // hit tests (never O(n) per mousemove), degree-capped label budget, and a
-  // single dirty-flag rAF loop that only repaints when something changed.
+  // dirty-flag rAF that is only requested when something changed.
   //
   // The payload the server sends is the RAW graph; it is never rendered
   // directly. `project()` sits in between — it applies the focus filters
@@ -192,6 +192,20 @@
   let cam = { x: 0, y: 0, k: 1 }; // screen = (world - cam) * k + center
   let dirty = false;
   let raf = 0;
+  let painting = false; // the canvas is mounted (between onMount and teardown)
+  /** Mark the frame dirty and request ONE paint. Frames are requested only when
+   *  something changed — an idle graph schedules no rAF at all (a perpetual
+   *  "check dirty" loop woke WebContent 60×/s for nothing). */
+  function invalidate(): void {
+    dirty = true;
+    if (painting && raf === 0) raf = requestAnimationFrame(paint);
+  }
+  function paint(): void {
+    raf = 0;
+    if (!dirty) return;
+    dirty = false;
+    draw();
+  }
   let didFit = false; // auto zoom-to-fit once, on the first tick of a payload
   let ticks = 0;
 
@@ -255,7 +269,7 @@
         didFit = true;
         fit();
       }
-      dirty = true;
+      invalidate();
     };
   }
 
@@ -590,7 +604,7 @@
       wpost({ t: 'params', center: fCenter, repel: fRepel, link: fLink, dist: fDist });
     }
     dataRev++;
-    dirty = true;
+    invalidate();
   }
 
   // ── Fetch (own data via vaultGraph; only the SERVER-side toggles refetch) ─
@@ -714,7 +728,7 @@
     void nodeScale;
     void linkWidth;
     void labelZoom;
-    dirty = true;
+    invalidate();
   });
 
   // Title filter → match mask (dims non-matching); client-side, no re-fetch.
@@ -728,7 +742,7 @@
       for (let i = 0; i < n; i++) if (titles[i].toLowerCase().includes(f)) m[i] = 1;
       matched = m;
     }
-    dirty = true;
+    invalidate();
   });
 
   // ── Filter actions ──────────────────────────────────────────────────────
@@ -919,7 +933,7 @@
       for (let s = adjOff[i]; s < adjOff[i + 1]; s++) hoverSet.add(adjList[s]);
       hoverTip = { ...hoverTip, title: titles[i] ?? '', meta: metas[i] ?? '' };
     }
-    dirty = true;
+    invalidate();
   }
 
   // ── Camera helpers ──────────────────────────────────────────────────────
@@ -941,10 +955,10 @@
     cam.k = Math.min(4, Math.max(0.02, Math.min((cssW * 0.9) / bw, (cssH * 0.9) / bh)));
     cam.x = (minx + maxx) / 2;
     cam.y = (miny + maxy) / 2;
-    dirty = true;
+    invalidate();
   }
 
-  // ── Rendering (one dirty-flag rAF loop) ──────────────────────────────────
+  // ── Rendering (dirty flag + on-demand rAF, see invalidate()) ─────────────
   function draw(): void {
     if (!ctx) return;
     const w = cssW, h = cssH;
@@ -1173,7 +1187,7 @@
     if (dragMode === 'pan') {
       cam.x = panCamX - (p.x - downX) / cam.k;
       cam.y = panCamY - (p.y - downY) / cam.k;
-      dirty = true;
+      invalidate();
       return;
     }
     // Idle move: hover pick (grid — never O(n)) + tooltip anchor.
@@ -1225,7 +1239,7 @@
     cam.k = Math.min(20, Math.max(0.02, cam.k * Math.exp(-e.deltaY * 0.0015)));
     cam.x = w.x - (p.x - cssW / 2) / cam.k;
     cam.y = w.y - (p.y - cssH / 2) / cam.k;
-    dirty = true;
+    invalidate();
   }
 
   function onPointerLeave(): void {
@@ -1245,14 +1259,14 @@
       canvasEl.width = Math.round(cssW * dpr);
       canvasEl.height = Math.round(cssH * dpr);
       ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
-      dirty = true;
+      invalidate();
     });
     ro.observe(rootEl);
 
     // Theme/scheme flips re-read the CSS vars + rebuild the group palette.
     const mo = new MutationObserver(() => {
       readTheme();
-      dirty = true;
+      invalidate();
     });
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-scheme'] });
 
@@ -1264,17 +1278,13 @@
     canvasEl.addEventListener('pointerleave', onPointerLeave);
     canvasEl.addEventListener('dblclick', onDblClick);
 
-    const loop = (): void => {
-      if (dirty) {
-        dirty = false;
-        draw();
-      }
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
+    painting = true;
+    invalidate();
 
     return () => {
+      painting = false;
       cancelAnimationFrame(raf);
+      raf = 0;
       ro.disconnect();
       mo.disconnect();
       canvasEl.removeEventListener('wheel', onWheel);
@@ -1352,7 +1362,7 @@
     </button>
     {#if panelOpen}
       <div class="panel-body">
-        <input class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
+        <input dir="ltr" class="filter" type="text" placeholder="Filter titles…" aria-label="Filter titles" bind:value={filter} />
 
         <div class="sec">
           Focus
@@ -1371,7 +1381,7 @@
                 onclick={() => (anchorPaths = anchorPaths.filter((x) => x !== a))}
               >
                 <span class="ftoken-t">{a.split('/').pop()?.replace(/\.md$/, '')}</span>
-                <Icon name="x" size={10} />
+                <Icon name="x" size={12} />
               </button>
             {/each}
           </div>
@@ -1382,7 +1392,7 @@
           </label>
         {/if}
         <div class="typeahead">
-          <input
+          <input dir="auto"
             class="filter"
             type="text"
             placeholder="Anchor on a note…"
@@ -1409,7 +1419,7 @@
             {/if}
           </div>
           {#if serviceFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
+            <input dir="auto" class="filter" type="text" placeholder="Find service…" aria-label="Find service" bind:value={svcQuery} />
           {/if}
           <div class="facets">
             {#each svcShown as f (f.label)}
@@ -1458,7 +1468,7 @@
             {/if}
           </div>
           {#if tagFacets.length > 8}
-            <input class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
+            <input dir="auto" class="filter" type="text" placeholder="Find tag…" aria-label="Find tag" bind:value={tagQuery} />
           {/if}
           <div class="facets">
             {#each tagShown as f (f.label)}
@@ -1495,7 +1505,7 @@
           {#if expandedGroups.length}
             <div class="chips">
               {#each expandedGroups as g (g)}
-                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={10} /></button>
+                <button class="ftoken" title="Collapse {g}" onclick={() => toggleGroup(g)}><span class="ftoken-t">{g}</span> <Icon name="x" size={12} /></button>
               {/each}
             </div>
           {/if}

@@ -1,11 +1,11 @@
 <script lang="ts">
   import { NO_WORKSPACE } from '../../lib/labels';
   // Drawer "Terminal" tab: opens a `kubectl exec -it` terminal session for the pod
-  // (`POST …/exec`, Edit) and renders it inline with `<Terminal preferDom>`
+  // (`POST …/exec`, Edit) and renders it inline with `<LazyTerminal preferDom>`
   // (agent-TUI renderer; shells in a pod redraw prompts constantly). The
   // session is killed when the view unmounts — it lives only in this drawer.
   import { untrack } from 'svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { api } from '../../lib/api/client';
   import { k8sApi } from '../../lib/api/k8s';
@@ -109,7 +109,7 @@
     </div>
     <div class="term">
       {#key sessionId}
-        <Terminal {sessionId} preferDom autoFocus restartable onrestart={() => { void close().then(open); }} onstatus={(s) => (status = s)} />
+        <LazyTerminal {sessionId} preferDom autoFocus restartable onrestart={() => { void close().then(open); }} onstatus={(s) => (status = s)} />
       {/key}
     </div>
   {:else}

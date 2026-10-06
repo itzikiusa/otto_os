@@ -71,6 +71,7 @@ connection library unusable for every non-root account.)
 | 15 | GET /api/v1/workspaces/{id}/members | ws admin | — | `MemberEntry[]` |
 | 16 | PUT /api/v1/workspaces/{id}/members | ws admin | SetMembersReq | `MemberEntry[]` |
 | 16a | GET /api/v1/workspaces/scratch | Agents:View | — | `Workspace` — the daemon's system-owned **scratch** workspace (`id: "scratch"`, `root_path` = daemon `$HOME`). Hidden from `GET /workspaces`; every authenticated user holds Editor there implicitly, so `POST /workspaces/scratch/sessions` starts a **workspace-less session** and `GET /workspaces/scratch/sessions` lists the caller's own (root: all). `PATCH`/`DELETE /workspaces/scratch` and member edits → 409. **Only the session routes exist under `scratch`** (`…/sessions…`, plus `…/broadcast`, `…/activity/summary` and `…/members` for the 409 above): every other `/workspaces/scratch/…` route family answers **404**, so the implicit Editor never reaches another workspace-scoped API. |
+| 16b | PATCH\|DELETE /api/v1/workspaces/scratch | Agents:View | — | always **409** `the scratch workspace is system-owned` — the scratch workspace cannot be renamed or deleted |
 | 17 | GET /api/v1/workspaces/{id}/sessions | ws viewer, **owner-scoped** (non-admins see only their own sessions; root/ws-admin get the full list) | optional query `?archived=&kind=&source=&status=&limit=&before=&foreground=&with_sources=&ids=` (all narrowing and all applied **in SQL**; `source=none` = sessions with no string `meta.source`; `foreground=true` = the rows the sidebar lists — every connection session plus the agents `Session::is_foreground_agent` accepts (no string `meta.source` in `BACKGROUND_SESSION_SOURCES`), plus agents whose source is in the comma list `with_sources` (≤ 64; e.g. `channel` for the Slack/Telegram groups); `foreground=false` = background agents only; `ids` = comma list of session ids (≤ 64, more → 400) — fetch-by-id for open tabs; `limit` (1–1000) keeps the **newest** N matching rows, still returned oldest-first; `before` = RFC 3339 cursor — only rows created strictly before it, pass the oldest row's `created_at` to page back; a malformed `before` → 400) | `Session[]` oldest-first — each row carries transient `live: bool` + `viewers: number`. Callers that only need live rows should pass `archived=false` (the archived history is the bulk of the table). The Agents sidebar asks for `?archived=false&foreground=true&with_sources=channel` (+ sources a mounted panel needs, e.g. `swarm`), pages the Archived section with `?archived=true&limit=100&before=…` and probes it with `?archived=true&limit=1` — a workspace's background review agents (~99 % of its rows) are never shipped to it |
 | 17b | GET /api/v1/sessions | Agents:View; each workspace **owner-scoped** exactly as #17 (root: every workspace, full rows; otherwise every workspace the caller is a member of — full rows where they are ws-admin, their own rows elsewhere — plus their own `scratch` sessions) | same query as #17; **`archived` defaults to `false`** here unless `ids` is given (a fetch-by-id returns the rows whatever their archived state — the UI's `ensureSession` / open-tab path) | `Session[]` (same shape as #17) across all of the caller's workspaces in ONE query — the tray / all-workspaces sidebar feed, replacing one #17 call per workspace |
 | 18 | POST /api/v1/workspaces/{id}/sessions | ws editor | CreateSessionReq | Session |
@@ -80,7 +81,7 @@ connection library unusable for every non-root account.)
 | 22 | POST /api/v1/sessions/{id}/restart | ws editor + **session owner-or-admin** | — | Session (respawn; uses resume args when provider_session_id set; `409` when the session is archived) |
 | — | POST /api/v1/sessions/{id}/resume | ws editor + **session owner-or-admin**, resource authorization | — | `Session`. Open if already live without replacing its PTY; otherwise resume through the existing serialized resume path. `409` for archived or unsupported inactive sessions, or when the provider's active-conversation guard refuses a fork. Resume errors propagate; this never falls back to an unconditional restart. |
 | 23 | POST /api/v1/workspaces/{id}/orchestrate | ws editor | OrchestrateReq | OrchestrateResp |
-| 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` |
+| 24 | POST /api/v1/workspaces/{id}/orchestrate/execute | ws editor | ExecutePlanReq | `{"results":[{"action_index":0,"ok":true,"detail":"...","session_ids":["..."]}]}` — the plan is re-validated against the live workspace first (1..=10 actions, known providers/sessions/connections, `spawn_sessions.count` 1..=8); an invalid plan is 400 and nothing runs. |
 | 25 | GET /api/v1/workspaces/{id}/connections | ws viewer | — | `Connection[]` (includes global ones; secret never present) |
 | 26 | POST /api/v1/workspaces/{id}/connections | ws editor | UpsertConnectionReq | Connection |
 | 27 | PATCH /api/v1/connections/{id} | ws editor (global: `Connections:Admin`) | UpsertConnectionReq (PATCH semantics: absent secret = keep; absent `environment`/`read_only` = **preserve** the stored value — never reset to dev/false, so a partial PATCH can't disable the write-guard) | Connection |
@@ -95,6 +96,7 @@ connection library unusable for every non-root account.)
 | 31 | GET /api/v1/git/accounts | member | — | `GitAccount[]` (own accounts only; token never present) |
 | 32 | POST /api/v1/git/accounts | member | CreateGitAccountReq | GitAccount |
 | 33 | DELETE /api/v1/git/accounts/{id} | member (owner) | — | 204 |
+| 33a | PATCH /api/v1/git/accounts/{id} | member (owner) | `UpdateGitAccountReq {label?, username?, namespace?, api_base_url?, token?}` — `namespace`/`api_base_url` `""` clears; a non-empty `token` rotates the Keychain secret, empty/absent keeps it | GitAccount |
 | 34 | GET /api/v1/workspaces/{id}/repos | ws viewer | — | `Repo[]` |
 | 35 | POST /api/v1/workspaces/{id}/repos | ws editor | AddRepoReq | Repo (clone runs async; Notice events report progress/done) |
 | 36 | DELETE /api/v1/repos/{id} | ws editor | — | 204 (unregisters; never deletes files) |
@@ -295,7 +297,7 @@ workspace from the row.
 | 64 | GET /api/v1/swarm/presets | member | — | `SwarmPreset[]` |
 | 65 | GET /api/v1/swarm/swarms/{sid}/agents | ws viewer | — | `SwarmAgent[]` |
 | 66 | POST /api/v1/swarm/swarms/{sid}/agents | ws editor | CreateAgentReq | SwarmAgent |
-| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent |
+| 67 | PATCH /api/v1/swarm/agents/{aid} | ws editor | UpdateAgentReq | SwarmAgent — present fields apply; `schedule: null` clears the schedule, an absent `schedule` keeps it. The schedule's `last_run` / `armed_at` keys are server-owned: an edit carries the stored ones (client values ignored); `armed_at` is re-stamped on create, resume (`enabled` false→true) or a change to `cadence`/`every_min`/`at`/`weekday`/`expr`/`timezone`, and the scheduler fires from `max(last_run, armed_at)`. `at` is read in the schedule's IANA `timezone` (absent = UTC); `every_min` floors at 5 |
 | 68 | DELETE /api/v1/swarm/agents/{aid} | ws editor | — | 204 |
 | 69 | POST /api/v1/workspaces/{id}/swarm/recruit | ws editor | RecruitReq | RecruitedAgent |
 | 70 | GET /api/v1/swarm/swarms/{sid}/projects | ws viewer | — | `SwarmProject[]` |
@@ -438,6 +440,7 @@ still-attached viewer receives `{"type":"terminated"}` and the WS closes immedia
 |---|---|---|---|
 | POST /api/v1/sessions/{id}/share | session owner / ws admin | `CreateShareReq {role, ttl_secs?, label?, recipient_email?, duration_secs?}` | `CreateShareResp {token, url, info: ShareInfo}` (token shown once) |
 | GET /api/v1/sessions/{id}/shares | session owner / ws admin | — | `ListSharesResp {shares: ShareInfo[]}` (live, non-revoked) |
+| GET /api/v1/auth/shares | member (self-owned) | — | `MyShare[]` = `ShareInfo` fields + `session_title: string \| null` (null when the session is gone) — the caller's live (non-revoked, non-expired) links across ALL sessions, newest first, capped at 500. Never another user's links, never the secret |
 | DELETE /api/v1/auth/shares/{share_id} | member (self-owned) | — | 204 (revokes + evicts; idempotent) |
 | POST /api/v1/auth/shares/revoke-all | member (self-owned) | — | 204 (revokes all caller's shares + evicts) |
 
@@ -1275,6 +1278,7 @@ run keeps its status and counts but `result_dropped: true`.
 | GET /repos/{id}/local-reviews | ws viewer | — | `Review[]` (local review history) |
 | POST /pr-review-comments/{cid}/approve | ws editor | — | `ReviewComment` — approve a draft and post it to the PR **at most once** (`posted` is claimed atomically before the forge call and released if it fails; an already-posted comment is never re-posted). A rejected inline anchor (line not in the PR diff) falls back to a general comment citing `path:line`. Local reviews (`pr_number = 0`) are approved without any forge call. |
 | POST /pr-review-comments/{cid}/decline | ws editor | — | `ReviewComment` — decline a draft (`posted` is kept: declining never un-posts). A summarizer re-run does not re-draft approved/declined/posted comments. |
+| PATCH /pr-review-comments/{cid} | ws editor | `{ body?: string, restore_draft?: bool }` | `ReviewComment` — a person's edit before approval: `body` replaces a **draft**'s text (non-empty); `restore_draft: true` moves a **declined** comment back to draft (both may be sent together). Never touches a posted comment; nothing is sent to the forge. 409 when the comment is not in the required state, 400 for an empty body / empty request. A summarizer re-run replaces drafts (edited ones included). |
 | GET /reviews/{review_id} | ws viewer | — | Exact persisted `Review`, including current agents/session IDs and fallback; `404` when missing. Authorizes against the review repository workspace. |
 | POST /reviews/{review_id}/handoff | ws editor | — | hand the review findings to an agent session |
 | POST /reviews/{review_id}/cancel | ws editor | — | cancel an in-flight review: signals the run's cancel flag, kills the live agent sessions, marks the run `cancelled`, cleans up temp files and broadcasts `review_changed`. `409` if the review is not `running`. Returns the updated Review. |
@@ -1305,6 +1309,10 @@ carries `lens?` — the lens slug that produced it: orchestrator-mode rows run e
 lens as sub-agents and keep the label through the merge, so one row's findings span
 several lenses. Such a row's own `lens` is empty (it is not one lens's row), which
 also means it is never superseded by the same-lens "already covered" rule above.
+Entries also carry an optional `line_end?` (inclusive end of a multi-line finding).
+A reviewer's findings file is parsed element by element and leniently (`line` as a
+number or numeric-prefix string such as `"42-45"`, which also yields `line_end`;
+any/null `severity`); only an element that is not a finding object is skipped.
 | GET /reviews/{review_id}/findings | ws viewer | — | `Finding[]` — **widened** from `ReviewFindingRow[]` to the full workflow `Finding` (all old fields — `id`, `state`, `severity`, `body`, `path`, `line`, `fingerprint` — are retained; the rich workflow fields are added). Non-breaking superset. See "Review findings workflow" below. |
 | POST /reviews/{review_id}/findings/{fingerprint}/state | ws editor | `{state, fix_session_id?}` | updated finding (legacy lifecycle transition — **deprecated**, kept for back-compat; new UI uses the id-keyed `/findings/{id}/*` actions below) |
 | GET /reviews/{review_id}/merge-readiness | ws viewer | — | `MergeReadiness` (open/total findings + approvals + ci_status + mergeable + conflicts + branch freshness) |
@@ -1443,7 +1451,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | GET /product/transcripts/{trid} | owning story ws viewer | — | Full `Transcript` (authorization precedes body read) |
 | POST /product/stories/{sid}/transcripts | ws editor | CreateTranscriptReq | Transcript |
 | DELETE /product/transcripts/{trid} | ws editor | — | 204 |
-| POST /product/stories/{sid}/draft (PATCH) | ws editor | — | create/update the working RFC draft |
+| PATCH /product/stories/{sid}/draft | ws editor | — | create/update the working RFC draft |
 | POST /product/stories/{sid}/publish-as-rfc | ws editor + account owner/root | `PublishAsRfcReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | POST /product/stories/{sid}/publish-as-story | ws editor + account owner/root | `PublishAsStoryReq` | Published story detail; 409 if reviewed identity is missing/stale, no outbound call |
 | GET /workspaces/{ws}/product/learnings | ws viewer | — | `Learning[]` |
@@ -1451,7 +1459,7 @@ values) and `folder`, alongside the existing `cwd/stage/watch_enabled/watch_cade
 | PATCH /product/learnings/{lid} | ws editor | UpdateLearningReq | Learning |
 | DELETE /product/learnings/{lid} | ws editor | — | 204 |
 | POST /product/learnings/{lid}/accept | ws editor | — | accept a proposed learning |
-| GET /workspaces/{ws}/product/drafts | ws viewer | — | `Draft[]` |
+| POST /workspaces/{ws}/product/drafts | ws editor | `NewDraftReq {title?}` | the new standalone draft's detail (a draft story not yet tied to an epic) |
 
 ### Transcript pages and publication review
 
@@ -2241,7 +2249,7 @@ reviews every entry (aggregate: `score` = min, `passed` = all; per-repo detail
 under `reviews[]`) and `git_pr` drafts/opens one PR per entry.
 
 **Run context files.** Every run owns `<data_dir>/workflow-context/<run_id>/`,
-the file-based step-handoff layer (`workflow_context.rs`). Every write here is
+the file-based step-handoff layer (`otto_workflows::context`). Every write here is
 best-effort — a failure logs and the run continues; context files never fail a
 node.
 
@@ -2488,7 +2496,7 @@ Plugins are external sidecar processes installed at runtime under `~/otto-plugin
 |---|---|---|
 | GET `/plugins` | member | Enabled plugins `[{slug,name,icon,has_ui}]` for the sidebar; UI filters by grant. Exempt in policy. |
 | ANY `/plugins/{slug}` · ANY `/plugins/{slug}/{*rest}` | plugin `<slug>` grant (GET=view, else=edit); root bypass | Reverse-proxied to the sidecar. Gated by the dedicated plugin branch in the feature guard. |
-| GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
+| GET `/plugins/{slug}/ui` · GET `/plugins/{slug}/ui/` · GET `/plugins/{slug}/ui/{*path}` | public static | Iframe assets served from the plugin's `ui` dir (root-mounted). |
 | GET `/plugin-admin` | root | Installed-plugin list (full records, no token). |
 | POST `/plugin-admin/install` | root | `{source}` = local path or git URL → installs into the plugins home (disabled). Reinstall is serialized with enable/disable/remove: disables old credentials and stops the sidecar before replacing local files, then installs the new executable metadata/token disabled. A failed replacement remains disabled. Explicitly enable to start the replacement. |
 | POST `/plugin-admin/{slug}/enable` · POST `/plugin-admin/{slug}/disable` | root | Spawn / stop the sidecar. |
@@ -2683,7 +2691,9 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 | GET /insights/reports | Insights:View | `?offset=0&limit=200&summaries=false&latest=false` | Newest-first `ReportView[]`; limit 1–200, default 200. Metadata-only by default (`summary:""`); `summaries=true` includes a preview capped at 80 lines / 64 KiB. `latest=true` returns at most one newest report per cadence (three total), ignoring offset. Only selected-page artifacts are hydrated; archive filenames are still enumerated. |
 | GET /insights/report | Insights:View | — | one report's HTML |
 | GET /insights/report-status | Insights:View | `?key=daily:YYYYMMDD_YYYYMMDD&summary=false` (also weekly/monthly) | `{report:ReportView|null, html_revision:string|null}`. Exactly three artifact metadata checks, independent of archive size; optional bounded summary preview. Missing report is null. Bad key is 400. HTML revision changes when HTML length/mtime changes; a new summary alone does not mean completion. |
-| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed) |
+| POST /insights/run | root | `{ period, offset? }` | `{ started, run_id?, report_key?, report_revision, reason?, attached? }` — `report_revision` is the HTML revision captured before starting (null if absent), for bounded completion polling; `run_id` when started; `report_key` identifies the requested daemon-local collector calendar period (`daily:YYYYMMDD_YYYYMMDD`, or `weekly`/`monthly`); offset 0 is current, 1 is the previous complete period. The calendar reference is frozen at acceptance and passed to a daemon-owned, content-addressed bundled collector under `insights/collectors/`, so a delayed start across midnight keeps this key. Installed skill instructions/customizations remain untouched. This manual endpoint explicitly regenerates an existing period (`--force`); scheduled catch-up remains idempotent. `reason` when not started (e.g. skill not installed). **One run per period:** while a run for the same `report_key` is still generating (its session alive, its HTML unchanged, inside the 15-min timeout) the request starts nothing and returns that run with `attached: true` |
+| GET /insights/runs/active | View | — | `ActiveRun[]` = `{ run_id, report_key, report_revision, started_at }`, oldest first — runs still generating; finished/killed/timed-out runs are pruned. Lets the page restore its progress banner after it was left |
+| POST /insights/runs/{id}/cancel | root | — | 204 — kills and archives the run's session and drops it from the active list; 404 when no such active run |
 
 ## LSP (language server bridge)
 
@@ -2702,8 +2712,8 @@ The audit log is an **append-only** ledger written best-effort by the daemon at 
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
-| GET /fs/browse?path= | member | — | complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
-| GET /fs/read?path= | member | — | regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
+| GET /fs/browse?path= | root, or Agents Edit | — | non-root callers get 403 inside Otto's data dir (`$OTTO_DATA_DIR` and the default `~/Library/Application Support/Otto`), `~/.ssh`/`~/.aws`/`~/.gnupg`/… and for key-like file names. Complete directory listing (for shared path pickers; optional `files=true`). Authorized filesystem work runs off async workers, with four admitted listings globally and a 10-second response deadline. Saturation returns retryable 409; timeout returns 502. Canceled/timed-out OS work retains admission until it really exits. Picker search still filters the complete listing; no silent entry truncation. |
+| GET /fs/read?path= | root, or Agents Edit | — | same non-root deny list as `/fs/browse` (403). Regular-file contents, bounded to 400 KiB; binary content returns an empty string with `truncated:true`. Four admitted reads globally, 10-second response deadline; 409 when busy, 502 on timeout. |
 | GET /logs/daemon | root | `?file=&mode=all\|tail\|since&lines=&offset=` | `DaemonLogs {log_dir, files[], selected, mode, content, offset, next_offset, truncated}` — see below |
 | POST /client/errors | any authed user | `{kind, message, stack?, route?, action?}` | **204**. The UI's last-resort error hook (`ui/src/main.ts`) files a fatal client-side failure — e.g. Svelte's `effect_update_depth_exceeded`, which freezes the shell until a reload — before it self-heals. Logged (clipped) at ERROR under target `otto_client` with the user and route; nothing is stored or interpreted |
 
@@ -2839,7 +2849,7 @@ These self-authenticate via the `?token=` query parameter and are merged at the 
 | GET /ws/events | `Sec-WebSocket-Protocol: otto-bearer, <token>` (preferred — keeps the token out of the URL) or `?token=` fallback; member | daemon event stream (see ws.md) |
 | GET /ws/lsp?lang=&root=&token= | `?token=`; ws editor | LSP WebSocket bridge. Share-link (scoped) and MCP-restricted tokens → 403 (same as `/fs/*`). A non-root caller's canonical `root` must be inside a workspace they are a member of (or exactly the scratch workspace root) → else 403. Sockets share ONE server process per `(user, lang, canonical root)` — never across users (ref-counted; reaped 60 s after the last socket leaves): request ids are rewritten per socket, `initialize` is answered from the first result, `didOpen`/`didClose` are ref-counted per URI, `publishDiagnostics` goes to sockets holding the URI. The server's stdin backlog is bounded (8 MiB); past it client messages are back-pressured (the socket stops being read) instead of queued. |
 | GET /ws/api-client/stream?token= | `?token=`; ws editor | API-client streaming-response bridge |
-| GET /browser/proxy?url=&token= | `?token=` | in-app browser HTTP proxy |
+| GET /browser/proxy?url=&ticket= | single-use `?ticket=` (from `POST /api/v1/browser/proxy-ticket`, bound to `url`, 60 s TTL; `?token=` is NOT accepted) | in-app browser "Take over" HTTP proxy. Every response (HTML, pass-through bytes, errors) carries `Content-Security-Policy: sandbox allow-scripts` (opaque origin — never same-origin with the daemon), `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`. HTML gets an HTML-escaped `<base href>` + the element-picker script (posts `otto-element` to `parent`) |
 
 ## Ingest (per-session token, unauthenticated by bearer)
 
@@ -2875,9 +2885,9 @@ keyword (FTS5) recall. Reads require `ws viewer`, mutations `ws editor`. `Memory
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
 | GET /workspaces/{ws}/memories | ws viewer | query: `collection?,kind?,story_id?,tag?,include_inactive?,limit?` | `Memory[]` |
-| POST /workspaces/{ws}/memories | ws editor | `NewMemory` | `Memory` (exact-dup save is a NOOP returning the existing row) |
+| POST /workspaces/{ws}/memories | ws editor | `NewMemory` | `Memory` (exact-dup save is a NOOP returning the existing live row; a duplicate of a forgotten/merged memory reactivates that row — `active=true`, `state=accepted`) |
 | GET /workspaces/{ws}/memories/{id} | ws viewer | — | `Memory` |
-| PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory` |
+| PATCH /workspaces/{ws}/memories/{id} | ws editor | `MemoryPatch` | `Memory`; 409 when the new body duplicates another memory (live or forgotten) in the same collection/scope/story |
 | DELETE /workspaces/{ws}/memories/{id} | ws editor | — | 204 (soft-delete: `active=false`) |
 | GET /workspaces/{ws}/memories/{id}/links | ws viewer | — | `MemoryLink[]` |
 | POST /workspaces/{ws}/memory/search | ws viewer | `MemoryQuery` | `MemoryHit[]` (keyword FTS5 → LIKE fallback, re-ranked) |
@@ -3209,7 +3219,7 @@ Schema history lists identifiers only; opening it does not fetch every schema bo
 | POST /workspaces/{ws}/memory/{mid}/forget/undo | ws editor | `{undo_token}` | restored `Memory` |
 | POST /workspaces/{ws}/memory/merge | ws editor | `{ids}` | merged `Memory` |
 | POST /workspaces/{ws}/memory/{mid}/split | ws editor | `{parts}` | `Memory[]` |
-| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported}` |
+| POST /workspaces/{ws}/memory/import | ws editor | `{kind, content}` (AGENTS.md\|CLAUDE.md\|.cursorrules) | `{imported, import_id}` — `imported` counts the memories this import created (or revived from a forgotten/merged duplicate), which are parked as `suggested`; a section identical to a live memory leaves that memory's state and provenance untouched and is not counted |
 
 ## Must-have wave (Wave 3) — additional routes
 
@@ -3244,7 +3254,7 @@ both `create_run` and the spawned `run_workflow` call — so a fixed instruction
 engine's prompt normalization exactly like a chat-started run.
 
 **Chat trigger (`kind: "chat"`)** and the simplified run command are handled entirely by
-`otto-server::workflow_chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
+`otto_workflows::chat` (`WorkflowChatTriggerImpl`), invoked by the channels Bridge for
 every inbound Slack/Telegram/webhook message *before* normal session routing. Resolution order:
 
 1. **Legacy structured command** — a message declaring `Action: Workflow` + `Name:` (see
@@ -3286,10 +3296,10 @@ It runs as `ottod mcp-tools` (stdio JSON-RPC) exposing read-only, redacted, row/
 audited tools — `otto_db_schema`, `otto_git_pr_review`, `otto_product_story` (db_query / swarm_task /
 broker_topic deferred), the per-feature reads (see `docs/features/mcp-control-plane.md` §9), and the
 AWS / Kubernetes console tools that wrap `/aws/*` and `/k8s/*` — reads `aws_list_accounts`,
-`aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues` / `aws_sqs_peek`,
+`aws_s3_list_buckets` / `aws_s3_list_objects` / `aws_s3_preview`, `aws_sqs_list_queues`,
 `aws_ec2_list_instances`, `aws_athena_list_tables` / `aws_athena_get_query`, `aws_eks_list_clusters`, `aws_logs_list_groups` / `aws_logs_filter` / `aws_logs_insights` / `aws_logs_get_insights`,
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text tail), `k8s_top`; and the
-three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action` (same set, `otto.`-prefixed,
+Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `aws_sqs_peek` (a receive bumps the receive count), `k8s_action` (same set, `otto.`-prefixed,
 on the outward server with the writers in `DANGEROUS`). The outward `otto.run_workflow` tool takes
 `workflow_id` plus the optional `input`, `start_node` and `review_mode` (`"fan_out"`|`"orchestrator"`,
 forwarded verbatim to `POST /workflows/{id}/run`, which validates it). Tool calls are logged to
@@ -3407,6 +3417,7 @@ Persistence: `otto_state::canvas` (`CanvasScene`, `CanvasSceneSummary`). The ric
 
 | # | Method & path | Auth | Request | Response |
 |---|---|---|---|---|
+| 101a | GET /api/v1/canvas/scenes | member · Canvas feature | — | `CanvasSceneSummary[]` — the caller's own scenes across every workspace (Canvas is workspace-independent) |
 | 102 | GET /api/v1/workspaces/{ws}/canvas/scenes | ws viewer | — | `CanvasSceneSummary[]` (newest-updated first) |
 | 103 | POST /api/v1/workspaces/{ws}/canvas/scenes | ws editor | `{title, doc?, story_id?, provider?, section?}` | CanvasScene (201; `doc` defaults to an empty scene) |
 | 104 | GET /api/v1/canvas/scenes/{id}[?files=ref] | ws viewer | — | CanvasScene (full `doc_json`). Excalidraw images are stored as `otto-canvas-file:<sha256>` refs (migration 0163); by default they are put back inline (`dataURL`) so the doc is self-contained. `?files=ref` (also accepted on #103, #105 and #106b) returns the stored doc with refs — the Canvas editor's read; it resolves each ref through #106c |
@@ -3534,7 +3545,7 @@ reported in `depth_exceeded`.
 ### Design assist — agent turns, variants, learned rules
 
 One agent-turn pipeline for every studio and format
-(`crates/otto-server/src/design_assist.rs`; building blocks in
+(`crates/otto-design-assist/src/lib.rs`; building blocks in
 `otto_design::{variants, cite, learn}` and `otto_improve::design`). Same RBAC
 as above (`/design/*`: GET = design View, else design Edit) plus the workspace
 role from the artifact (or the `workspace_id`). Types: `DesignAssist*`,
@@ -4119,7 +4130,7 @@ running in the checkout. PATCHing a `workflow`-kind task's `workflow_id` to null
 a 400.
 
 Persistence: `otto_state::scheduled_tasks` (migrations 0084 + 0086); scheduler:
-`otto_server::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
+`otto_automation::scheduled_tasks_scheduler` (60s tick, in-flight-guard-first,
 advance-cursor-on-completion, startup reaper, global run semaphore); engine:
 `scheduled_tasks_engine` (session-based provider-agnostic agent runs via
 `agent_run`, shell, and workflow handoff); cadence: `cadence` (tz + cron); live
@@ -4456,7 +4467,7 @@ recall), and each Personal Agent's own `memory/notes.md` (unchanged). With
 `accept`; otherwise they are `accepted` and shown as a chip with Undo.
 
 **DTOs** (Rust: stored rows in `crates/otto-state/src/assistant.rs`, request/response
-shapes in `crates/otto-server/src/assistant/{types,router,limits}.rs`; TS:
+shapes in `crates/otto-assistant/src/assistant/{types,router,limits}.rs`; TS:
 `ui/src/lib/api/types.ts` `// ── Otto Assistant`):
 
 ```text
@@ -4638,7 +4649,7 @@ by-id routes load the row first and check the role on its `workspace_id` (the
 IDOR guard, like Scheduled Tasks). Persistence: `otto_state::browser`
 (`BrowserTab`, `BrowserAnnotation`).
 
-`GET /browser/page` fetches a caller-supplied URL **on the daemon's behalf**,
+`GET /workspaces/{wid}/browser/page` fetches a caller-supplied URL **on the daemon's behalf**,
 so it netguard-checks it (`otto_netguard::check_url`) before the fetch — a
 blocked address (loopback/private/metadata) is a `400`. Navigating a
 reader-mode tab (`PATCH .../tabs/{id}` with a new `url` while `mode ==
@@ -4790,7 +4801,7 @@ title field of their own).
 
 **`POST /browser/vault-save`** writes an OKF-flavored note through the vault
 engine's `write_note` (the same call `otto_vault_write` lands on —
-`crates/otto-server/src/mcp_outward.rs`): YAML front-matter (`url`, `title`,
+`crates/otto-mcp/src/outward/exec.rs`): YAML front-matter (`url`, `title`,
 `saved` date, `tags: [browser]` — `url`/`title` are YAML-double-quoted with
 `\`/`"`/newlines escaped), a `## Summary` section, then one `## Mark N`
 section per annotation on that URL (selector, excerpt, comment). The note
@@ -4907,6 +4918,7 @@ a workspace Admin, or root may see, attach to or drive it; everyone else gets
 
 | Method & path | Auth | Request | Response |
 |---|---|---|---|
+| POST /api/v1/browser/proxy-ticket | Browser Edit | `{url}` (absolute http(s)) | `BrowserProxyTicket` `{ticket, expires_in_secs}` — single-use ticket for `GET /browser/proxy?url=<same url>&ticket=`; consumed on first redemption (even a URL mismatch burns it); held in daemon memory only |
 | GET /api/v1/browser/live/status | Browser View | — | `BrowserLiveStatus` — per-build install state (+ approximate download size), current settings, the running install job, process/session counts |
 | PUT /api/v1/browser/live/settings | Browser Admin | `BrowserLiveSettings` (partial) | `BrowserLiveSettings` — 400 on `headed:true` with `build:"chrome-headless-shell"`, unknown build, or out-of-range caps. Stored in the settings KV under `browser_live`. Applies to newly started Chromium processes |
 | POST /api/v1/browser/live/install | Browser Admin | `{build?}` (default: the configured build) | 202 `BrowserEngineInstallJob` — starts the one-time download (409 while another install runs; 200 with `state:"installed"` when already present; 400 when the build's checksum isn't pinned or the platform is unsupported) |
@@ -5034,7 +5046,7 @@ the cache.
 |---|---|---|---|
 | GET /aws/accounts/{id}/sqs/queues | AwsSqs:View | `?prefix=&region=` | `{ queues: { url, name, fifo }[] }` |
 | GET /aws/accounts/{id}/sqs/queues/attributes | AwsSqs:View | `?url=&region=` | `{ attributes: Record<string,string>, approx_messages, approx_not_visible, approx_delayed, dlq_target_arn? }` (`get-queue-attributes --attribute-names All`; `dlq_target_arn` parsed from `RedrivePolicy`) |
-| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:View | `{ url, max?: 1..10, visibility_timeout?: 0 }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1`, so peeking does not hide messages |
+| POST /aws/accounts/{id}/sqs/queues/peek | AwsSqs:Edit (`sqs_send`) | `{ url, max?: 1..10, visibility_timeout?: ignored }` (`?region=`) | `{ messages: { message_id, receipt_handle, body, attributes, message_attributes, md5 }[] }` — `receive-message --visibility-timeout 0 --wait-time-seconds 1` (the timeout is always 0), so peeking does not hide messages; it DOES increment each message's receive count (a queue with a redrive policy can dead-letter after enough peeks), hence Edit |
 | POST /aws/accounts/{id}/sqs/queues/send | AwsSqs:Edit | `{ url, body, delay_seconds?, group_id?, dedup_id?, message_attributes? }` | `{ message_id }` — audited `aws.sqs.send` |
 | POST /aws/accounts/{id}/sqs/queues/delete-message | AwsSqs:Edit | `{ url, receipt_handle }` | 204 — audited `aws.sqs.delete_message` |
 | POST /aws/accounts/{id}/sqs/queues/purge | AwsSqs:Edit | `{ url, confirm_name }` (must equal the queue name) | 204 — audited `aws.sqs.purge` |
@@ -5462,7 +5474,7 @@ recorded in history. Root must also obtain an independent artifact approval.
   policy. Validation does not guarantee eventual execution success.
 - `POST /database-changes/{id}/submit` accepts `{revision,note?}` and moves a validated change to
   `awaiting_review`, after checking current author eligibility and bindings.
-- `POST /database-changes/{id}/approve` or `/database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
+- `POST /database-changes/{id}/approve` or `POST /database-changes/{id}/reject` accepts `{revision,note?}`; rejection requires
   a note. Approval requires `change_approve` on every target and an approver
   independent of both the effective and real author, including impersonation.
   Every reviewed change requires one independent approval, including development.
@@ -5991,6 +6003,12 @@ nullable `parent_span_id`, safe static `name`, `component`, `kind`,
 `attributes`. Browser spans accept only known module names and the operations
 `ui.navigation`, `ui.chunk`, `ui.render`, `ui.long_task`, `ui.frame_delay`, `http.client`,
 `ui.request.queue`, `ui.response.decode`. Server spans use matched route templates;
+while telemetry is enabled every instrumented response carries `x-otto-route` (the
+matched route TEMPLATE, e.g. `/api/v1/repos/{id}/fetch`, CORS-exposed) and the UI
+names its client span `http.client.<method>.<template>` (same shape as the server
+span name) so client latency rolls up per endpoint. A request whose client
+disconnects before the response is recorded with `status:"cancelled"` and
+`http.response.status_code:499`;
 raw URLs, prompts, SQL, body text, headers, file paths and user identifiers are
 never exported. Browser timestamps allow at most one day of age / one minute
 of future skew; duration is finite and bounded to one hour. Attributes have an
@@ -6008,5 +6026,22 @@ Errors use the standard `Problem` envelope: 401 unauthenticated, 403 non-root,
 400 invalid settings/batch, 413 oversized ingestion, 502 unavailable local
 pipeline or profiling prerequisites. Concrete TypeScript DTOs live in
 `ui/src/lib/api/types.ts`.
+
+Delivery is batched: spans, per-minute resource maxima and spike/profile logs are
+buffered in the daemon and handed to a short-lived collector about every 5 minutes
+under a background ClickHouse lease that neither wakes an idle-stopped engine nor
+resets its idle clock (buffered data waits at most ~30 minutes, or until queue
+pressure, before one flush wakes it). Telemetry therefore never keeps ClickHouse or
+the collector resident. A failed send is retried and its data re-queued.
+`TelemetryStatus.buffered_samples` counts buffered resource minutes + logs,
+`last_flush_at` is the last successful flush (unix seconds), `collector_send_failed`
+is the cumulative count of records the collector's ClickHouse exporters gave up on
+(scraped from its loopback-only internal metrics; details in
+`telemetry/collector.log`, rotated at 1 MiB), and `collector_queue_size` is the
+exporter queue depth at the end of the last flush. `collector_ready` means the last
+flush succeeded. The first analysis runs one hour after enabling, then every
+`analysis_interval_hours`. Latency suggestions rank by `self_ms` (exclusive time:
+duration minus direct children, `null` when unmeasured) and collapse candidates
+that share the same slowest trace.
 
 `TelemetryStatus.exported` counts spans accepted by the collector, not a durable-storage acknowledgment. `dropped` counts daemon-side validation/queue discards and unacknowledged sends (including canceled sends). Collector exporter queues may still be retrying; dashboard operation counts reflect the actual stored rollups.

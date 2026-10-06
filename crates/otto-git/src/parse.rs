@@ -674,7 +674,11 @@ pub fn parse_diff_bytes_capped(bytes: &[u8], caps: Option<&DiffCaps>) -> DiffRes
     for raw_line in bytes.split_inclusive(|b| *b == b'\n') {
         let text = String::from_utf8_lossy(raw_line);
         let line = text.trim_end_matches('\n').trim_end_matches('\r');
-        if line.starts_with("diff --git ") {
+        // `diff --cc` / `diff --combined` start an UNMERGED path's block
+        // (a conflicted file in `git diff` during a merge). Their `@@@` hunks
+        // are not unified hunks, so the file is listed without hunks — before,
+        // the whole block was skipped and a conflicted tree diffed to 0 files.
+        if line.starts_with("diff --git ") || is_combined_diff_start(line) {
             finish(&mut resp, &mut budget, &mut cur, &group);
             if group.as_ref().is_none_or(|(hdr, _, _)| hdr != line) {
                 group = Some((line.to_string(), Sha256::new(), resp.files.len()));
@@ -984,6 +988,9 @@ pub fn parse_hunks(text: &str) -> Vec<Hunk> {
 }
 
 struct FileState {
+    /// Inside a combined (`diff --cc`) block's `@@@` hunks: not unified
+    /// hunks, so everything up to the next file is ignored.
+    in_combined_hunks: bool,
     git_old: Option<String>,
     git_new: Option<String>,
     minus_path: Option<String>, // from "--- a/…"
@@ -1031,6 +1038,7 @@ impl FileState {
             added_lines: 0,
             deleted_lines: 0,
             hunks_seen: 0,
+            in_combined_hunks: false,
             kept_lines: 0,
             kept_bytes: 0,
             file_cap: None,
@@ -1054,6 +1062,10 @@ impl FileState {
     }
 
     fn feed(&mut self, line: &str) {
+        if self.in_combined_hunks || line.starts_with("@@@") {
+            self.in_combined_hunks = true;
+            return;
+        }
         if let Some(rest) = line.strip_prefix("@@") {
             if let Some((old_start, new_start)) = parse_hunk_header(rest) {
                 self.hunks_seen += 1;
@@ -1302,10 +1314,23 @@ pub(crate) fn unquote_c(v: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// `diff --cc <path>` / `diff --combined <path>` — a combined (unmerged) block.
+fn is_combined_diff_start(line: &str) -> bool {
+    line.starts_with("diff --cc ") || line.starts_with("diff --combined ")
+}
+
 /// "diff --git a/old b/new" → (Some(old), Some(new)). Best effort: paths with
 /// the literal substring " b/" are ambiguous; the ---/+++ lines win anyway.
 /// Either side may be C-quoted (`"a/x\ty" "b/x\ty"`).
 fn parse_diff_git_paths(line: &str) -> (Option<String>, Option<String>) {
+    if let Some(p) = line
+        .strip_prefix("diff --cc ")
+        .or_else(|| line.strip_prefix("diff --combined "))
+    {
+        // A combined diff names the one (unmerged) path, unprefixed.
+        let p = unquote_c(p.trim());
+        return (None, Some(p).filter(|p| !p.is_empty()));
+    }
     let rest = match line.strip_prefix("diff --git ") {
         Some(r) => r,
         None => return (None, None),
@@ -1367,6 +1392,37 @@ mod tests {
         assert_eq!(st.untracked_total, None);
         let json = serde_json::to_string(&st).unwrap();
         assert!(!json.contains("untracked_t"), "{json}");
+    }
+
+    /// A conflicted path during a merge prints a combined `diff --cc`
+    /// block; it must be listed (not silently dropped), next to normal files.
+    #[test]
+    fn combined_diff_blocks_are_listed() {
+        let text = "diff --cc conflicted.txt\n\
+index 1111111,2222222..0000000\n\
+--- a/conflicted.txt\n\
++++ b/conflicted.txt\n\
+@@@ -1,1 -1,1 +1,5 @@@\n\
+++<<<<<<< HEAD\n\
+ +ours\n\
+++=======\n\
++ theirs\n\
+++>>>>>>> other\n\
+diff --git a/ok.txt b/ok.txt\n\
+--- a/ok.txt\n\
++++ b/ok.txt\n\
+@@ -1 +1 @@\n\
+-a\n\
++b\n";
+        let d = parse_diff(text);
+        let paths: Vec<&str> = d.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["conflicted.txt", "ok.txt"], "{d:?}");
+        assert!(d.files[0].hunks.is_empty());
+        assert_eq!(d.files[1].hunks.len(), 1);
+        assert_eq!(
+            parse_diff("diff --combined x.rs\n--- a/x.rs\n+++ b/x.rs\n").files[0].path,
+            "x.rs"
+        );
     }
 
     use super::*;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // Home: Otto's one "desktop". The ambient backdrop fills the page; on it sit
   // a greeting + today's glance cards (HomeToday) and the active space's
@@ -177,7 +178,7 @@
       <div class="spaces-bar">
         <div class="spaces segmented" role="tablist" aria-label="Spaces">
           {#each home.views as v, i (v.id)}
-            <button
+            <button use:rowMenu
               class="space"
               onkeydown={onTabKey}
               class:active={i === home.activeIndex}

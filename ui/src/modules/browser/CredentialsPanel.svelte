@@ -235,17 +235,17 @@
         {#if !editing}
           <label>
             <span>Domain</span>
-            <input type="text" bind:value={fDomain} placeholder="example.com" spellcheck="false" />
+            <input dir="auto" type="text" bind:value={fDomain} placeholder="example.com" spellcheck="false" />
           </label>
         {:else}
           <label>
             <span>Domain</span>
-            <input type="text" value={editing.domain} disabled />
+            <input dir="auto" type="text" value={editing.domain} disabled />
           </label>
         {/if}
         <label>
           <span>Username</span>
-          <input type="text" bind:value={fUsername} spellcheck="false" />
+          <input dir="auto" type="text" bind:value={fUsername} spellcheck="false" />
         </label>
         <label>
           <span>{editing ? 'New password (leave blank to keep current)' : 'Password'}</span>
@@ -253,7 +253,7 @@
         </label>
         <label>
           <span>Notes</span>
-          <textarea bind:value={fNotes} rows="2"></textarea>
+          <textarea dir="auto" bind:value={fNotes} rows="2"></textarea>
         </label>
         <label class="checkbox">
           <input type="checkbox" bind:checked={fAllowAgentUse} />
@@ -399,7 +399,7 @@
     font-size: var(--fs-s);
   }
   .form input:disabled {
-    opacity: 0.65;
+    opacity: var(--disabled-opacity);
   }
   .warning {
     margin: 0;

@@ -262,11 +262,11 @@
             <input type="number" min="1" max="10080" bind:value={form.everyMin} />
           </label>
         {:else if form.cadence === 'cron'}
-          <label class="fl"><span>Cron (5 fields)</span><input bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
+          <label class="fl"><span>Cron (5 fields)</span><input dir="ltr" bind:value={form.cron} placeholder="0 9 * * 1-5" /></label>
         {:else}
           <label class="fl">
             <span>At (HH:MM, in the timezone below)</span>
-            <input type="text" placeholder="09:00" bind:value={form.atTime} />
+            <input dir="ltr" type="text" placeholder="09:00" bind:value={form.atTime} />
           </label>
           {#if form.cadence === 'weekly'}
             <label class="fl">
@@ -279,14 +279,14 @@
             </label>
           {/if}
         {/if}
-        <label class="fl"><span>Timezone (IANA)</span><input bind:value={form.timezone} placeholder="Asia/Jerusalem" /></label>
-        <label class="fl"><span>Run prompt</span><textarea bind:value={form.prompt} rows="3"></textarea></label>
+        <label class="fl"><span>Timezone (IANA)</span><input dir="auto" bind:value={form.timezone} placeholder="Asia/Jerusalem" /></label>
+        <label class="fl"><span>Run prompt</span><textarea dir="auto" bind:value={form.prompt} rows="3"></textarea></label>
       {:else if form.kind === 'event'}
         <label class="fl">
           <span>Event kind</span>
           <select bind:value={form.eventKind}>{#each EVENT_KINDS as [value, label] (value)}<option {value}>{label}</option>{/each}</select>
         </label>
-        <label class="fl"><span>Match fields (JSON)</span><textarea rows="3" bind:value={form.filter}></textarea></label>
+        <label class="fl"><span>Match fields (JSON)</span><textarea dir="ltr" rows="3" bind:value={form.filter}></textarea></label>
         <p class="hint">All specified fields must match the event.</p>
       {:else if form.kind === 'chat'}
         <label class="fl">
@@ -298,11 +298,11 @@
         </label>
         <label class="fl">
           <span>Chat id</span>
-          <input type="text" placeholder="C0123456 (Slack) / -100987654321 (Telegram)" bind:value={form.chatId} />
+          <input dir="auto" type="text" placeholder="C0123456 (Slack) / -100987654321 (Telegram)" bind:value={form.chatId} />
         </label>
         <label class="fl">
           <span>Thread (optional)</span>
-          <input type="text" placeholder="thread ts — leave blank to match any thread" bind:value={form.chatThread} />
+          <input dir="auto" type="text" placeholder="thread ts — leave blank to match any thread" bind:value={form.chatThread} />
         </label>
         <label class="chk-row" class:disabled={form.chatChannel === 'telegram'}>
           <input
@@ -323,10 +323,10 @@
 
       <label class="fl"><span>Send results to</span><select bind:value={form.resultChannel}><option value="">No chat delivery</option><option value="slack">Slack</option><option value="telegram">Telegram</option></select></label>
       {#if form.resultChannel}
-        <label class="fl"><span>Channel / chat ID</span><input bind:value={form.resultChat} /></label>
-        <label class="fl"><span>Thread (optional)</span><input bind:value={form.resultThread} /></label>
+        <label class="fl"><span>Channel / chat ID</span><input dir="auto" bind:value={form.resultChat} /></label>
+        <label class="fl"><span>Thread (optional)</span><input dir="auto" bind:value={form.resultThread} /></label>
       {/if}
-      <label class="fl"><span>Result webhook (optional)</span><input type="url" bind:value={form.resultWebhook} placeholder="https://example.com/result" /></label>
+      <label class="fl"><span>Result webhook (optional)</span><input dir="ltr" type="url" bind:value={form.resultWebhook} placeholder="https://example.com/result" /></label>
       <button class="btn small" disabled={previewing} onclick={previewTrigger}>{previewing ? 'Checking…' : 'Preview / validate'}</button>
       {#if preview}
         <div class="hint">{#if preview.length}Next fires ({previewTimezone}):<ul>{#each preview as at}<li>{new Date(at).toLocaleString(undefined, { timeZone: previewTimezone })}</li>{/each}</ul>{:else}Trigger configuration is valid.{/if}</div>
@@ -527,7 +527,7 @@
     background: var(--surface);
   }
   .trig-row.disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
   }
   .trig-ic {
     color: var(--text-dim);

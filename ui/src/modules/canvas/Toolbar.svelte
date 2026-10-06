@@ -56,7 +56,7 @@
 <div class="toolbar">
   <div class="left">
     {#if editingTitle}
-      <input
+      <input dir="auto" aria-label="Scene title"
         class="title-input"
         bind:value={titleDraft}
         use:focusOnMount

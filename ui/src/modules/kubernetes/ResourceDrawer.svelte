@@ -8,7 +8,6 @@
 <script lang="ts">
   import DockedDrawer from '../../lib/components/DockedDrawer.svelte';
   import Badge from '../../lib/components/Badge.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import { actionOperation } from './permissions';
   // Detail drawer for the selected row: Overview (normalized fields + action
@@ -19,6 +18,7 @@
   import { untrack } from 'svelte';
   import { stringify as toYaml } from 'yaml';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import { loadErrorText } from '../../lib/loadError';
@@ -277,20 +277,7 @@
     </div>
   {/snippet}
 
-  <div class="dr-tabs" role="tablist" aria-label="Detail tabs">
-    {#each TABS as t (t.id)}
-      <button
-        role="tab"
-        id="k8s-tab-{t.id}"
-        aria-selected={tab === t.id}
-        aria-controls="k8s-panel-{t.id}"
-        tabindex={tab === t.id ? 0 : -1}
-        class:active={tab === t.id}
-        onclick={() => ontab(t.id)}
-        onkeydown={onTabKey}
-      >{t.label}</button>
-    {/each}
-  </div>
+  <Tabs label="Detail tabs" idBase="k8s" tabs={TABS} value={tab} onchange={ontab} />
 
   <div class="dr-body" role="tabpanel" id="k8s-panel-{tab}" aria-labelledby="k8s-tab-{tab}">
     {#if tab === 'overview'}
@@ -447,27 +434,6 @@
   .dr-ns {
     color: var(--text-dim);
     font-size: var(--fs-s);
-  }
-  .dr-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 4px 8px 0;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-  }
-  .dr-tabs button {
-    border: none;
-    background: transparent;
-    padding: 6px 10px;
-    font-size: var(--fs-s);
-    color: var(--text-dim);
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    white-space: nowrap;
-  }
-  .dr-tabs button.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
   }
   .dr-body {
     flex: 1;

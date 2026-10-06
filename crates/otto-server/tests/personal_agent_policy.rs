@@ -15,54 +15,19 @@
 //! Harness copied from `mcp_auto_approve.rs` (kept separate so the two suites
 //! evolve independently).
 
-use std::sync::Arc;
-
 use chrono::Utc;
-use otto_core::secrets::SecretStore;
-use otto_core::{Error, Id, Result};
-use otto_rbac::{AuthRepo, RbacRoleChecker};
+use otto_rbac::AuthRepo;
 use otto_server::ServerCtx;
-use otto_sessions::{ProviderRegistry, SessionManager};
 use otto_state::{
-    AgentAutonomy, AgentRule, ConnectionSectionsRepo, ConnectionsRepo, DbExplorerRepo, DbPool,
-    GitStore, IntegrationsRepo, IssuesRepo, NewPersonalAgent, NewSession, PersonalAgentsRepo,
-    ProductRepo, ReviewsRepo, SessionsRepo, SkillEvalsRepo, SwarmRepo, WorkspacesRepo,
+    AgentAutonomy, AgentRule, DbPool, NewPersonalAgent, NewSession, PersonalAgentsRepo,
+    SessionsRepo, SwarmRepo,
 };
 use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use tokio::sync::broadcast;
 
 // ---------------------------------------------------------------------------
 // Harness (mirrors ui_control.rs: a real base_url + listener)
 // ---------------------------------------------------------------------------
-
-struct NoopSecrets;
-impl SecretStore for NoopSecrets {
-    fn put(&self, _key: &str, _value: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn get(&self, _key: &str) -> Result<Option<String>> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-    fn delete(&self, _key: &str) -> Result<()> {
-        Err(Error::Internal("noop secrets".into()))
-    }
-}
-
-struct NoopSpawner;
-impl otto_connections::Spawner for NoopSpawner {
-    fn spawn_connection<'a>(
-        &'a self,
-        _ws_id: &'a Id,
-        _user_id: &'a Id,
-        _conn: &'a otto_core::domain::Connection,
-        _spec: otto_pty::CommandSpec,
-        _first_command: Option<String>,
-        _title: Option<String>,
-    ) -> otto_core::auth::BoxFuture<'a, Result<otto_core::domain::Session>> {
-        Box::pin(async { Err(Error::Internal("noop spawner".into())) })
-    }
-}
 
 async fn file_pool(dir: &std::path::Path) -> DbPool {
     let opts = SqliteConnectOptions::new()
@@ -117,144 +82,9 @@ async fn seed_workspace(pool: &DbPool, ws_id: &str, admin: &str) {
 }
 
 async fn test_ctx(pool: &DbPool, base_url: String, tmp: &std::path::Path) -> ServerCtx {
-    let (events, _rx) = broadcast::channel(256);
-    let secrets: Arc<dyn SecretStore> = Arc::new(NoopSecrets);
-    let roles = Arc::new(RbacRoleChecker::new(pool.clone()));
-    let manager = Arc::new(SessionManager::new(
-        SessionsRepo::new(pool.clone()),
-        events.clone(),
-        ProviderRegistry::new(None),
-    ));
-    let orchestrator = Arc::new(otto_orchestrator::Orchestrator::new("claude"));
-    let improve_engine = Arc::new(otto_improve::ImprovementEngine {
-        improvements: otto_state::ImprovementsRepo::new(pool.clone()),
-        sessions: SessionsRepo::new(pool.clone()),
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        producer: Arc::new(otto_improve::RealProposalProducer::new(
-            orchestrator.clone(),
-        )),
-        events: events.clone(),
-        library_root: tmp.join("lib"),
-    });
-    let connections = Arc::new(otto_connections::ConnectionsService::new(
-        ConnectionsRepo::new(pool.clone()),
-        ConnectionSectionsRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let db_explorer = Arc::new(otto_dbviewer::DbViewerService::new(
-        ConnectionsRepo::new(pool.clone()),
-        secrets.clone(),
-        DbExplorerRepo::new(pool.clone()),
-    ));
-    let brokers = Arc::new(otto_brokers::BrokersService::new(
-        otto_state::BrokerClustersRepo::new(pool.clone()),
-        secrets.clone(),
-        None,
-    ));
-    let mcp = Arc::new(otto_mcp::McpService::new(pool.clone(), secrets.clone()));
-    let swarm_repo = SwarmRepo::new(pool.clone());
-    let swarm = Arc::new(otto_swarm::SwarmService::new(swarm_repo.clone()));
-    let product_repo = ProductRepo::new(pool.clone());
-    let product = Arc::new(otto_product::ProductService::new(
-        product_repo.clone(),
-        IssuesRepo::new(pool.clone()),
-        secrets.clone(),
-    ));
-    let usage = otto_usage::UsageEngine::start(
-        otto_usage::UsageConfig {
-            enabled: false, // This fixture does not exercise metrics or start ClickHouse.
-            ..Default::default()
-        },
-        tmp.join("usage"),
-    )
-    .await;
-    ServerCtx {
-        pool: pool.clone(),
-        secrets,
-        events: events.clone(),
-        authenticator: Arc::new(otto_rbac::RbacAuthenticator::new(pool.clone())),
-        roles,
-        auth_cache: otto_rbac::AuthCache::new(),
-        version: "test".into(),
-        base_url,
-        data_dir: tmp.to_path_buf(),
-        plugins: Arc::new(otto_server::plugins::PluginManager::new(
-            otto_state::PluginsRepo::new(pool.clone()),
-            tmp.join("plugins"),
-            tmp.to_path_buf(),
-            "http://127.0.0.1:7700/api/v1/plugin-host".into(),
-        )),
-        manager,
-        workspaces: WorkspacesRepo::new(pool.clone()),
-        connections,
-        db_explorer,
-        db_assist: otto_server::db_assist::new_registry(),
-        transcript_cache: Default::default(),
-        rooms: Default::default(),
-        brokers,
-        mcp,
-        spawner: Arc::new(NoopSpawner),
-        git_store: GitStore::new(pool.clone()),
-        issues_store: IssuesRepo::new(pool.clone()),
-        integrations_store: IntegrationsRepo::new(pool.clone()),
-        channel_bridge: None,
-        wf_skip_current: Default::default(),
-        reviews_store: ReviewsRepo::new(pool.clone()),
-        findings_store: otto_state::ReviewFindingsRepo::new(pool.clone()),
-        finding_events_store: otto_state::FindingEventsRepo::new(pool.clone()),
-        repo_rules_store: otto_state::RepoRulesRepo::new(pool.clone()),
-        proof_packs_store: otto_state::ReviewProofPacksRepo::new(pool.clone()),
-        skill_evals_store: SkillEvalsRepo::new(pool.clone()),
-        golden_tasks_store: otto_state::GoldenTasksRepo::new(pool.clone()),
-        eval_matrices_store: otto_state::EvalMatricesRepo::new(pool.clone()),
-        skill_eval_cancels: Default::default(),
-        skill_reviews_store: otto_state::SkillReviewsRepo::new(pool.clone()),
-        skill_review_cancels: Default::default(),
-        review_agent_cancels: Default::default(),
-        review_cancels: Default::default(),
-        orchestrator,
-        improve_engine,
-        context_library: otto_context::Library::new(tmp.join("ctx")),
-        usage,
-        telemetry: None,
-        product,
-        product_repo,
-        attachment_repo: otto_state::ProductAttachmentRepo::new(pool.clone()),
-        discovery_repo: otto_state::ProductDiscoveryRepo::new(pool.clone()),
-        refinement_repo: otto_state::ProductRefinementRepo::new(pool.clone()),
-        mockup_repo: otto_state::ProductMockupRepo::new(pool.clone()),
-        discovery_chat_repo: otto_state::DiscoveryChatRepo::new(pool.clone()),
-        canvas_repo: otto_state::CanvasRepo::new(pool.clone()),
-        product_agent_cancels: otto_server::product_run::new_cancel_registry(),
-        design_jobs: otto_server::design_blender::new_job_registry(),
-        memory: Arc::new(otto_memory::MemoryService::with_defaults(pool.clone())),
-        vault: Arc::new(otto_vault::VaultEngine::new(pool.clone())),
-        vault_docs_runs: otto_server::vault_docs_agent::new_run_registry(),
-        vault_docs_refine: otto_server::vault_docs_agent::new_refine_registry(),
-        swarm,
-        swarm_repo,
-        swarm_coords: otto_server::swarm_runtime::new_registry(),
-        swarm_run_cancels: otto_server::swarm_run::new_cancel_registry(),
-        goal_loops_repo: otto_state::GoalLoopsRepo::new(pool.clone()),
-        goal_loops: otto_server::goal_loop::new_registry(),
-        workgraph: Arc::new(otto_workgraph::WorkGraphService::new(
-            otto_state::WorkGraphRepo::new(pool.clone()),
-            events.clone(),
-        )),
-        scheduled_tasks: otto_state::ScheduledTasksRepo::new(pool.clone()),
-        proof_repo: otto_state::ProofRepo::new(pool.clone()),
-        proof_locks: otto_server::proof::new_locks(),
-        runs: otto_state::RunsRepo::new(pool.clone()),
-        runs_engine: otto_server::run_engine::RunEngine::new(),
-        browser_tabs: otto_state::BrowserTabsRepo::new(pool.clone()),
-        browser_annotations: otto_state::BrowserAnnotationsRepo::new(pool.clone()),
-        browser_credentials: otto_state::BrowserCredentialsRepo::new(pool.clone()),
-        ui_bridge: Default::default(),
-        browser: Arc::new(otto_server::routes::browser::BrowserEngineHandle::new(
-            None,
-            tmp.join("browser"),
-        )),
-    }
+    let mut ctx = ServerCtx::for_tests(pool, tmp).await;
+    ctx.base_url = base_url;
+    ctx
 }
 
 struct Daemon {
@@ -412,6 +242,68 @@ async fn boot(tools: &[&str]) -> Daemon {
         .await;
     assert_eq!(st, 200, "enable tools: {body}");
     d
+}
+
+impl Daemon {
+    /// A WebSocket upgrade request against a ROOT route; returns the status.
+    /// The handlers refuse before upgrading, so a refusal is a plain 403.
+    async fn ws_status(&self, path_and_query: &str) -> u16 {
+        self.http
+            .get(format!("{}{path_and_query}", self.base))
+            .header("connection", "upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+}
+
+/// Agent-session credentials (sec-agent P1): the daemon's unconfined Files
+/// routes and root-mounted sockets are outside the `/api/v1` read-only guard
+/// (a WS upgrade is a GET), so each applies the agent rules itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_credentials_are_confined_on_files_and_root_routes() {
+    let d = boot(&[]).await;
+    let secret = d._tmp.path().join("secrets.json");
+    std::fs::write(&secret, "{}").unwrap();
+    let file = format!("/fs/read?path={}", secret.display());
+    let agent = d.agent_session(json!({})).await;
+    let read_only = d.agent_session(json!({"read_only": true})).await;
+
+    // Host files: the person's token reads; no agent credential does.
+    let (st, body) = d.send("GET", &d.human, &file, None).await;
+    assert_eq!(st, 200, "{body}");
+    for token in [&agent, &read_only] {
+        let (st, body) = d.send("GET", token, &file, None).await;
+        assert_eq!(st, 403, "agent token must not read host files: {body}");
+        let (st, _) = d.send("GET", token, "/fs/browse?path=/tmp", None).await;
+        assert_eq!(st, 403);
+    }
+
+    // The language server reads a whole host directory: agents are refused.
+    let root = d._tmp.path().display().to_string();
+    assert_eq!(
+        d.ws_status(&format!("/ws/lsp?lang=rust&root={root}&token={agent}"))
+            .await,
+        403
+    );
+    // A read-only session never opens an HTTP stream (it sends requests).
+    assert_eq!(
+        d.ws_status(&format!(
+            "/ws/api-client/stream?workspace_id=ws1&token={read_only}"
+        ))
+        .await,
+        403
+    );
+    // Its event stream (receive-only) still opens.
+    assert_ne!(
+        d.ws_status(&format!("/ws/events?token={read_only}")).await,
+        403
+    );
 }
 
 fn pr_args(title: &str) -> Value {
@@ -729,7 +621,7 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     // with a budget: swarm + spend + active count + ready tasks.
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     probe.reset();
-    tokio::time::sleep(otto_server::swarm_wake::MIN_GAP + std::time::Duration::from_millis(1000))
+    tokio::time::sleep(otto_swarm::runtime::wake::MIN_GAP + std::time::Duration::from_millis(1000))
         .await;
     let tick: Vec<String> = probe
         .take()
@@ -742,7 +634,7 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     );
     // Then nothing: no event, and the safety tick is a minute away.
     tokio::time::sleep(
-        otto_server::swarm_wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
+        otto_swarm::runtime::wake::MIN_GAP * 2 + std::time::Duration::from_millis(500),
     )
     .await;
     let idle: Vec<String> = probe
@@ -753,10 +645,10 @@ async fn an_idle_swarm_coordinator_issues_no_statements_between_safety_ticks() {
     assert!(
         idle.is_empty(),
         "an idle coordinator parks until an event or the {:?} safety tick: {idle:?}",
-        otto_server::swarm_wake::SAFETY_TICK
+        otto_swarm::runtime::wake::SAFETY_TICK
     );
     assert!(
-        otto_server::swarm_wake::has_bell(&swarm.id),
+        otto_swarm::runtime::wake::has_bell(&swarm.id),
         "parked on its bell"
     );
 }

@@ -14,6 +14,7 @@
 pub mod auto_approve;
 pub mod client;
 pub mod http;
+pub mod outward;
 pub mod policy;
 pub mod risk;
 pub mod service;

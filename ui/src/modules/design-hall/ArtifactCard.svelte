@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // One design as a card (Continue strip, project and studio pages): preview,
   // title + head version, studio + status, when it last changed, and link chips
   // (the stories it implements, how often it is referenced). The whole card is
@@ -25,7 +26,7 @@
   const by = $derived(artifact.created_by_kind === 'agent' ? ' · drafted by Otto' : '');
 </script>
 
-<a
+<a use:rowMenu
   class="acard"
   href={`#/design/a/${encodeURIComponent(artifact.id)}`}
   data-testid="design-artifact-card"

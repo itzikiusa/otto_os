@@ -28,7 +28,7 @@
 
 <div class="kf" style="padding-inline-start: {(depth + 1) * 13 + 4}px">
   <Icon name="search" size={12} />
-  <input
+  <input dir="auto" aria-label="Filter keys by prefix"
     class="kf-input"
     placeholder="filter by prefix…"
     bind:value={draft}
@@ -40,7 +40,7 @@
   />
   {#if active}
     <button class="kf-clear" title="Clear filter" aria-label="Clear filter" onclick={clear}>
-      <Icon name="x" size={10} />
+      <Icon name="x" size={12} />
     </button>
   {/if}
 </div>

@@ -346,7 +346,7 @@
       </div>
       {#if streamKind === 'websocket'}
         <div class="ws-send">
-          <input class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
+          <input dir="ltr" class="input mono grow" aria-label="Message to send" placeholder={apiStream.status === 'open' ? '{"type":"ping"}' : 'Connect first'}
             bind:value={wsSend} disabled={apiStream.status !== 'open'} onkeydown={(e) => { if (e.key === 'Enter') sendWs(); }} />
           <button class="btn small primary" onclick={sendWs} disabled={apiStream.status !== 'open' || !wsSend.trim()}>Send message</button>
         </div>
@@ -375,7 +375,7 @@
       {#if apiClient.sending}
         <p class="empty-title" role="status">Sending…</p>
       {:else}
-        <Icon name="send" size={compact ? 20 : 24} />
+        <Icon name="send" size={compact ? 24 : 24} />
         <p class="empty-title">Send the request to see the response here</p>
         {#if !compact}
           <p class="empty-sub">Press <kbd>⌘</kbd><kbd>↵</kbd> or click Send. You’ll see the status, timing, headers and body.</p>
@@ -463,7 +463,7 @@
           {#if parsed !== undefined && (bodyView === 'pretty' || bodyView === 'tree')}
             <label class="filter">
               <Icon name="search" size={12} />
-              <input
+              <input dir="ltr"
                 class="mono"
                 placeholder={bodyView === 'tree' ? 'Find a key or value…' : '$.data[0].id'}
                 aria-label={bodyView === 'tree' ? 'Find in the response' : 'JSONPath filter'}

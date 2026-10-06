@@ -267,10 +267,17 @@ impl MemoryService {
             });
         }
 
-        // Save with state=suggested via a small shim: save() creates rows with
-        // the default state ('accepted'); we flip them right after.
-        let mems = self.save(ws, by, parsed).await?;
-        let ids: Vec<String> = mems.iter().map(|m| m.id.clone()).collect();
+        // Save, then park ONLY the rows this import brought in as
+        // `suggested`: a section identical to a memory that is already live
+        // keeps its state and provenance (re-importing the same AGENTS.md
+        // used to demote every accepted memory back to suggested). A revived
+        // forgotten/merged duplicate counts as brought in.
+        let saved = self.save_detailed(ws, by, parsed).await?;
+        let ids: Vec<String> = saved
+            .iter()
+            .filter(|(_, outcome)| outcome.is_new())
+            .map(|(m, _)| m.id.clone())
+            .collect();
 
         // Mark each as suggested + record the import kind in provenance_json.
         let prov = serde_json::json!({
@@ -296,7 +303,7 @@ impl MemoryService {
             .await?;
 
         Ok(ImportResp {
-            imported: n,
+            imported: ids.len(),
             import_id: gi.id,
         })
     }

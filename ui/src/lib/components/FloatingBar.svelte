@@ -335,6 +335,7 @@
       source: r.source,
       plan: r.plan,
       closeIds: r.closeIds,
+      closePermanent: r.closePermanent,
     };
   }
 
@@ -374,7 +375,7 @@
     busy[turn.id] = true;
     const reply = turn.plan
       ? await confirmPlan(turn.plan as Action[], sp, askHost)
-      : await confirmClose(turn.closeIds ?? [], sp, askHost);
+      : await confirmClose(turn.closeIds ?? [], sp, askHost, turn.closePermanent !== false);
     barStore.updateTurn(idx, turn.id, { ...replyPatch(reply), plan: undefined, closeIds: undefined });
     delete busy[turn.id];
   }
@@ -750,7 +751,7 @@
                 <div class="ed-grid">
                   <label class="ed-field">
                     <span>Name</span>
-                    <input
+                    <input dir="auto"
                       class="input"
                       value={space.name}
                       maxlength="24"
@@ -840,20 +841,20 @@
                         <button class="btn small" disabled={busy[t.id]} onclick={() => void resolveTurn(t, false)}>Cancel</button>
                         <button
                           class="btn small"
-                          class:primary={!t.closeIds}
-                          class:danger={!!t.closeIds}
+                          class:primary={!t.closeIds || t.closePermanent === false}
+                          class:danger={!!t.closeIds && t.closePermanent !== false}
                           disabled={busy[t.id]}
                           onclick={() => void resolveTurn(t, true)}
-                        >{busy[t.id] ? 'Running…' : t.closeIds ? 'Delete' : 'Run plan'}</button>
+                        >{busy[t.id] ? 'Running…' : t.closeIds ? (t.closePermanent !== false ? 'Delete' : 'Archive') : 'Run plan'}</button>
                       </div>
                     {/if}
                     <footer class="meta">
-                      <span class="src"><Icon name="sparkle" size={11} />{t.source ?? 'Ask Otto'}</span>
+                      <span class="src"><Icon name="sparkle" size={12} />{t.source ?? 'Ask Otto'}</span>
                       <span>{timeOf(t.at)}</span>
                       {#if t.route}
                         <span class="grow"></span>
                         <button class="open-btn" onclick={() => openRoute(t.route ?? '')}>
-                          {inApp ? 'Open' : 'Open in Otto'} <Icon name={inApp ? 'chevronRight' : 'external'} size={11} />
+                          {inApp ? 'Open' : 'Open in Otto'} <Icon name={inApp ? 'chevronRight' : 'external'} size={12} />
                         </button>
                       {/if}
                     </footer>
@@ -924,10 +925,10 @@
           title="Ask Otto"
           onclick={() => void openBar()}
         >
-          <Icon name="sparkle" size={inApp ? 15 : 17} />
+          <Icon name="sparkle" size={inApp ? 14 : 16} />
           {#if unread}<span class="unread" aria-label="New reply"></span>{/if}
         </button>
-        <input
+        <input dir="ltr"
           bind:this={inputEl}
           bind:value={query}
           class="input-main"
@@ -955,7 +956,7 @@
           >
             <ProviderIcon {provider} size={13} />
             <span class="fb-chip-label">{modelLabel}</span>
-            <Icon name="chevronDown" size={10} />
+            <Icon name="chevronDown" size={12} />
           </button>
           <span class="sep" aria-hidden="true"></span>
           <div class="spaces" role="radiogroup" aria-label="Spaces (⌃1–⌃4)">
@@ -978,7 +979,7 @@
             title="Voice input arrives with the assistant update — type for now"
             onclick={(e) => e.preventDefault()}
           >
-            <Icon name="mic" size={15} />
+            <Icon name="mic" size={14} />
           </button>
         {:else}
           <kbd class="k-hint">⌘K</kbd>

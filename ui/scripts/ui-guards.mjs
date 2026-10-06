@@ -105,6 +105,10 @@
 //                     stroke-dasharray: data bars and meters show the value,
 //                     they don't animate to it (foundations §8). A resize the
 //                     user drags carries `ui-guards: allow`.
+//   disabled-opacity  an `opacity` literal (0.2–0.7) in a disabled-state rule set
+//                     (`:disabled`, `[disabled]`, `[aria-disabled…]`,
+//                     `.disabled`) → var(--disabled-opacity) (0.45, tokens.css);
+//                     `node scripts/codemods/disabled-opacity.mjs` rewrites them.
 //   local-spinner     a component rule set spinning its own ring (`animation:
 //                     … spin …`, incl. otto-spin) → the global `.spinner`
 //                     (`--spinner-size` for the diameter).
@@ -118,12 +122,38 @@
 //                     confirm says so (patterns §6). An instant action with
 //                     no confirm carries `ui-guards: allow`.
 //
-// One ratcheted rule scans MARKUP:
+// Ratcheted rules that scan MARKUP:
 //
 //   a11y-ignore       a `svelte-ignore a11y_…` comment — each one silences a
 //                     real accessibility check (a click on a div, a missing
 //                     label…). Fix the markup (a real <button>, a label)
 //                     instead of muting the compiler.
+//   bidi-dir          a <textarea> or text-like <input> (no type, text,
+//                     search, url, email, tel) with no `dir` → dir="auto" for
+//                     human language, dir="ltr" for code / paths / URLs
+//                     (accessibility.md §6). scripts/codemods/bidi-dir.mjs
+//                     adds them; re-run it after a merge.
+//   unlabeled-control an <input> / <select> / <textarea> with no accessible
+//                     name: no aria-label / aria-labelledby / title, no
+//                     <label for> naming its id, not inside a <label>. A
+//                     placeholder is not a label (it vanishes on typing and
+//                     many screen readers skip it) → aria-label, or a <label>.
+//
+// More ratcheted MARKUP rules (script/style/comments blanked):
+//
+//   icon-size         an `<Icon size={…}>` literal off the icon scale
+//                     (foundations §9): 12, 13–14, 16, 24–26 — and 20 only in
+//                     the phone touch chrome (ICON_TOUCH_CHROME below). Numeric
+//                     literals inside an expression count (`compact ? 16 : 26`).
+//                     `node scripts/codemods/icon-sizes.mjs` snaps them.
+//   inline-retry      a hand-rolled Retry button (`…Retry</button>`) outside
+//                     lib/components → LoadState (`error` + `onretry`), which
+//                     owns the one "Couldn’t load X / detail / Retry" look
+//                     (components.md §11).
+//   local-tablist     a `role="tablist"` outside lib/components (a `.segmented`
+//                     tablist is exempt — components.md §3) → <Tabs>
+//                     (lib/components/Tabs.svelte: one underline style, arrow
+//                     keys, roving focus).
 //
 // Two more ratcheted rules scan SCRIPT code (.ts/.js files and the non-style
 // part of .svelte files, comments blanked) — perf patterns (GAPS §0 G):
@@ -133,10 +163,22 @@
 //                     meters, a touch keep-alive) → pollWhileVisible /
 //                     liveQuery (lib/poll.ts, lib/live.ts), which pause while
 //                     hidden, never overlap, and follow the events socket.
+//   smooth-scroll     a literal `behavior: 'smooth'` — JS scrolling ignores the
+//                     CSS reduced-motion override → `behavior: scrollBehavior()`
+//                     (lib/motion.ts); a Svelte transition takes motionMs(ms).
 //   body-style        `document.body.style.cursor|userSelect = …` or
 //                     `documentElement.style.setProperty(…)` → a
 //                     full-document style recalc per write (SF-02/SF-03);
 //                     use lib/dragCursor.ts (overlay) / a scoped custom prop.
+//
+// One ratcheted rule scans the E2E SPECS (ui/e2e/*.ts, top level):
+//
+//   e2e-wait-timeout  `page.waitForTimeout(…)` — a fixed sleep is either too
+//                     short on a slow runner (flake) or wasted time on a fast
+//                     one → wait for the condition: expect(…).toBeVisible(),
+//                     expect.poll(…), page.waitForResponse(…). A sleep that
+//                     proves ABSENCE ("nothing else fires within 1 s") is
+//                     legitimate — mark it `ui-guards: allow`.
 //
 // Updating the baseline: `node scripts/ui-guards.mjs --update-baseline`
 // rewrites scripts/ui-guards-baseline.json from the current tree (sorted keys,
@@ -149,6 +191,8 @@
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { markupOf, startTags, attrValue } from './codemods/markup.mjs';
+import { needsDir } from './codemods/bidi-dir.mjs';
 
 const UI = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(UI, 'src');
@@ -261,6 +305,8 @@ const RULES = {
   'local-pill-class': 'local pill look (background / radius / padding on a local .pill/.chip/.badge/.tag) — use <Badge> (lib/components/Badge.svelte)',
   'hover-only-reveal': 'control hidden until :hover with no :focus-visible/:focus-within reveal and no (hover: none) fallback — use .reveal-on-hover (app.css)',
   'a11y-ignore': 'svelte-ignore a11y_… — fix the markup (real <button>, label) instead of silencing the check',
+  'bidi-dir': 'free-text field with no dir — dir="auto" for prose, dir="ltr" for code/paths/URLs (node scripts/codemods/bidi-dir.mjs)',
+  'unlabeled-control': 'form control with no accessible name (placeholder is not a label) — add aria-label, or a <label for> / wrapping <label>',
   'focus-accent': 'outline in var(--accent) — focus rings use var(--accent-text)',
   'physical-shorthand': '4-value padding/margin/inset with different left/right — use -block / -inline',
   'private-keyframes': 'private @keyframes — spinners use .spinner / otto-spin, live-dot pulses otto-pulse, entrances otto-fade-in / otto-pop-in (app.css); keep a local one only when the motion is genuinely different',
@@ -281,6 +327,12 @@ const RULES = {
   'data-bar-transition': 'transition on width / inline-size / flex-basis / stroke-dasharray — data bars show the value, they don’t animate to it',
   'local-spinner': 'local spinning ring (animation: …spin…) — use the global .spinner (app.css)',
   'danger-menu-ellipsis': 'danger menu row whose label doesn’t end in “…” — a destructive row that opens a confirm ends in “…”',
+  'e2e-wait-timeout': 'waitForTimeout in an E2E spec — wait for the condition (expect…toBeVisible / expect.poll / waitForResponse); an absence-proving sleep carries `ui-guards: allow`',
+  'icon-size': 'off-scale <Icon size> — 12, 13–14, 16, 24–26 (20 in phone touch chrome only); run scripts/codemods/icon-sizes.mjs (foundations §9)',
+  'inline-retry': 'hand-rolled Retry button — use LoadState (error + onretry) or EmptyState tone="error" (components.md §11)',
+  'local-tablist': 'local role="tablist" — use <Tabs> (lib/components/Tabs.svelte; components.md §3)',
+  'smooth-scroll': "literal behavior: 'smooth' — use scrollBehavior() from lib/motion.ts (reduced motion)",
+  'disabled-opacity': 'opacity literal on a disabled state — use var(--disabled-opacity) (scripts/codemods/disabled-opacity.mjs)',
   'body-style': 'document-level style write (body cursor/userSelect, documentElement setProperty) — use lib/dragCursor.ts or a scoped custom property',
 };
 
@@ -509,6 +561,13 @@ for (const f of files) {
       if (cls) hit('local-pill-class', f, s.decls[0].at, `"${s.sel}" draws a local .${cls}`);
     }
   }
+  const DISABLED_SEL = /:disabled\b|\[disabled\]|\[aria-disabled|\.disabled(?![\w-])/;
+  for (const s of sets) {
+    if (!DISABLED_SEL.test(s.sel)) continue;
+    for (const d of s.decls) {
+      if (d.prop === 'opacity' && /^0?\.(?:[2-6]\d*|7)\s*(?:!important)?$/.test(d.value)) hit('disabled-opacity', f, d.at, `"${s.sel}" opacity: ${d.value}`);
+    }
+  }
   for (const s of sets) {
     const bg = s.decls.find((d) => (d.prop === 'background' || d.prop === 'background-color') && /^var\(\s*--accent\s*\)/.test(d.value));
     if (bg && s.decls.some((d) => d.prop === 'color')) hit('accent-fill', f, bg.at, `"${s.sel}" — ${bg.prop}: var(--accent) under text`);
@@ -599,7 +658,72 @@ for (const f of files) {
   }
 }
 
-// script-code rules: setInterval / document-level style writes.
+// ---------- markup a11y ratchets: bidi-dir, unlabeled-control ----------
+// A file input is opened by a labelled button and never focused itself.
+const NO_NAME_TYPES = /^(hidden|submit|button|reset|image|file)$/;
+for (const f of files) {
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = markupOf(f.text);
+  // <label …>…</label> spans: a control inside one is named by it.
+  const spans = [];
+  for (const m of markup.matchAll(/<label(?=[\s>])/g)) {
+    const close = markup.slice(m.index).search(/<\/label\s*>/);
+    if (close !== -1) spans.push([m.index, m.index + close]);
+  }
+  const forIds = new Set([...markup.matchAll(/\sfor\s*=\s*(?:"([^"]*)"|'([^']*)'|\{([^}]*)\})/g)].map((m) => (m[1] ?? m[2] ?? m[3]).trim()));
+  for (const t of startTags(f.text, ['input', 'select', 'textarea'], markup)) {
+    if (needsDir(t.tag, t.attrs)) hit('bidi-dir', f, t.start, `<${t.tag}> without dir`);
+    if (/\{\s*\.\.\./.test(t.attrs)) continue; // a spread may carry the label
+    const type = attrValue(t.attrs, 'type');
+    if (t.tag === 'input' && type && NO_NAME_TYPES.test(type)) continue;
+    // Out of the accessibility tree (a hidden file picker opened by a button).
+    if (/(?:^|\s)hidden(?:\s|$|=)|aria-hidden\s*=\s*["{]?\s*["']?true/.test(t.attrs)) continue;
+    if (/(?:^|\s)(?:aria-label|aria-labelledby|title)\s*=|\{(?:aria-label|title)\}/.test(t.attrs)) continue;
+    const id = attrValue(t.attrs, 'id')?.trim();
+    if (id && forIds.has(id)) continue;
+    // A static id named again elsewhere (`{@render jsonLabel('np-body', …)}`
+    // emits the <label for> from a snippet), or a snippet's own id parameter
+    // (`{#snippet picker(id: string)}` — the caller pairs it with a label).
+    if (id && /^[\w-]+$/.test(id) && markup.split(new RegExp(`['"]${id}['"]`)).length > 2) continue;
+    if (id && /^\w+$/.test(id) && new RegExp(`\\{#snippet\\s+\\w+\\([^)]*\\b${id}\\b`).test(markup)) continue;
+    if (spans.some(([a, b]) => t.start > a && t.start < b)) continue;
+    hit('unlabeled-control', f, t.start, `<${t.tag}> with no accessible name`);
+  }
+}
+
+// ---------- ratcheted markup rules: icon-size / inline-retry / local-tablist ----------
+/** Phone touch chrome, where a 20 px icon is the documented exception (foundations §9). */
+const ICON_TOUCH_CHROME = new Set(['src/shell/BottomNav.svelte', 'src/shell/MobileActionBar.svelte', 'src/shell/App.svelte']);
+const ICON_SIZES = new Set([12, 13, 14, 16, 24, 25, 26]);
+for (const f of files) {
+  if (!f.path.endsWith('.svelte')) continue;
+  const markup = f.text
+    .replace(/<script\b[\s\S]*?<\/script[^>]*>/gi, blank)
+    .replace(/<style\b[\s\S]*?<\/style[^>]*>/gi, blank)
+    .replace(/<!--[\s\S]*?-->/g, blank);
+  if (f.rel !== 'src/lib/components/Icon.svelte') {
+    for (const m of markup.matchAll(/<Icon(?=[\s/>])/g)) {
+      const end = tagEnd(markup, m.index + 5);
+      if (end === -1) continue;
+      const size = /\ssize=\{([^{}]*)\}/.exec(markup.slice(m.index, end));
+      if (!size) continue;
+      for (const n of size[1].matchAll(/(?<![\w.'"-])(\d+)(?![\w.'"-])/g)) {
+        const v = Number(n[1]);
+        if (ICON_SIZES.has(v) || (v === 20 && ICON_TOUCH_CHROME.has(f.rel))) continue;
+        hit('icon-size', f, m.index, `<Icon size={${size[1].trim()}}>`);
+      }
+    }
+  }
+  if (!f.rel.startsWith('src/lib/components/')) {
+    for (const m of markup.matchAll(/\bRetry\b[^<>]*<\/button>/g)) hit('inline-retry', f, m.index, m[0].slice(0, 60));
+    for (const m of markup.matchAll(/<[a-z][\w-]*\b[^>]*\brole="tablist"[^>]*>/g)) {
+      if (/\bclass(?:=["{][^"}]*|:)\bsegmented\b/.test(m[0])) continue;
+      hit('local-tablist', f, m.index, m[0].slice(0, 80));
+    }
+  }
+}
+
+// script-code rules: setInterval / document-level style writes / smooth scroll.
 const INTERVAL = /(?<![\w$.])(?:(?:window|globalThis|self)\.)?setInterval\s*\(/g;
 const BODY_STYLE =
   /\bdocument\.(?:body|documentElement)\.style\.(?:(?:cursor|userSelect|webkitUserSelect)\s*=(?!=)|setProperty\s*\()/g;
@@ -610,8 +734,22 @@ for (const f of files) {
   if (!INTERVAL_ALLOW.has(f.rel)) {
     for (const m of code.matchAll(INTERVAL)) hit('raw-set-interval', f, m.index, 'setInterval(');
   }
+  if (f.rel !== 'src/lib/motion.ts') {
+    for (const m of code.matchAll(/\bbehavior\s*:\s*(['"])smooth\1/g)) hit('smooth-scroll', f, m.index, m[0]);
+  }
   if (f.rel !== 'src/lib/dragCursor.ts') {
     for (const m of code.matchAll(BODY_STYLE)) hit('body-style', f, m.index, m[0].replace(/\s+/g, ' '));
+  }
+}
+
+// E2E specs: fixed sleeps (top-level ui/e2e/*.ts only — never the report dirs).
+const E2E = join(UI, 'e2e');
+if (existsSync(E2E)) {
+  for (const name of readdirSync(E2E).sort()) {
+    if (!/\.ts$/.test(name)) continue;
+    const p = join(E2E, name);
+    const f = { path: p, rel: relative(UI, p), text: readFileSync(p, 'utf8') };
+    for (const m of stripComments(f.text).matchAll(/\bwaitForTimeout\s*\(/g)) hit('e2e-wait-timeout', f, m.index, 'waitForTimeout(');
   }
 }
 

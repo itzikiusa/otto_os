@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu as rowMenuKeys } from '../../../lib/rowMenu';
   import { plural } from '../../../lib/plural';
   // DesignArena — the Product → **Design** tab (design/product-design-arena.md §4).
   // ONE arena for every design artifact of a story: a Figma/Canva-style 2D side
@@ -819,7 +820,7 @@
       {/if}
       <div class="list-actions">
         <button class="btn small" onclick={newMenu} title="New artifact (blank or from a template)">
-          <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={10} />
+          <Icon name="plus" size={12} /> New <Icon name="chevronDown" size={12} />
         </button>
         <label class="btn small" title="Import files: HTML, images, SVG, .mmd, .excalidraw, .glb / .gltf">
           <Icon name="arrowUp" size={12} />
@@ -866,13 +867,13 @@
       {:else}
         {#each groups as g (g.name)}
           <button class="group-head" onclick={() => (collapsedGroups = { ...collapsedGroups, [g.name]: !collapsedGroups[g.name] })} aria-expanded={!collapsedGroups[g.name]}>
-            <Icon name={collapsedGroups[g.name] ? 'chevronRight' : 'chevronDown'} size={11} />
+            <Icon name={collapsedGroups[g.name] ? 'chevronRight' : 'chevronDown'} size={12} />
             <span>{g.name}</span>
             <span class="group-count">{g.rows.length}</span>
           </button>
           {#if !collapsedGroups[g.name]}
             {#each g.rows as r (r.att.id)}
-              <div
+              <div use:rowMenuKeys
                 class="mockup-row"
                 class:active={selectedId === r.att.id}
                 role="presentation"
@@ -936,7 +937,7 @@
           </button>
         {/if}
         <span class="st-grow"></span>
-        <button class="btn small" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={10} /></button>
+        <button class="btn small" onclick={exportMenu} title="Export"><Icon name="arrowDown" size={12} /> Export <Icon name="chevronDown" size={12} /></button>
         <button class="icon-btn" onclick={moreMenu} aria-label="More actions" title="More actions"><Icon name="more" size={14} /></button>
       </div>
 
@@ -995,7 +996,7 @@
         </div>
         {#if codeView && isText}
           <!-- Code view: the raw source, autosaved like every other editor. -->
-          <textarea class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
+          <textarea dir="ltr" class="code-view" spellcheck="false" value={source} oninput={onCodeInput} aria-label="Artifact source"></textarea>
         {/if}
       </div>
 
@@ -1012,9 +1013,7 @@
       </div>
     {:else if !loading}
       <div class="stage-empty">
-        <Icon name="layers" size={28} />
-        <p>Select an artifact to view and edit it, use <strong>New ▾</strong> for a blank one or a template, or
-          <strong>Create with AI</strong> to generate one in place.</p>
+        <EmptyState icon="layers" title="No artifact selected" body="Select an artifact to view and edit it, use New ▾ for a blank one or a template, or Create with AI to generate one in place." />
       </div>
     {/if}
   </div>
@@ -1507,16 +1506,6 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    color: var(--text-dim);
-    text-align: center;
-    padding: 20px;
-  }
-  .stage-empty p {
-    margin: 0;
-    font-size: var(--fs-m);
-    max-width: 360px;
-    line-height: 1.5;
   }
 
   /* ── Inspector + assistant ────────────────────────────────────────────── */

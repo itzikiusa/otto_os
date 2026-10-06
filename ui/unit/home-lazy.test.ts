@@ -19,7 +19,7 @@ test('HomeBox loads every box kind lazily', () => {
   const src = read('src/modules/home/HomeBox.svelte');
   const boxes = staticImports(src).filter((s) => /\/boxes\/\w+Box\.svelte$/.test(s));
   assert.deepEqual(boxes, [], 'map the kind to () => import(...) in BODY_LOADERS');
-  for (const k of ['SessionsBox', 'MissionControlBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox']) {
+  for (const k of ['SessionsBox', 'MissionControlBox', 'DbDashboardBox', 'K8sBox', 'InsightsBox', 'UsageBox', 'ClassroomsBox']) {
     assert.match(src, new RegExp(`import\\('\\./boxes/${k}\\.svelte'\\)`), k);
   }
 });
@@ -50,4 +50,26 @@ test('service worker serves only hashed /assets/* cache-first and prunes old bui
   const devGate = sw.indexOf('@vite|@fs|@id|node_modules');
   assert.ok(devGate > 0 && devGate < sw.indexOf('const isNav'), 'dev-server modules pass through before any respondWith');
   assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v3'/, 'bump CACHE_NAME on a policy change');
+});
+
+test('service worker never caches the proxy, plugin UIs or credentialed URLs', () => {
+  const sw = read('public/sw.js');
+  const firstRespond = sw.indexOf('event.respondWith(');
+  for (const gate of ['(browser|plugins)', '(token|ticket|access_token)=', 'url.origin !== self.location.origin']) {
+    const at = sw.indexOf(gate);
+    assert.ok(at > 0 && at < firstRespond, `${gate} must bail out before any respondWith`);
+  }
+  // Navigations store only the shell, under '/', never the per-URL response.
+  assert.match(sw, /c\.put\('\/', clone\)/);
+  assert.doesNotMatch(sw, /c\.put\(event\.request, clone\)\);\n\s*const ct = resp\.headers/);
+  assert.doesNotMatch(sw, /CACHE_NAME = 'otto-shell-v4'/, 'bump CACHE_NAME on a policy change');
+});
+
+test('Classrooms keeps three.js behind a dynamic import', () => {
+  for (const f of ['src/modules/home/boxes/ClassroomsBox.svelte', 'src/modules/home/classrooms/scene.ts', 'src/modules/home/classrooms/model.ts']) {
+    const imports = staticImports(read(f));
+    assert.ok(!imports.some((s) => s === 'three' || s.startsWith('three/')), `${f} must not statically import three`);
+  }
+  assert.match(read('src/modules/home/classrooms/scene.ts'), /import\('three'\)/);
+  assert.match(read('scripts/bundle-budget.mjs'), /three: \['home'/);
 });

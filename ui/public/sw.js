@@ -26,7 +26,10 @@
 // handler below. Bumping the name makes `activate` purge every v2 entry once,
 // which is the only way to evict a bad shell from clients already carrying one.
 // v4: cache-first narrowed to /assets/*; old-build assets pruned (see above).
-const CACHE_NAME = 'otto-shell-v4';
+// v5: never touch /browser/ (take-over proxy), /plugins/, cross-origin or any
+// URL carrying a credential (`token=` / `ticket=`); navigations cache only the
+// shell under '/', never each URL. The bump purges anything v4 stored there.
+const CACHE_NAME = 'otto-shell-v5';
 // Synthetic cache key holding the /assets/* set of the last shell seen.
 const SHELL_ASSETS_KEY = '/__otto-shell-assets';
 const PRECACHE_URLS = ['/manifest.webmanifest'];
@@ -57,6 +60,12 @@ self.addEventListener('fetch', (event) => {
   // Never intercept API or WebSocket traffic — always the live daemon.
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) return;
   if (event.request.method !== 'GET') return;
+  // Only the app's own origin is ours to cache.
+  if (url.origin !== self.location.origin) return;
+  // Third-party content (the take-over proxy, plugin UIs) and any URL that
+  // carries a credential must never land in (or be served from) the cache.
+  if (/^\/(browser|plugins)\//.test(url.pathname)) return;
+  if (/(^|[?&])(token|ticket|access_token)=/i.test(url.search)) return;
   // Vite dev-server modules (`npm run dev`) are never intercepted. The
   // network-first branch below cached every one of them (each HMR `?t=` URL a
   // new entry) and put the worker on every module fetch, which also hid them
@@ -78,17 +87,17 @@ self.addEventListener('fetch', (event) => {
           // pins a broken or outdated shell that later loads happily from
           // cache-first hashed assets, so the app silently keeps running an old
           // build across reloads. Anything non-OK is passed through uncached.
-          if (resp && resp.ok) {
+          // Every client route is the same SPA document, so only the shell is
+          // stored — under '/' — never the per-URL response.
+          const ct = resp ? resp.headers.get('content-type') || '' : '';
+          if (resp && resp.ok && resp.type === 'basic' && ct.includes('text/html')) {
             const clone = resp.clone();
-            caches.open(CACHE_NAME).then((c) => c.put(event.request, clone));
-            const ct = resp.headers.get('content-type') || '';
-            if (ct.includes('text/html')) {
-              event.waitUntil(resp.clone().text().then(pruneAssets).catch(() => {}));
-            }
+            caches.open(CACHE_NAME).then((c) => c.put('/', clone));
+            event.waitUntil(resp.clone().text().then(pruneAssets).catch(() => {}));
           }
           return resp;
         })
-        .catch(() => caches.match(event.request).then((c) => c || caches.match('/'))),
+        .catch(() => caches.match('/')),
     );
     return;
   }

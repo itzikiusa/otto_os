@@ -14,7 +14,7 @@
   } from '../../lib/stores/ui.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { AUTO_VERTICAL_ENGINES } from '../../lib/db-view-prefs';
-  import { database } from '../../lib/stores/database.svelte';
+  import { dbPrefs } from '../../lib/stores/dbPrefs.svelte';
   import { clipHistory } from '../../lib/stores/clipHistory.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -274,6 +274,18 @@
       onchange={(v) => ui.setTermCopyOnSelect(v)}
     />
     <SettingToggle
+      label="Use Option as Meta key"
+      hint="⌥ sends Meta, so ⌥← / ⌥→ jump words and ⌥⌫ deletes a word in shells and agents. Turn it off if your keyboard layout types characters such as @, braces, brackets, | or accents with ⌥."
+      checked={ui.termOptionAsMeta}
+      onchange={(v) => ui.setTermOptionAsMeta(v)}
+    />
+    <SettingToggle
+      label="Screen reader support"
+      hint="Announces terminal output to VoiceOver and lets you read the screen line by line. Uses the slower non-GPU renderer; toggling reloads open terminals."
+      checked={ui.termScreenReader}
+      onchange={(v) => ui.setTermScreenReader(v)}
+    />
+    <SettingToggle
       label="Terminal toolbar"
       hint="Show the font-size and copy-on-select controls on each terminal."
       checked={ui.termToolbar}
@@ -399,15 +411,15 @@
   <SettingToggle
     label="Connect restored tabs on click only"
     hint="After a reload only the active connection connects; the other tabs wait, marked “Not connected yet”, until you open one. Off: they connect in the background, three at a time."
-    checked={database.warmRestored === 'on-click'}
-    onchange={(on) => database.setWarmRestored(on ? 'on-click' : 'background')}
+    checked={dbPrefs.warmRestored === 'on-click'}
+    onchange={(on) => dbPrefs.setWarmRestored(on ? 'on-click' : 'background')}
     testid="db-warm-on-click"
   />
   <SettingToggle
     label="Keep open connections alive"
     hint="Pings each open, connected database every 4 minutes so its pool and SSH tunnel don’t close from inactivity, and a dropped one shows red before your next query."
-    checked={database.keepAlive}
-    onchange={(on) => database.setKeepAlive(on)}
+    checked={dbPrefs.keepAlive}
+    onchange={(on) => dbPrefs.setKeepAlive(on)}
     testid="db-keep-alive"
   />
   <SettingToggle
@@ -819,7 +831,7 @@
     color: var(--text);
   }
   .sb-btn:disabled {
-    opacity: 0.25;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .sb-toggle {

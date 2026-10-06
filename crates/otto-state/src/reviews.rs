@@ -109,6 +109,21 @@ impl ReviewsRepo {
         Ok(())
     }
 
+    /// Atomically claim a finished review for a new attempt: flip it to
+    /// `running` ONLY if it is not running already. `false` ⇒ another attempt
+    /// won the race (two quick "Retry summarizer" clicks used to both pass a
+    /// read-then-write check and each persist a full set of drafts).
+    pub async fn try_begin_rerun(&self, id: &Id) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE pr_reviews SET status = 'running', error = NULL WHERE id = ? AND status != 'running'",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("claim review rerun"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Fail every review still marked `running`. Called on daemon startup: a
     /// review's background task dies with the process, so any row left
     /// `running` from a previous run is orphaned and would otherwise spin in
@@ -280,6 +295,46 @@ impl ReviewsRepo {
             .await
             .map_err(dberr("set comment state"))?;
         self.get_comment(id).await
+    }
+
+    /// Person edits of a not-yet-posted comment: replace a DRAFT's body and/or
+    /// move a DECLINED comment back to draft. Guarded in SQL so a comment that
+    /// is posted (or changed state meanwhile) is never touched. `Ok(None)` ⇒
+    /// nothing matched the guard (the caller reports a conflict).
+    pub async fn edit_unposted_comment(
+        &self,
+        id: &Id,
+        body: Option<&str>,
+        restore_draft: bool,
+    ) -> Result<Option<ReviewComment>> {
+        let mut tx = self.pool.begin().await.map_err(dberr("edit comment"))?;
+        if restore_draft {
+            let res = sqlx::query(
+                "UPDATE pr_review_comments SET state = 'draft' WHERE id = ? AND state = 'declined' AND posted = 0",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("restore comment"))?;
+            if res.rows_affected() != 1 {
+                return Ok(None);
+            }
+        }
+        if let Some(body) = body {
+            let res = sqlx::query(
+                "UPDATE pr_review_comments SET body = ? WHERE id = ? AND state = 'draft' AND posted = 0",
+            )
+            .bind(body)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("edit comment body"))?;
+            if res.rows_affected() != 1 {
+                return Ok(None);
+            }
+        }
+        tx.commit().await.map_err(dberr("edit comment"))?;
+        self.get_comment(id).await.map(Some)
     }
 
     /// Atomically claim a comment for posting to the forge: flips `posted`
@@ -518,6 +573,77 @@ mod tests {
 
         let after = repo.get_review(&review.id).await.unwrap();
         assert_eq!(after.status, ReviewStatus::Cancelled);
+    }
+
+    /// Drafts are editable; declined comments restore to draft; posted or
+    /// approved comments are never touched.
+    #[tokio::test]
+    async fn edit_unposted_comment_respects_state_guards() {
+        use otto_core::domain::{CommentSeverity, CommentState};
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        let c = repo
+            .add_comment(
+                &review.id,
+                Some("a.rs"),
+                Some(1),
+                CommentSeverity::Warn,
+                "orig",
+            )
+            .await
+            .unwrap();
+        let e = repo
+            .edit_unposted_comment(&c.id, Some("edited"), false)
+            .await
+            .unwrap();
+        assert_eq!(e.unwrap().body, "edited");
+        // Declined: body edit refused until restored, restore works.
+        repo.set_comment_state(&c.id, CommentState::Declined, false)
+            .await
+            .unwrap();
+        assert!(repo
+            .edit_unposted_comment(&c.id, Some("x"), false)
+            .await
+            .unwrap()
+            .is_none());
+        let r = repo
+            .edit_unposted_comment(&c.id, Some("again"), true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((r.state, r.body.as_str()), (CommentState::Draft, "again"));
+        // Posted: untouchable.
+        repo.set_comment_state(&c.id, CommentState::Approved, true)
+            .await
+            .unwrap();
+        assert!(repo
+            .edit_unposted_comment(&c.id, Some("y"), false)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .edit_unposted_comment(&c.id, None, true)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Double "Retry summarizer": only the first claim wins.
+    #[tokio::test]
+    async fn try_begin_rerun_is_exclusive() {
+        use otto_core::domain::ReviewStatus;
+        let repo = ReviewsRepo::new(mem_pool().await);
+        let review = repo.create_review(&"r".to_string(), 7).await.unwrap();
+        // Still running ⇒ no new attempt.
+        assert!(!repo.try_begin_rerun(&review.id).await.unwrap());
+        repo.set_status(&review.id, ReviewStatus::Error, Some("boom"))
+            .await
+            .unwrap();
+        assert!(repo.try_begin_rerun(&review.id).await.unwrap());
+        assert!(!repo.try_begin_rerun(&review.id).await.unwrap());
+        let after = repo.get_review(&review.id).await.unwrap();
+        assert_eq!(after.status, ReviewStatus::Running);
+        assert!(after.error.is_none());
     }
 
     #[tokio::test]

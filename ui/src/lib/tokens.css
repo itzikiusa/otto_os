@@ -47,6 +47,18 @@
   --radius-m: 8px;
   --radius-l: 12px;
 
+  /* A disabled control is the control at this opacity (app.css .btn, .icon-btn,
+     .segmented, .pill-toggle); ui-guards ratchets other literals (foundations §3). */
+  --disabled-opacity: 0.45;
+  /* Minimum touch HIT size on a coarse pointer (layout.md: ≥ 36 px on phone).
+     The global coarse-pointer rule in app.css grows the shared controls; a
+     module control that needs it sets min-block-size: var(--hit-min) inside
+     @media (pointer: coarse) instead of its own number. */
+  --hit-min: 36px;
+  /* Readable column for chat / prose surfaces (Assistant, conversation) —
+     narrower than PageBody's --page-readable (1200px), which is for whole pages of cards/forms. */
+  --prose-readable: 820px;
+
   /* Layers (docs/design/guidelines/foundations.md §6). Floating UI picks one
      of these instead of inventing a number; scripts/ui-guards.mjs ratchets
      z-index literals outside 0–10 (in-pane stacking). Nothing exceeds
@@ -214,7 +226,11 @@ html[data-theme='native'][data-scheme='light'] {
   --surface-3: #e6e6ec;
   --border: rgba(0, 0, 0, 0.1);
   --text: #1d1d1f;
-  --text-dim: #636368;
+  /* --text-dim and --accent-text are measured to clear 4.5:1 on every
+     surface AND on the --accent-soft / --accent-soft-strong tints over them
+     (a selected row on --surface-3) — tokenContrast.test.ts. */
+  --text-dim: #56565b;
+  --accent-text: color-mix(in srgb, var(--accent) 56%, var(--text));
   --term-bg: #fbfbfd;
   --control-border: #86868b;
 }
@@ -227,7 +243,11 @@ html[data-theme='native'][data-scheme='dark'] {
   --surface-3: #3a3a41;
   --border: rgba(255, 255, 255, 0.1);
   --text: #f2f2f5;
-  --text-dim: #acacb3;
+  /* --text-dim and --accent-text are measured to clear 4.5:1 on every
+     surface AND on the --accent-soft / --accent-soft-strong tints over them
+     (a selected row on --surface-3) — tokenContrast.test.ts. */
+  --text-dim: #b9b9bf;
+  --accent-text: color-mix(in srgb, var(--accent) 47%, var(--text));
   --term-bg: #131318;
 }
 
@@ -242,7 +262,11 @@ html[data-theme='pro-dark'][data-scheme='dark'] {
   --surface-3: #2e2e38;
   --border: rgba(255, 255, 255, 0.08);
   --text: #e8e8ee;
-  --text-dim: #9a9aa8;
+  /* --text-dim and --accent-text are measured to clear 4.5:1 on every
+     surface AND on the --accent-soft / --accent-soft-strong tints over them
+     (a selected row on --surface-3) — tokenContrast.test.ts. */
+  --text-dim: #a8a8b5;
+  --accent-text: color-mix(in srgb, var(--accent) 51%, var(--text));
   --term-bg: #0f0f14;
   --accent: #6c5ce7;
 }
@@ -257,13 +281,14 @@ html[data-theme='warm'][data-scheme='light'] {
   --surface-3: #e7e3dc;
   --border: rgba(60, 50, 30, 0.12);
   --text: #3d3a35;
-  --text-dim: #605c56;
+  --text-dim: #59554f;
   --term-bg: #fbfaf7;
   --control-border: #87827a;
   --accent: #0f9d58;
   /* This green needs a firmer pull toward --text to clear 4.5:1 on
-     --surface-3 and on its own --accent-soft tint (tokenContrast.test.ts). */
-  --accent-text: color-mix(in srgb, var(--accent) 50%, var(--text));
+     --surface-3 and on its own --accent-soft / -soft-strong tints
+     (tokenContrast.test.ts). */
+  --accent-text: color-mix(in srgb, var(--accent) 38%, var(--text));
 }
 
 html[data-theme='warm'][data-scheme='dark'] {
@@ -274,7 +299,10 @@ html[data-theme='warm'][data-scheme='dark'] {
   --surface-3: #3b3832;
   --border: rgba(255, 245, 225, 0.1);
   --text: #e8e4da;
-  --text-dim: #ada79b;
+  /* Lighter than the other dark themes' dim: the green tint lifts a selected
+     row on --surface-3 the most (tokenContrast.test.ts). */
+  --text-dim: #c5c0b5;
+  --accent-text: color-mix(in srgb, var(--accent) 48%, var(--text));
   --term-bg: #1a1916;
   --accent: #2bb673;
   /* White on this bright green is 2.61:1 — fill with the accent itself and
@@ -374,7 +402,7 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --surface-3: #3a3a41;
   --border: rgba(255, 255, 255, 0.1);
   --text: #f2f2f5;
-  --text-dim: #acacb3;
+  --text-dim: #b9b9bf;
   --term-bg: #131318;
   --danger: #ff8a80;
   --warning: #e3b341;
@@ -394,7 +422,7 @@ html[data-scheme='light']:not([data-theme='pro-dark']) .otto-force-dark {
   --accent-faint: color-mix(in srgb, var(--accent) 6%, transparent);
   --accent-line: color-mix(in srgb, var(--accent) 40%, transparent);
   --accent-line-strong: color-mix(in srgb, var(--accent) 60%, transparent);
-  --accent-text: color-mix(in srgb, var(--accent) 62%, var(--text));
+  --accent-text: color-mix(in srgb, var(--accent) 47%, var(--text));
   --hover: color-mix(in srgb, var(--text) 7%, transparent);
   --border-strong: color-mix(in srgb, var(--text) 22%, transparent);
   --control-border: color-mix(in srgb, var(--text) 34%, transparent);

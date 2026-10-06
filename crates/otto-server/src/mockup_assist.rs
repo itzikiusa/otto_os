@@ -47,7 +47,7 @@ use crate::state::ServerCtx;
 
 /// Live-preview file poll cadence while the agent edits.
 const POLL: Duration = Duration::from_millis(900);
-/// Attachment storage root (mirrors `product_media::ATTACH_ROOT`).
+/// Attachment storage root (mirrors `otto_product::media::ATTACH_ROOT`).
 const ATTACH_ROOT: &str = "product/attachments";
 /// Per-artifact agent scratch dirs: `data_dir/product/mockup_assist/<aid>/`.
 /// The story delete route removes them (via `ProductCtx::mockup_scratch_root`).
@@ -94,16 +94,10 @@ pub async fn assist_mockup(
     // Resolve the agent provider (honored only when a NEW mockup session is
     // created; a refine resumes the existing one). Precedence mirrors Discovery
     // Chat: request → workspace default → global default → claude.
-    let global_default = otto_state::SettingsRepo::new(ctx.pool.clone())
-        .get("default_provider")
+    let provider = ctx
+        .resolve_provider(Some(&ws), req.provider.as_deref())
         .await
-        .ok()
-        .flatten();
-    let provider = otto_core::provider::resolve_provider(&[
-        req.provider.as_deref().unwrap_or(""),
-        otto_core::provider::workspace_default(&ws.settings),
-        otto_core::provider::global_default(global_default.as_ref()),
-    ]);
+        .map_err(ApiError)?;
 
     // Resolve the target attachment (+ whether THIS call minted it, for cleanup on
     // failure), its format, current source, and the resumable assist session id.
@@ -226,7 +220,7 @@ pub async fn assist_mockup(
         story_id: story.id.clone(),
         attachment_id,
         format: format.to_string(),
-        content: crate::product_media::event_content(format.mime(), &bytes),
+        content: otto_product::media::event_content(format.mime(), &bytes),
     });
 
     Ok(Json(updated))
@@ -331,15 +325,15 @@ async fn cleanup(ctx: &ServerCtx, att: &ProductAttachment) {
 }
 
 /// Read a text file the agent may have written, refusing anything over the raw
-/// attachment cap (`product_media::MAX_RAW_BYTES`) or not UTF-8: `None` means
+/// attachment cap (`otto_product::media::MAX_RAW_BYTES`) or not UTF-8: `None` means
 /// "unusable", and callers keep the prior source.
 async fn read_text_capped(path: &std::path::Path) -> Option<String> {
     let len = tokio::fs::metadata(path).await.ok()?.len();
-    if len > crate::product_media::MAX_RAW_BYTES as u64 {
+    if len > otto_product::media::MAX_RAW_BYTES as u64 {
         tracing::warn!(
             "mockup assist: {} exceeds the {} MB cap; ignored",
             path.display(),
-            crate::product_media::MAX_RAW_BYTES / (1024 * 1024)
+            otto_product::media::MAX_RAW_BYTES / (1024 * 1024)
         );
         return None;
     }
@@ -442,7 +436,7 @@ fn spawn_file_poll(
                 attachment_id: attachment_id.clone(),
                 format: format.to_string(),
                 // `None` above the WS payload cap → clients re-fetch.
-                content: crate::product_media::event_content(format.mime(), content.as_bytes()),
+                content: otto_product::media::event_content(format.mime(), content.as_bytes()),
             });
         }
     })

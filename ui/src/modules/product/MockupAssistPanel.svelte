@@ -13,7 +13,7 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import LiveWorkingDot from '../../lib/components/LiveWorkingDot.svelte';
   import { toastError } from '../../lib/toastError';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import MockupLivePreview from './MockupLivePreview.svelte';
   import { mockupAssist } from '../../lib/stores/mockup-assist.svelte';
   import type { DesignFormat, ProductAttachment } from './types';
@@ -99,7 +99,7 @@
 
 <section class="mockup-assist" class:embedded>
   <header class="ma-head">
-    <span class="ma-title"><Icon name="zap" size={15} /> {embedded ? 'Assistant' : 'Design agent'}</span>
+    <span class="ma-title"><Icon name="zap" size={14} /> {embedded ? 'Assistant' : 'Design agent'}</span>
     <div class="ma-format" role="group" aria-label="Design format">
       {#each DESIGN_FORMATS as f (f)}
         <button
@@ -117,7 +117,7 @@
     </label>
     {#if mockupAssist.busy}<span class="ma-working"><LiveWorkingDot label="Working…" /></span>{/if}
     <button class="ma-close" onclick={onclose} aria-label="Close design agent" title="Close design agent">
-      <Icon name="x" size={15} />
+      <Icon name="x" size={14} />
     </button>
   </header>
 
@@ -134,7 +134,7 @@
       <div class="ma-shell">
         {#if mockupAssist.sessionId}
           {#key mockupAssist.sessionId}
-            <Terminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark preferDom />
+            <LazyTerminal sessionId={mockupAssist.sessionId} readOnly={false} forceDark preferDom />
           {/key}
         {:else}
           <div class="ma-empty">
@@ -154,7 +154,7 @@
       </div>
 
       <div class="ma-composer">
-        <textarea
+        <textarea dir="auto" aria-label="Message to the mockup assistant"
           bind:value={draft}
           onkeydown={onKey}
           placeholder={locked ? 'Ask for a change…' : `Describe the ${FORMATS[mockupAssist.format].label.toLowerCase()} to create…`}
@@ -234,7 +234,7 @@
   }
   .ma-format button:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   /* Locked chips: only the active one matters — hide the rest in the narrow dock. */
   .embedded .ma-format button:disabled:not(.on) {
@@ -255,7 +255,7 @@
   }
   .ma-provider select:disabled {
     cursor: default;
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
   }
   .ma-working {
     display: inline-flex;
@@ -307,6 +307,10 @@
     min-height: 0;
     display: flex;
     position: relative;
+    /* A short dock (the Design inspector) can't fit the empty state's
+       starters: scroll them here instead of letting them spill over the
+       composer, which left Send unclickable. */
+    overflow-y: auto;
     /* The Terminal paints its own (forced-dark) background; the empty state
        sits on the normal surface so its text uses the scheme's tokens. */
     background: var(--surface-2);
@@ -383,7 +387,7 @@
     cursor: pointer;
   }
   .ma-send:disabled {
-    opacity: 0.45;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 

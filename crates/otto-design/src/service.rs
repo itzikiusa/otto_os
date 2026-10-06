@@ -761,6 +761,9 @@ impl DesignService {
             }
         }
 
+        // GC fence: the blob may already exist and be judged unreferenced by
+        // a concurrent prune; hold off its delete until the version commits.
+        let blob_ref = self.blobs.reference_guard().await?;
         let stored = self.blobs.put_hashed(&bytes, sha).await?;
         let version = self
             .store
@@ -780,6 +783,7 @@ impl DesignService {
                 opts.base.as_deref(),
             )
             .await?;
+        drop(blob_ref);
 
         // Mirror into the working copy (best-effort: the blob is the truth).
         if let Some(path) = self.work_file(&artifact) {
@@ -1335,6 +1339,8 @@ impl DesignService {
             merge_meta(&mut a.meta, m)?;
             a.meta = bound_json(a.meta.clone(), MAX_META_BYTES, "meta")?;
         }
+        // GC fence for a new thumbnail blob, held until the row references it.
+        let mut blob_ref = None;
         if let Some(b64) = req.thumb_b64 {
             let bytes = decode_content(None, Some(b64))?.unwrap_or_default();
             if bytes.len() > MAX_THUMB_BYTES {
@@ -1342,9 +1348,11 @@ impl DesignService {
             }
             let png = format::spec("png").expect("png is a known format");
             format::validate(png, &bytes)?;
+            blob_ref = Some(self.blobs.reference_guard().await?);
             a.thumb_blob = Some(self.blobs.put(&bytes).await?);
         }
         let updated = self.store.write_artifact_meta(&a).await?;
+        drop(blob_ref);
         if updated.status != prev_status {
             let (kind, payload) = if updated.status == "shipped" {
                 (
@@ -1689,10 +1697,16 @@ impl DesignService {
                 let (_, bytes) = self.store.reclaimable(&doomed).await?;
                 report.reclaimable_bytes += bytes.max(0) as u64;
                 let candidate_blobs = self.store.delete_versions(&doomed).await?;
-                for sha in candidate_blobs {
-                    if !self.store.blob_in_use(&sha).await? {
-                        self.blobs.remove(&sha).await?;
-                        report.blobs.push(sha);
+                if !candidate_blobs.is_empty() {
+                    // Exclusive GC fence: no save is between storing a blob
+                    // (a no-op when it exists) and committing the row that
+                    // references it, so `blob_in_use` is final here.
+                    let _gc = self.blobs.gc_guard().await?;
+                    for sha in candidate_blobs {
+                        if !self.store.blob_in_use(&sha).await? {
+                            self.blobs.remove(&sha).await?;
+                            report.blobs.push(sha);
+                        }
                     }
                 }
             }
@@ -1791,17 +1805,23 @@ impl DesignService {
         // The caller's snapshot can predate another thumbnail or metadata
         // publication. No-op detection and GC must use the durable row.
         let a = self.store.require_artifact(&a.id).await?;
+        let blob_ref = self.blobs.reference_guard().await?;
         let sha = self.blobs.put(bytes).await?;
         if a.thumb_blob.as_deref() == Some(sha.as_str()) {
             return Ok(a.clone());
         }
         self.store.set_thumb_blob(&a.id, &sha).await?;
+        drop(blob_ref);
         // The replaced thumbnail is a cache, not history: GC it now when no
         // version or other artifact references it (it used to linger until an
-        // admin ran the prune).
+        // admin ran the prune). Re-checked under the exclusive GC fence so a
+        // save that just re-referenced the same bytes keeps its blob.
         if let Some(old) = a.thumb_blob.as_deref() {
-            if blobs::is_sha(old) && !self.store.blob_in_use(old).await.unwrap_or(true) {
-                let _ = self.blobs.remove(old).await;
+            if blobs::is_sha(old) {
+                let _gc = self.blobs.gc_guard().await?;
+                if !self.store.blob_in_use(old).await.unwrap_or(true) {
+                    let _ = self.blobs.remove(old).await;
+                }
             }
         }
         let updated = self.store.require_artifact(&a.id).await?;

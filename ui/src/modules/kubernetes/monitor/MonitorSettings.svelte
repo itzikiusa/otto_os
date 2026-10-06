@@ -346,12 +346,12 @@
       <div class="grid2">
         <label class="field">
           <span>Namespaces {#if !NEEDS_NS}<span class="dim">(blank = {cluster.default_namespace})</span>{/if}</span>
-          <input class="input" placeholder={NEEDS_NS ? 'required: e.g. groove, groove-jobs' : cluster.default_namespace ?? ''} bind:value={nsText} onblur={syncNamespaces} disabled={!canEdit} data-testid="k8s-monitor-namespaces" />
+          <input dir="auto" class="input" placeholder={NEEDS_NS ? 'required: e.g. groove, groove-jobs' : cluster.default_namespace ?? ''} bind:value={nsText} onblur={syncNamespaces} disabled={!canEdit} data-testid="k8s-monitor-namespaces" />
           {#if errors.namespaces}<em class="err">{errors.namespaces}</em>{/if}
         </label>
         <div class="field">
           <span>Transport</span>
-          <button class="input picker" onclick={transportMenu} disabled={!canEdit}>{cfg.transport} <Icon name="dot" size={10} /></button>
+          <button class="input picker" onclick={transportMenu} disabled={!canEdit}>{cfg.transport} <Icon name="dot" size={12} /></button>
         </div>
       </div>
       <label class="toggle small">
@@ -381,9 +381,9 @@
       {#each cfg.probes as p, i (i)}
         <div class="probe" data-testid="k8s-monitor-probe">
           <div class="grid-probe">
-            <label class="field"><span>Name</span><input class="input" bind:value={p.name} disabled={!canEdit} />{#if errors[`probe.${i}.name`]}<em class="err">{errors[`probe.${i}.name`]}</em>{/if}</label>
+            <label class="field"><span>Name</span><input dir="auto" class="input" bind:value={p.name} disabled={!canEdit} />{#if errors[`probe.${i}.name`]}<em class="err">{errors[`probe.${i}.name`]}</em>{/if}</label>
             <label class="field"><span>Port</span><input class="input" type="number" placeholder="first" bind:value={p.port} disabled={!canEdit} />{#if errors[`probe.${i}.port`]}<em class="err">{errors[`probe.${i}.port`]}</em>{/if}</label>
-            <label class="field wide"><span>Path</span><input class="input mono" bind:value={p.path} disabled={!canEdit} />{#if errors[`probe.${i}.path`]}<em class="err">{errors[`probe.${i}.path`]}</em>{/if}</label>
+            <label class="field wide"><span>Path</span><input dir="ltr" class="input mono" bind:value={p.path} disabled={!canEdit} />{#if errors[`probe.${i}.path`]}<em class="err">{errors[`probe.${i}.path`]}</em>{/if}</label>
             <div class="field"><span>Format</span><button class="input picker" onclick={(e) => formatMenu(e, p)} disabled={!canEdit}>{p.format}</button></div>
             <label class="field"><span>Timeout (ms)</span><input class="input" type="number" min="100" max="30000" bind:value={p.timeout_ms} disabled={!canEdit} /></label>
             {#if canEdit}<button class="icon-btn del" onclick={() => removeProbe(i)} title="Remove probe" aria-label="Remove probe"><Icon name="trash" size={13} /></button>{/if}
@@ -393,9 +393,9 @@
               <div class="row between"><span class="dim small">Field mappings</span>{#if canEdit}<button class="btn small ghost" onclick={() => addMapping(p)}><Icon name="plus" size={12} /> Mapping</button>{/if}</div>
               {#each p.mappings ?? [] as m, j (j)}
                 <div class="map">
-                  <input class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
-                  <input class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
-                  <input class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
+                  <input dir="ltr" class="input mono" placeholder="memory_stats.sys" bind:value={m.field} disabled={!canEdit} title="Dotted path; numbers index arrays" />
+                  <input dir="ltr" aria-label="Metric name" class="input mono" placeholder="metric name" bind:value={m.metric} disabled={!canEdit} />
+                  <input dir="ltr" aria-label="Metric label" class="input mono" placeholder="or label" bind:value={m.label} disabled={!canEdit} />
                   <button class="input picker" onclick={(e) => unitMenu(e, m)} disabled={!canEdit}>{m.unit ?? 'number'}</button>
                   {#if canEdit}<button class="icon-btn" onclick={() => removeMapping(p, j)} aria-label="Remove mapping" title="Remove mapping"><Icon name="x" size={12} /></button>{/if}
                   {#if errors[`probe.${i}.map.${j}`]}<em class="err span">{errors[`probe.${i}.map.${j}`]}</em>{/if}
@@ -404,8 +404,8 @@
             </div>
           {:else if p.format === 'prometheus'}
             <div class="sub-block grid2">
-              <label class="field"><span>Include globs <span class="dim">(blank = all)</span></span><input class="input mono" value={globs(p.include)} oninput={(e) => setGlobs(p, 'include', e.currentTarget.value)} placeholder="http_*, process_*" disabled={!canEdit} /></label>
-              <label class="field"><span>Exclude globs</span><input class="input mono" value={globs(p.exclude)} oninput={(e) => setGlobs(p, 'exclude', e.currentTarget.value)} placeholder="*_bucket" disabled={!canEdit} /></label>
+              <label class="field"><span>Include globs <span class="dim">(blank = all)</span></span><input dir="ltr" class="input mono" value={globs(p.include)} oninput={(e) => setGlobs(p, 'include', e.currentTarget.value)} placeholder="http_*, process_*" disabled={!canEdit} /></label>
+              <label class="field"><span>Exclude globs</span><input dir="ltr" class="input mono" value={globs(p.exclude)} oninput={(e) => setGlobs(p, 'exclude', e.currentTarget.value)} placeholder="*_bucket" disabled={!canEdit} /></label>
             </div>
           {/if}
         </div>
@@ -422,9 +422,9 @@
         <div class="ex">
           <span class="chip">{kindLabel(x.kind)}</span>
           {#if x.kind === 'label'}
-            <input class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Label selector" class="input mono" placeholder="app=frb,tier!=web" bind:value={x.selector} disabled={!canEdit} />
           {:else}
-            <input class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
+            <input dir="ltr" aria-label="Name pattern" class="input mono" placeholder={x.kind === 'workload' ? 'cronjob:*' : '*-confsrv-*'} bind:value={x.match} disabled={!canEdit} />
           {/if}
           {#if canEdit}<button class="icon-btn" onclick={() => removeExclusion(i)} aria-label="Remove exclusion" title="Remove exclusion"><Icon name="x" size={12} /></button>{/if}
           {#if errors[`ex.${i}`]}<em class="err span">{errors[`ex.${i}`]}</em>{/if}
@@ -438,7 +438,7 @@
   <Modal title="Test probes" width={720} onclose={() => (testOpen = false)}>
     <div class="test">
       <div class="row">
-        <input class="input mono" placeholder="pod name (blank = first running pod)" bind:value={testPod} />
+        <input dir="ltr" aria-label="Test pod name" class="input mono" placeholder="pod name (blank = first running pod)" bind:value={testPod} />
         <button class="btn primary" onclick={() => void runTest()} disabled={testBusy || saving || toggling}>{testBusy ? 'Testing…' : 'Run'}</button>
       </div>
       <p class="dim help">Saves the current form, then fetches every probe from one pod and shows what parsed. Nothing is written to the metrics store.</p>

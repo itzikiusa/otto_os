@@ -606,7 +606,23 @@ test('K8s Fleet: a 2,400-row table mounts ≤ 150 rows and scrolls to the last o
   expect(await domCount(page, '[data-testid="k8s-fleet-row"]')).toBeLessThanOrEqual(150);
   // Keyboard: the table is one tab stop; ↓ moves the focused row.
   await page.getByTestId('k8s-fleet-table').locator('.vlist').evaluate((el) => (el.scrollTop = 0));
-  await page.locator('[data-testid="k8s-fleet-row"][data-i="0"]').focus();
+  // Row 0 is the pinned focus row, so while the list is still scrolled to the
+  // end it lives in VirtualList's out-of-window `.vlist-pin` copy. The scroll
+  // re-render then moves it into `.vlist-win` (a NEW element), dropping focus
+  // set in between — wait for the windowed copy and the pin to go first.
+  const table = page.getByTestId('k8s-fleet-table');
+  await expect(table.locator('.vlist-win [data-testid="k8s-fleet-row"][data-i="0"]')).toBeVisible();
+  await expect(table.locator('.vlist-pin')).toHaveCount(0);
+  await table.locator('.vlist-win [data-testid="k8s-fleet-row"][data-i="0"]').focus();
+  await expect(table.locator('[data-testid="k8s-fleet-row"][data-i="0"]')).toBeFocused();
+  // Scrolling the focused row out of the window (→ the `.vlist-pin` copy) and
+  // back (→ a fresh window copy) swaps its element both ways; keyboard focus
+  // must follow the row instead of dropping to <body>.
+  await table.locator('.vlist').evaluate((el) => (el.scrollTop = el.scrollHeight));
+  await expect(table.locator('.vlist-pin [data-testid="k8s-fleet-row"][data-i="0"]')).toBeFocused();
+  await table.locator('.vlist').evaluate((el) => (el.scrollTop = 0));
+  await expect(table.locator('.vlist-pin')).toHaveCount(0);
+  await expect(table.locator('.vlist-win [data-testid="k8s-fleet-row"][data-i="0"]')).toBeFocused();
   await page.keyboard.press('ArrowDown');
   await expect(page.locator('[data-testid="k8s-fleet-row"][data-i="1"]')).toBeFocused();
 });

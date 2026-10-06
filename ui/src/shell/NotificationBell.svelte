@@ -324,7 +324,7 @@
     aria-expanded={open}
     title="Notifications"
   >
-    <Icon name="bell" size={15} />
+    <Icon name="bell" size={14} />
     {#if unreadCount > 0}
       <span class="count-bubble sev-{notifications.unreadSeverity ?? 'info'}" aria-hidden="true">{badge}</span>
     {/if}
@@ -379,7 +379,7 @@
           <div class="panel-list">
             {#if notifications.error && notifications.notices.length === 0}
               <div class="panel-empty nb-error" role="alert">
-                <Icon name="warning" size={20} />
+                <Icon name="warning" size={24} />
                 <p>Couldn’t load notifications</p>
                 <button class="btn small" onclick={() => notifications.load()} disabled={notifications.loading}>
                   <Icon name="refresh" size={12} /> Retry
@@ -392,7 +392,7 @@
               </div>
             {:else if notifications.rows.length === 0}
               <div class="panel-empty">
-                <Icon name="bell" size={22} />
+                <Icon name="bell" size={24} />
                 <p>You’re all caught up</p>
               </div>
             {:else}
@@ -451,7 +451,7 @@
                         aria-expanded={expanded.has(n.id)}
                         onclick={() => toggleDetails(n.id)}
                       >
-                        <Icon name={expanded.has(n.id) ? 'chevronUp' : 'chevronDown'} size={11} />
+                        <Icon name={expanded.has(n.id) ? 'chevronUp' : 'chevronDown'} size={12} />
                         {expanded.has(n.id) ? 'Hide details' : 'Show details'}
                       </button>
                       {#if expanded.has(n.id)}
@@ -472,7 +472,7 @@
                       aria-label={`Dismiss ${row.title}`}
                       title="Dismiss"
                     >
-                      <Icon name="x" size={10} />
+                      <Icon name="x" size={12} />
                     </button>
                   </div>
                 {/each}

@@ -65,6 +65,16 @@ async fn stream_ws(
         Ok(auth) => auth,
         Err(_) => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
     };
+    // Share / MCP-restricted tokens and read-only agent sessions never stream.
+    if let Err(e) = crate::feature_guard::root_route_gate(
+        crate::feature_guard::RootRoute::ApiStream,
+        &auth,
+        Some(&ctx.pool),
+    )
+    .await
+    {
+        return (StatusCode::FORBIDDEN, e.to_string()).into_response();
+    }
     let user = &auth.effective_user;
     if auth.scope.is_some()
         || auth.mcp_only

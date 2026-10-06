@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { toastError } from '../../lib/toastError';
   import { CLUSTER_VIEWS, type ClusterView } from './types';
@@ -532,7 +533,7 @@
   <!-- The whole header toggles (the caret button stays the keyboard/AT
        control); clicks on its own buttons don't. -->
   <!-- The caret button is the keyboard/AT toggle; a click anywhere on the head is a mouse shortcut, so the head itself is presentational. -->
-  <div
+  <div use:rowMenu
     role="presentation"
     class="sec-head"
     onclick={(e) => {
@@ -583,7 +584,7 @@
 {#snippet clusterRow(c: BrokerCluster, depth: number)}
   <!-- The row drags; its name button opens the cluster and ⋯ holds the same
        menu as right-click (no button nested inside a button). -->
-  <div
+  <div use:rowMenu
     role="group"
     aria-label={c.name}
     class="cluster"

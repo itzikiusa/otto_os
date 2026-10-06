@@ -296,7 +296,7 @@
   <label class="picker-label" for="ss-query">
     {sourceKind === 'jira' ? 'Search issues' : 'Search pages'}
   </label>
-  <input
+  <input dir="auto"
     id="ss-query"
     class="picker-input"
     bind:value={query}
@@ -446,7 +446,7 @@
     background: var(--accent-faint);
   }
   .load-more-btn:disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
 </style>

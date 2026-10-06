@@ -17,7 +17,9 @@ in audits.
 - Build from tokens and you mostly pass by construction. The measured table is
   in [foundations.md §1.4](./foundations.md#14-contrast-measured-values). The
   traps:
-  - `--text-dim` on `--surface-3` fails (4.2–4.4:1): use `--text` there.
+  - Text tokens are measured on every surface and on the accent tints
+    (`tokenContrast.test.ts`). A tint you mix yourself is not: measure it,
+    or use `--text` on it.
   - `--accent` as text fails in several themes: use `--accent-text`.
   - Anything on `--accent-solid` must be `--accent-contrast`, which is dark
     text in Warm dark.
@@ -68,6 +70,13 @@ in audits.
 - `Esc` closes the top-most layer only. Global shortcuts don't fire while an
   overlay is open. `ui.overlayOpen` covers `Modal`, `Drawer`, the palette and
   the new-session sheets, so register overlays properly (`ui.pushModal()`).
+- **A right-click menu has a keyboard and a touch path.** Put `use:rowMenu`
+  (`lib/rowMenu.ts`) on any element with `oncontextmenu`: the ContextMenu key,
+  ⇧F10 and a touch long-press then open the same menu
+  (`node scripts/codemods/row-menu.mjs` adds it). A double-click action is
+  also in that menu, or has a key (canvas nodes: Enter / F2 edits).
+- **Single-key shortcuts** (no modifier) act only while focus is inside their
+  surface, and can be switched off (WCAG 2.1.4) — see the Cluster workspace.
 - Everything reachable by pointer is reachable by keyboard, and every major
   verb is in ⌘K ([patterns.md §9](./patterns.md#9-keyboard-first)).
 
@@ -88,7 +97,9 @@ in audits.
 - `Icon` renders `aria-hidden="true"`. The meaning must come from the control's
   label or visible text, never from the SVG.
 - **Form fields have labels**: `<label for>`, a wrapping `<label>`, or
-  `aria-label`. The audit found 144 placeholder-only inputs.
+  `aria-label`. A placeholder is not a label. `ui-guards`' `unlabeled-control`
+  rule fails any `<input>` / `<select>` / `<textarea>` without one (hidden
+  file pickers are exempt).
 - **Toggles** expose their state:
   - `aria-pressed` on toggle buttons and value-segmented controls
   - `aria-selected` on tabs
@@ -147,6 +158,12 @@ covers it. The layout mirrors itself **if you use logical properties**:
   flip, and nothing flips inside a `dir="ltr"` island.
 - **Code, paths, commands, terminals and diffs stay LTR** (`dir="ltr"` on the
   container) even in an RTL UI.
+- **Every free-text field declares its direction.** A `<textarea>` or text
+  `<input>` that holds human language gets `dir="auto"`, so a Hebrew message
+  lays out right-to-left and an English one left-to-right whatever the UI
+  direction. One that holds code, a path, a URL, a command or a key gets
+  `dir="ltr"`. `ui-guards`' `bidi-dir` rule enforces it;
+  `node scripts/codemods/bidi-dir.mjs` adds the attribute to new fields.
 - About 247 physical `left`/`right` declarations remain in the tree. Convert
   them in any file you touch.
 

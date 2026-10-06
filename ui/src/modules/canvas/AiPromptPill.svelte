@@ -72,7 +72,7 @@
   <!-- keydown on the wrapper so Esc closes even when a mode/Draw button is focused -->
   <div class="prompt-bar" class:busy role="toolbar" aria-label="Ask Otto to draw" tabindex="-1" {onkeydown}>
     <Icon name="zap" />
-    <input
+    <input dir="auto"
       bind:value={prompt}
       use:focusOnMount
       aria-label="Describe a diagram or blocks"
@@ -96,7 +96,7 @@
   .prompt-wrap {
     position: absolute;
     top: 12px;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     transform: translateX(-50%);
     z-index: var(--z-sticky);
     width: min(720px, 92%);
@@ -156,7 +156,7 @@
     white-space: nowrap;
   }
   .run:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .close {

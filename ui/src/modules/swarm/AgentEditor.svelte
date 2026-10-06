@@ -71,9 +71,23 @@
     newSkill = '';
   }
 
+  // `at` is wall-clock time in this zone (the scheduler is timezone-aware).
+  // An existing agent keeps its stored zone — pre-timezone schedules have
+  // none and stay UTC; new schedules use the Mac's zone.
+  const browserTz = (() => {
+    try {
+      return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    } catch {
+      return 'UTC';
+    }
+  })();
+  const schedTz = untrack(() => (initSched ? (initSched.timezone ?? 'UTC') : browserTz));
+
+  // Unchecking "Scheduled runs" sends `schedule: null`, which clears it
+  // server-side; the server also carries the stored run cursor across edits.
   function buildSchedule(): AgentSchedule | null {
     if (!scheduled) return null;
-    const base: AgentSchedule = { cadence, directive, enabled: true };
+    const base: AgentSchedule = { cadence, directive, enabled: true, timezone: schedTz };
     if (cadence === 'interval') base.every_min = everyMin;
     if (cadence === 'daily') base.at = at;
     if (cadence === 'weekly') {
@@ -117,11 +131,11 @@
   <div class="grid2">
     <div class="field">
       <label for="ag-name">Name</label>
-      <input id="ag-name" class="input" bind:value={name} />
+      <input dir="auto" id="ag-name" class="input" bind:value={name} />
     </div>
     <div class="field">
       <label for="ag-title">Title / role</label>
-      <input id="ag-title" class="input" bind:value={title} placeholder="e.g. CTO" />
+      <input dir="auto" id="ag-title" class="input" bind:value={title} placeholder="e.g. CTO" />
     </div>
     <div class="field">
       <label for="ag-provider">Provider</label>
@@ -142,27 +156,27 @@
     </div>
     <div class="field">
       <label for="ag-avatar">Avatar (emoji)</label>
-      <input id="ag-avatar" class="input" bind:value={avatar} maxlength="4" />
+      <input dir="auto" id="ag-avatar" class="input" bind:value={avatar} maxlength="4" />
     </div>
     <div class="field">
       <label for="ag-spec">Specialization</label>
-      <input id="ag-spec" class="input" bind:value={specialization} />
+      <input dir="auto" id="ag-spec" class="input" bind:value={specialization} />
     </div>
   </div>
 
   <div class="field">
     <label for="ag-soul">Soul (background + traits)</label>
-    <textarea id="ag-soul" class="input" rows="3" bind:value={soulMd}></textarea>
+    <textarea dir="auto" id="ag-soul" class="input" rows="3" bind:value={soulMd}></textarea>
   </div>
   <div class="field">
     <label for="ag-scope">Scope (what they own)</label>
-    <textarea id="ag-scope" class="input" rows="2" bind:value={scopeMd}></textarea>
+    <textarea dir="auto" id="ag-scope" class="input" rows="2" bind:value={scopeMd}></textarea>
   </div>
 
   <div class="field">
     <label for="ag-skill">Skills (must-use toggle)</label>
     <div class="skill-add">
-      <input
+      <input dir="auto"
         id="ag-skill"
         class="input grow"
         placeholder="skill name…"
@@ -204,22 +218,22 @@
     </label>
     {#if scheduled}
       <div class="sched">
-        <select class="input small" bind:value={cadence}>
+        <select aria-label="Schedule cadence" class="input small" bind:value={cadence}>
           <option value="interval">every N minutes</option>
           <option value="daily">daily</option>
           <option value="weekly">weekly</option>
         </select>
         {#if cadence === 'interval'}
-          <input class="input small" type="number" min="1" bind:value={everyMin} /> min
+          <input class="input small" type="number" min="5" bind:value={everyMin} aria-label="Every N minutes (minimum 5)" /> min
         {/if}
         {#if cadence === 'daily' || cadence === 'weekly'}
-          <!-- The swarm scheduler matches `at` against UTC (swarm_scheduler.rs),
-               not the Mac's local clock — say so, or 09:00 fires at 09:00 UTC. -->
-          <input class="input small" type="time" bind:value={at} aria-label="Run time (UTC)" title="Time of day in UTC" />
-          <span class="dim" title="The swarm scheduler runs on UTC time">UTC</span>
+          <!-- `at` is matched in the schedule's timezone (swarm_scheduler.rs →
+               cadence): name the zone so 09:00 means what it says. -->
+          <input class="input small" type="time" bind:value={at} aria-label={`Run time (${schedTz})`} title={`Time of day in ${schedTz}`} />
+          <span class="dim" title="The time is interpreted in this timezone">{schedTz}</span>
         {/if}
         {#if cadence === 'weekly'}
-          <select class="input small" bind:value={weekday}>
+          <select aria-label="Weekday" class="input small" bind:value={weekday}>
             <option value={0}>Mon</option><option value={1}>Tue</option>
             <option value={2}>Wed</option><option value={3}>Thu</option>
             <option value={4}>Fri</option><option value={5}>Sat</option>
@@ -227,7 +241,7 @@
           </select>
         {/if}
       </div>
-      <textarea class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
+      <textarea dir="auto" class="input" rows="2" aria-label="Standing directive" placeholder="Standing directive (what to do each run)…" bind:value={directive}></textarea>
     {/if}
   </div>
 

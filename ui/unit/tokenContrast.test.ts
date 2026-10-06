@@ -3,6 +3,13 @@
 //   • --accent-text (accent links/labels) is >= 4.5:1 on --surface-2,
 //     --surface-3 and on an --accent-soft tint (a selected row) over --surface
 //     and --surface-2;
+//   • every TEXT token (--text, --text-dim, --accent-text) is >= 4.5:1 on
+//     every ground (--bg, --bg-sidebar, --surface, --surface-2, --surface-3)
+//     and on the --accent-soft / --accent-soft-strong tints over each (a
+//     selected row, hovered or not — a11y P3: --text-dim on soft-strong over
+//     --surface-3 was 3.5–4.0:1);
+//   • the Rail's count badges (semantic colour pulled toward --text on its own
+//     24% tint over --bg-sidebar) are >= 4.5:1 (were 3.7–4.0 in light themes);
 //   • --control-border (input/select outlines) is >= 3:1 against --bg,
 //     --surface and --surface-2 (WCAG 1.4.11) wherever it is a measured hex
 //     (the light schemes).
@@ -92,6 +99,54 @@ for (const combo of COMBOS) {
       for (const name of ['--bg', '--surface', '--surface-2']) {
         const ratio = contrast(border, hex(v, name));
         assert.ok(ratio >= 3, `--control-border on ${name} is ${ratio.toFixed(2)}:1 (< 3)`);
+      }
+    });
+  }
+}
+
+const GROUNDS = ['--bg', '--bg-sidebar', '--surface', '--surface-2', '--surface-3'];
+
+for (const combo of COMBOS) {
+  const v = varsFor(combo.theme, combo.scheme);
+  const accent = hex(v, '--accent');
+  const text = hex(v, '--text');
+  const SOFT = mixPct(combo.theme, combo.scheme, '--accent-soft', '--accent');
+  const STRONG = mixPct(combo.theme, combo.scheme, '--accent-soft-strong', '--accent');
+  const tokens: [string, Rgb][] = [
+    ['--text', text],
+    ['--text-dim', hex(v, '--text-dim')],
+    ['--accent-text', mixSrgb(accent, text, mixPct(combo.theme, combo.scheme, '--accent-text', '--accent'))],
+  ];
+
+  test(`${combo.name}: every text token >= 4.5:1 on every ground and accent tint`, () => {
+    const fails: string[] = [];
+    for (const g of GROUNDS) {
+      const base = hex(v, g);
+      const grounds: [string, Rgb][] = [
+        [g, base],
+        [`--accent-soft over ${g}`, mixSrgb(accent, base, SOFT)],
+        [`--accent-soft-strong over ${g}`, mixSrgb(accent, base, STRONG)],
+      ];
+      for (const [tn, fg] of tokens) {
+        for (const [gn, ground] of grounds) {
+          const r = contrast(fg, ground);
+          if (r < 4.5) fails.push(`${tn} on ${gn}: ${r.toFixed(2)}`);
+        }
+      }
+    }
+    assert.deepEqual(fails, [], fails.join('; '));
+  });
+
+  // Rail badges: color-mix(--success|--warning 70%, --text) on
+  // color-mix(same 24%, --bg-sidebar) — Rail.svelte .rail-badge.
+  const all = varsFor(combo.theme, combo.scheme);
+  if (parseHex(all['--warning'] ?? '') && parseHex(all['--success'] ?? '')) {
+    test(`${combo.name}: Rail count badges >= 4.5:1`, () => {
+      const sidebar = hex(v, '--bg-sidebar');
+      for (const name of ['--success', '--warning']) {
+        const c = hex(all, name);
+        const r = contrast(mixSrgb(c, text, 0.7), mixSrgb(c, sidebar, 0.24));
+        assert.ok(r >= 4.5, `${name} badge is ${r.toFixed(2)}:1 (< 4.5)`);
       }
     });
   }

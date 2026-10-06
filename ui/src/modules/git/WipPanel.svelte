@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
   // GitKraken-style WIP panel: shown in the graph's RIGHT detail pane when the
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
@@ -26,9 +27,17 @@
   import Badge from '../../lib/components/Badge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { ListWindow } from './list-window.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
+  import {
+    draftInFlight,
+    readComposer,
+    startDraft,
+    takePendingDraft,
+    watchComposer,
+    writeComposer,
+  } from './commitComposer';
 
   interface Props {
     repoId: string;
@@ -119,6 +128,35 @@
       (s) => (s.meta as { source?: string } | null)?.source === 'commit-draft' && !s.archived && s.created_at >= draftStartedAt!,
     );
     return c.length > 0 ? c[c.length - 1].id : null;
+  });
+
+  // The composer outlives the panel (commitComposer.ts): restore this repo's
+  // summary / description, adopt a draft that finished while we were away,
+  // and resume the spinner on one still running. Declared before the
+  // `wipRequest` effect so a "Commit with message…" prefill still wins.
+  let composerRepo = '';
+  $effect(() => {
+    const repo = repoId;
+    const unwatch = untrack(() => {
+      composerRepo = repo;
+      const saved = readComposer(repo);
+      subject = saved.subject;
+      body = saved.body;
+      draftedAt = saved.draftedAt;
+      const stop = watchComposer(repo);
+      const parked = takePendingDraft(repo);
+      if (parked) void applyDraft(parked);
+      const running = draftInFlight(repo);
+      if (running && !drafting) void followDraft(running, repo);
+      return stop;
+    });
+    return unwatch;
+  });
+  $effect(() => {
+    const text = { subject, body, draftedAt };
+    untrack(() => {
+      if (composerRepo) writeComposer(composerRepo, text);
+    });
   });
 
   // The draft endpoint reads the staged diff (falling back to the full working
@@ -560,6 +598,15 @@
 
   async function draftMessage(): Promise<void> {
     if (drafting || committing) return;
+    const repo = repoId;
+    const p = startDraft(repo, () =>
+      api.post<DraftCommitMessageResp>(`/repos/${repo}/draft-commit-message`, {}),
+    );
+    await followDraft(p, repo);
+  }
+
+  /** Watch a draft request (started here, or before a remount) to the end. */
+  async function followDraft(p: Promise<DraftCommitMessageResp>, repo: string): Promise<void> {
     drafting = true;
     draftSessionId = null;
     draftElapsed = 0;
@@ -567,45 +614,49 @@
     draftStartedAt = new Date(Date.now() - 2000).toISOString();
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
-      const d = await api.post<DraftCommitMessageResp>(
-        `/repos/${repoId}/draft-commit-message`,
-        {},
-      );
-      const text = d.message.trim();
-      // Never overwrite what the person already typed without asking.
-      if (subject.trim() || body.trim()) {
-        const ok = await confirmer.ask(
-          'The agent’s message will replace the summary and description you have typed.',
-          { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
-        );
-        if (!ok) {
-          draftSessionId = d.session_id ?? null;
-          draftedAt = null;
-          return;
-        }
-      }
-      draftedAt = Date.now();
-      const nl = text.indexOf('\n');
-      if (nl === -1) {
-        subject = text;
-        body = '';
-      } else {
-        subject = text.slice(0, nl).trim();
-        body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
-      }
-      draftSessionId = d.session_id ?? null;
-      toasts.info(
-        'Draft ready',
-        d.from_staged
-          ? 'From staged changes — review the summary & description.'
-          : 'From working changes (nothing staged) — review & edit.',
-      );
+      const d = await p;
+      // Switched repos meanwhile: the reply was parked for that repo.
+      if (repo !== repoId) return;
+      await applyDraft(d);
     } catch (e) {
-      toastError('Couldn’t draft the message', e);
+      if (repo === repoId) toastError('Couldn’t draft the message', e);
     } finally {
       clearInterval(tick);
       drafting = false;
     }
+  }
+
+  /** Put an agent draft into the fields — asking first over typed text. */
+  async function applyDraft(d: DraftCommitMessageResp): Promise<void> {
+    const text = d.message.trim();
+    // Never overwrite what the person already typed without asking.
+    if (subject.trim() || body.trim()) {
+      const ok = await confirmer.ask(
+        'The agent’s message will replace the summary and description you have typed.',
+        { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
+      );
+      if (!ok) {
+        draftSessionId = d.session_id ?? null;
+        draftedAt = null;
+        return;
+      }
+    }
+    draftedAt = Date.now();
+    const nl = text.indexOf('\n');
+    if (nl === -1) {
+      subject = text;
+      body = '';
+    } else {
+      subject = text.slice(0, nl).trim();
+      body = text.slice(nl + 1).replace(/^\s*\n/, '').trimEnd();
+    }
+    draftSessionId = d.session_id ?? null;
+    toasts.info(
+      'Draft ready',
+      d.from_staged
+        ? 'From staged changes — review the summary & description.'
+        : 'From working changes (nothing staged) — review & edit.',
+    );
   }
 
   async function commit(): Promise<void> {
@@ -617,6 +668,7 @@
       toasts.success('Committed', r.sha.slice(0, 8));
       subject = '';
       body = '';
+      draftedAt = null;
       amend = false;
       onstatus(r.status);
       selectedPath = null;
@@ -631,7 +683,7 @@
 
 {#snippet fileRow(file: TFile, depth: number, section: 'unstaged' | 'staged')}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
+  <div use:rowMenu
     class="wp-file"
     class:selected={selectedPath === file.change.path}
     style="padding-inline-start:{8 + depth * 14}px"
@@ -679,7 +731,7 @@
          same affordance file rows have. The name/chevron only folds — a name
          click must never mutate the index. -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
+    <div use:rowMenu
       class="wp-folder"
       style="padding-inline-start:{8 + depth * 14}px"
       oncontextmenu={(e) => folderMenu(e, node, section)}
@@ -919,7 +971,7 @@
   <!-- Commit composer -->
   <div class="wp-composer">
     <div class="msg-box">
-      <input
+      <input dir="auto"
         class="input subject-input"
         bind:value={subject}
         placeholder={amend
@@ -942,7 +994,7 @@
         {#if drafting}
           <span class="spinner" style="--spinner-size: 10px" aria-hidden="true"></span> Drafting…{draftElapsed > 0 ? ` ${draftElapsed}s` : ''}
         {:else}
-          <Icon name="zap" size={11} /> Draft
+          <Icon name="zap" size={12} /> Draft
         {/if}
       </button>
       {#if liveDraftId}
@@ -951,7 +1003,7 @@
           onclick={() => (showDraftTerm = !showDraftTerm)}
           title={showDraftTerm ? 'Hide the drafting agent' : 'Watch the drafting agent live'}
         >
-          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={11} />
+          <Icon name={showDraftTerm ? 'chevronUp' : 'terminal'} size={12} />
           {showDraftTerm ? 'Hide agent' : 'Watch agent'}
         </button>
       {/if}
@@ -961,10 +1013,10 @@
     {/if}
     {#if liveDraftId && showDraftTerm}
       <div class="draft-term">
-        <Terminal sessionId={liveDraftId} preferDom showToolbar={false} />
+        <LazyTerminal sessionId={liveDraftId} preferDom showToolbar={false} />
       </div>
     {/if}
-    <textarea
+    <textarea dir="auto"
       class="input body-input"
       rows="2"
       bind:value={body}

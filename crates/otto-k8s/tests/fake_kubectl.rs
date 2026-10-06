@@ -1134,8 +1134,10 @@ async fn exec_spawns_a_k8s_session_with_the_contract_argv() {
             "exec",
             "-it",
             "web-1",
-            "-c",
-            "web",
+            // One `--flag=value` token so a container name can never be read
+            // as a separate flag; it stays BEFORE `--`, after which kubectl
+            // takes everything as the container command.
+            "--container=web",
             "--",
             "sh",
             "-c",
@@ -1185,9 +1187,18 @@ async fn logs_endpoint_returns_text_and_streams_when_following() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(text.trim(), "{}", "fake kubectl echoes {{}} for logs");
-    assert!(argv_log()
-        .iter()
-        .any(|l| l.ends_with("--request-timeout 20s logs web-1 -n shop -c web --tail=50")));
+    // Options are single `--flag=value` tokens, the pod name follows `--`, and
+    // a one-shot read is capped server-side by `--limit-bytes`.
+    let one_shot = format!(
+        "--request-timeout 20s logs --namespace=shop --container=web --tail=50 \
+         --limit-bytes={} -- web-1",
+        otto_k8s::logs::LOGS_CAP
+    );
+    assert!(
+        argv_log().iter().any(|l| l.ends_with(&one_shot)),
+        "{:?}",
+        argv_log()
+    );
     let (st, _, text) = call(
         &ctx,
         &user,
@@ -1204,7 +1215,9 @@ async fn logs_endpoint_returns_text_and_streams_when_following() {
         .find(|l| l.contains(" logs "))
         .unwrap();
     assert!(
-        follow.ends_with("--context kind-kind logs web-1 -n shop --tail=500 --timestamps -f"),
+        follow.ends_with(
+            "--context kind-kind logs --namespace=shop --tail=500 --timestamps -f -- web-1"
+        ),
         "{follow}"
     );
     assert!(

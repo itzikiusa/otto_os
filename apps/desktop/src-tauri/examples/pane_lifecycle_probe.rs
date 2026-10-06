@@ -1,6 +1,9 @@
 //! Runs the production pane commands against synthetic bundled HTML only.
 //! No daemon, registry restore/save, sessions, credentials or installed app.
 #![allow(dead_code, unused_imports)]
+#[path = "../src/throttle.rs"]
+mod throttle;
+use throttle::NO_THROTTLE;
 #[path = "../src/panes.rs"]
 mod panes;
 #[path = "../src/panes_policy.rs"]

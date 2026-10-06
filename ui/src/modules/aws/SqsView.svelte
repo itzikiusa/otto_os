@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { plural } from '../../lib/plural';
   import { toastError } from '../../lib/toastError';
@@ -21,11 +22,12 @@
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import Icon from '../../lib/components/Icon.svelte';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import JsonTree from '../database/JsonTree.svelte';
   import ViewToolbar from './ViewToolbar.svelte';
   import MetricsPanel from './MetricsPanel.svelte';
   import RegionPicker from './RegionPicker.svelte';
-  import { prettyJson, awsErrorText, serviceTabKey } from './util';
+  import { prettyJson, awsErrorText } from './util';
   import type { AwsAccount, SqsMessage, SqsQueue } from '../../lib/api/types';
 
   interface Props {
@@ -39,7 +41,9 @@
   const canDelete = $derived(resourceAccess.can('aws_account', account.id, 'sqs_delete', 'aws_sqs', 'edit'));
   const canPurge = $derived(resourceAccess.can('aws_account', account.id, 'sqs_purge', 'aws_sqs', 'edit'));
   const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
-  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'view'));
+  // Peek is a receive: it bumps each message's receive count (and can
+  // dead-letter it), so the daemon gates it like Send — Edit on SQS.
+  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_send', 'aws_sqs', 'edit'));
   // A-1: queues live per region; the picker restores the last one used.
   // svelte-ignore state_referenced_locally
   let region = $state(account.region);
@@ -338,7 +342,7 @@
           <tbody>
             {#each shown as q (q.url)}
               {@const a = aws.sqsAttrs[q.url]}
-              <tr
+              <tr use:rowMenu
                 class="trow"
                 class:sel={q.url === selectedUrl}
                 tabindex="0"
@@ -381,18 +385,20 @@
           {#if attrs}<span class="dim counts mono">{attrs.approx_messages} avail · {attrs.approx_not_visible} in-flight · {attrs.approx_delayed} delayed</span>{/if}
           <button class="icon-btn more" onclick={(e) => selected && queueMenu(e, selected)} aria-label="Queue actions" title="Actions"><Icon name="more" size={14} /></button>
         </div>
-        <div class="tabs" role="tablist" aria-label="Queue details">
-          {#each [['messages', 'Messages'], ['send', 'Send'], ['attributes', 'Attributes'], ['metrics', 'Metrics'], ['redrive', 'Redrive']] as const as [id, label] (id)}
-            <button role="tab" tabindex={tab === id ? 0 : -1} onkeydown={serviceTabKey} aria-selected={tab === id} class:on={tab === id} onclick={() => (tab = id)} disabled={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive))} title={((id === 'send' && !canSend) || (id === 'redrive' && !canRedrive) || (id === 'messages' && !canReceive)) ? 'Needs Edit on SQS' : ''}>{label}</button>
-          {/each}
-        </div>
+        <Tabs
+          label="Queue details"
+          idBase="sqs"
+          value={tab}
+          onchange={(id) => (tab = id)}
+          tabs={([['messages', 'Messages', canReceive], ['send', 'Send', canSend], ['attributes', 'Attributes', true], ['metrics', 'Metrics', true], ['redrive', 'Redrive', canRedrive]] as const).map(([id, label, ok]) => ({ id, label, disabled: !ok, title: ok ? undefined : 'Needs Edit on SQS' }))}
+        />
 
-        <div class="tab-body">
+        <div class="tab-body" role="tabpanel" id="sqs-panel-{tab}" aria-labelledby="sqs-tab-{tab}">
           {#if tab === 'messages'}
             <div class="bar">
               <label>Peek <select bind:value={peekN}>{#each [1, 2, 5, 10] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
               <button class="btn primary small" onclick={() => void peek()} disabled={!canReceive || peeking} title={canReceive ? undefined : 'Needs Edit on SQS'}>{peeking ? 'Peeking…' : 'Peek'}</button>
-              <span class="dim">Non-destructive (visibility timeout 0). Messages may appear in any order.</span>
+              <span class="dim">Messages stay visible (visibility timeout 0), but each peek raises their receive count — on a queue with a redrive policy, repeated peeks can move them to the dead-letter queue. Order is not guaranteed.</span>
             </div>
             {#if messages.length === 0}
               <p class="dim pad">No messages loaded — press Peek.</p>
@@ -436,16 +442,16 @@
               <div class="row3">
                 <label class="field"><span>Delay (s)</span><input type="number" min="0" max="900" bind:value={sendDelay} aria-invalid={!validDelay} />{#if !validDelay}<span class="err">Enter a whole number from 0 to 900.</span>{/if}</label>
                 {#if selected.fifo}
-                  <label class="field"><span>Message group ID</span><input bind:value={sendGroup} required /></label>
-                  <label class="field"><span>Dedup ID <em>(optional)</em></span><input bind:value={sendDedup} /></label>
+                  <label class="field"><span>Message group ID</span><input dir="auto" bind:value={sendGroup} required /></label>
+                  <label class="field"><span>Dedup ID <em>(optional)</em></span><input dir="auto" bind:value={sendDedup} /></label>
                 {/if}
               </div>
               <div class="field">
                 <span>Message attributes (String)</span>
                 {#each sendAttrs as a, i (i)}
                   <div class="kv">
-                    <input aria-label="Attribute {i + 1} name" placeholder="name" bind:value={a.k} />
-                    <input aria-label="Attribute {i + 1} value" placeholder="value" bind:value={a.v} />
+                    <input dir="auto" aria-label="Attribute {i + 1} name" placeholder="name" bind:value={a.k} />
+                    <input dir="auto" aria-label="Attribute {i + 1} value" placeholder="value" bind:value={a.v} />
                     <button class="icon-btn" onclick={() => (sendAttrs = sendAttrs.filter((_, j) => j !== i))} aria-label="Remove attribute" title="Remove attribute"><Icon name="x" size={12} /></button>
                   </div>
                 {/each}
@@ -478,9 +484,9 @@
                 Move messages from this queue (typically a dead-letter queue) back to their source. Uses
                 <code>start-message-move-task</code>; SQS enforces the DLQ relationship.
               </p>
-              <label class="field"><span>Source ARN</span><input class="mono" value={attrs?.attributes.QueueArn ?? '…'} readonly /></label>
+              <label class="field"><span>Source ARN</span><input dir="ltr" class="mono" value={attrs?.attributes.QueueArn ?? '…'} readonly /></label>
               {#if dlqSource.length}<p class="dim">Known source queues: {dlqSource.join(', ')}</p>{/if}
-              <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
+              <label class="field"><span>Destination ARN <em>(blank = original source)</em></span><input dir="ltr" class="mono" bind:value={redriveDest} placeholder="arn:aws:sqs:…" /></label>
               <div class="bar">
                 <button class="btn primary small" onclick={() => void redrive()} disabled={!canRedrive || redriving || !attrs}>{redriving ? 'Starting…' : 'Start redrive'}</button>
               </div>
@@ -616,29 +622,6 @@
   }
   .more {
     margin-inline-start: auto;
-  }
-  .tabs {
-    display: flex;
-    gap: 2px;
-    padding: 0 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tabs button {
-    padding: 6px 10px;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: var(--fs-m);
-  }
-  .tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-  .tabs button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
   }
   .tab-body {
     flex: 1;

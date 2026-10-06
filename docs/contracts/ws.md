@@ -769,7 +769,7 @@ persisted + verified findings ingested into memory):
 
 ## Goal-loop progress (Goal Loops)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/goal_loop.rs` on every loop
+Workspace-scoped. Emitted by `crates/otto-automation/src/goal_loop.rs` on every loop
 transition: status change, phase change (Plan → Execute → Evaluate → Digest), a new
 iteration, after each evaluation, and when an executor's live state flips (e.g.
 → `waiting`). The Loops UI updates the list row directly from these fields and
@@ -802,7 +802,7 @@ a loop is active, covering any missed event).
 
 ## Product AI-run completion (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs` at the end of every
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs` at the end of every
 AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ```json
@@ -828,7 +828,7 @@ AI-run task (analysis, rewrite, test-case generation, plan generation).
 
 ## Multi-agent plan kickoff (A3)
 
-Workspace-scoped. Emitted by `crates/otto-server/src/product_run.rs::run_generate_plan` each
+Workspace-scoped. Emitted by `crates/otto-product/src/run.rs::run_generate_plan` each
 time a planning (or the summarizer) session is created during a `plan/generate` run, carrying
 the live session ids known so far. Lets the Plan tab tile the planning sessions side-by-side so
 the user can watch them (and answer questions when `interactive`).
@@ -996,7 +996,7 @@ blind timer.
 }
 ```
 
-- Emitted by `otto-server/src/insights.rs` after a scheduled insights run
+- Emitted by `otto-insights/src/lib.rs` after a scheduled insights run
   completes (conditioned on `period_done()` returning `true`).
 - `period` — human-readable label combining the kind (`daily|weekly|monthly`)
   and the run's start date.
@@ -1081,12 +1081,28 @@ blind timer.
   "run_id": "<Id>", "status": "running|ok|error|canceled" }
 ```
 
-- Emitted by `otto_server::scheduled_tasks_engine` when a scheduled-task run
+- Emitted by `otto_automation::scheduled_tasks_engine` when a scheduled-task run
   starts, finishes (`ok`), errors, or is stopped from Otto (`canceled`).
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Scheduled Tasks page re-fetches the task's run history on a matching tick
   instead of polling.
 - TypeScript type: `{ type: 'scheduled_task_run_updated'; workspace_id: Id; task_id: Id; run_id: Id; status: string }`.
+
+---
+
+### `personal_agent_run_updated`
+
+```json
+{ "type": "personal_agent_run_updated", "workspace_id": "<Id>", "agent_id": "<Id>",
+  "run_id": "<Id>", "status": "running|ok|error" }
+```
+
+- Emitted by `otto_assistant::personal_agents_engine` when a personal-agent run
+  starts, finishes (`ok`) or errors.
+- Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
+- The Personal Agents page re-fetches the agent's run history on a matching
+  tick instead of polling.
+- TypeScript type: `{ type: 'personal_agent_run_updated'; workspace_id: Id; agent_id: Id; run_id: Id; status: string }`.
 
 ---
 
@@ -1267,7 +1283,7 @@ coalesce before refetching.
 
 ### `canvas_updated` / `canvas_session_started`
 
-Workspace-scoped. Emitted by `crates/otto-server/src/canvas_assist.rs` while an
+Workspace-scoped. Emitted by `crates/otto-canvas/src/assist.rs` while an
 Ask-AI agent turn edits a scene's backing source file (live, per-poll) and once
 more with the committed result; `canvas_session_started` fires at the START of
 the turn so the Canvas Assistant panel can attach the agent's shell immediately
@@ -1290,7 +1306,7 @@ instead of waiting for it to finish.
 
 Workspace-scoped. Emitted by `crates/otto-server/src/mockup_assist.rs` (live
 per-poll while the design agent edits the file, and once with the committed
-result), by `product_media.rs` on every `PUT /product/attachments/{aid}/content`
+result), by `otto_product::media` on every `PUT /product/attachments/{aid}/content`
 save from the UI, by `routes/swarm_ingest.rs` when a swarm agent publishes an
 artifact, and by `design_blender.rs` for each output a Blender render job
 attaches — same shape and timing as the canvas pair above, but for a product
@@ -1368,7 +1384,7 @@ their own routes.
 ### `design_assist_updated` / `design_variants_ready`
 
 Workspace-scoped states of the unified design-assist pipeline
-(`crates/otto-server/src/design_assist.rs`).
+(`crates/otto-design-assist/src/lib.rs`).
 
 ```json
 { "type": "design_assist_updated", "workspace_id": "<Id>", "artifact_id": "<Id>", "turn_id": "<Id>", "status": "starting|running|done|unchanged|conflict|failed", "mode": "generate|refine|critique|a11y|variant", "branch": "main|variant/<run>/<k>", "session_id": "<Id>" | null, "version_id": "<Id>" | null, "error": "..." | null }
@@ -1626,7 +1642,7 @@ saved Context, while existing sessions retain their initial context.
 Otto Assistant (`api.md` "Otto Assistant"). **Owner-scoped**: each event carries
 the assistant owner's `user_id` and is delivered ONLY to that user's
 connections — not to workspace members and not to root (the assistant is
-personal). Emitted by `crates/otto-server/src/assistant.rs` and its submodules.
+personal). Emitted by `crates/otto-assistant/src/assistant.rs` and its submodules.
 Reply prose still streams over the session-family `transcript_live` /
 `transcript_appended` events of `thread.session_id`; these four events carry the
 assistant's own index and queue.

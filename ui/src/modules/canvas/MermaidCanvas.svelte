@@ -24,6 +24,7 @@
   import { ui } from '../../lib/stores/ui.svelte';
   import type { CanvasDoc, CanvasFormat } from './types';
   import Icon from '../../lib/components/Icon.svelte';
+  import EmptyState from '../../lib/components/EmptyState.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
 
   interface Props {
@@ -384,17 +385,11 @@
           </div>
         {:else if notMermaid}
           <div class="empty">
-            <Icon name="shapes" size={28} />
-            <p class="lead">This canvas holds Excalidraw content</p>
-            <p class="hint">It’s labeled Mermaid but contains an Excalidraw scene. Create a new
-              <strong>Excalidraw</strong> canvas to edit those shapes.</p>
+            <EmptyState icon="shapes" title="This canvas holds Excalidraw content" body="It’s labeled Mermaid but contains an Excalidraw scene. Create a new Excalidraw canvas to edit those shapes." />
           </div>
         {:else if !renderError}
           <div class="empty">
-            <Icon name="branch" size={28} />
-            <p class="lead">Mermaid diagram</p>
-            <p class="hint">Describe it in <strong>Ask Otto</strong>, or open <strong>Code</strong> to
-              edit the Mermaid yourself — both write the same diagram and render here live.</p>
+            <EmptyState icon="branch" title="Mermaid diagram" body="Describe it in Ask Otto, or open Code to edit the Mermaid yourself — both write the same diagram and render here live." />
           </div>
         {/if}
 
@@ -429,13 +424,13 @@
           <button onclick={() => zoomBy(1.2)} title="Zoom in" aria-label="Zoom in"><Icon name="plus" size={14} /></button>
           <span class="sep"></span>
           <button onclick={() => void downloadSvg()} title="Download SVG" aria-label="Download SVG">
-            <Icon name="file" size={15} />
+            <Icon name="file" size={14} />
           </button>
           <button onclick={() => void downloadPng()} title="Download PNG" aria-label="Download PNG">
-            <Icon name="image" size={15} />
+            <Icon name="image" size={14} />
           </button>
           <button onclick={() => void copySource()} title="Copy source" aria-label="Copy source">
-            <Icon name="copy" size={15} />
+            <Icon name="copy" size={14} />
           </button>
         </div>
       {/if}
@@ -535,7 +530,7 @@
   .content {
     position: absolute;
     top: 0;
-    left: 0;
+    left: 0; /* ui-guards: allow — pan/zoom transform space is physical (x grows rightward) */
     will-change: transform;
   }
   .content :global(svg) {
@@ -548,27 +543,11 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    text-align: center;
-    color: var(--text-dim);
-    padding: 24px;
     pointer-events: none;
-  }
-  .empty .lead {
-    margin: 6px 0 0;
-    font-size: var(--fs-l);
-    font-weight: 600;
-    color: var(--text);
-  }
-  .empty .hint {
-    margin: 0;
-    font-size: var(--fs-m);
-    max-width: 360px;
-    line-height: 1.5;
   }
   .err {
     position: absolute;
-    left: 50%;
+    left: 50%; /* ui-guards: allow — centred with translateX(-50%), direction-neutral */
     bottom: 64px;
     transform: translateX(-50%);
     display: inline-flex;

@@ -130,7 +130,7 @@
     then commit or sync when you choose. Stored credentials and runtime history are excluded. Review document content before pushing it to a remote.</p>
   <label for="backup-git-repo">Existing local repository</label>
   <div class="controls">
-    <input id="backup-git-repo" class="input mono" bind:value={repoPath} disabled={busy} oninput={() => { generation++; reset(); }} placeholder="/path/to/backup-repository" />
+    <input dir="ltr" id="backup-git-repo" class="input mono" bind:value={repoPath} disabled={busy} oninput={() => { generation++; reset(); }} placeholder="/path/to/backup-repository" />
     <button class="btn" disabled={busy} onclick={() => browsing = true}>Browse…</button>
     <button class="btn" disabled={busy || !repoPath.trim()} onclick={loadStatus}>Check repository</button>
   </div>
@@ -147,7 +147,7 @@
         {#if preview.reconnect.length}<details><summary>Reconnect after importing</summary><ul>{#each preview.reconnect as item}<li>{item}</li>{/each}</ul></details>{/if}
         <button class="btn" disabled={busy || exported} onclick={writeSnapshot}>{exported ? 'Snapshot written' : 'Write snapshot'}</button>
         {#if exported}
-          <div class="controls"><input class="input" aria-label="Snapshot commit message" bind:value={message} disabled={busy} placeholder="Describe the backup changes" /><button class="btn" disabled={busy || !message.trim()} onclick={commitSnapshot}>Commit snapshot</button></div>
+          <div class="controls"><input dir="auto" class="input" aria-label="Snapshot commit message" bind:value={message} disabled={busy} placeholder="Describe the backup changes" /><button class="btn" disabled={busy || !message.trim()} onclick={commitSnapshot}>Commit snapshot</button></div>
         {/if}
       </div>
     {/if}

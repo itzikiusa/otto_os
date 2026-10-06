@@ -22,7 +22,7 @@ import type {
   ReviewProofPack,
   ReviewProofPackExport,
 } from './types';
-import { apiComponent, startMeasurement } from '../telemetry';
+import { apiComponent, clientSpanName, startMeasurement } from '../telemetry';
 import { serviceHealth } from '../stores/serviceHealth.svelte';
 import { inheritedLane, type Lane } from './lane';
 
@@ -280,10 +280,12 @@ export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}
     init = { ...init, headers };
   }
   let status = 0;
+  let route: string | null = null;
   try {
     const resp = await fetch(`${base}/api/v1${path}`, init);
     if (base !== baseUrl()) altRetryMs = ALT_RETRY_MIN_MS;
     status = resp.status;
+    route = resp.headers.get('x-otto-route');
     return resp;
   } catch (e) {
     if (base === baseUrl() || isAbortError(e)) throw e;
@@ -292,9 +294,11 @@ export async function laneFetch(lane: Lane, path: string, init: RequestInit = {}
     if (method !== 'GET' && method !== 'HEAD') throw e;
     const resp = await fetch(`${baseUrl()}/api/v1${path}`, init);
     status = resp.status;
+    route = resp.headers.get('x-otto-route');
     return resp;
   } finally {
-    measured?.finish(status > 0 && status < 400 ? 'ok' : 'error', { 'http.request.method': (init.method ?? 'GET').toUpperCase(), ...(status ? { 'http.response.status_code': status } : {}), 'otto.lane': lane });
+    const method = (init.method ?? 'GET').toUpperCase();
+    measured?.finish(status > 0 && status < 400 ? 'ok' : 'error', { 'http.request.method': method, ...(status ? { 'http.response.status_code': status } : {}), 'otto.lane': lane }, clientSpanName(method, route));
   }
 }
 

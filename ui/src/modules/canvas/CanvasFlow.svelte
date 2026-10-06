@@ -17,6 +17,7 @@
   // point (scene coords via `screenToFlowPosition`) and resets the tool.
 
   import { untrack } from 'svelte';
+  import { requestEdit } from './editRequest.svelte';
   import {
     SvelteFlow,
     Background,
@@ -204,15 +205,27 @@
       }
       return;
     }
-    if (mod && (e.key === 'z' || e.key === 'Z')) {
+    // Undo/redo are the SCENE's — while a node's editor has focus, ⌘Z / ⌘Y
+    // belong to the text field (undoing the whole scene mid-word lost edits).
+    if (!typing && mod && (e.key === 'z' || e.key === 'Z')) {
       e.preventDefault();
       if (e.shiftKey) canvas.redo();
       else canvas.undo();
       return;
     }
-    if (mod && (e.key === 'y' || e.key === 'Y')) {
+    if (!typing && mod && (e.key === 'y' || e.key === 'Y')) {
       e.preventDefault();
       canvas.redo();
+      return;
+    }
+    // Enter / F2 edits the one selected node — the keyboard twin of the
+    // double-click every node offers (accessibility.md §3, grids: Enter edits).
+    if (!typing && !mod && !e.shiftKey && !e.altKey && (e.key === 'Enter' || e.key === 'F2')) {
+      const sel = nodes.filter((n) => n.selected);
+      if (sel.length === 1) {
+        e.preventDefault();
+        requestEdit(sel[0].id);
+      }
       return;
     }
     if (!typing && mod && (e.key === 'a' || e.key === 'A')) {
@@ -294,6 +307,9 @@
     height: 100%;
     position: relative;
     outline: none;
+  }
+  .editor:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--accent-text);
   }
   /* While a tool is armed, hint the insert action with a crosshair cursor. */
   .editor.tool-active :global(.svelte-flow__pane) {

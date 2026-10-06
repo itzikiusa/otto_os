@@ -7,8 +7,21 @@
 //! so a crash never leaves a truncated blob under a valid name. Nothing here
 //! deletes a blob on its own — removal is only the prune's GC step (opt-in
 //! admin route, or the scheduled retention job — see `retention`).
+//!
+//! GC fence: `put` skips an existing blob, so a save can "store" a blob the
+//! GC already decided was unreferenced and is about to delete — the new
+//! version would then point at a missing file. Every writer holds
+//! [`BlobStore::reference_guard`] (shared) from its `put` until the DB row
+//! that references the blob is committed; the GC takes
+//! [`BlobStore::gc_guard`] (exclusive) and re-checks `blob_in_use` under it
+//! before deleting. Process-wide per canonical blob root, like the
+//! artifact `commit_lock`, so request-scoped services share it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use otto_core::{Error, Result};
 use sha2::{Digest, Sha256};
@@ -118,8 +131,45 @@ impl BlobStore {
         .unwrap_or((0, 0))
     }
 
+    /// The GC fence of this store's root (see the module docs).
+    async fn fence(&self) -> Result<Arc<RwLock<()>>> {
+        tokio::fs::create_dir_all(&self.root)
+            .await
+            .map_err(|e| Error::Internal(format!("create blob dir: {e}")))?;
+        let root = tokio::fs::canonicalize(&self.root)
+            .await
+            .map_err(|e| Error::Internal(format!("blob root identity: {e}")))?;
+        type Fences = HashMap<PathBuf, Weak<RwLock<()>>>;
+        static FENCES: OnceLock<Mutex<Fences>> = OnceLock::new();
+        let mut fences = FENCES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        fences.retain(|_, f| f.strong_count() > 0);
+        if let Some(f) = fences.get(&root).and_then(Weak::upgrade) {
+            return Ok(f);
+        }
+        let f = Arc::new(RwLock::new(()));
+        fences.insert(root, Arc::downgrade(&f));
+        Ok(f)
+    }
+
+    /// Hold (shared) from `put` until the DB row referencing the blob is
+    /// committed, so the GC can't delete it in between. Never hold it across
+    /// [`Self::gc_guard`] (the fence is fair: that would deadlock).
+    pub async fn reference_guard(&self) -> Result<OwnedRwLockReadGuard<()>> {
+        Ok(self.fence().await?.read_owned().await)
+    }
+
+    /// Hold (exclusive) around the GC's "still unreferenced?" re-check and
+    /// [`Self::remove`]: no writer is mid-reference while it is held.
+    pub async fn gc_guard(&self) -> Result<OwnedRwLockWriteGuard<()>> {
+        Ok(self.fence().await?.write_owned().await)
+    }
+
     /// Remove a blob — ONLY called by the opt-in prune after it proved no
-    /// version/thumbnail references the blob. Returns whether a file existed.
+    /// version/thumbnail references the blob, under [`Self::gc_guard`].
+    /// Returns whether a file existed.
     pub async fn remove(&self, sha: &str) -> Result<bool> {
         let p = self.path(sha)?;
         match tokio::fs::remove_file(&p).await {
@@ -156,6 +206,37 @@ mod tests {
         assert!(!store.remove(&a).await.unwrap());
         assert_eq!(store.usage().await, (0, 0));
         assert!(matches!(store.get(&a).await, Err(Error::NotFound(_))));
+    }
+
+    /// The fence is shared by every store over the same (canonical) root:
+    /// GC waits for an in-flight reference and vice versa.
+    #[tokio::test]
+    async fn gc_guard_waits_for_in_flight_references_across_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = BlobStore::new(dir.path().join("blobs"));
+        let alias = dir.path().join("alias");
+        std::fs::create_dir_all(dir.path().join("blobs")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("blobs"), &alias).unwrap();
+        let b = BlobStore::new(&alias);
+        let reference = a.reference_guard().await.unwrap();
+        let gc = b.gc_guard();
+        tokio::pin!(gc);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut gc)
+                .await
+                .is_err(),
+            "GC must wait while a writer is between put and its DB reference"
+        );
+        drop(reference);
+        let held = gc.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), a.reference_guard())
+                .await
+                .is_err(),
+            "a writer waits while the GC re-checks and deletes"
+        );
+        drop(held);
+        a.reference_guard().await.unwrap();
     }
 
     #[tokio::test]

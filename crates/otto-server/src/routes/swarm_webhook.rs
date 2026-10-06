@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::state::ServerCtx;
-use crate::swarm_channels::{GoalSpec, LaunchOpts, Origin};
+use otto_swarm::runtime::channels::{GoalSpec, LaunchOpts, Origin};
 
 #[derive(Deserialize)]
 pub struct WebhookGoalReq {
@@ -231,7 +231,7 @@ pub async fn trigger(
         start,
         created_by: swarm.created_by.clone(),
     };
-    match crate::swarm_channels::launch(&ctx, &swarm, opts).await {
+    match otto_swarm::runtime::channels::launch(&ctx.swarm_rt(), &swarm, opts).await {
         Ok(project_id) => (
             StatusCode::ACCEPTED,
             Json(json!({ "swarm_id": sid, "project_id": project_id, "started": start })),

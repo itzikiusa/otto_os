@@ -172,7 +172,7 @@
       <span class="git-tab-name">{r.name}</span>
       {#if branchOf(r.id)}
         <span class="git-tab-branch mono">
-          <Icon name="branch" size={9} /><span class="git-tab-branch-name">{branchOf(r.id)}</span>
+          <Icon name="branch" size={12} /><span class="git-tab-branch-name">{branchOf(r.id)}</span>
         </span>
       {/if}
       <button
@@ -183,7 +183,7 @@
         onclick={(e) => {
           e.stopPropagation();
           git.closeRepoTab(r.id);
-        }}><Icon name="x" size={9} /></button
+        }}><Icon name="x" size={12} /></button
       >
     </div>
   {/each}

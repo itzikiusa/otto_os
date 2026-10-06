@@ -122,7 +122,7 @@
         </div>
         <div class="row-controls">
           {#if recording}
-            <input
+            <input dir="auto"
               class="input recorder"
               use:focusOnMount
               readonly

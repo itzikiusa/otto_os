@@ -46,9 +46,9 @@ pub fn exec_spec(k: &Kubectl, req: &ExecReq) -> Result<CommandSpec> {
     if ns.is_empty() || pod.is_empty() {
         return Err(Error::Invalid("ns and pod are required".into()));
     }
-    if pod.starts_with('-') || pod.contains(char::is_whitespace) {
-        return Err(Error::Invalid("invalid pod name".into()));
-    }
+    // Flag-shaped names (`--context=…`, `-A`) would re-target kubectl.
+    crate::resources::validate_name("namespace", ns)?;
+    crate::resources::validate_name("pod", pod)?;
     let mut args = k.argv_stream(["-n", ns, "exec", "-it", pod]);
     if let Some(c) = req
         .container
@@ -56,8 +56,8 @@ pub fn exec_spec(k: &Kubectl, req: &ExecReq) -> Result<CommandSpec> {
         .map(str::trim)
         .filter(|c| !c.is_empty())
     {
-        args.push("-c".into());
-        args.push(c.into());
+        crate::resources::validate_name("container", c)?;
+        args.push(format!("--container={c}"));
     }
     args.push("--".into());
     match req.command.as_ref().filter(|c| !c.is_empty()) {
@@ -211,8 +211,7 @@ mod tests {
                 "exec",
                 "-it",
                 "web-1",
-                "-c",
-                "web",
+                "--container=web",
                 "--",
                 "sh",
                 "-c",

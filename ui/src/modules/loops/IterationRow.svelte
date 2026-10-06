@@ -143,7 +143,7 @@
           <div class="crits">
             {#each iter.evaluation.criteria as c (c.id)}
               <span class="crit-chip" class:met={c.met} title={c.evidence || undefined}>
-                <Icon name={c.met ? 'check' : 'dot'} size={11} />
+                <Icon name={c.met ? 'check' : 'dot'} size={12} />
                 <span class="crit-label">{criteria[c.id] || c.id}</span>
               </span>
             {/each}

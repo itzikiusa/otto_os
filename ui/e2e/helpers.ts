@@ -1,4 +1,6 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page, type Request } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
 // The top-level routable pages (hash router: #/<module>). `share` is excluded
@@ -53,18 +55,37 @@ export async function openPage(page: Page, id: string): Promise<void> {
 }
 
 /**
+ * Open the New Session sheet with ⌘T, falling back to the TabBar + button only
+ * if the shortcut never reaches the app. The sheet is lazy-loaded
+ * (`{#await import(...)}` in App.svelte), so it appears a beat after the key
+ * press: an instant `isVisible()` check reads false, and the fallback click then
+ * lands on the sheet's own backdrop once it mounts. Wait for the sheet first.
+ */
+export async function openNewSessionSheet(page: Page): Promise<Locator> {
+  const dialog = page.locator('.sheet[role="dialog"][aria-label="New session"]');
+  await page.keyboard.press('Meta+t');
+  const opened = await dialog
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true, () => false);
+  if (!opened) await page.getByTitle('New session', { exact: true }).click();
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+/**
  * Open the API page and make sure the request editor is showing. A workspace
  * with nothing in it (no saved requests, history or edited tab) opens on the
  * "Create your first request" onboarding state; this clicks through it.
  */
 export async function openApiEditor(page: Page): Promise<void> {
   await openPage(page, 'api');
-  // The editor is temporarily visible during the first workspace fetch. Wait
-  // for that fetch before deciding whether the empty-workspace CTA is needed.
-  await expect(page.getByText('Loading saved requests…', { exact: true })).toHaveCount(0);
+  // The editor shows (aria-busy) while the workspace's lists are in flight; an
+  // untouched empty workspace swaps it for onboarding once they settle. Decide
+  // only after that, or the onboarding check races the swap.
   const url = page.getByLabel('Request URL', { exact: true });
   const onboarding = page.getByText('Create your first request', { exact: true });
   await expect(url.or(onboarding).first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0, { timeout: 15_000 });
   if (await onboarding.isVisible()) {
     await page.getByRole('button', { name: 'New request', exact: true }).first().click();
   }
@@ -211,3 +232,33 @@ export async function openRightPanelTab(page: Page, name: string): Promise<void>
   }
   await expect(tab).toHaveAttribute('aria-selected', 'true');
 }
+
+/** The flattened PNG a snip annotated-save POSTs, as base64. The editor sends
+ *  a raw `image/png` body (docs/contracts/api.md, `POST /snips/{id}/annotated`),
+ *  not the legacy `{data_b64}` JSON — assert that framing, then hand back the
+ *  bytes in the form the specs decode. */
+export function snipAnnotatedPng(request: Request): string {
+  expect(request.headers()['content-type']).toBe('image/png');
+  const body = request.postDataBuffer();
+  expect(body, 'annotated save must carry a body').not.toBeNull();
+  expect(body!.subarray(0, 8).toString('hex'), 'annotated save must be a PNG').toBe('89504e470d0a1a0a');
+  return body!.toString('base64');
+}
+
+/** The tour film's chapter `title` as the Help page labels its button
+ *  (`m:ss Title`, `timeLabel` in src/modules/help/guide.ts) plus its start in
+ *  seconds — read from the bundled film.json so the playback specs follow a
+ *  re-cut film instead of pinning the old timestamps. */
+export function tourChapter(title: string): { label: string; start: number } {
+  const film = JSON.parse(readFileSync(join(process.cwd(), 'src/lib/walkthroughs/film.json'), 'utf8')) as {
+    chapters: { title: string; start: number }[];
+  };
+  const chapter = film.chapters.find((c) => c.title === title);
+  if (!chapter) throw new Error(`film.json has no chapter titled ${JSON.stringify(title)}`);
+  const s = Math.floor(chapter.start);
+  return { label: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} ${title}`, start: chapter.start };
+}
+
+/** Path of a real tour MP4 (OTTO_E2E_TOUR_VIDEO — CI generates a synthetic
+ *  one); playback specs skip without it. */
+export const tourVideoPath = process.env.OTTO_E2E_TOUR_VIDEO;

@@ -27,7 +27,11 @@ reqwest = { workspace = true }
 # auto-decompression for every reqwest client in the daemon). Already in the
 # tree through the mongodb driver's zstd wire compression.
 zstd = { version = "0.13.3", default-features = false }
-sqlx = { workspace = true, features = ["mysql", "postgres", "tls-rustls", "bigdecimal", "time", "chrono", "uuid", "ipnetwork", "mac_address"] }
+# `mysql-rsa`: sqlx 0.9 no longer enables the RSA backend by default, and
+# without it MySQL 8/9's default `caching_sha2_password` fails on a plaintext
+# connection ("RSA auth backend disabled") — the client encrypts the password
+# with the server's public key. TLS connections never take that path.
+sqlx = { workspace = true, features = ["mysql", "mysql-rsa", "postgres", "tls-rustls", "bigdecimal", "time", "chrono", "uuid", "ipnetwork", "mac_address"] }
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
 # Wire compression is not a nice-to-have here: a fat-document collection read
 # over an SSH tunnel is bandwidth-bound (measured ~68 KB/s on a real bastion),

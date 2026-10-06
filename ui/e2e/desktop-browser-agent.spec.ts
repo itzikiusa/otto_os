@@ -59,8 +59,8 @@ test.afterEach(async () => {
 });
 
 async function openFixture(page: Page): Promise<void> {
-  await page.getByPlaceholder('Enter URL').fill(FIXTURE_URL);
-  await page.getByTitle('Go').click();
+  await page.getByPlaceholder('e.g. https://example.com').fill(FIXTURE_URL);
+  await page.getByRole('button', { name: 'Go', exact: true }).click();
   await expect(page.locator('.reader h1')).toHaveText('Agent Fixture', { timeout: 15_000 });
 }
 
@@ -76,7 +76,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   await page.goto('/#/browser');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
 
-  const dock = page.getByLabel('Browser agent');
+  const dock = page.getByRole('complementary', { name: 'Browser agent' });
   await expect(dock).toContainText('No session attached');
   // Detached → the ask bar is disabled with a hint, never a dead input.
   const ask = page.getByLabel('Ask the agent about this page');
@@ -93,7 +93,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
   // The binding survives a reload (persisted per workspace).
   await page.reload();
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByLabel('Browser agent')).toContainText('E2E Shell');
+  await expect(page.getByRole('complementary', { name: 'Browser agent' })).toContainText('E2E Shell');
 
   await openFixture(page);
   await markHeading(page, 'this heading');
@@ -137,7 +137,7 @@ test('browser page: dock starts detached, attaches a session, ask sends page + m
 test('browser page: "New agent" creates a session bound to the dock without leaving the page', async ({ page }) => {
   await page.goto('/#/browser');
   await expect(page.locator('.shell')).toBeVisible({ timeout: 15_000 });
-  const dock = page.getByLabel('Browser agent');
+  const dock = page.getByRole('complementary', { name: 'Browser agent' });
 
   // The default provider is whatever the daemon reports; the test daemon's
   // shell provider is what a fresh install falls back to when no agent CLI
@@ -176,7 +176,7 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   await expect(panel.getByRole('group', { name: 'Browser version' })).toHaveCount(0);
   // The default is the Browser module: its URL bar + an ask bar aimed at the
   // active session.
-  await expect(panel.getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
+  await expect(panel.getByPlaceholder('e.g. https://example.com', { exact: true })).toBeVisible();
   await expect(panel.getByPlaceholder('Search or enter URL…')).toHaveCount(0);
   const ask = panel.getByLabel('Ask the agent about this page');
   await expect(ask).toBeVisible();
@@ -184,7 +184,7 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   // "attach a session" one (the session is the pane beside it).
   await expect(ask).toHaveAttribute('placeholder', /Open a page first/);
   // No embedded dock inside the panel — the session IS the main pane.
-  await expect(panel.getByLabel('Browser agent')).toHaveCount(0);
+  await expect(panel.getByRole('complementary', { name: 'Browser agent' })).toHaveCount(0);
 
   // Settings → Browser: the classic per-session panel.
   await openPage(page, 'settings/browser');
@@ -199,7 +199,7 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
   await openRightPanelTab(page, 'Browser');
   await expect(page.locator('.rpanel').getByPlaceholder('Search or enter URL…')).toBeVisible();
-  await expect(page.locator('.rpanel').getByPlaceholder('Enter URL', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.rpanel').getByPlaceholder('e.g. https://example.com', { exact: true })).toHaveCount(0);
 
   // Back to the module restores it.
   await openPage(page, 'settings/browser');
@@ -207,5 +207,5 @@ test('agent mode: the Session panel Browser tab embeds the module; Settings → 
   await openPage(page, 'agents');
   await page.getByRole('button', { name: /E2E Shell/ }).first().click();
   await openRightPanelTab(page, 'Browser');
-  await expect(page.locator('.rpanel').getByPlaceholder('Enter URL', { exact: true })).toBeVisible();
+  await expect(page.locator('.rpanel').getByPlaceholder('e.g. https://example.com', { exact: true })).toBeVisible();
 });

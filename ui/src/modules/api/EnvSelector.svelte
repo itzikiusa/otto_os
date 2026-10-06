@@ -147,7 +147,7 @@
               title={env.is_active ? 'Active' : 'Set active'}
             >
               <span class="radio" class:on={env.is_active}>
-                {#if env.is_active}<Icon name="check" size={10} />{/if}
+                {#if env.is_active}<Icon name="check" size={12} />{/if}
               </span>
               <span class="env-name ellipsis grow">{env.name}</span>
               <span class="env-count">{Object.keys(env.variables).length + env.secret_keys.length} variables{#if env.secret_keys.length}{' '}· {env.secret_keys.length} secret{/if}</span>
@@ -163,7 +163,7 @@
             <div class="var-editor">
               {#each rows as row, i (i)}
                 <div class="var-row">
-                  <input class="input var-key mono" placeholder="base_url" aria-label="Variable name" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
+                  <input dir="ltr" class="input var-key mono" placeholder="base_url" aria-label="Variable name" value={row.key} oninput={(e) => updateRow(i, { key: (e.currentTarget as HTMLInputElement).value })} />
                   <input
                     class="input var-val mono"
                     class:secret={row.secret}

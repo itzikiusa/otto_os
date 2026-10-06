@@ -82,7 +82,7 @@
 
     {#if mode === 'curl'}
       <p class="lead">Paste a <code>curl</code> command, for example from your browser’s dev tools (“Copy as cURL”). It opens as a new, unsaved request.</p>
-      <textarea class="input mono curl" rows="6" bind:value={curl} spellcheck="false" aria-label="curl command"
+      <textarea dir="ltr" class="input mono curl" rows="6" bind:value={curl} spellcheck="false" aria-label="curl command"
         placeholder={"curl https://api.example.com/v1/users \\\n  -H 'Authorization: Bearer {{api_token}}'"}></textarea>
       <p class="hint">Tip: pasting a curl command straight into the URL field works too.</p>
     {:else if mode === 'file'}
@@ -141,7 +141,7 @@
     cursor: pointer;
   }
   .pick.disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   code {

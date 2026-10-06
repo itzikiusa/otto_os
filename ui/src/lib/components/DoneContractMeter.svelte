@@ -58,7 +58,7 @@
         {#each contract.items as it (it.key)}
           <li class="item" class:ok={it.satisfied} class:miss={!it.satisfied}>
             <span class="mark" aria-hidden="true">
-              <Icon name={it.satisfied ? 'check' : 'x'} size={11} />
+              <Icon name={it.satisfied ? 'check' : 'x'} size={12} />
             </span>
             <div class="item-body">
               <div class="item-top">

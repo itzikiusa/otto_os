@@ -312,8 +312,8 @@
       <span class="lbl">{f.label}</span>
       {#each linkRows(f.key) as l, i (i)}
         <div class="linkrow">
-          <input class="input" value={l.label} aria-label="Link label" disabled={readonly} oninput={(e) => setLink(f.key, i, 'label', e.currentTarget.value)} />
-          <input class="input" value={l.href} aria-label="Link URL" disabled={readonly} oninput={(e) => setLink(f.key, i, 'href', e.currentTarget.value)} />
+          <input dir="auto" class="input" value={l.label} aria-label="Link label" disabled={readonly} oninput={(e) => setLink(f.key, i, 'label', e.currentTarget.value)} />
+          <input dir="ltr" class="input" value={l.href} aria-label="Link URL" disabled={readonly} oninput={(e) => setLink(f.key, i, 'href', e.currentTarget.value)} />
           <button class="icon-btn" onclick={() => removeLink(f.key, i)} disabled={readonly} aria-label="Remove link" title="Remove link"><Icon name="x" size={12} /></button>
         </div>
       {/each}
@@ -324,18 +324,18 @@
     <div class="field" class:half={f.half}>
       <label for={`si-${f.key}`}>{f.label}</label>
       {#if f.kind === 'textarea'}
-        <textarea id={`si-${f.key}`} class="input" rows={f.key === 'body' || f.key === 'quote' ? 4 : 2} value={v} disabled={readonly} oninput={(e) => setProp(f.key, e.currentTarget.value)}></textarea>
+        <textarea dir="auto" id={`si-${f.key}`} class="input" rows={f.key === 'body' || f.key === 'quote' ? 4 : 2} value={v} disabled={readonly} oninput={(e) => setProp(f.key, e.currentTarget.value)}></textarea>
       {:else if f.kind === 'lines'}
-        <textarea id={`si-${f.key}`} class="input" rows="4" value={rawLines(f.key)} disabled={readonly} oninput={(e) => setProp(f.key, e.currentTarget.value.split('\n'))}></textarea>
+        <textarea dir="auto" id={`si-${f.key}`} class="input" rows="4" value={rawLines(f.key)} disabled={readonly} oninput={(e) => setProp(f.key, e.currentTarget.value.split('\n'))}></textarea>
       {:else if f.kind === 'icon'}
-        <input id={`si-${f.key}`} class="input" list="site-icon-names" value={v} disabled={readonly} placeholder="bolt, star, 2×…" oninput={(e) => setProp(f.key, e.currentTarget.value)} />
+        <input dir="auto" id={`si-${f.key}`} class="input" list="site-icon-names" value={v} disabled={readonly} placeholder="bolt, star, 2×…" oninput={(e) => setProp(f.key, e.currentTarget.value)} />
       {:else if f.kind === 'media'}
         <div class="with-btn">
-          <input id={`si-${f.key}`} class="input" value={v} disabled={readonly} placeholder="https://… or pick from the library" oninput={(e) => setProp(f.key, e.currentTarget.value)} />
+          <input dir="ltr" id={`si-${f.key}`} class="input" value={v} disabled={readonly} placeholder="https://… or pick from the library" oninput={(e) => setProp(f.key, e.currentTarget.value)} />
           {#if !readonly}<button class="btn small" onclick={(e) => void choose('image', e, (uri) => setProp(f.key, uri))}>Library…</button>{/if}
         </div>
       {:else}
-        <input id={`si-${f.key}`} class="input" value={v} disabled={readonly} placeholder={f.placeholder ?? ''} oninput={(e) => setProp(f.key, e.currentTarget.value)} />
+        <input dir="auto" id={`si-${f.key}`} class="input" value={v} disabled={readonly} placeholder={f.placeholder ?? ''} oninput={(e) => setProp(f.key, e.currentTarget.value)} />
       {/if}
       {#if warn}<span class="hint bad"><Icon name="warning" size={12} /> {warn}</span>{:else if f.hint}<span class="hint">{f.hint}</span>{/if}
     </div>
@@ -487,7 +487,7 @@
           {#each GRADIENTS as g (g)}
             <button class="sw grad" data-g={g} class:on={section.style?.background === `gradient:${g}`} style:--sw-a={g === 'ink' ? theme.night : g === 'soft' ? theme.surfaceAlt : theme.primary} style:--sw-b={g === 'soft' ? theme.primary : theme.accent} onclick={() => setBg(`gradient:${g}`)} disabled={readonly} aria-label={`Gradient ${g}`} title={`Gradient · ${g}`}></button>
           {/each}
-          <input class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom color (hex)" onchange={commitHex} />
+          <input dir="auto" class="input hex" placeholder="# hex" bind:value={hexDraft} disabled={readonly} aria-label="Custom color (hex)" onchange={commitHex} />
         </div>
         {#if bg?.offBrand}
           <p class="warnchip" role="status"><Icon name="warning" size={12} /> Off-brand color — not in {kitLabel ?? 'the palette'}.
@@ -590,22 +590,22 @@
     <!-- ── Nothing selected: page + site ── -->
     <div class="group">
       <div class="gh"><span class="k">Page</span></div>
-      <div class="field"><label for="sp-title">Title</label><input id="sp-title" class="input" value={page.title} disabled={readonly} oninput={(e) => setPage('title', e.currentTarget.value)} /></div>
+      <div class="field"><label for="sp-title">Title</label><input dir="auto" id="sp-title" class="input" value={page.title} disabled={readonly} oninput={(e) => setPage('title', e.currentTarget.value)} /></div>
       <div class="field">
         <label for="sp-slug">URL</label>
         {#if page === doc.pages[0]}
-          <input id="sp-slug" class="input" value="/ (home)" disabled />
+          <input dir="ltr" id="sp-slug" class="input" value="/ (home)" disabled />
         {:else}
-          <input id="sp-slug" class="input" value={page.slug} disabled={readonly} onchange={(e) => setPage('slug', e.currentTarget.value)} />
+          <input dir="ltr" id="sp-slug" class="input" value={page.slug} disabled={readonly} onchange={(e) => setPage('slug', e.currentTarget.value)} />
         {/if}
       </div>
-      <div class="field"><label for="sp-desc">Description (search engines)</label><textarea id="sp-desc" class="input" rows="2" value={page.description ?? ''} disabled={readonly} oninput={(e) => setPage('description', e.currentTarget.value)}></textarea></div>
+      <div class="field"><label for="sp-desc">Description (search engines)</label><textarea dir="auto" id="sp-desc" class="input" rows="2" value={page.description ?? ''} disabled={readonly} oninput={(e) => setPage('description', e.currentTarget.value)}></textarea></div>
     </div>
     <div class="group">
       <div class="gh"><span class="k">Site</span></div>
-      <div class="field"><label for="ss-title">Site name</label><input id="ss-title" class="input" value={doc.title ?? ''} disabled={readonly} oninput={(e) => setSite('title', e.currentTarget.value)} /></div>
-      <div class="field half"><label for="ss-domain">Domain</label><input id="ss-domain" class="input" value={doc.settings?.domain ?? ''} placeholder="example.com" disabled={readonly} oninput={(e) => setSite('domain', e.currentTarget.value)} /></div>
-      <div class="field half"><label for="ss-lang">Language</label><input id="ss-lang" class="input" value={doc.settings?.lang ?? 'en'} disabled={readonly} oninput={(e) => setSite('lang', e.currentTarget.value)} /></div>
+      <div class="field"><label for="ss-title">Site name</label><input dir="auto" id="ss-title" class="input" value={doc.title ?? ''} disabled={readonly} oninput={(e) => setSite('title', e.currentTarget.value)} /></div>
+      <div class="field half"><label for="ss-domain">Domain</label><input dir="auto" id="ss-domain" class="input" value={doc.settings?.domain ?? ''} placeholder="example.com" disabled={readonly} oninput={(e) => setSite('domain', e.currentTarget.value)} /></div>
+      <div class="field half"><label for="ss-lang">Language</label><input dir="auto" id="ss-lang" class="input" value={doc.settings?.lang ?? 'en'} disabled={readonly} oninput={(e) => setSite('lang', e.currentTarget.value)} /></div>
     </div>
     <div class="group">
       <div class="gh"><span class="k">Brand</span>

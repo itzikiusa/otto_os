@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Product Story Analysis page — left sidebar (Stories | Learnings toggle +
   // story list + import) and a per-story workspace: ONE header band buckets the
   // 13 sub-views into 4 workflow GROUPS (Story · Discover · Deliver · Log) —
@@ -556,7 +557,7 @@
 {#snippet storyRow(s: ProductStory, node?: TreeNode, depth: number = 0)}
   <!-- One tree row: an epic (▾/▸ + 🗂 + count), a top-level story (unchanged
        look) or an indented child (depth 1 = unfiled, 2 = inside a folder). -->
-  <div
+  <div use:rowMenu
     class="story-row-wrap"
     class:active={product.selectedId === s.id}
     class:child={depth > 0}
@@ -628,14 +629,14 @@
       <!-- Open story: its stage (or tree role), folder and source key sit beside
            the title — the old breadcrumb row is folded into the header. -->
       {#if selectedIsEpic}
-        <span class="chip pp-epic-chip"><Icon name="folder" size={10} /> Epic · {product.childrenOf(selectedStory.id).length} children</span>
+        <span class="chip pp-epic-chip"><Icon name="folder" size={12} /> Epic · {product.childrenOf(selectedStory.id).length} children</span>
       {:else if selectedStory.tree_kind === 'doc'}
-        <span class="chip"><Icon name="note" size={10} /> Doc</span>
+        <span class="chip"><Icon name="note" size={12} /> Doc</span>
       {:else}
         <StatusBadge status={storyStage(selectedStory.stage)} />
       {/if}
       {#if selectedStory.folder}
-        <span class="chip pp-folder-chip" title="Folder inside the epic"><Icon name="folder" size={10} /> {selectedStory.folder}</span>
+        <span class="chip pp-folder-chip" title="Folder inside the epic"><Icon name="folder" size={12} /> {selectedStory.folder}</span>
       {/if}
       {#if selectedStory.source_kind !== 'draft'}
         <span class="pp-key mono">{selectedStory.source_key}</span>
@@ -665,7 +666,7 @@
     {#if product.view === 'stories'}
       {#if selectedStory && selectedIsEpic}
         <button class="btn small add-child-btn" onclick={(e) => addChildMenu(e, selectedStory)} title="Add a story or doc under this epic" data-label="Add child…">
-          <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={10} />
+          <Icon name="plus" size={12} /> Add child <Icon name="chevronDown" size={12} />
         </button>
       {/if}
       <!-- The ONE import affordance — secondary, before the one primary (the empty state owns it while the list is empty). -->
@@ -681,7 +682,7 @@
         disabled={draftCreating}
         data-label="New draft or epic…"
       >
-        <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={10} />
+        <Icon name="plus" size={12} /> {draftCreating ? 'Creating…' : 'New'} <Icon name="chevronDown" size={12} />
       </button>
     {/if}
   {/snippet}
@@ -755,8 +756,8 @@
                     onclick={() => toggleFolder(node.story.id, f.name)}
                     aria-expanded={!collapsedFolders[`${node.story.id}/${f.name}`]}
                   >
-                    <Icon name={collapsedFolders[`${node.story.id}/${f.name}`] ? 'chevronRight' : 'chevronDown'} size={10} />
-                    <Icon name="folder" size={11} />
+                    <Icon name={collapsedFolders[`${node.story.id}/${f.name}`] ? 'chevronRight' : 'chevronDown'} size={12} />
+                    <Icon name="folder" size={12} />
                     <span class="folder-name">{f.name}/</span>
                     <span class="folder-count">{f.children.length}</span>
                   </button>

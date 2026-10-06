@@ -10,6 +10,7 @@
   import { browser } from '../../lib/stores/browser.svelte';
   import { vault } from '../vault/vault.svelte';
   import { toasts } from '../../lib/toast.svelte';
+  import { isAbortError } from '../../lib/api/client';
   import { confirmer } from '../../lib/confirm.svelte';
   import { ctxMenu, type MenuItem } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
@@ -604,7 +605,8 @@
     try {
       await browser.runSummarize(url);
     } catch (e) {
-      toastError('Couldn’t summarize the page', e);
+      if (isAbortError(e)) toasts.info('Summary stopped');
+      else toastError('Couldn’t summarize the page', e);
     }
   }
 
@@ -812,6 +814,7 @@
     <div class="summary" role="status">
       <div class="summary-head"><span>Summary · drafted by Otto</span></div>
       <p class="dim-line">Summarizing this page…</p>
+      <div><button class="btn small" onclick={() => browser.stopSummarize()}><Icon name="stop" size={12} /> Stop</button></div>
     </div>
   {:else if browser.summary}
     <div class="summary">
@@ -973,7 +976,7 @@
     color: var(--text);
   }
   .icon-btn.tool:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .icon-btn.tool.active {

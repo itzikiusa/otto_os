@@ -701,10 +701,26 @@ enum FeedSend {
 /// Channel errors that will never succeed on retry for this feed — the thread
 /// target refuses replies (Slack rejects threading onto join/system messages),
 /// or the destination itself is gone. Matched on the adapter's error string,
-/// which embeds the Slack API error code verbatim.
+/// which embeds the Slack API error code / the Telegram `description` verbatim.
 fn classify_send_error(e: &anyhow::Error) -> FeedSend {
     let s = e.to_string();
+    // Telegram refuses an edit whose text is unchanged — the feed already
+    // shows exactly this, so it is a success, not a failure to count.
+    if s.contains("message is not modified") {
+        return FeedSend::Ok;
+    }
     const PERMANENT: &[&str] = &[
+        // Telegram Bot API descriptions.
+        "chat not found",
+        "bot was blocked by the user",
+        "bot was kicked",
+        "user is deactivated",
+        "message to be replied not found",
+        "message to edit not found",
+        "not enough rights to send",
+        "have no rights to send",
+        "Unauthorized",
+        // Slack Web API error codes.
         "cannot_reply_to_message",
         "thread_not_found",
         "message_not_found",
@@ -831,14 +847,7 @@ fn render_feed(header: &str, lines: &[String]) -> String {
 
 /// Truncate `s` to at most `max_chars` Unicode scalar values.  Does NOT append
 /// `…` — the caller adds a continuation note instead.
-fn truncate_to_char_boundary(s: &str, max_chars: usize) -> &str {
-    for (char_count, (byte_idx, _)) in s.char_indices().enumerate() {
-        if char_count == max_chars {
-            return &s[..byte_idx];
-        }
-    }
-    s
-}
+use otto_core::text::prefix_chars as truncate_to_char_boundary;
 
 /// Extract the agent's explicit reply blocks marked with ⟦otto-send⟧ … ⟦/otto-send⟧.
 /// Empty blocks are skipped; unterminated markers are ignored.
@@ -1427,6 +1436,28 @@ mod tests {
         // Anything else (network blips, timeouts) retries on the next tick.
         let e = anyhow::anyhow!("error sending request: connection reset by peer");
         assert_eq!(classify_send_error(&e), FeedSend::Transient);
+    }
+
+    #[test]
+    fn classify_send_error_matches_telegram_descriptions() {
+        for desc in [
+            "Bad Request: chat not found",
+            "Forbidden: bot was blocked by the user",
+            "Forbidden: bot was kicked from the group chat",
+            "Bad Request: message to be replied not found",
+            "Unauthorized",
+        ] {
+            let e = anyhow::anyhow!("Telegram sendMessage failed: {desc}");
+            assert_eq!(classify_send_error(&e), FeedSend::Permanent, "{desc}");
+        }
+        let e =
+            anyhow::anyhow!("Telegram editMessageText failed: Too Many Requests: retry after 5");
+        assert_eq!(classify_send_error(&e), FeedSend::RateLimited);
+        // An unchanged edit is a no-op success, not a failure to count.
+        let e = anyhow::anyhow!(
+            "Telegram editMessageText failed: Bad Request: message is not modified: specified new message content and reply markup are exactly the same"
+        );
+        assert_eq!(classify_send_error(&e), FeedSend::Ok);
     }
 
     #[test]

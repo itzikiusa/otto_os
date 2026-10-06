@@ -7,7 +7,7 @@
   import { product } from '../../lib/stores/product.svelte';
   import Icon from '../../lib/components/Icon.svelte';
   import { agentProviders, defaultAgentProvider } from '../../lib/providers';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { runStatus, type StatusInfo } from '../../lib/status';
@@ -270,7 +270,7 @@
   }
 
   // Inline terminal state — multiple may be open at once, keyed by session id.
-  // NOTE: No ws.openSession() here — the inline <Terminal sessionId={...} />
+  // NOTE: No ws.openSession() here — the inline <LazyTerminal sessionId={...} />
   // connects directly by id. Calling openSession would push it into the Agents
   // grid sidebar which we don't want.
   let openTerminals = $state<Set<string>>(new Set());
@@ -413,7 +413,7 @@
       <!-- Focus input -->
       <div class="focus-wrap">
         <label class="field-label" for="focus-input">Focus <span class="focus-optional">(optional)</span></label>
-        <textarea
+        <textarea dir="auto"
           id="focus-input"
           class="focus-input"
           rows={2}
@@ -453,7 +453,7 @@
     <!-- ── History selector ─────────────────────────────────────────────────── -->
     <section class="history-row">
       <span class="field-label">History</span>
-      <select
+      <select aria-label="Analysis history"
         class="hist-select"
         onfocus={loadHistory}
         onchange={(e) => {
@@ -505,7 +505,7 @@
           {#if summarizerAgent?.session_id && openTerminals.has(summarizerAgent.session_id)}
             <div class="rp-term">
               {#key summarizerAgent.session_id}
-                <Terminal sessionId={summarizerAgent.session_id} forceDark preferDom resumeOnOpen={false} />
+                <LazyTerminal sessionId={summarizerAgent.session_id} forceDark preferDom resumeOnOpen={false} />
               {/key}
             </div>
           {/if}
@@ -567,7 +567,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                    <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                   {/key}
                 </div>
               {/if}
@@ -614,7 +614,7 @@
               {#if agent.session_id && openTerminals.has(agent.session_id)}
                 <div class="rp-term">
                   {#key agent.session_id}
-                    <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                    <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                   {/key}
                 </div>
               {/if}
@@ -628,7 +628,7 @@
                 {@const key = agent.id + ':repos'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Related repos
                     <span class="coll-count">({findings.related_repos.length})</span>
                   </button>
@@ -647,7 +647,7 @@
                 {@const key = agent.id + ':func'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Functionalities
                     <span class="coll-count">({findings.functionalities.length})</span>
                   </button>
@@ -666,7 +666,7 @@
                 {@const key = agent.id + ':int'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Integration points
                     <span class="coll-count">({findings.integration_points.length})</span>
                   </button>
@@ -685,7 +685,7 @@
                 {@const key = agent.id + ':risks'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Risks
                     <span class="coll-count">({findings.risks.length})</span>
                   </button>
@@ -704,7 +704,7 @@
                 {@const key = agent.id + ':oq'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Open questions
                     <span class="coll-count">({findings.open_questions.length})</span>
                   </button>
@@ -728,7 +728,7 @@
                 {@const key = agent.id + ':sl'}
                 <div class="collapsible">
                   <button class="coll-trigger" onclick={() => toggleCollapse(key)}>
-                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={11} /></span>
+                    <span class="coll-arrow" aria-hidden="true"><Icon name={collapsed[key] ? 'chevronRight' : 'chevronDown'} size={12} /></span>
                     Suggested learnings
                     <span class="coll-count">({findings.suggested_learnings.length})</span>
                   </button>
@@ -787,7 +787,7 @@
             {#if agent.session_id && openTerminals.has(agent.session_id)}
               <div class="rp-term">
                 {#key agent.session_id}
-                  <Terminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
+                  <LazyTerminal sessionId={agent.session_id} forceDark preferDom resumeOnOpen={false} />
                 {/key}
               </div>
             {/if}
@@ -917,7 +917,7 @@
     border-color: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft-strong)
   }
   .focus-input:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: not-allowed;
   }
   .focus-input::placeholder {

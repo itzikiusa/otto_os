@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { loadErrorText } from '../../lib/loadError';
   // Vault v3 — the docs home. Obsidian-style three-pane layout: left sidebar
   // (Files / Search / Tags over the active vault), center (note edit⇄read or
   // the graph), right panel (backlinks / outgoing / outline / properties /
@@ -72,7 +73,7 @@
     } catch (e) {
       // Surface the daemon's reason inline — a silently-failing dialog is the
       // worst kind of "did nothing".
-      createError = e instanceof Error ? e.message : String(e);
+      createError = loadErrorText(e);
     } finally {
       creating = false;
     }
@@ -433,7 +434,7 @@
                   class="vtab-close"
                   title="Close tab"
                   aria-label="Close {tabName}"
-                  onclick={() => void vault.closeTab(i)}><Icon name="x" size={11} /></button
+                  onclick={() => void vault.closeTab(i)}><Icon name="x" size={12} /></button
                 >
               </div>
             {/each}
@@ -489,14 +490,14 @@
       </span>
       {#if vault.note}
         <span>
-          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={11} /> couldn’t refresh</span>{/if}
+          {vault.backlinks.length} backlinks{#if vault.backlinksLoading}<span class="spinner vs-inline" role="status" aria-label="Loading backlinks"></span>{:else if vault.backlinksError}<span class="vs-warn" role="status" title={vault.backlinksError}><Icon name="warning" size={12} /> couldn’t refresh</span>{/if}
         </span>
         <span>{vault.note.meta.word_count} words</span>
         <span>{(vault.editing ? vault.draft : vault.note.raw).length} characters</span>
         {#if vault.current.okf && vault.okfReport}
           <span class:ok={vault.okfReport.conformant} class:bad={!vault.okfReport.conformant}
             title={vault.okfReport.conformant ? 'This note passes OKF validation' : 'See the OKF section in the right panel'}>
-            <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={11} />
+            <Icon name={vault.okfReport.conformant ? 'check' : 'warning'} size={12} />
             {vault.okfReport.conformant ? 'OKF valid' : `OKF: ${vault.okfReport.errors.length} ${vault.okfReport.errors.length === 1 ? 'issue' : 'issues'}`}
           </span>
         {/if}
@@ -513,12 +514,12 @@
     <form class="av-body" onsubmit={(e) => { e.preventDefault(); void submitCreate(); }}>
       <div class="field">
         <label for="av-name">Name</label>
-        <input id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
+        <input dir="auto" id="av-name" class="input" bind:value={cName} placeholder="Team Docs" use:focusOnMount />
       </div>
       <div class="field">
         <label for="av-path">Folder</label>
         <PathField bind:value={cPath} start={cPath || '~'}>
-          <input id="av-path" class="input" bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" spellcheck="false" />
+          <input dir="ltr" id="av-path" class="input" bind:value={cPath} placeholder="~/Documents/Obsidian/MyVault" spellcheck="false" />
         </PathField>
         <span class="hint">An existing folder (an Obsidian vault works as is) or a new path to create. Leave it blank to create one under ~/.otto/vault.</span>
       </div>

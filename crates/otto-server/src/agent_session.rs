@@ -4,7 +4,7 @@
 //! visible-in-Agents, resumable session that auto-gets the workspace's MCP tools.
 //!
 //! Used by Discovery Chat (one session per chat thread) and Canvas "Ask AI" (one
-//! session per scene). It mirrors `swarm_agent_run` but RESUMES the same session
+//! session per scene). It mirrors `otto_swarm::runtime::agent_run` but RESUMES the same session
 //! across turns and detects the NEW turn via a transcript baseline — a resumed
 //! transcript already holds the prior turns, so we must wait for the completed
 //! turn count to GROW rather than accepting any `end_turn` (which would echo the

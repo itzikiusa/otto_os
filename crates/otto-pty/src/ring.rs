@@ -196,51 +196,11 @@ pub fn contains_ascii_ci(hay: &[u8], needle: &[u8]) -> bool {
 
 /// Strip ANSI/VT escape sequences from a raw PTY byte slice, returning plain
 /// text. Handles CSI sequences (`ESC [ … <letter>`), OSC sequences (`ESC ]
-/// … BEL/ST`), and bare `ESC X` two-byte sequences. Non-UTF-8 bytes are
+/// … BEL/ST`), and bare `ESC X` two-byte sequences (shared impl:
+/// `otto_core::text::strip_ansi_bytes`). Non-UTF-8 bytes are
 /// replaced with U+FFFD.
 fn strip_ansi(raw: &[u8]) -> String {
-    let s = String::from_utf8_lossy(raw);
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\x1b' {
-            out.push(ch);
-            continue;
-        }
-        // ESC: look at the next byte to classify the sequence.
-        match chars.peek().copied() {
-            Some('[') => {
-                // CSI sequence: ESC [ … final-byte (A-Za-z@~)
-                chars.next(); // consume '['
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() || c == '@' || c == '~' {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                // OSC sequence: ESC ] … BEL or ESC \.
-                chars.next(); // consume ']'
-                for c in chars.by_ref() {
-                    if c == '\x07' {
-                        break;
-                    }
-                    if c == '\x1b' {
-                        if chars.peek() == Some(&'\\') {
-                            chars.next();
-                        }
-                        break;
-                    }
-                }
-            }
-            Some(_) => {
-                // Other two-byte ESC sequences — skip the next character.
-                chars.next();
-            }
-            None => {}
-        }
-    }
-    out
+    otto_core::text::strip_ansi_bytes(raw)
 }
 
 impl Default for RingBuffer {

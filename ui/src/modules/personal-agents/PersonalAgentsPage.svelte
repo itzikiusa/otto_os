@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   // Personal Agents module. Routes: `#/personal-agents` (agent cards),
   // `#/personal-agents/rooms` (agent rooms), `#/personal-agents/<agentId>[/<tab>]`
   // (one agent's page). The first list GET seeds four disabled example agents
@@ -15,6 +16,7 @@
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { registry } from '../../lib/commands.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
+  import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -151,7 +153,7 @@
     {#snippet tabs()}
       <div class="segmented" role="tablist" aria-label="Personal agents view" tabindex="-1" onkeydown={onTabKey}>
         <button role="tab" aria-selected={sub !== 'rooms'} tabindex={sub !== 'rooms' ? 0 : -1} class:active={sub !== 'rooms'} onclick={() => router.go('personal-agents')}>Agents</button>
-        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Rooms</button>
+        <button role="tab" aria-selected={sub === 'rooms'} tabindex={sub === 'rooms' ? 0 : -1} class:active={sub === 'rooms'} onclick={() => router.go('personal-agents/rooms')}>Agent rooms</button>
       </div>
     {/snippet}
     {#snippet actions()}
@@ -189,7 +191,9 @@
             actionIcon="plus"
             variant="page"
             onaction={() => (creating = true)}
-          />
+          >
+            <AutomateGuide current="personal-agents" />
+          </EmptyState>
         {/snippet}
         {#if !primaryAgent && Object.keys(autonomyById).length > 0}
           <p class="pa-hint" role="note"><Icon name="star" size={12} /> Choose one agent as <strong>your agent</strong> (its Autonomy tab): your main assistant, routing specialist work to the others.</p>
@@ -198,7 +202,7 @@
           {#each agents as a (a.id)}
             {@const example = isExample(a)}
             {@const auto = autonomyById[a.id]}
-            <li class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
+            <li use:rowMenu class="pa-card" class:paused={!a.enabled} class:primary={!!auto?.primary} oncontextmenu={(e) => cardMenu(e, a)}>
               <div class="card-top">
                 <AgentAvatar avatar={a.avatar} name={a.name} size={36} />
                 <div class="card-id">
@@ -225,8 +229,8 @@
                   <span class="chip ok">Enabled</span>
                 {/if}
                 {#if a.browser}<span class="chip" title="Runs and chat can drive the in-app browser">Browser</span>{/if}
-                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={11} /> Your agent</span>{/if}
-                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={11} /> Proactive</span>{/if}
+                {#if auto?.primary}<span class="chip pa-accent" title="Your primary assistant"><Icon name="star" size={12} /> Your agent</span>{/if}
+                {#if auto?.proactive.enabled}<span class="chip" title="Works its standing goals in the background, read-only"><Icon name="eye" size={12} /> Proactive</span>{/if}
                 <!-- A paused agent's schedules never fire — don't promise a next run. -->
                 {#if a.enabled}
                   <span class="meta">Next run <RelTime iso={personalAgents.nextRunAt(a.id)} fallback="not scheduled" /></span>

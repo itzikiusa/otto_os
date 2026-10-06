@@ -116,7 +116,7 @@ test('arena: grouped assets; an Excalidraw board renders the React island', asyn
   await expect(page.locator('.stage-status')).toContainText(/1 elements/);
   // Inspector shows the type; the Annotate toggle exists for boards.
   await expect(page.locator('.arena-inspector')).toContainText('Board');
-  await expect(page.locator('.stage-toolbar .tb-btn', { hasText: 'Annotate' })).toBeVisible();
+  await expect(page.locator('.stage-toolbar').getByRole('button', { name: 'Annotate', exact: true })).toBeVisible();
 });
 
 test('arena: a scene3d opens with the Hierarchy pane and an object count', async ({ page }) => {
@@ -133,7 +133,7 @@ test('arena: a scene3d opens with the Hierarchy pane and an object count', async
   await expect(page.locator('.arena-assets .pane-body')).toContainText(/Floor|Crate|2 objects/);
   // Play toggle + Blender section in the inspector (installed or not, the
   // script download is always offered).
-  await expect(page.locator('.stage-toolbar .tb-btn', { hasText: 'Play' })).toBeVisible();
+  await expect(page.locator('.stage-toolbar').getByRole('button', { name: 'Play', exact: true })).toBeVisible();
   await expect(page.locator('.arena-inspector .btn', { hasText: 'Download script' })).toBeVisible({ timeout: 15_000 });
   // Back to the asset list via the switch.
   await page.locator('.pane-switch .ss', { hasText: 'Assets' }).click();
@@ -153,7 +153,7 @@ test('arena: code-view edit autosaves via PUT …/content and survives a reload'
   await page.locator('.mockup-row', { hasText: 'flow.mmd' }).click();
   await expect(page.locator('.mockup-stage iframe.mockup-frame')).toBeVisible({ timeout: 20_000 });
 
-  await page.locator('.stage-toolbar .tb-btn', { hasText: 'Source' }).click();
+  await page.locator('.stage-toolbar').getByRole('button', { name: 'Source', exact: true }).click();
   const code = page.locator('.code-view');
   await expect(code).toBeVisible();
   await expect(code).toHaveValue(/flowchart LR/);
@@ -174,7 +174,7 @@ test('arena: code-view edit autosaves via PUT …/content and survives a reload'
   // as pageerror events even when the application catches the fetch failure.
   await openArena(page, false);
   await page.locator('.mockup-row', { hasText: 'flow.mmd' }).click();
-  await page.locator('.stage-toolbar .tb-btn', { hasText: 'Source' }).click();
+  await page.locator('.stage-toolbar').getByRole('button', { name: 'Source', exact: true }).click();
   await expect(page.locator('.code-view')).toHaveValue(new RegExp(EDIT_MARK), { timeout: 15_000 });
   const { ctx, base } = await apiCtx();
   const body = await (await ctx.get(`${base}/api/v1/product/attachments/${mermaidId}`)).text();

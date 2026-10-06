@@ -549,7 +549,7 @@ pub async fn ingest_mockup(
         .create(NewAttachment {
             story_id: story.id.clone(),
             workspace_id: story.workspace_id.clone(),
-            filename: crate::product_media::sanitize_filename(&format!("{title}{}", format.ext())),
+            filename: otto_product::media::sanitize_filename(&format!("{title}{}", format.ext())),
             mime: format.mime().into(),
             size_bytes,
             sha256: None,

@@ -830,42 +830,10 @@ fn tail_cap(s: &str, cap: usize) -> String {
 /// text. Handles CSI (`ESC[…`), OSC (`ESC]…` ended by BEL or ST) and lone
 /// two-char escapes; passes printable text, tabs, and newlines through.
 fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                Some('[') => {
-                    // CSI: params/intermediates until a final byte 0x40-0x7E.
-                    for f in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&f) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    // OSC: until BEL, or ST (ESC \).
-                    while let Some(f) = chars.next() {
-                        if f == '\x07' {
-                            break;
-                        }
-                        if f == '\x1b' {
-                            if matches!(chars.peek(), Some('\\')) {
-                                chars.next();
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ => {} // lone/other escape: drop the escape + next char
-            },
-            '\r' | '\x07' => {}
-            '\n' | '\t' => out.push(c),
-            c if c.is_control() => {}
-            c => out.push(c),
-        }
-    }
-    out
+    otto_core::text::strip_ansi(s)
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
 }
 
 #[cfg(test)]

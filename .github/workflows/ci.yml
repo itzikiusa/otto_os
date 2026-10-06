@@ -31,6 +31,11 @@ env:
   # CI never reads the debuginfo anyway — a backtrace still has symbol names.
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
+  # The ONE ClickHouse pin (SHA-512 of this exact release asset) for every job
+  # that installs the single binary: the Rust job's k8s-monitor ratchets and
+  # the e2e-functional shards' usage/telemetry engine.
+  CLICKHOUSE_VERSION: 26.8.15.10
+  CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
 
 jobs:
   rust:
@@ -96,9 +101,6 @@ jobs:
       # (SHA-512 pinned to this exact release asset) and REQUIRE it: the tests
       # fail instead of skipping when OTTO_REQUIRE_CLICKHOUSE is set.
       - name: Install ClickHouse (k8s monitor ratchets)
-        env:
-          CLICKHOUSE_VERSION: 26.8.15.10
-          CLICKHOUSE_SHA512: d54f83e187b19399260fa9d7f68403a7c3adf48059f211d0620216e6ea49687490898b5aa32f49d9728db58c5912cfb700148b814b8c3314f88ccfa940ffd85a
         run: |
           archive="$RUNNER_TEMP/clickhouse.tgz"
           curl --fail --location --silent --show-error --retry 3 \
@@ -232,22 +234,13 @@ jobs:
       - name: Bundle-size budget
         run: node scripts/bundle-budget.mjs
 
-  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
-  # closest to the app's WKWebView — against an isolated debug daemon
-  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
-  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
-  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
-  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
-  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
-  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
-  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
-  # Advisory until it has a green history: this is the first job to run the
-  # daemon + Playwright WebKit on the Linux runner.
-  perf-gates:
-    name: Perf gates (WebKit subset, advisory)
+  # Build the debug test daemon ONCE and hand it to every job that drives a
+  # real ottod (e2e-functional shards, perf-gates, daemon-budget) as an
+  # artifact — each of those used to compile the whole workspace itself.
+  build-ottod:
+    name: Build test daemon (ottod, debug)
     runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -268,6 +261,200 @@ jobs:
 
       - name: Build the test daemon
         run: cargo build -p ottod
+
+      - name: Upload the test daemon
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ottod-debug
+          path: target/debug/ottod
+          retention-days: 3
+          if-no-files-found: error
+
+  # ADVISORY functional E2E: every desktop-* spec on the desktop-browser
+  # project (Chromium, 1280×800 3-pane shell) plus the mobile specs at iPhone
+  # portrait (WebKit), sharded across 4 runners. Isolated throwaway daemon per
+  # shard (ui/e2e/global-setup.ts: temp data dir, own port, file secret store,
+  # fake agent CLIs). Perf specs are skipped here (OTTO_E2E_FUNCTIONAL_ONLY) —
+  # they run in perf-gates. Retries are 0 and any `flaky` count fails the
+  # shard, so a red shard is an honest result — but the suite is too slow to
+  # gate merges, so it never fails the workflow (continue-on-error) and no
+  # job `needs:` it. Keep it out of the branch's required status checks.
+  # The other mobile/tablet projects run nightly (e2e-nightly.yml).
+  e2e-functional:
+    name: E2E functional (shard ${{ matrix.shard }}/4, advisory)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # The DB Explorer / Connections / Brokers specs drive the seeded dev
+      # stacks (dev/dbviewer: MySQL, Postgres, Mongo, ClickHouse, Redis;
+      # dev/brokers: Redpanda) — the same compose files as db-drivers.yml.
+      # Started on EVERY shard: Playwright shards by test, so which shard gets
+      # a DB spec moves with the suite. Started first and detached, so the
+      # images pull and seed while the steps below install; the health wait
+      # right before Playwright usually finds them ready.
+      - name: Start the seeded DB stack + Redpanda
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml up -d
+          docker compose -f dev/brokers/docker-compose.yml up -d
+
+      # redis-server: the Connections/DB/ops specs spawn their own throwaway
+      # Redis. ffmpeg: generates the synthetic tour film below.
+      - name: Install redis-server + ffmpeg
+        run: |
+          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
+          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
+          sudo apt-get install -y --no-install-recommends redis-server ffmpeg
+          # The specs start their own instances; the distro service would
+          # only hold :6379.
+          sudo systemctl disable --now redis-server || true
+          redis-server --version
+
+      # The usage + telemetry specs need the daemon's embedded ClickHouse
+      # (the daemon resolves `clickhouse` on PATH / ~/.local/bin). Same pin
+      # as the Rust job (workflow env).
+      - name: Install ClickHouse (usage engine)
+        run: |
+          archive="$RUNNER_TEMP/clickhouse.tgz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-lts/clickhouse-common-static-$CLICKHOUSE_VERSION-amd64.tgz" \
+            --output "$archive"
+          printf '%s  %s\n' "$CLICKHOUSE_SHA512" "$archive" | sha512sum --check
+          mkdir -p "$RUNNER_TEMP/ch"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/ch"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$(find "$RUNNER_TEMP/ch" -type f -name clickhouse -path '*/bin/*' | head -n 1)" "$HOME/.local/bin/clickhouse"
+          rm -rf "$RUNNER_TEMP/ch" "$archive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/clickhouse" local --version
+
+      # The Help tour playback specs (desktop-ux{,-r2,-r3,-r4}-help) need a
+      # real MP4 at OTTO_E2E_TOUR_VIDEO. The published film is not in the
+      # repo, so synthesize one as long as the film (film.json `duration`, so
+      # every chapter is seekable), with an audio track (the r1 spec asserts
+      # decoded audio). VP9 + Opus: Playwright's Chromium has no H.264/AAC.
+      - name: Generate the synthetic tour film
+        run: |
+          duration=$(node -p "Math.ceil(require('./ui/src/lib/walkthroughs/film.json').duration) + 1")
+          out="$RUNNER_TEMP/otto-tour.mp4"
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=320x180:rate=10:duration=$duration" \
+            -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=$duration" \
+            -c:v libvpx-vp9 -b:v 40k -deadline realtime -cpu-used 8 -g 10 \
+            -c:a libopus -b:a 24k -shortest -movflags +faststart "$out"
+          ls -l "$out"
+          echo "OTTO_E2E_TOUR_VIDEO=$out" >> "$GITHUB_ENV"
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      # Artifacts drop the executable bit.
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
+
+      - name: Install Node
+        uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 26.10.0
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        working-directory: ui
+        run: npm ci
+
+      # desktop-browser = Chromium; iphone-portrait = WebKit (device default).
+      - name: Install Playwright browsers
+        working-directory: ui
+        run: npx playwright install --with-deps chromium webkit
+
+      # Same wait as db-drivers.yml: every service has a compose healthcheck
+      # (seeds run before it reports healthy); redis-seed is a one-shot.
+      - name: Wait for healthy servers
+        run: |
+          for _ in $(seq 1 60); do
+            unhealthy=$(docker ps --filter name=otto- --format '{{.Names}} {{.Status}}' \
+              | grep -v 'redis-seed' | grep -vc '(healthy)' || true)
+            [ "$unhealthy" = "0" ] && break
+            sleep 5
+          done
+          docker ps --format '{{.Names}}  {{.Status}}'
+          if [ "$unhealthy" != "0" ]; then
+            echo "::error::DB/Kafka stack never became healthy"
+            docker compose -f dev/dbviewer/docker-compose.yml logs --tail 80
+            docker compose -f dev/brokers/docker-compose.yml logs --tail 80
+            exit 1
+          fi
+
+      - name: E2E (desktop-browser + iphone-portrait)
+        working-directory: ui
+        env:
+          OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
+          OTTO_E2E_FUNCTIONAL_ONLY: '1'
+        run: >-
+          npx playwright test
+          --project=desktop-browser --project=iphone-portrait
+          --shard=${{ matrix.shard }}/4 --retries=0
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: e2e-functional-report-${{ matrix.shard }}
+          path: |
+            ui/e2e/.report-0
+            ui/test-results
+          retention-days: 7
+
+      - name: Server logs
+        if: failure()
+        run: |
+          docker compose -f dev/dbviewer/docker-compose.yml logs --tail 200
+          docker compose -f dev/brokers/docker-compose.yml logs --tail 200
+
+  # A SMALL, fast subset of the Playwright perf gates on WebKit — the engine
+  # closest to the app's WKWebView — against an isolated debug daemon
+  # (ui/e2e/global-setup.ts: temp data dir, own port, file secret store).
+  # Chosen for stability: bounded-DOM counts (git sidebar, file viewer,
+  # insights, Kafka/K8s lists, a 100k-row grid) plus the grid's scroll/paint
+  # timings, the terminal flood/^C and park-redraw budgets, and the daemon's
+  # terminal emulator budgets (otto-pty, gated by OTTO_PERF), which run with
+  # OTTO_PERF_BUDGET_SCALE=3 (budgets were measured on a Mac; counts are never scaled). The full perf set runs locally with
+  # `npx playwright test --project=desktop-webkit` (docs/testing/ci-performance.md).
+  # Advisory until it has a green history: this is the first job to run the
+  # daemon + Playwright WebKit on the Linux runner.
+  perf-gates:
+    name: Perf gates (WebKit subset, advisory)
+    needs: build-ottod
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
+        with:
+          name: ottod-debug
+          path: target/debug
+
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -305,7 +492,10 @@ jobs:
       # DB Explorer at scale: the deterministic `@ci` subset of the scale spec
       # (wide 20k × 300 grid, column filter over 100k JSON rows, result memory
       # budget release + Re-run). The other scenarios run locally.
+      # Runs even when the subset above failed: the two are independent, and
+      # skipping this one left DB-at-scale with no result at all.
       - name: Perf gates — DB at scale (desktop-webkit, @ci)
+        if: success() || failure()
         working-directory: ui
         env:
           OTTO_E2E_BIN: ${{ github.workspace }}/target/debug/ottod
@@ -313,6 +503,11 @@ jobs:
         run: >-
           npx playwright test --project=desktop-webkit --workers=1
           e2e/desktop-db-scale-perf.spec.ts --grep @ci
+
+      - name: Fail on flaky tests
+        if: success() || failure()
+        working-directory: ui
+        run: node scripts/e2e-flaky-check.mjs
 
       - name: Upload the Playwright report
         if: failure()
@@ -330,28 +525,20 @@ jobs:
   # summary only. macOS + ClickHouse: .github/workflows/perf-nightly.yml.
   daemon-budget:
     name: Daemon perf budget
+    needs: build-ottod
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2.9.2
+      - name: Download the test daemon
+        uses: actions/download-artifact@v7.0.0
         with:
-          shared-key: perf-gates
-          save-if: false
+          name: ottod-debug
+          path: target/debug
 
-      - name: Install librdkafka build deps
-        run: |
-          sudo grep -lE 'dl\.google\.com|packages\.microsoft\.com' /etc/apt/sources.list.d/* 2>/dev/null | xargs -r sudo rm -f
-          sudo apt-get update || echo "::warning::apt-get update failed for some sources; installing from what refreshed"
-          sudo apt-get install -y cmake libcurl4-openssl-dev
-
-      - name: Build the test daemon
-        run: cargo build -p ottod
+      - name: Make the test daemon executable
+        run: chmod +x target/debug/ottod
 
       - name: Install Node
         uses: actions/setup-node@v7.0.0
@@ -408,6 +595,38 @@ jobs:
       - name: cargo audit
         # RUSTSEC-2023-0071 (rsa "Marvin Attack" timing sidechannel) has NO fixed
         # upgrade available and reaches us only transitively via sqlx-mysql's
-        # caching_sha2_password auth (not used at runtime by our SQLite-only
-        # state). Ignore until sqlx-mysql swaps its RSA backend.
+        # caching_sha2_password auth (the DB Explorer's `mysql-rsa` feature).
+        # That path only ENCRYPTS the password to the server's public key; the
+        # attack recovers plaintext from a party performing RSA DECRYPTION,
+        # which Otto never does. Ignore until sqlx-mysql swaps its RSA backend.
         run: cargo audit --ignore RUSTSEC-2023-0071
+
+  # Duplicate-version report (deny.toml: multiple-versions = "warn"). Advisory:
+  # it surfaces crates compiled twice at different semver majors so they can be
+  # aligned; licenses/advisories are not gated here (see the audit job).
+  deny:
+    name: cargo deny (duplicates, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: cargo deny check bans
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check bans
+
+  # Bug-fix commits that touch the UI should carry a test (ui/unit or ui/e2e).
+  # Non-blocking: prints a ::warning:: per offending commit in the PR range.
+  fix-has-test:
+    name: UI fix carries a test (advisory)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check 🐛 fix( commits touching ui/src
+        run: scripts/check-fix-has-test.sh "origin/${{ github.base_ref }}" "${{ github.event.pull_request.head.sha }}"

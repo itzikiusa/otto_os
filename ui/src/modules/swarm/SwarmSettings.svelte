@@ -265,15 +265,15 @@
           </div>
           <div class="field">
             <label for="t-chat">Match chat / channel <span class="dim">(blank = any)</span></label>
-            <input id="t-chat" class="input" bind:value={triggerForm.match_chat} placeholder="e.g. #builds or chat id" />
+            <input dir="auto" id="t-chat" class="input" bind:value={triggerForm.match_chat} placeholder="e.g. #builds or chat id" />
           </div>
           <div class="field">
             <label for="t-kw">Keyword <span class="dim">(blank = any)</span></label>
-            <input id="t-kw" class="input" bind:value={triggerForm.keyword} placeholder="e.g. /swarm" />
+            <input dir="ltr" id="t-kw" class="input" bind:value={triggerForm.keyword} placeholder="e.g. /swarm" />
           </div>
           <div class="field">
             <label for="t-repo">Repository path <span class="dim">(optional)</span></label>
-            <PathField bind:value={triggerForm.repo_path}><input id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
+            <PathField bind:value={triggerForm.repo_path}><input dir="ltr" id="t-repo" class="input" bind:value={triggerForm.repo_path} placeholder="/path/to/repo" /></PathField>
           </div>
         </div>
         <div class="toggles">

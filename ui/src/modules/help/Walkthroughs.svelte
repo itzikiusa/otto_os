@@ -16,6 +16,7 @@
   //
   // Phone: push navigation — the film + list is the page; opening a guide
   // replaces it and the header gets a back button.
+  import { scrollBehavior } from '../../lib/motion';
   import { tick } from 'svelte';
   import { router } from '../../lib/router.svelte';
   import PageHeader from '../../lib/components/PageHeader.svelte';
@@ -82,14 +83,14 @@
   async function watchPart(start: number): Promise<void> {
     filmRequested = true;
     await tick();
-    mainEl?.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    mainEl?.scrollTo({ top: 0, behavior: scrollBehavior() });
     film?.playAt(start);
   }
 
   async function watchTour(): Promise<void> {
     filmRequested = true;
     await tick();
-    mainEl?.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    mainEl?.scrollTo({ top: 0, behavior: scrollBehavior() });
   }
 
   // ---- "Open <module>" (respects the sidebar's RBAC gate) ----
@@ -243,7 +244,7 @@
           <nav class="rail" aria-label="Guides" bind:this={railEl} onkeydown={onRailKey} style="--list-pane-w:{listW}px">
             <div class="rail-search">
               <Icon name="search" size={13} />
-              <input
+              <input dir="ltr"
                 bind:this={searchEl}
                 bind:value={query}
                 type="search"
@@ -304,7 +305,7 @@
                     {#if selected.summary}<p class="summary">{selected.summary}</p>{/if}
                     {#if chapterFor}
                       <button class="btn small" onclick={() => chapterFor && watchPart(chapterFor.start)} data-testid="guide-watch-part">
-                        <Icon name="play" size={11} /> Watch this part · {timeLabel(chapterFor.start)}
+                        <Icon name="play" size={12} /> Watch this part · {timeLabel(chapterFor.start)}
                       </button>
                     {/if}
                   </header>

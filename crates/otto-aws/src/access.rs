@@ -108,8 +108,9 @@ pub async fn initialize(pool: &DbPool, user: &User, id: &Id) -> Result<()> {
             "ec2_start" | "ec2_stop" | "ec2_reboot" | "ec2_terminate" => {
                 (Feature::AwsEc2, Capability::Edit)
             }
-            "sqs_view" | "sqs_receive" => (Feature::AwsSqs, Capability::View),
-            "sqs_send" | "sqs_delete" | "sqs_purge" | "sqs_redrive" => {
+            "sqs_view" => (Feature::AwsSqs, Capability::View),
+            // A receive bumps the receive count (can dead-letter): Edit.
+            "sqs_receive" | "sqs_send" | "sqs_delete" | "sqs_purge" | "sqs_redrive" => {
                 (Feature::AwsSqs, Capability::Edit)
             }
             "athena_view" => (Feature::AwsAthena, Capability::View),

@@ -220,7 +220,7 @@
     <span class="src-free">…or just describe what you want</span>
   </div>
 
-  <textarea
+  <textarea dir="auto"
     class="big-input"
     bind:this={inputEl}
     bind:value={query}

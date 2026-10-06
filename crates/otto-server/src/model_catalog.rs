@@ -30,7 +30,7 @@ use otto_state::{ProviderModel, ProviderModelsRepo};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::auth::CurrentUser;
 use crate::error::ApiResult;
@@ -369,7 +369,7 @@ pub async fn refresh_provider(ctx: &ServerCtx, provider: &str) {
             Some(Ok(models)) => {
                 match repo.upsert_batch(provider, source, &models).await {
                     Ok(()) => {
-                        info!(
+                        tracing::debug!(
                             provider,
                             source,
                             count = models.len(),

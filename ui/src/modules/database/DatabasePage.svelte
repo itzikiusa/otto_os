@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowMenu } from '../../lib/rowMenu';
   import Badge from '../../lib/components/Badge.svelte';
   import { focusOnMount } from '../../lib/focusOnMount';
   import { NO_WORKSPACE } from '../../lib/labels';
@@ -223,6 +224,14 @@
   let accessFor = $state<Connection | null>(null);
   const connectionAccess = (c: Connection, operation: string, capability: 'view'|'edit'|'admin'='edit') => resourceAccess.can('connection',c.id,operation,'connections',capability);
   $effect(() => { for (const c of [...database.connections,...database.otherConnections]) void resourceAccess.load('connection',c.id); });
+  // The "Open a connection" pane offers the most recently opened ones as a
+  // one-click reopen instead of only pointing at the list.
+  const recentConns = $derived(
+    database.connections
+      .filter((c) => c.last_opened_at)
+      .sort((a, b) => Date.parse(b.last_opened_at!) - Date.parse(a.last_opened_at!))
+      .slice(0, 5),
+  );
   function connMenu(e: MouseEvent, c: Connection): void {
     const isDb = database.connections.some((x) => x.id === c.id);
     ctxMenu.show(e, [
@@ -1104,7 +1113,18 @@
           body={`${hubSummary} Choose one ${viewport.isPhone ? 'above' : 'on the left'} to open it here.`}
           actionLabel={database.sidebarCollapsed || database.sideTab !== 'connections' ? 'Show connections' : undefined}
           onaction={showConnections}
-        />
+        >
+          {#if recentConns.length > 0}
+            <div class="recent-conns" data-testid="db-recent-conns">
+              <p class="empty-note">Recently opened</p>
+              {#each recentConns as c (c.id)}
+                <button class="btn ghost small" onclick={() => void database.openConnection(c.id)} title="Open {c.name}">
+                  <Icon name={engineGlyph(c.kind)} size={12} /> {c.name}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </EmptyState>
       {/if}
     {:else}
       <!-- Unified tab strip: DB connections, Kafka clusters, and SSH/custom terminals -->
@@ -1115,7 +1135,7 @@
         {#each openConns as c (c.id)}
           {@const st = database.connStatus.get(c.id)}
           {@const on = database.activePane === null && database.selectedConnId === c.id}
-          <div class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
+          <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(c)} class:guarded={isGuardedConn(c) && !isProdConn(c)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); connMenu(e, c); }}>
             <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `db:${c.id}`)} onclick={() => database.openConnection(c.id)} title="{c.name} — right-click to open beside agents">
               <span class="conn-tab-glyph {c.kind}"><Icon name={engineGlyph(c.kind)} size={12} /></span>
               {#if sectionLeaf(c)}<span class="conn-tab-path mono" title="Folder: {sectionPath(c)}">{sectionLeaf(c)}</span>{/if}
@@ -1147,7 +1167,7 @@
         {/each}
         {#each brokers.openClusters as cl (cl.id)}
           {@const on = database.activePane?.kind === 'kafka' && database.activePane.id === cl.id}
-          <div class="conn-tab" class:active={on} class:prod={isProdConn(cl)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}>
+          <div use:rowMenu class="conn-tab" class:active={on} class:prod={isProdConn(cl)} role="presentation" oncontextmenu={(e) => { e.preventDefault(); clusterMenu(e, cl); }}>
             <button class="conn-tab-main" role="tab" aria-selected={on} tabindex={connTabStop(on, `kafka:${cl.id}`)} onclick={() => openCluster(cl)} title={cl.name}>
               <span class="conn-tab-glyph kafka"><Icon name={engineGlyph('kafka')} size={12} /></span>
               <span class="conn-tab-name ellipsis">{cl.name}</span>
@@ -1378,7 +1398,7 @@
 
 {#snippet connRow(c: Connection, depth: number)}
   {@const isDb = database.connections.some((x) => x.id === c.id)}
-  <div
+  <div use:rowMenu
     role="group"
     aria-label={c.name}
     class="conn-row"
@@ -1416,7 +1436,7 @@
 {/snippet}
 
 {#snippet clusterRow(cl: BrokerCluster, depth: number)}
-  <div
+  <div use:rowMenu
     role="group"
     aria-label={cl.name}
     class="conn-row"
@@ -1451,7 +1471,7 @@
 {#snippet connSearchBox()}
   <div class="tree-search">
     <Icon name="search" size={12} />
-    <input
+    <input dir="ltr"
       class="tree-search-input"
       type="text"
       bind:value={connFilter}
@@ -1460,7 +1480,7 @@
       aria-label="Filter connections"
     />
     {#if connFilter}
-      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={10} /></button>
+      <button class="tree-search-clear" onclick={() => (connFilter = '')} aria-label="Clear filter" title="Clear filter"><Icon name="x" size={12} /></button>
     {/if}
     {#if !viewport.isPhone}
       <!-- New section / connection live here on tablet/desktop (the phone keeps
@@ -1566,7 +1586,7 @@
   {#if database.sideTab === 'saved'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter saved queries…"
         bind:value={savedSearch}
@@ -1587,7 +1607,7 @@
       {#each filteredSaved as q (q.id)}
         <div class="saved-row">
           {#if renamingId === q.id}
-            <input
+            <input dir="auto"
               class="rename-input"
               bind:value={renameDraft}
               use:focusOnMount
@@ -1622,7 +1642,7 @@
   {:else if database.sideTab === 'history'}
     <div class="list-search">
       <Icon name="search" size={12} />
-      <input
+      <input dir="ltr"
         class="list-search-input"
         placeholder="Filter history…"
         bind:value={historySearch}
@@ -1734,6 +1754,15 @@
 {/if}
 
 <style>
+  .recent-conns {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 6px;
+    margin-block-start: 12px;
+  }
+  .recent-conns .empty-note { flex-basis: 100%; margin: 0; text-align: center; }
   .db-root {
     height: 100%;
     display: flex;

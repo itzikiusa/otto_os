@@ -184,7 +184,7 @@
   <!-- Search input -->
   <div class="picker-field">
     <label class="picker-label" for="jp-query">Search issues</label>
-    <input
+    <input dir="auto"
       id="jp-query"
       class="picker-input"
       bind:value={query}

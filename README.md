@@ -364,6 +364,7 @@ Otto is a Tauri 2 desktop app with a Rust backend daemon and a Svelte 5 frontend
   `otto-sessions` (session manager + PTY + trust + prompt-guard), `otto-pty`,
   `otto-orchestrator`, `otto-git`, `otto-issues` (Jira/Confluence),
   `otto-channels`, `otto-connections`, `otto-dbviewer` (Database Explorer),
+  `otto-apiclient` (API-client gRPC + scripting engines),
   `otto-brokers` (Kafka viewer), `otto-ssh` (shared SSH-tunnel helper),
   `otto-browser` (in-app browser: reader/live tabs, annotations, Lightpanda
   sidecar engine), `otto-aws` (AWS console — `aws` CLI v2 runner, accounts,

@@ -246,7 +246,7 @@
     {:else}
       <label class="search">
         <Icon name="search" size={12} />
-        <input class="input" placeholder="Filter blocks…" bind:value={query} aria-label="Filter blocks" data-testid="site-block-search" />
+        <input dir="ltr" class="input" placeholder="Filter blocks…" bind:value={query} aria-label="Filter blocks" data-testid="site-block-search" />
       </label>
       {#if readonly}<p class="dim hint">Read-only — blocks can’t be added.</p>{/if}
       {#each groups as g (g.id)}
@@ -512,7 +512,7 @@
   }
   .tile:disabled {
     cursor: default;
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .thumb {
     position: relative;

@@ -12,7 +12,7 @@
   import type { Poller } from '../../lib/poll';
   import { liveQuery } from '../../lib/live';
   import Icon from '../../lib/components/Icon.svelte';
-  import Terminal from '../../lib/components/Terminal.svelte';
+  import LazyTerminal from '../../lib/components/LazyTerminal.svelte';
   import AgentByline from '../../lib/components/AgentByline.svelte';
   import { confirmer } from '../../lib/confirm.svelte';
   import { refineNote, refineSession, resetRefineSession, vaultNote, writeVaultNote } from '../../lib/api/vault';
@@ -230,7 +230,7 @@
         <option value={p}>{p}</option>
       {/each}
     </select>
-    <input
+    <input dir="auto"
       bind:value={prompt}
       aria-label="Refinement request"
       placeholder="Refine this note… (e.g. tighten the intro, add a troubleshooting section)"
@@ -269,7 +269,7 @@
   {#if sessionId}
     <div class="term">
       {#key sessionId}
-        <Terminal sessionId={sessionId} preferDom />
+        <LazyTerminal sessionId={sessionId} preferDom />
       {/key}
     </div>
   {:else}
@@ -312,7 +312,7 @@
     flex: 0 0 auto;
   }
   .bar select:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .bar input {
     flex: 1;
@@ -325,7 +325,7 @@
     padding: 6px 10px;
   }
   .bar input:disabled {
-    opacity: 0.6;
+    opacity: var(--disabled-opacity);
   }
   .send {
     display: inline-flex;
@@ -341,7 +341,7 @@
     white-space: nowrap;
   }
   .send:disabled {
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
     cursor: default;
   }
   .notice {

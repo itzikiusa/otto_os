@@ -293,20 +293,41 @@ fn is_human_edit(message: &serde_json::Value) -> bool {
     message["edited"].is_object()
 }
 
-/// The ts that identifies the underlying MESSAGE, for dedup. A `message_changed`
-/// event carries its own (edit) `ts` at the top level while the message it
-/// concerns keeps the original under `message.ts` — keying on the outer one
-/// makes every rewrite of a message look like a brand-new message.
-fn dedup_ts(event: &serde_json::Value) -> &str {
-    event["message"]["ts"]
+/// The dedup identity of an event. A `message_changed` event carries its own
+/// (edit) `ts` at the top level while the message it concerns keeps the
+/// original under `message.ts` — keying on the outer one made every Slack
+/// rewrite (unfurl, preview) look like a brand-new message, so those key on
+/// the ORIGINAL ts and dedup onto the post itself.
+///
+/// A HUMAN edit is new content and must be forwarded (see `process_event`),
+/// so it keys on the original ts PLUS its `edited.ts`: distinct from the
+/// original post (which used to swallow every edit), yet each specific edit
+/// is still delivered at most once (Socket Mode redelivers).
+fn dedup_ts(event: &serde_json::Value) -> String {
+    let original = event["message"]["ts"]
         .as_str()
         .or_else(|| event["ts"].as_str())
-        .unwrap_or("")
+        .unwrap_or("");
+    match event["message"]["edited"]["ts"].as_str() {
+        Some(edit) if is_human_edit(&event["message"]) => format!("{original}#edit:{edit}"),
+        _ => original.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Adapter implementation
 // ---------------------------------------------------------------------------
+
+/// The dedup window for `bot_token`, shared by every listener generation of
+/// this bot in the process (see `run`).
+fn seen_window(bot_token: &str) -> Arc<Mutex<DedupWindow>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<DedupWindow>>>>,
+    > = std::sync::OnceLock::new();
+    let map = MAP.get_or_init(Default::default);
+    let mut m = map.lock().unwrap_or_else(|p| p.into_inner());
+    Arc::clone(m.entry(bot_token.to_string()).or_default())
+}
 
 /// Slack bot adapter: post, edit and upload messages via the Web API.
 pub struct SlackAdapter {
@@ -538,8 +559,12 @@ pub async fn run(
             debug!("slack: removed {n} stale downloaded attachment(s)");
         }
     });
-    // In-memory dedup set: keyed by "channel:ts".
-    let seen: Arc<Mutex<DedupWindow>> = Arc::new(Mutex::new(DedupWindow::default()));
+    // In-memory dedup set: keyed by "channel:ts". Shared per bot token
+    // across listener generations: a config edit respawns the listener while
+    // Slack may still redeliver events the previous generation handled (an
+    // unacked envelope, or the old socket's last frames) — a fresh window
+    // used to forward those twice.
+    let seen = seen_window(&bot_token);
 
     let mut backoff_ms: u64 = 3_000;
     const BACKOFF_MAX_MS: u64 = 60_000;
@@ -852,7 +877,7 @@ async fn handle_event(
         debug!(event_type, "slack: ignored non-message event");
         return;
     }
-    info!(event_type, "slack: message-like event received");
+    debug!(event_type, "slack: message-like event received");
 
     // Loop prevention — the ONLY thing we ever drop. Never forward the bot's
     // own messages, including the nested message of an edit (`message_changed`):
@@ -860,7 +885,7 @@ async fn handle_event(
     // edit emits a message_changed event authored by the bot. Without this the
     // relay would feed its own output back to the agent in a tight loop.
     if event["bot_id"].is_string() || event["message"]["bot_id"].is_string() {
-        info!(event_type, "slack: bot message skipped (loop prevention)");
+        debug!(event_type, "slack: bot message skipped (loop prevention)");
         return;
     }
 
@@ -1188,8 +1213,9 @@ mod tests {
             "dedup on the original"
         );
 
-        // A real human edit keeps the `edited` stamp — still forwarded, but it
-        // dedups onto the original message so it cannot re-trigger either.
+        // A real human edit keeps the `edited` stamp — it is new content and
+        // is forwarded, so it must NOT dedup onto the original post (that
+        // swallowed every edit); a redelivery of the same edit still dedups.
         let edited = serde_json::json!({
             "channel": "C1",
             "ts": "1785255520.000200",
@@ -1202,7 +1228,21 @@ mod tests {
             }
         });
         assert!(is_human_edit(&edited["message"]));
-        assert_eq!(dedup_ts(&edited), "1785255511.983239");
+        assert_eq!(
+            dedup_ts(&edited),
+            "1785255511.983239#edit:1785255520.000000",
+            "an edit is distinct from the original post"
+        );
+        assert_ne!(dedup_ts(&edited), dedup_ts(&unfurl));
+        // A second, later edit is distinct again.
+        let mut edited2 = edited.clone();
+        edited2["message"]["edited"]["ts"] = serde_json::json!("1785255530.000000");
+        assert_ne!(dedup_ts(&edited2), dedup_ts(&edited));
+        // The dedup window survives a listener respawn on the same bot.
+        assert!(Arc::ptr_eq(
+            &seen_window("xoxb-dedup-test"),
+            &seen_window("xoxb-dedup-test")
+        ));
 
         // A plain new message keys on its own ts, exactly as before.
         let plain = serde_json::json!({"channel": "C1", "ts": "1785255600.5", "text": "hi"});

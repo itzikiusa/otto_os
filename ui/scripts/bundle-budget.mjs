@@ -23,6 +23,21 @@
 //   node scripts/bundle-budget.mjs --update
 //
 // `--json` prints the measurements as JSON instead of the table.
+//
+// Two structural rules run alongside the byte budgets (they fail on their own,
+// whatever the sizes):
+//
+//   lazy-only    a heavy component (xterm's Terminal, CodeMirror's CodeEditor)
+//                must not be in the STATIC import set of the pages listed in
+//                LAZY_ONLY — they show it only inside an opened section, so it
+//                must stay behind a dynamic import (LazyTerminal / LazyMount).
+//                Byte budgets have 3 % slack and a page can shrink elsewhere;
+//                this pins the specific regression.
+//                LAZY_ONLY_PKG does the same for a whole npm package (`three`).
+//   duplicates   no npm package may be bundled from two node_modules locations
+//                (e.g. a nested mermaid under @excalidraw/mermaid-to-excalidraw
+//                next to the top-level one) — pin it with package.json
+//                `overrides` instead of shipping both copies.
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -125,12 +140,112 @@ if (manifest[RP_KEY]) {
   throw new Error(`bundle-budget: no manifest entry "${RP_KEY}" — is the right panel still a lazy chunk?`);
 }
 
+// ---- lazy-only: heavy components out of named pages' static import sets ----
+/** Heavy component → the page keys (shell/pages.svelte.ts) that must reach it
+ *  only through a dynamic import. */
+const LAZY_ONLY = {
+  'src/lib/components/Terminal.svelte': [
+    'vault',
+    'product',
+    'settings',
+    'git',
+    'workflows',
+    'personal-agents',
+    'canvas',
+    'browser',
+    'kubernetes',
+    'aws',
+    'skills-eval',
+  ],
+  'src/lib/components/CodeEditor.svelte': ['settings'],
+};
+/** npm package → the page keys whose STATIC import set must not reach it
+ *  (same rule as LAZY_ONLY, for a whole package). `three` (~650 kB) is only
+ *  ever behind a dynamic import: Home's Classrooms widget and the Design Hall
+ *  3D surfaces load it on first mount (classrooms/scene.ts, scene3d/build.ts). */
+const LAZY_ONLY_PKG = {
+  three: ['home', 'agents'],
+};
+const ruleFailures = [];
+/** Output files holding `src`'s own code: its chunk when it is a dynamic entry
+ *  (with Rollup's `_<Name>-<hash>.js` split when it is ALSO imported
+ *  statically somewhere), or the shared `_<Name>-<hash>.js` chunk when it is
+ *  only ever imported statically. */
+function heavyFiles(src) {
+  const name = src.split('/').pop().replace(/\.svelte$/, '');
+  const shared = new RegExp(`^_${name}-[\\w-]+\\.js$`);
+  const files = new Set();
+  for (const [k, c] of Object.entries(manifest)) {
+    if (k === src || shared.test(k)) files.add(c.file);
+  }
+  return files;
+}
+for (const [src, keys] of Object.entries(LAZY_ONLY)) {
+  const heavy = heavyFiles(src);
+  if (heavy.size === 0) continue; // not bundled at all — nothing can leak
+  for (const key of keys) {
+    const page = pages.get(key);
+    if (!page || !manifest[page]) {
+      ruleFailures.push(`lazy-only: page "${key}" is not in shell/pages.svelte.ts LOADERS — update LAZY_ONLY`);
+      continue;
+    }
+    const leaked = [...closure(page)].filter((f) => heavy.has(f));
+    if (leaked.length) {
+      ruleFailures.push(
+        `lazy-only: page:${key} statically imports ${src} (${leaked.join(', ')}) — load it through a dynamic import (LazyTerminal / lazyComponent)`,
+      );
+    }
+  }
+}
+
+for (const [pkg, keys] of Object.entries(LAZY_ONLY_PKG)) {
+  const prefix = `node_modules/${pkg}/`;
+  const heavy = new Set(
+    Object.entries(manifest)
+      .filter(([k, c]) => k.includes(prefix) || (c.src ?? '').includes(prefix))
+      .map(([, c]) => c.file),
+  );
+  if (heavy.size === 0) continue;
+  for (const key of keys) {
+    const page = pages.get(key);
+    if (!page || !manifest[page]) {
+      ruleFailures.push(`lazy-only: page "${key}" is not in shell/pages.svelte.ts LOADERS — update LAZY_ONLY_PKG`);
+      continue;
+    }
+    const leaked = [...closure(page)].filter((f) => heavy.has(f));
+    if (leaked.length) {
+      ruleFailures.push(`lazy-only: page:${key} statically imports the ${pkg} package (${leaked.join(', ')}) — load it through a dynamic import`);
+    }
+  }
+}
+
+// ---- duplicates: one bundled copy per npm package ----
+/** package name → the node_modules prefixes it was bundled from. */
+const pkgLocations = new Map();
+for (const c of Object.values(manifest)) {
+  const m = (c.src ?? '').match(/^(.*node_modules\/)((?:@[^/]+\/)?[^/]+)\//);
+  if (!m) continue;
+  if (!pkgLocations.has(m[2])) pkgLocations.set(m[2], new Set());
+  pkgLocations.get(m[2]).add(m[1]);
+}
+for (const [name, at] of pkgLocations) {
+  if (at.size > 1) {
+    ruleFailures.push(
+      `duplicates: ${name} is bundled from ${at.size} copies (${[...at].join(', ')}) — dedupe with package.json "overrides"`,
+    );
+  }
+}
+
 const budget = existsSync(BUDGET) ? JSON.parse(readFileSync(BUDGET, 'utf8')) : {};
 const kb = (n) => `${(n / 1024).toFixed(1)} KB`;
 
 if (args.has('--json')) {
   console.log(JSON.stringify(measured, null, 2));
   process.exit(0);
+}
+
+if (ruleFailures.length) {
+  console.error(`bundle-budget: ${ruleFailures.length} structural rule failure(s):\n  ${ruleFailures.join('\n  ')}`);
 }
 
 if (args.has('--update')) {
@@ -162,6 +277,7 @@ console.log(rows.join('\n'));
 if (shrunk.length) {
   console.log(`\nbundle-budget: ${shrunk.length} target(s) shrank past the tolerance (${shrunk.join(', ')}) — ratchet with --update.`);
 }
+if (ruleFailures.length) process.exit(1);
 if (failures.length) {
   console.error(`\nbundle-budget: ${failures.length} over budget:\n  ${failures.join('\n  ')}`);
   console.error('Lazy-load what grew (dynamic import), or — when the growth is deliberate — record it with --update.');

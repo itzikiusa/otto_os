@@ -879,7 +879,7 @@
       {/if}
       <div class="pal-search">
         <Icon name="search" size={12} />
-        <input class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
+        <input dir="ltr" class="pal-search-input" placeholder="Filter tables…" aria-label="Filter tables" bind:value={paletteSearch} spellcheck="false" />
       </div>
       <div class="pal-list">
         {#if paletteLoading}
@@ -977,7 +977,7 @@
                     aria-label="Select every column of {t.alias}"
                     title="Select every column"
                   />
-                  <input
+                  <input dir="ltr"
                     class="alias-input mono"
                     value={t.alias}
                     aria-label="Alias for {t.table}"
@@ -1025,9 +1025,7 @@
 
         {#if tables.length === 0}
           <div class="canvas-hint">
-            <Icon name="layers" size={22} />
-            <p class="ch-title">Build a query visually</p>
-            <p>Pick a table on the left. Add more and drag between columns (or use <strong>Add join…</strong>) to join — or right-click a query tab and choose <strong>Open in Builder</strong>.</p>
+            <EmptyState icon="layers" title="Build a query visually" body="Pick a table on the left. Add more and drag between columns (or use Add join…) to join — or right-click a query tab and choose Open in Builder." />
           </div>
         {/if}
         {#if tables.length > 1}
@@ -1102,10 +1100,10 @@
                     {#each colOptions as o (o.key)}<option value={o.key}>{o.key}</option>{/each}
                   </select>
                 {:else}
-                  <input class="input mono grow-2" bind:value={it.sql} placeholder={dialect === 'postgres' ? "CASE WHEN total > 100 THEN 'big' END" : "IF(total > 100, 'big', 'small')"} aria-label="SQL expression" spellcheck="false" />
+                  <input dir="ltr" class="input mono grow-2" bind:value={it.sql} placeholder={dialect === 'postgres' ? "CASE WHEN total > 100 THEN 'big' END" : "IF(total > 100, 'big', 'small')"} aria-label="SQL expression" spellcheck="false" />
                 {/if}
                 <span class="as">AS</span>
-                <input class="input mono alias" bind:value={it.as} placeholder={it.kind === 'column' ? it.ref.column : 'alias'} aria-label="Output name" spellcheck="false" />
+                <input dir="ltr" class="input mono alias" bind:value={it.as} placeholder={it.kind === 'column' ? it.ref.column : 'alias'} aria-label="Output name" spellcheck="false" />
                 <button class="icon-btn" onclick={() => moveSelect(i, -1)} disabled={i === 0} aria-label="Move up" title="Move up"><Icon name="chevronUp" size={12} /></button>
                 <button class="icon-btn" onclick={() => moveSelect(i, 1)} disabled={i === clauses.select.length - 1} aria-label="Move down" title="Move down"><Icon name="chevronDown" size={12} /></button>
                 <button class="icon-btn" onclick={() => removeSelect(it.id)} aria-label="Remove column" title="Remove"><Icon name="x" size={12} /></button>
@@ -1153,7 +1151,7 @@
             {:else}
               <div class="chips">
                 {#each clauses.groupBy as r, i (refKey(r))}
-                  <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={9} /></button></span>
+                  <span class="chip mono">{refKey(r)}<button class="chip-x" onclick={() => removeGroupBy(i)} aria-label="Remove {refKey(r)} from GROUP BY" title="Remove"><Icon name="x" size={12} /></button></span>
                 {/each}
               </div>
             {/if}
@@ -1339,7 +1337,7 @@
         <span class="cg-hint">{g.conj === 'AND' ? 'all of' : 'any of'}</span>
         {#if depth > 0}
           <span class="grow"></span>
-          <button class="btn small ghost" onclick={() => addCond(g, having)}><Icon name="plus" size={10} />Condition</button>
+          <button class="btn small ghost" onclick={() => addCond(g, having)}><Icon name="plus" size={12} />Condition</button>
         {/if}
       </div>
     {/if}
@@ -1366,13 +1364,13 @@
             {#each opsFor(k) as op (op)}<option value={op}>{OPS[op].label}</option>{/each}
           </select>
           {#if ar === 1}
-            <input class="input mono val" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="Value" spellcheck="false" />
+            <input dir="ltr" class="input mono val" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="Value" spellcheck="false" />
           {:else if ar === 2}
-            <input class="input mono val half" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="From" spellcheck="false" />
+            <input dir="ltr" class="input mono val half" bind:value={it.value} placeholder={placeholderFor(k)} aria-label="From" spellcheck="false" />
             <span class="as">and</span>
-            <input class="input mono val half" bind:value={it.value2} placeholder={placeholderFor(k)} aria-label="To" spellcheck="false" />
+            <input dir="ltr" class="input mono val half" bind:value={it.value2} placeholder={placeholderFor(k)} aria-label="To" spellcheck="false" />
           {:else if ar === 'list'}
-            <input
+            <input dir="ltr"
               class="input mono val"
               value={it.value ?? (it.values ?? []).join(', ')}
               oninput={(e) => setListText(it, e.currentTarget.value)}
@@ -1759,24 +1757,8 @@
     top: 50%;
     left: 50%; /* ui-guards: allow — centred with the translate below: the same in RTL */
     transform: translate(-50%, -50%);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
     max-width: 360px;
-    text-align: center;
-    color: var(--text-dim);
     pointer-events: none;
-  }
-  .canvas-hint p {
-    margin: 0;
-    font-size: var(--fs-s);
-    line-height: 1.5;
-  }
-  .canvas-hint .ch-title {
-    color: var(--text);
-    font-size: var(--fs-m);
-    font-weight: 500;
   }
   .join-form {
     display: flex;
@@ -1866,7 +1848,7 @@
     padding: 8px 14px 16px;
   }
   .clauses.disabled {
-    opacity: 0.55;
+    opacity: var(--disabled-opacity);
     pointer-events: none;
   }
   .notice {

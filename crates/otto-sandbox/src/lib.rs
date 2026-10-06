@@ -149,7 +149,42 @@ const HOME_DENY_WRITE_LITERAL: &[&str] = &[
     ".claude/settings.local.json",
     ".codex/config.toml",
 ];
-const HOME_DENY_WRITE_SUBPATH: &[&str] = &[".config/git"];
+const HOME_DENY_WRITE_SUBPATH: &[&str] = &[
+    ".config/git",
+    // gh aliases (`!shell` aliases run on the user's next `gh …`) + hosts.
+    ".config/gh",
+    // Claude Code extension points that load into EVERY claude session the
+    // user runs, sandboxed or not: plugins (with their hooks), hook scripts
+    // referenced from settings.json, subagent and slash-command definitions.
+    // The CLI's own state (projects/, todos/, statsig/, shell-snapshots/…)
+    // stays writable under the `.claude` grant.
+    ".claude/plugins",
+    ".claude/hooks",
+    ".claude/agents",
+    ".claude/commands",
+];
+
+/// The Otto desktop app's (bundle id `com.otto.app`) WebKit storage under
+/// `$HOME`: localStorage holds the UI's bearer token (`otto_token`), and the
+/// network cache / cookies hold API responses. Neither readable nor writable
+/// (a poisoned cache entry would load into the app's webview).
+const HOME_DENY_ALL_SUBPATH: &[&str] = &[
+    "Library/WebKit/com.otto.app",
+    "Library/Application Support/com.otto.app",
+    "Library/Caches/com.otto.app",
+    "Library/HTTPStorages/com.otto.app",
+];
+
+/// Files of a repo's git dir that make the DAEMON's (unsandboxed) git run
+/// code: `config` (fsmonitor, sshCommand, credential helpers, filters, hooks
+/// path, aliases), `config.worktree`, `commondir` (re-points the whole repo at
+/// another config) and `hooks/`. The git dir itself is literal-denied too, so
+/// it can't be renamed away and replaced by one the agent wrote. Objects,
+/// refs, the index, logs — what `git commit`/`branch`/`stash` write — stay
+/// writable. (An agent's `git push -u` still pushes; only the upstream
+/// tracking line it would add to `config` is refused.)
+const GIT_DIR_DENY_WRITE_LITERAL: &[&str] = &["config", "config.worktree", "commondir"];
+const GIT_DIR_DENY_WRITE_SUBPATH: &[&str] = &["hooks"];
 
 /// Programs that hand work to launchd (which runs it outside the sandbox).
 /// `launchctl` talks to launchd over the bootstrap port, which mach-lookup
@@ -238,6 +273,41 @@ impl SandboxPolicy {
                     .map(|rel| filter("subpath", &canonicalize_lenient(&home.join(rel)))),
             );
             trailing.push(format!("(deny file-write* {})", filters.join(" ")));
+        }
+        if home_set {
+            let hidden: Vec<String> = HOME_DENY_ALL_SUBPATH
+                .iter()
+                .map(|rel| filter("subpath", &canonicalize_lenient(&home.join(rel))))
+                .collect();
+            trailing.push(format!(
+                "(deny file-read* file-write* {})",
+                hidden.join(" ")
+            ));
+        }
+        // The repo's git dir(s): writable for commits, but never the files
+        // that pick programs for the daemon's own git to run.
+        let mut git_dirs: Vec<PathBuf> = Vec::new();
+        let dot_git = canonicalize_lenient(&cwd.join(".git"));
+        if dot_git.exists() {
+            git_dirs.push(dot_git);
+        }
+        for e in extra_writable {
+            let e = canonicalize_lenient(e);
+            // Only a git dir that exists now: a session that will `git init`
+            // its own repo must be able to create `.git`.
+            if e.exists()
+                && (e.file_name().is_some_and(|n| n == ".git") || e.join("HEAD").is_file())
+            {
+                git_dirs.push(e);
+            }
+        }
+        git_dirs.sort();
+        git_dirs.dedup();
+        for g in &git_dirs {
+            trailing.push(format!(
+                "(deny file-write* {})",
+                git_dir_filters(g).join(" ")
+            ));
         }
         if data_dir_set {
             // 1. Otto's data dir is read-only for the agent…
@@ -451,6 +521,42 @@ fn design_work_filters(data_dir: &Path) -> Vec<String> {
     ]
 }
 
+/// Write-deny filters for one git dir `g` ([`GIT_DIR_DENY_WRITE_LITERAL`] /
+/// [`GIT_DIR_DENY_WRITE_SUBPATH`]), applied to `g` itself, to each linked
+/// worktree's admin dir (`g/worktrees/<name>/`) and to each submodule's git
+/// dir (`g/modules/**`). When `g` is a worktree's `.git` FILE the literal
+/// keeps its `gitdir:` pointer from being rewritten.
+fn git_dir_filters(g: &Path) -> Vec<String> {
+    let mut out = vec![filter("literal", g)];
+    out.extend(
+        GIT_DIR_DENY_WRITE_LITERAL
+            .iter()
+            .map(|f| filter("literal", &g.join(f))),
+    );
+    out.extend(
+        GIT_DIR_DENY_WRITE_SUBPATH
+            .iter()
+            .map(|f| filter("subpath", &g.join(f))),
+    );
+    // Nested admin dirs, by pattern. Skipped (the literals above still apply)
+    // when the path can't be embedded in a regex literal.
+    if let Some(d) = g.to_str().filter(|d| !d.contains('"')) {
+        let d = regex_escape(d);
+        let files = GIT_DIR_DENY_WRITE_LITERAL
+            .iter()
+            .map(|f| regex_escape(f))
+            .collect::<Vec<_>>()
+            .join("|");
+        out.push(format!(
+            "(regex #\"^{d}/(worktrees/[^/]+|modules/.+)/({files})$\")"
+        ));
+        out.push(format!(
+            "(regex #\"^{d}/(worktrees/[^/]+|modules/.+)/hooks(/|$)\")"
+        ));
+    }
+    out
+}
+
 /// Escape POSIX-regex metacharacters so a literal path matches itself.
 fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -533,7 +639,10 @@ mod tests {
         assert!(!sbpl.contains(&format!("(subpath \"{data}/bin\")")));
         assert!(!sbpl.contains(&format!("(subpath \"{data}/provider-accounts\")")));
         // Not readable at all.
-        let hidden = at(&sbpl, "(deny file-read*");
+        let hidden = at(
+            &sbpl,
+            &format!("(deny file-read* (literal \"{data}/secrets.json\")"),
+        );
         assert!(hidden > deny);
         assert!(sbpl.contains(&format!("(literal \"{data}/secrets.json\")")));
         assert!(sbpl.contains(&format!("(prefix \"{data}/otto.db\")")));
@@ -601,6 +710,104 @@ mod tests {
         );
         assert!(sbpl.contains("(literal \"/home/u/.codex/config.toml\")"));
         assert!(sbpl.contains("(subpath \"/home/u/.config/git\")"));
+    }
+
+    /// A sandboxed agent must not plant code the user's OTHER (unsandboxed)
+    /// tools run: claude plugins/hooks/agents/commands and gh aliases.
+    #[test]
+    fn for_agent_denies_claude_extension_points_and_gh_config() {
+        let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
+        let grant = at(&sbpl, "(allow file-write* (subpath \"/home/u/.claude\"))");
+        for rel in [
+            ".claude/plugins",
+            ".claude/hooks",
+            ".claude/agents",
+            ".claude/commands",
+            ".config/gh",
+        ] {
+            let deny = at(&sbpl, &format!("(subpath \"/home/u/{rel}\")"));
+            assert!(deny > grant, "{rel} deny must follow the grant");
+        }
+        // The CLI's own state stays writable (no deny names it).
+        for rel in [".claude/projects", ".claude/todos", ".claude/statsig"] {
+            assert!(!sbpl.contains(&format!("/home/u/{rel}")), "{rel}");
+        }
+    }
+
+    /// The UI token lives in the app's WebKit localStorage: not readable.
+    #[test]
+    fn for_agent_hides_the_desktop_app_webkit_storage() {
+        let sbpl = agent_policy("/nonexistent-otto-test/Otto").to_sbpl();
+        let read_all = at(&sbpl, "(allow file-read*)");
+        let deny = at(&sbpl, "(deny file-read* file-write* ");
+        assert!(deny > read_all, "the deny must follow the global read");
+        for rel in [
+            "Library/WebKit/com.otto.app",
+            "Library/Application Support/com.otto.app",
+            "Library/Caches/com.otto.app",
+        ] {
+            assert!(
+                sbpl[deny..].contains(&format!("(subpath \"/home/u/{rel}\")")),
+                "{rel} must be hidden"
+            );
+        }
+        // …and that deny follows the `Library/Caches` write grant too.
+        assert!(deny > at(&sbpl, "(subpath \"/home/u/Library/Caches\")"));
+    }
+
+    /// The daemon's unsandboxed git reads the repo's `.git/config` and runs
+    /// its hooks: the agent may commit (objects/refs/index) but not edit
+    /// config, commondir or hooks — nor swap the git dir out wholesale.
+    #[test]
+    fn for_agent_write_denies_git_config_and_hooks() {
+        let tmp = std::env::temp_dir().join(format!("otto-sbx-git-{}", std::process::id()));
+        let cwd = tmp.join("project");
+        let git = cwd.join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let cwd = canonicalize_lenient(&cwd);
+        let git = canonicalize_lenient(&git);
+        let pol = SandboxPolicy::for_agent(
+            &cwd,
+            Path::new("/home/u"),
+            Path::new("/nonexistent-otto-test/Otto"),
+            std::slice::from_ref(&git),
+            NetworkPolicy::Full,
+        );
+        let sbpl = pol.to_sbpl();
+        let g = git.display().to_string();
+        let grant = at(
+            &sbpl,
+            &format!("(allow file-write* (subpath \"{}\"))", cwd.display()),
+        );
+        let deny = at(&sbpl, &format!("(deny file-write* (literal \"{g}\")"));
+        assert!(deny > grant, "the git-dir deny must follow the cwd grant");
+        let rule = &sbpl[deny..sbpl[deny..].find('\n').unwrap() + deny];
+        for f in [
+            format!("(literal \"{g}/config\")"),
+            format!("(literal \"{g}/config.worktree\")"),
+            format!("(literal \"{g}/commondir\")"),
+            format!("(subpath \"{g}/hooks\")"),
+        ] {
+            assert!(rule.contains(&f), "missing {f} in {rule}");
+        }
+        assert!(
+            rule.contains("/(worktrees/[^/]+|modules/.+)/(config|config\\.worktree|commondir)$")
+        );
+        // Commits still work: objects/refs/index are not named.
+        for f in ["objects", "refs", "index", "logs"] {
+            assert!(
+                !rule.contains(&format!("{g}/{f}")),
+                "{f} must stay writable"
+            );
+        }
+        // Exactly one rule for the git dir even though it is both cwd/.git and
+        // an extra.
+        assert_eq!(
+            sbpl.matches(&format!("(literal \"{g}/config\")")).count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

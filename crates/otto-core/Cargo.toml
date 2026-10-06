@@ -15,4 +15,6 @@ ulid.workspace = true
 sha2.workspace = true
 # `secrets::get_async` runs keychain misses on the blocking pool.
 tokio = { workspace = true }
+# `cadence`: schedule wall-clock times in the schedule's IANA timezone.
+chrono-tz = "0.10.4"
 

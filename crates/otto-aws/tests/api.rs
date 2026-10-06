@@ -68,6 +68,8 @@ case "$1 $2" in
     exit 0;;
   "sqs list-queues")
     echo '{"QueueUrls": ["https://sqs.eu-west-1.amazonaws.com/123456789012/orders"]}'; exit 0;;
+  "sqs receive-message")
+    echo '{"Messages": [{"MessageId": "m-1", "ReceiptHandle": "rh", "Body": "{}", "Attributes": {"ApproximateReceiveCount": "1"}}]}'; exit 0;;
   "configure export-credentials")
     # The spawn-count tests' profiles export creds (slowly, so a fan-out that
     # does not single-flight would visibly start several exports).
@@ -971,6 +973,57 @@ async fn cloudwatch_metrics_single_call_cached_and_service_gated() {
     );
     let (st, _, _) = call(&ctx, &viewer, "GET", &uri, None).await;
     assert_eq!(st, StatusCode::OK);
+}
+
+/// A peek is a `receive-message`: it never hides messages (visibility timeout
+/// pinned to 0 whatever the body asks) but bumps their receive count, so it is
+/// gated like Send — the old View-level `sqs_receive` grant is not enough.
+#[tokio::test]
+async fn sqs_peek_needs_edit_and_pins_visibility_timeout_to_zero() {
+    let ctx = TestCtx::new().await;
+    let root = seed_user(&ctx.pool, "root", true).await;
+    let (_, a, _) = call(
+        &ctx,
+        &root,
+        "POST",
+        "/aws/accounts",
+        Some(profile_req("sqs", "sqs-peek-profile")),
+    )
+    .await;
+    let id = a["id"].as_str().unwrap().to_string();
+    let uri = format!("/aws/accounts/{id}/sqs/queues/peek");
+    let body = serde_json::json!({
+        "url": "https://sqs.eu-west-1.amazonaws.com/123456789012/orders",
+        "max": 5,
+        "visibility_timeout": 43200
+    });
+
+    let viewer = seed_user(&ctx.pool, "sqs-viewer", false).await;
+    grant(&ctx.pool, &viewer, "aws", "view").await;
+    grant(&ctx.pool, &viewer, "aws_sqs", "view").await;
+    allow_account(&ctx, &root, &viewer, &id, "discover").await;
+    allow_account(&ctx, &root, &viewer, &id, "sqs_view").await;
+    allow_account(&ctx, &root, &viewer, &id, "sqs_receive").await;
+    let (st, e, _) = call(&ctx, &viewer, "POST", &uri, Some(body.clone())).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+    assert!(
+        !calls_log()
+            .lines()
+            .any(|l| l.contains("PROFILE=sqs-peek-profile") && l.contains("receive-message")),
+        "a refused peek must not reach the CLI"
+    );
+
+    allow_account(&ctx, &root, &viewer, &id, "sqs_send").await;
+    let (st, r, _) = call(&ctx, &viewer, "POST", &uri, Some(body)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["messages"][0]["message_id"], "m-1");
+    let line = calls_log()
+        .lines()
+        .rfind(|l| l.contains("PROFILE=sqs-peek-profile") && l.contains("receive-message"))
+        .expect("peek spawned receive-message")
+        .to_string();
+    assert!(line.contains("--visibility-timeout 0 "), "{line}");
+    assert!(!line.contains("43200"), "{line}");
 }
 
 #[tokio::test]

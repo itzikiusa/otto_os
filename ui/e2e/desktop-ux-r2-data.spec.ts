@@ -156,7 +156,7 @@ for (const variant of variants) test(`Loaded data workbenches ${variant.name}`, 
   await editor.fill('SELECT id, customer, notes FROM customers LIMIT 20');
   await page.getByRole('button',{name:/^Run\s+⌘/}).click();
   await expect(page.getByText('Example customer',{exact:true})).toBeVisible();
-  if (variant.name === 'phone') await page.getByRole('tab',{name:'Vertical',exact:true}).click();
+  if (variant.name === 'phone') await page.getByRole('group',{name:'Result view'}).getByRole('button',{name:'Vertical',exact:true}).click();
   await page.getByText('Example customer',{exact:true}).scrollIntoViewIfNeeded();
   await shot('database');
 
@@ -166,7 +166,7 @@ for (const variant of variants) test(`Loaded data workbenches ${variant.name}`, 
   await page.getByRole('button',{name:'Send',exact:true}).click();
   await expect(page.getByRole('button',{name:'Tree',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Tree',exact:true}).click();
-  await expect(page.getByText('Loading saved requests…',{exact:true})).toHaveCount(0);
+  await expect(page.locator('.api-page[aria-busy="true"]')).toHaveCount(0);
   await shot('api');
 
   await page.route('**/groups', r => r.fulfill({json:[{group_id:'customer-notification-consumers',state:'Stable',members:2},{group_id:'audit-log-consumers',state:'Empty',members:0}]}));

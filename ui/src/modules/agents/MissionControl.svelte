@@ -440,7 +440,7 @@
           aria-busy={deletingViews[sv.id] ? 'true' : undefined}
           title={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
           aria-label={deletingViews[sv.id] ? `Deleting view “${sv.name}”…` : `Delete view “${sv.name}”`}
-        ><Icon name="x" size={10} /></button>
+        ><Icon name="x" size={12} /></button>
       </span>
     {/each}
     <button class="btn small ghost" onclick={() => (showNewViewForm = !showNewViewForm)} aria-expanded={showNewViewForm}>
@@ -450,7 +450,7 @@
 
   {#if showNewViewForm}
     <div class="new-view-form">
-      <input
+      <input dir="auto"
         type="text"
         class="input"
         placeholder="View name"
@@ -459,7 +459,7 @@
         onkeydown={(e) => { if (e.key === 'Enter') void createView(); else if (e.key === 'Escape') showNewViewForm = false; }}
       />
       {#if advancedFilter}
-        <input type="text" class="input wide mono" aria-label="Filter JSON" placeholder={'{"bucket":"needs_you"}'} bind:value={newViewFilter} />
+        <input dir="ltr" type="text" class="input wide mono" aria-label="Filter JSON" placeholder={'{"bucket":"needs_you"}'} bind:value={newViewFilter} />
       {:else}
         <select class="input" aria-label="View status" bind:value={filterBucket}><option value="">All statuses</option>{#each ALL_BUCKETS as bucket}<option value={bucket}>{BUCKET_LABELS[bucket]}</option>{/each}</select>
         <select class="input" aria-label="View provider" bind:value={filterProvider}><option value="">All providers</option>{#each providers as provider}<option value={provider}>{provider}</option>{/each}</select>
@@ -536,12 +536,12 @@
                           onclick={(e) => openSubtask(e, item)}
                           title="Push a sub-task to this agent"
                           data-testid="subtask-btn"
-                        ><Icon name="plus" size={10} /> Sub-task</button>
+                        ><Icon name="plus" size={12} /> Sub-task</button>
                       {/if}
                     </div>
                     {#if subtaskFor === item.id}
                       <div class="subtask-form" data-subtask-for={item.id}>
-                        <input
+                        <input dir="auto"
                           class="input subtask-input"
                           placeholder="Sub-task for the agent…"
                           bind:value={subtaskTitle}
@@ -679,7 +679,7 @@
   }
   .wq-view-del:disabled {
     cursor: progress;
-    opacity: 0.5;
+    opacity: var(--disabled-opacity);
   }
 
   /* New-view form */

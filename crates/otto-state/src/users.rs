@@ -74,6 +74,42 @@ impl UsersRepo {
         self.get(&id).await
     }
 
+    /// Create the FIRST (root) user — atomically conditional on the table being
+    /// empty. A single `INSERT … SELECT … WHERE NOT EXISTS` statement, so two
+    /// racing onboarding requests can't both pass a separate `count() == 0`
+    /// check: exactly one row lands, the loser gets `Conflict`.
+    pub async fn create_first_root(
+        &self,
+        username: &str,
+        password_hash: &str,
+        display_name: &str,
+    ) -> Result<User> {
+        let id = new_id();
+        let now = fmt(Utc::now());
+        let res = sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, is_root, disabled, created_at)
+             SELECT ?, ?, ?, ?, 1, 0, ?
+             WHERE NOT EXISTS (SELECT 1 FROM users)",
+        )
+        .bind(&id)
+        .bind(username)
+        .bind(password_hash)
+        .bind(display_name)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(ref d) if d.message().contains("UNIQUE") => {
+                Error::Conflict("already onboarded".into())
+            }
+            other => Error::Internal(format!("create root user: {other}")),
+        })?;
+        if res.rows_affected() == 0 {
+            return Err(Error::Conflict("already onboarded".into()));
+        }
+        self.get(&id).await
+    }
+
     pub async fn get(&self, id: &Id) -> Result<User> {
         let r = sqlx::query("SELECT * FROM users WHERE id = ?")
             .bind(id)
@@ -135,5 +171,38 @@ impl UsersRepo {
                 .map_err(dberr("update user"))?;
         }
         self.get(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_root_insert_is_conditional_on_an_empty_table() {
+        let users = UsersRepo::new(crate::db::test_pool().await);
+        let root = users
+            .create_first_root("root", "hash", "Root")
+            .await
+            .unwrap();
+        assert!(root.is_root);
+        // A second onboarding — even under a different username — loses.
+        let err = users
+            .create_first_root("root2", "hash", "Mallory")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+        assert_eq!(users.count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn first_root_refused_once_any_user_exists() {
+        let users = UsersRepo::new(crate::db::test_pool().await);
+        users.create("alice", "hash", "Alice", false).await.unwrap();
+        let err = users
+            .create_first_root("root", "hash", "Root")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
     }
 }

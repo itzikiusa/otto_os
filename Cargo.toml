@@ -2,20 +2,24 @@
 resolver = "2"
 members = [
     "crates/otto-core",
+    "crates/otto-assistant",
     "crates/otto-state",
     "crates/otto-rbac",
     "crates/otto-keychain",
     "crates/otto-pty",
     "crates/otto-sessions",
     "crates/otto-connections",
+    "crates/otto-automation",
     "crates/otto-aws",
     "crates/otto-k8s",
     "crates/otto-dbviewer",
+    "crates/otto-apiclient",
     "crates/otto-orchestrator",
     "crates/otto-git",
     "crates/otto-issues",
     "crates/otto-channels",
     "crates/otto-improve",
+    "crates/otto-insights",
     "crates/otto-context",
     "crates/otto-usage",
     "crates/otto-telemetry",
@@ -31,11 +35,15 @@ members = [
     "crates/otto-ssh",
     "crates/otto-canvas",
     "crates/otto-design",
+    "crates/otto-design-assist",
     "crates/otto-workgraph",
     "crates/otto-mcp",
     "crates/otto-sandbox",
     "crates/otto-browser",
     "crates/otto-transcript",
+    "crates/otto-workflows",
+    "crates/otto-agent-run",
+    "crates/otto-review",
 ]
 # Custom plugins are out-of-process sidecars installed at RUNTIME under
 # ~/otto-plugins (not workspace members, not compiled into the app). See
@@ -50,6 +58,7 @@ license = "MIT"
 otto-core = { path = "crates/otto-core" }
 otto-state = { path = "crates/otto-state" }
 otto-rbac = { path = "crates/otto-rbac" }
+otto-automation = { path = "crates/otto-automation" }
 otto-keychain = { path = "crates/otto-keychain" }
 otto-pty = { path = "crates/otto-pty" }
 otto-sessions = { path = "crates/otto-sessions" }
@@ -57,30 +66,37 @@ otto-connections = { path = "crates/otto-connections" }
 otto-aws = { path = "crates/otto-aws" }
 otto-k8s = { path = "crates/otto-k8s" }
 otto-dbviewer = { path = "crates/otto-dbviewer" }
+otto-apiclient = { path = "crates/otto-apiclient" }
 otto-orchestrator = { path = "crates/otto-orchestrator" }
 otto-git = { path = "crates/otto-git" }
 otto-issues = { path = "crates/otto-issues" }
 otto-channels = { path = "crates/otto-channels" }
 otto-improve = { path = "crates/otto-improve" }
+otto-insights = { path = "crates/otto-insights" }
 otto-context = { path = "crates/otto-context" }
 otto-skills = { path = "crates/otto-skills" }
 otto-usage = { path = "crates/otto-usage" }
 otto-telemetry = { path = "crates/otto-telemetry" }
+otto-agent-run = { path = "crates/otto-agent-run" }
+otto-review = { path = "crates/otto-review" }
 otto-server = { path = "crates/otto-server" }
 otto-product = { path = "crates/otto-product" }
 otto-swarm = { path = "crates/otto-swarm" }
 otto-memory = { path = "crates/otto-memory" }
+otto-assistant = { path = "crates/otto-assistant" }
 otto-vault = { path = "crates/otto-vault" }
 otto-brokers = { path = "crates/otto-brokers" }
 otto-netguard = { path = "crates/otto-netguard" }
 otto-ssh = { path = "crates/otto-ssh" }
 otto-canvas = { path = "crates/otto-canvas" }
 otto-design = { path = "crates/otto-design" }
+otto-design-assist = { path = "crates/otto-design-assist" }
 otto-workgraph = { path = "crates/otto-workgraph" }
 otto-mcp = { path = "crates/otto-mcp" }
 otto-sandbox = { path = "crates/otto-sandbox" }
 otto-browser = { path = "crates/otto-browser" }
 otto-transcript = { path = "crates/otto-transcript" }
+otto-workflows = { path = "crates/otto-workflows" }
 
 # Tree-sitter repo map (otto-context). A coherent grammar set pinned to one
 # tree-sitter ABI; `ignore` walks the repo honoring .gitignore.
