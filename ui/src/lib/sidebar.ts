@@ -172,6 +172,20 @@ export function availableModules(
 }
 
 /**
+ * Whether the user may open the built-in module behind a route (its first
+ * segment), using the SAME gate {@link availableModules} applies — so a link
+ * list outside the sidebar (the Automate chooser, S20-307) never sends a user
+ * to a module their role or a disabled feature hides. A route with no
+ * registry entry is allowed (it has no gate of its own to check).
+ */
+export function routeAllowed(route: string, can: (feature: Feature) => boolean): boolean {
+  const id = route.split(/[/?]/)[0];
+  const m = SIDEBAR_MODULES.find((x) => x.id === id);
+  if (!m) return true;
+  return m.featureAny ? m.featureAny.some(can) : m.feature == null || can(m.feature);
+}
+
+/**
  * The sidebar entry a router module belongs to. The Database Explorer and
  * Message Brokers views have no nav entries of their own — they are opened from
  * the unified Connections hub, so their routes highlight `connections`.
