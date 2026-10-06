@@ -102,8 +102,8 @@ const DTOS: { rust: string; ts?: string; extraTs?: string[] }[] = [
   { rust: 'NotificationSettings' },
   { rust: 'User' },
   { rust: 'Workspace' },
-  // `live` / `viewers` are transient columns the list/get routes add.
-  { rust: 'Session', extraTs: ['live', 'viewers'] },
+  // `live` / `viewers` / `held` are transient columns the list/get routes add.
+  { rust: 'Session', extraTs: ['live', 'viewers', 'held'] },
   { rust: 'Notice' },
   { rust: 'Repo', extraTs: ['forge'] },
 ];

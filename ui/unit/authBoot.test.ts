@@ -87,7 +87,7 @@ test('a stalled /meta on an in-place re-boot keeps the running shell up (S13-304
       getToken: () => null, setToken() {},
       getImpersonationToken: () => null, setImpersonationToken() {},
     },
-    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {}, ssGet: () => null, ssSet() {}, ssRemove() {} },
   }, {
     setTimeout: (fn: () => void, ms: number) => { deadlines.push(ms); return setTimeout(fn, 5); },
   });
