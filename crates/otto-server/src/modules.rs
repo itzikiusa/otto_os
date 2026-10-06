@@ -3999,8 +3999,21 @@ pub(crate) async fn pr_draft_prompt_for(
         }
     };
     if diff.trim().is_empty() {
-        return Err(Error::Invalid(format!(
-            "no changes between '{source}' and '{base}'"
+        // An explicit head drafts from COMMITS only. When that head is the
+        // checked-out branch and the work is still in the working tree, say so
+        // — a bare "no changes" reads as a bug to someone looking at their
+        // edits (S15-307).
+        let uncommitted = match head {
+            Some(h) => {
+                git.current_branch().await.is_ok_and(|cur| cur == h)
+                    && git.status().await.is_ok_and(|st| !st.changes.is_empty())
+            }
+            None => false,
+        };
+        return Err(Error::Invalid(no_pr_changes_message(
+            &source,
+            base,
+            uncommitted,
         )));
     }
     let truncated = diff.len() > MAX_DIFF;
@@ -4051,6 +4064,20 @@ pub(crate) async fn pr_draft_prompt_for(
     let prompt = compose_draft_prompt(&skill_text, &base_prompt);
 
     Ok((prompt, source, base.to_string()))
+}
+
+/// The PR-draft "nothing to draft" error. `uncommitted`: the source is the
+/// checked-out branch and its working tree has changes that are not in any
+/// commit yet — the PR would carry none of them.
+pub(crate) fn no_pr_changes_message(source: &str, base: &str, uncommitted: bool) -> String {
+    if uncommitted {
+        format!(
+            "no commits between '{source}' and '{base}' — your changes are not committed yet. \
+             Commit your changes first: the PR includes commits only"
+        )
+    } else {
+        format!("no changes between '{source}' and '{base}'")
+    }
 }
 
 /// Launch an AI review on a specific branch/worktree (Run with Otto's `reviewing`
@@ -7624,5 +7651,18 @@ mod review_retry_tests {
         super::unregister_review_agent_cancel(&reg, &rid, 1);
         sweep_review_temp_files_if_idle(&reg, &rid);
         assert!(!diff.exists(), "the last retry out sweeps");
+    }
+
+    /// S15-307: an empty draft on the checked-out branch with uncommitted work
+    /// says to commit first; otherwise the plain "no changes".
+    #[test]
+    fn empty_pr_draft_names_uncommitted_work() {
+        let msg = super::no_pr_changes_message("feat", "main", true);
+        assert!(msg.contains("Commit your changes first"), "{msg}");
+        assert!(msg.contains("'feat'") && msg.contains("'main'"), "{msg}");
+        assert_eq!(
+            super::no_pr_changes_message("feat", "main", false),
+            "no changes between 'feat' and 'main'"
+        );
     }
 }
