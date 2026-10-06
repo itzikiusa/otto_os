@@ -22,7 +22,7 @@
 //! diagnosing correctness issues in production). All call sites compile-check the
 //! same; the hot path becomes a direct DB call.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -41,14 +41,77 @@ pub const AUTH_CACHE_ENABLED: bool = true;
 /// evict, so this is a belt-and-suspenders backstop.
 pub const AUTH_CACHE_TTL: Duration = Duration::from_secs(10);
 
+type Entries = DashMap<String, (AuthContext, Instant)>;
+type ByUser = DashMap<String, Vec<String>>;
+
+/// Every live [`AuthCache`]'s maps (S8-302). Revocation paths evict through
+/// [`evict_everywhere`] / [`evict_user_everywhere`], so a revoke issued from a
+/// cache-less `AuthRepo::new(pool)` (logout, PAT revoke, password change,
+/// disable…) still drops the entry the shared authenticator cached — no
+/// caller can forget to thread the cache through. Weak refs: a dropped cache
+/// (a test's) is pruned on the next registration.
+type Registered = (Weak<Entries>, Weak<ByUser>);
+
+fn registry() -> &'static Mutex<Vec<Registered>> {
+    static REG: OnceLock<Mutex<Vec<Registered>>> = OnceLock::new();
+    REG.get_or_init(Default::default)
+}
+
+fn register(entries: &Arc<Entries>, by_user: &Arc<ByUser>) {
+    let mut reg = registry().lock().unwrap_or_else(|p| p.into_inner());
+    reg.retain(|(e, _)| e.strong_count() > 0);
+    reg.push((Arc::downgrade(entries), Arc::downgrade(by_user)));
+}
+
+fn live_caches() -> Vec<(Arc<Entries>, Arc<ByUser>)> {
+    registry()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter_map(|(e, u)| Some((e.upgrade()?, u.upgrade()?)))
+        .collect()
+}
+
+fn evict_in(entries: &Entries, by_user: &ByUser, token_hash: &str) {
+    entries.remove(token_hash);
+    // Scrub from all reverse-index entries (the hash appears in at most one
+    // user's vec, but a linear scan is fine for the small cardinality).
+    by_user.retain(|_, hashes| {
+        hashes.retain(|h| h != token_hash);
+        !hashes.is_empty()
+    });
+}
+
+fn evict_user_in(entries: &Entries, by_user: &ByUser, user_id: &str) {
+    if let Some((_, hashes)) = by_user.remove(user_id) {
+        for h in hashes {
+            entries.remove(&h);
+        }
+    }
+}
+
+/// Evict `token_hash` from EVERY live [`AuthCache`] in the process.
+pub fn evict_everywhere(token_hash: &str) {
+    for (entries, by_user) in live_caches() {
+        evict_in(&entries, &by_user, token_hash);
+    }
+}
+
+/// Evict every cached token of `user_id` from EVERY live [`AuthCache`].
+pub fn evict_user_everywhere(user_id: &str) {
+    for (entries, by_user) in live_caches() {
+        evict_user_in(&entries, &by_user, user_id);
+    }
+}
+
 /// The full cache state, cheaply `Arc`-cloned so `AuthRepo` and the
 /// `GrantsInvalidator` impl share the same backing map.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AuthCache {
     /// token_hash → (AuthContext, inserted_at)
-    entries: Arc<DashMap<String, (AuthContext, Instant)>>,
+    entries: Arc<Entries>,
     /// user_id → set of token_hashes owned by that user (for per-user eviction)
-    by_user: Arc<DashMap<String, Vec<String>>>,
+    by_user: Arc<ByUser>,
     /// When false all get/insert/evict calls are no-ops: the authenticator
     /// falls through to the DB on every request, just as before the cache
     /// existed. Revocation paths are unaffected (they still call DB + evict,
@@ -63,20 +126,23 @@ pub struct AuthCache {
 impl AuthCache {
     /// Create an enabled cache with the standard TTL.
     pub fn new() -> Self {
-        Self {
-            entries: Arc::default(),
-            by_user: Arc::default(),
-            enabled: AUTH_CACHE_ENABLED,
-            grants: otto_state::GrantCache::new(),
-        }
+        Self::build(AUTH_CACHE_ENABLED)
     }
 
     /// Create a cache with the enabled flag forced to `value`. Used in tests.
     #[cfg(test)]
     pub fn with_enabled(enabled: bool) -> Self {
+        Self::build(enabled)
+    }
+
+    /// Every cache registers itself so process-wide revocations reach it.
+    fn build(enabled: bool) -> Self {
+        let entries = Arc::default();
+        let by_user = Arc::default();
+        register(&entries, &by_user);
         Self {
-            entries: Arc::default(),
-            by_user: Arc::default(),
+            entries,
+            by_user,
             enabled,
             grants: otto_state::GrantCache::new(),
         }
@@ -119,24 +185,20 @@ impl AuthCache {
     /// Evict a single token entry by `token_hash`. Also cleans the reverse index
     /// to keep `by_user` from accumulating stale pointers over time.
     pub fn evict(&self, token_hash: &str) {
-        self.entries.remove(token_hash);
-        // Scrub from all reverse-index entries (the hash appears in at most one
-        // user's vec, but a linear scan is fine for the small cardinality).
-        self.by_user.retain(|_, hashes| {
-            hashes.retain(|h| h != token_hash);
-            !hashes.is_empty()
-        });
+        evict_in(&self.entries, &self.by_user, token_hash);
     }
 
     /// Evict ALL cached entries belonging to `user_id`. Called on
     /// `revoke_all_for_user` and `set_grants` to flush stale auth/grant state.
     pub fn evict_user(&self, user_id: &str) {
         self.grants.invalidate_user(user_id);
-        if let Some((_, hashes)) = self.by_user.remove(user_id) {
-            for h in hashes {
-                self.entries.remove(&h);
-            }
-        }
+        evict_user_in(&self.entries, &self.by_user, user_id);
+    }
+}
+
+impl Default for AuthCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -260,6 +322,19 @@ mod tests {
             cache.get("hx").is_none(),
             "a past-TTL entry must be treated as a miss"
         );
+    }
+
+    #[test]
+    fn process_wide_eviction_reaches_every_live_cache() {
+        // S8-302: a revoke from a cache-less repo must still drop the entry
+        // the shared authenticator cached.
+        let cache = AuthCache::new();
+        cache.insert("pw-h1".into(), "pw-u1".into(), fake_ctx("pw-u1"));
+        cache.insert("pw-h2".into(), "pw-u2".into(), fake_ctx("pw-u2"));
+        evict_everywhere("pw-h1");
+        assert!(cache.get("pw-h1").is_none());
+        evict_user_everywhere("pw-u2");
+        assert!(cache.get("pw-h2").is_none());
     }
 
     /// The `WorkspaceRole` import is needed for a `scope`-bearing context test.

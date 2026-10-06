@@ -15,9 +15,12 @@
 //!   invalidation (stale access after revoke) outweighs any latency benefit.
 //!   Every authenticated request for these kinds always hits the DB.
 //! - Every revocation path evicts the affected entry **before** returning:
-//!   `revoke`, `revoke_api_token`, and `revoke_all_for_user` all call
-//!   `cache.evict(hash)` / `cache.evict_user(uid)` synchronously, so there is
-//!   no window where a revoked token is served from cache.
+//!   `revoke`, `revoke_api_token`, `revoke_all_for_user` (and the MCP /
+//!   managed-token sweeps) evict from EVERY live [`AuthCache`] in the process
+//!   (`cache::evict_everywhere` / `evict_user_everywhere`), whether or not the
+//!   repo doing the revoke has a cache attached — routes revoke through
+//!   cache-less `AuthRepo::new(pool)` repos (S8-302), so there is no window
+//!   where a revoked token is served from the authenticator's cache.
 //! - Grant changes invalidate the user's cached context via
 //!   [`GrantsInvalidator::invalidate_user`], implemented by `AuthCache`.
 //! - The cache is disabled entirely (all paths hit the DB) when
@@ -163,6 +166,23 @@ impl AuthRepo {
         }
     }
 
+    /// Drop one token hash from every live auth cache (S8-302): revokes run
+    /// on cache-less repos (`AuthRepo::new`) all over the routes, so evicting
+    /// only `self.cache` left the shared authenticator serving the revoked
+    /// token for up to `AUTH_CACHE_TTL`.
+    fn evict_hash(&self, hash: &str) {
+        crate::cache::evict_everywhere(hash);
+    }
+
+    /// Drop every cached token of `user_id` from every live auth cache (and
+    /// this repo's grant rows when a cache is attached).
+    fn evict_user(&self, user_id: &str) {
+        if let Some(cache) = &self.cache {
+            cache.evict_user(user_id);
+        }
+        crate::cache::evict_user_everywhere(user_id);
+    }
+
     /// Issue a new token for `user_id` and return the RAW token (the only
     /// time it exists in plaintext).
     pub async fn issue(&self, user_id: &Id) -> Result<String> {
@@ -210,8 +230,8 @@ impl AuthRepo {
 
         // Cache fast-path: only populated for login/api tokens (never for share
         // or impersonation). A hit means: the token was valid at insert-time,
-        // TTL has not elapsed, and evict() has not been called for this hash
-        // (which revoke paths do synchronously before returning). Safe to serve.
+        // TTL has not elapsed, and no revoke has evicted this hash (every revoke
+        // path evicts process-wide before returning — S8-302). Safe to serve.
         if let Some(cache) = &self.cache {
             if let Some(ctx) = cache.get(&hash) {
                 return Ok(ctx);
@@ -488,9 +508,7 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke token: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict(&hash);
-        }
+        self.evict_hash(&hash);
         signal_revocation();
         Ok(())
     }
@@ -511,9 +529,7 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke all for user: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(user_id);
-        }
+        self.evict_user(user_id);
         signal_revocation();
         Ok(res.rows_affected())
     }
@@ -541,10 +557,8 @@ impl AuthRepo {
             .fetch_all(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("purge expired tokens: {e}")))?;
-            if let Some(cache) = &self.cache {
-                for h in &hashes {
-                    cache.evict(h);
-                }
+            for h in &hashes {
+                self.evict_hash(h);
             }
             total += hashes.len() as u64;
             if (hashes.len() as i64) < BATCH {
@@ -647,10 +661,8 @@ impl AuthRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for hash in &hashes {
-                cache.evict(hash);
-            }
+        for hash in &hashes {
+            self.evict_hash(hash);
         }
         signal_revocation();
         Ok(hashes.len() as u64)
@@ -686,10 +698,8 @@ impl AuthRepo {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("expire managed session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for hash in &hashes {
-                cache.evict(hash);
-            }
+        for hash in &hashes {
+            self.evict_hash(hash);
         }
         Ok(hashes.len() as u64)
     }
@@ -749,10 +759,8 @@ impl AuthRepo {
         tx.commit()
             .await
             .map_err(|e| Error::Internal(format!("expire legacy session tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            for (_, hash) in &stale {
-                cache.evict(hash);
-            }
+        for (_, hash) in &stale {
+            self.evict_hash(hash);
         }
         Ok(stale.len() as u64)
     }
@@ -916,8 +924,8 @@ impl AuthRepo {
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke vault reviewer token: {e}")))?;
-        if let (Some(cache), Some(hash)) = (&self.cache, cached_hash) {
-            cache.evict(&hash);
+        if let Some(hash) = cached_hash {
+            self.evict_hash(&hash);
         }
         Ok(result.rows_affected() > 0)
     }
@@ -977,8 +985,8 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("revoke mcp token: {e}")))?;
-        if let (Some(cache), Some(uid)) = (&self.cache, owner) {
-            cache.evict_user(&uid);
+        if let Some(uid) = owner {
+            self.evict_user(&uid);
         }
         signal_revocation();
         Ok(res.rows_affected() > 0)
@@ -1017,9 +1025,7 @@ impl AuthRepo {
             .execute(&self.pool)
             .await
             .map_err(|e| Error::Internal(format!("rotate mcp token (delete old): {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(&user_id);
-        }
+        self.evict_user(&user_id);
         Ok(Some((token, info)))
     }
 
@@ -1038,9 +1044,7 @@ impl AuthRepo {
         .execute(&self.pool)
         .await
         .map_err(|e| Error::Internal(format!("revoke mcp tokens: {e}")))?;
-        if let Some(cache) = &self.cache {
-            cache.evict_user(user_id);
-        }
+        self.evict_user(user_id);
         Ok(res.rows_affected())
     }
 
@@ -1169,22 +1173,19 @@ impl AuthRepo {
     /// so the cache entry can be evicted by hash. The read is scoped by `user_id`
     /// and `kind='api'` so it cannot accidentally reveal another user's hash.
     pub async fn revoke_api_token(&self, user_id: &Id, id: &Id) -> Result<bool> {
-        // Pre-fetch the hash for cache eviction. This is a single indexed lookup
-        // and only runs when the cache is present; it is a no-op read otherwise.
-        let cached_hash: Option<String> = if self.cache.is_some() {
-            let row = sqlx::query(
-                "SELECT token_hash FROM auth_sessions
-                 WHERE id = ? AND user_id = ? AND kind = 'api'",
-            )
-            .bind(id)
-            .bind(user_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| Error::Internal(format!("revoke api token lookup: {e}")))?;
-            row.map(|r| r.get::<String, _>("token_hash"))
-        } else {
-            None
-        };
+        // Pre-fetch the hash for cache eviction: a single indexed lookup. It
+        // runs even without an attached cache — the shared authenticator's
+        // cache is evicted process-wide (S8-302).
+        let cached_hash: Option<String> = sqlx::query(
+            "SELECT token_hash FROM auth_sessions
+             WHERE id = ? AND user_id = ? AND kind = 'api'",
+        )
+        .bind(id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("revoke api token lookup: {e}")))?
+        .map(|r| r.get::<String, _>("token_hash"));
 
         let res =
             sqlx::query("DELETE FROM auth_sessions WHERE id = ? AND user_id = ? AND kind = 'api'")
@@ -1195,8 +1196,8 @@ impl AuthRepo {
                 .map_err(|e| Error::Internal(format!("revoke api token: {e}")))?;
 
         if res.rows_affected() > 0 {
-            if let (Some(cache), Some(h)) = (&self.cache, cached_hash) {
-                cache.evict(&h);
+            if let Some(h) = cached_hash {
+                self.evict_hash(&h);
             }
             signal_revocation();
         }
@@ -3257,6 +3258,40 @@ mod tests {
         assert!(
             matches!(repo.authenticate(&token).await, Err(Error::Unauthorized)),
             "revoked login token must be rejected even with cache present"
+        );
+    }
+
+    /// S8-302: routes revoke through a CACHE-LESS `AuthRepo::new(pool)` while
+    /// the authenticator holds the shared cache. Logout, PAT revoke and
+    /// revoke-all must still be refused on the very next cached lookup.
+    #[tokio::test]
+    async fn uncached_revokes_evict_the_shared_authenticator_cache() {
+        let pool = mem_pool().await;
+        let (authn, _cache) = cached_repo(pool.clone());
+        let routes = AuthRepo::new(pool.clone());
+        let uid = seed_user(&pool, "s8_302_user").await;
+
+        let login = routes.issue(&uid).await.unwrap();
+        let (pat, pat_info) = routes.issue_api_token(&uid, Some("ci")).await.unwrap();
+        let other = routes.issue(&uid).await.unwrap();
+        for t in [&login, &pat, &other] {
+            assert!(authn.authenticate(t).await.is_ok(), "primes the cache");
+        }
+
+        routes.revoke(&login).await.unwrap();
+        assert!(
+            matches!(authn.authenticate(&login).await, Err(Error::Unauthorized)),
+            "logout via an uncached repo must evict the shared cache"
+        );
+        assert!(routes.revoke_api_token(&uid, &pat_info.id).await.unwrap());
+        assert!(
+            matches!(authn.authenticate(&pat).await, Err(Error::Unauthorized)),
+            "PAT revoke via an uncached repo must evict the shared cache"
+        );
+        routes.revoke_all_for_user(&uid).await.unwrap();
+        assert!(
+            matches!(authn.authenticate(&other).await, Err(Error::Unauthorized)),
+            "revoke-all via an uncached repo must evict the shared cache"
         );
     }
 

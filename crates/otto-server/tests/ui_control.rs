@@ -105,6 +105,11 @@ struct Daemon {
 /// device `dev1`; `human` is alice's own API token, `agent` the session's
 /// managed token, `bob` another (non-root) user's token.
 async fn boot() -> Daemon {
+    boot_with(false).await
+}
+
+/// [`boot`], optionally with the daemon's cached authenticator (S8-302).
+async fn boot_with(cached_auth: bool) -> Daemon {
     let tmp = tempfile::tempdir().unwrap();
     let pool = file_pool(tmp.path()).await;
     seed_user(&pool, "alice", true).await;
@@ -141,7 +146,10 @@ async fn boot() -> Daemon {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
-    let ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    let mut ctx = test_ctx(&pool, base.clone(), tmp.path()).await;
+    if cached_auth {
+        ctx = ctx.with_cached_auth(&pool);
+    }
     otto_server::ui_bridge::spawn_session_watch(ctx.clone());
     // The production module composition (sessions, connections, dbviewer, …).
     let (api_extras, root_extras) = otto_server::modules::module_routers(&ctx);
@@ -622,6 +630,52 @@ async fn only_session_credentials_drive_and_only_their_owners_windows() {
         .unwrap();
     assert_eq!(out["code"], "no_ui_client", "{out}");
     assert!(!gets(&mut bobs, "ui_command", Duration::from_millis(300)).await);
+}
+
+/// S8-302: the same, with the daemon's auth cache ENABLED and primed. Logout
+/// revokes through a cache-less repo; the shared cache must still be evicted,
+/// so REST refuses the token at once and the socket closes within ~2 s (not
+/// at the 60 s re-check, which a stale cache hit used to defer it to).
+#[tokio::test]
+async fn events_socket_closes_on_revoke_with_the_auth_cache_on() {
+    let d = boot_with(true).await;
+    let me = |tok: &str| {
+        d.http
+            .get(format!("{}/api/v1/auth/me", d.base))
+            .bearer_auth(tok.to_string())
+            .send()
+    };
+    // Prime the cache with a REST hit, then open the socket.
+    assert_eq!(me(&d.bob).await.unwrap().status().as_u16(), 200);
+    let mut ws = d.ws(&d.bob).await;
+    let status = d
+        .http
+        .post(format!("{}/api/v1/auth/logout", d.base))
+        .bearer_auth(&d.bob)
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 204);
+    assert_eq!(
+        me(&d.bob).await.unwrap().status().as_u16(),
+        401,
+        "a revoked token must not be served from the auth cache"
+    );
+    let closed = tokio::time::timeout(Duration::from_millis(2500), async {
+        while let Some(msg) = ws.next().await {
+            match msg {
+                Ok(Message::Close(frame)) => return frame.map(|f| u16::from(f.code)),
+                Ok(_) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    })
+    .await
+    .expect("the revoked socket must close within ~2 s with the cache on");
+    assert_eq!(closed, Some(4401));
 }
 
 /// S8-03: an open `/ws/events` socket is re-validated — revoking its token

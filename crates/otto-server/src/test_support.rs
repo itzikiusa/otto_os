@@ -71,6 +71,17 @@ impl ServerCtx {
         Self::for_tests_with_secrets(pool, data_dir, Arc::new(MemorySecrets::default())).await
     }
 
+    /// Switch this fixture's authenticator to the daemon's CACHED one (over
+    /// [`ServerCtx::auth_cache`]), for tests that must prove a revoke reaches
+    /// the shared auth cache (S8-302) — fixtures are uncached by default.
+    pub fn with_cached_auth(mut self, pool: &DbPool) -> ServerCtx {
+        self.authenticator = Arc::new(otto_rbac::RbacAuthenticator::new_with_cache(
+            pool.clone(),
+            self.auth_cache.clone(),
+        ));
+        self
+    }
+
     /// [`Self::for_tests`] with a caller-supplied secret store.
     pub async fn for_tests_with_secrets(
         pool: &DbPool,
