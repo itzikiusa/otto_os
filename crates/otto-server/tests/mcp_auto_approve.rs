@@ -1329,6 +1329,11 @@ async fn one_approval_runs_one_of_two_waiting_calls() {
             body
         })
     };
+    // Each waiting call subscribes to the bus before its first status read:
+    // the receiver count says when BOTH calls are parked on the card (a fixed
+    // sleep raced a loaded runner — the second call arrived after the first
+    // had spent the approval and opened a fresh card).
+    let base = d.events.receiver_count();
     let a = spawn(d.clone());
     let id = loop {
         if let Some(a) = d.pending_approvals().await.first() {
@@ -1338,7 +1343,14 @@ async fn one_approval_runs_one_of_two_waiting_calls() {
     };
     let b = spawn(d.clone());
     // Let the second call find the shared card and start waiting.
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let parked = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while d.events.receiver_count() < base + 2 {
+        assert!(
+            tokio::time::Instant::now() < parked,
+            "both calls should be waiting on the card"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     assert_eq!(d.pending_approvals().await.len(), 1, "one shared card");
     let (st, body) = d
         .send(

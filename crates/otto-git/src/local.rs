@@ -7911,11 +7911,21 @@ mod tests {
             "the caller future must be dropped mid-commit"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let subject = LocalGit::new(&dir)
-            .run(&["log", "-1", "--format=%s"])
-            .await
-            .unwrap();
+        // Poll (bounded) instead of one fixed sleep: under a loaded test run
+        // the detached commit (hook included) can need more than 1.5 s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let subject = loop {
+            let s = LocalGit::new(&dir)
+                .run(&["log", "-1", "--format=%s"])
+                .await
+                .unwrap();
+            if s.trim() == "survives the drop" || std::time::Instant::now() >= deadline {
+                break s;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        // Let the finished git process release its locks.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(subject.trim(), "survives the drop");
         assert!(
             !dir.join(".git/index.lock").exists(),

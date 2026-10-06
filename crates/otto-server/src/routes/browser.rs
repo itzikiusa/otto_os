@@ -2246,6 +2246,18 @@ pub(crate) mod tests {
         };
         let mut req = req;
         req.extensions_mut().insert(AuthUser(user.clone()));
+        // The full auth context `auth_middleware` inserts — a human token
+        // (handlers like `reveal_credential` refuse agent credentials).
+        req.extensions_mut().insert(otto_core::auth::AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        });
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let body = resp

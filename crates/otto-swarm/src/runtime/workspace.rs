@@ -607,7 +607,7 @@ pub const HELPER_NAMES: [&str; 4] = [
 /// Root-anchored lines go into the repo's `info/exclude` (shared by all its
 /// worktrees, never committed); a cwd that is not a git checkout is a no-op.
 pub fn exclude_helpers(cwd: &str) {
-    let Ok(out) = std::process::Command::new("git")
+    let Ok(out) = otto_git::hardened_std_command()
         .args(["-C", cwd, "rev-parse", "--git-path", "info/exclude"])
         .output()
     else {
