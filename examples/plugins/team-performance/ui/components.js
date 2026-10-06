@@ -1,0 +1,845 @@
+// Team Performance — shared UI primitives (zero-dep, classic script).
+// Everything hangs off window.TP so views/*.js can use it without a bundler.
+// Rules (docs/design/guidelines): tokens only, real buttons, every state
+// designed (loading skeleton / empty checklist / inline error + Retry), no
+// native alert/confirm/prompt — the in-page modal confirmer replaces them.
+'use strict';
+(function () {
+  const TP = (window.TP = window.TP || {});
+  TP.views = TP.views || {};
+  TP.state = TP.state || { apiBase: '', token: '', hpd: 8, jiraBase: '' };
+
+  // ---- formatting ---------------------------------------------------------
+  const esc = (s) =>
+    String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+  const round = (v, d = 1) => (isNum(v) ? Math.round(v * 10 ** d) / 10 ** d : null);
+  const fmtD = (v) => {
+    if (!isNum(v)) return '—';
+    if (v > 0 && v < 1) return round(v * TP.state.hpd, 1) + 'h';
+    return round(v, 1) + 'd';
+  };
+  const fmtPct = (v) => (isNum(v) ? Math.round(v * 100) + '%' : '—');
+  /**
+   * A share is ALWAYS a 0..1 fraction — the UI never guesses a 0..100 scale.
+   * A value above 1 is an upstream bug (overlap / double count): it reads
+   * ">100%" and carries a 'bad' guardrail (overGuard) instead of being rescaled.
+   */
+  const isOver = (v) => isNum(v) && v > 1;
+  const fmtShare = (v) => (!isNum(v) ? '—' : isOver(v) ? '>100%' : fmtPct(v));
+  /** fmtShare for HTML contexts (">100%" escaped). */
+  const shareHtml = (v) => esc(fmtShare(v));
+  const overGuard = (v, what = 'This share') =>
+    isOver(v) ? { level: 'bad', msg: `${what} came out above 100% (${round(v, 2)}) — its inputs overlap or are double-counted, so read it as indicative only.`, codes: ['share_over_100'] } : null;
+  const fmtNum = (v, d = 1) => (isNum(v) ? String(round(v, d)) : '—');
+  const fmtX = (v) => (isNum(v) ? '×' + v.toFixed(2) : '—');
+  const fmtDate = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : '—');
+  const fmtAgo = (ms) => {
+    if (!ms) return 'never';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return `${s}s ago`;
+    if (s < 3600) return `${Math.round(s / 60)}m ago`;
+    if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+    return `${Math.round(s / 86400)}d ago`;
+  };
+  const fmtSecs = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  };
+
+  /** Normalise a metric that may be a bare number or {value, unit, n, quality, band, series, …}. */
+  function M(x) {
+    if (x == null) return null;
+    if (isNum(x)) return { value: x };
+    if (typeof x === 'object') {
+      const value = isNum(x.value) ? x.value : isNum(x.p50) ? x.p50 : isNum(x.median) ? x.median : isNum(x.rate) ? x.rate : null;
+      return { ...x, value };
+    }
+    return null;
+  }
+
+  // ---- api ----------------------------------------------------------------
+  async function api(path, opts = {}) {
+    const r = await fetch(TP.state.apiBase + path, {
+      ...opts,
+      headers: { Authorization: 'Bearer ' + TP.state.token, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    });
+    if (!r.ok) {
+      let msg = '';
+      try {
+        msg = (await r.json()).error || '';
+      } catch {
+        /* not json */
+      }
+      const e = new Error(msg || `HTTP ${r.status}`);
+      e.status = r.status;
+      throw e;
+    }
+    return r.json();
+  }
+  const put = (path, body) => api(path, { method: 'PUT', body: JSON.stringify(body) });
+  const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body) });
+
+  // ---- icons (stroke, currentColor) --------------------------------------
+  const ICONS = {
+    info: '<circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v3.6M8 5.1v.1"/>',
+    warn: '<path d="M8 2.2 14.3 13H1.7z"/><path d="M8 6.4v3M8 11.2v.1"/>',
+    check: '<path d="m3.2 8.4 3 3 6.6-6.8"/>',
+    x: '<path d="m4 4 8 8M12 4l-8 8"/>',
+    more: '<circle cx="3.5" cy="8" r=".6"/><circle cx="8" cy="8" r=".6"/><circle cx="12.5" cy="8" r=".6"/>',
+    back: '<path d="M9.8 3.5 5.3 8l4.5 4.5"/>',
+    chevron: '<path d="m4.5 6.2 3.5 3.5 3.5-3.5"/>',
+    refresh: '<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.6v2.8h-2.8"/>',
+    scan: '<path d="M2.5 5V2.5H5M11 2.5h2.5V5M13.5 11v2.5H11M5 13.5H2.5V11M4.5 8h7"/>',
+    up: '<path d="M8 13V3M4 7l4-4 4 4"/>',
+    down: '<path d="M8 3v10M4 9l4 4 4-4"/>',
+    flat: '<path d="M3 8h10M9.5 4.5 13 8l-3.5 3.5"/>',
+    dot: '<circle cx="8" cy="8" r="2.4"/>',
+    download: '<path d="M8 2.5v8M4.5 7.5 8 11l3.5-3.5M3 13.5h10"/>',
+    ext: '<path d="M9.5 2.5h4v4M13.5 2.5 7.5 8.5M12 9.5v4H2.5V4H6.5"/>',
+    plus: '<path d="M8 3v10M3 8h10"/>',
+    report: '<path d="M4 1.8h5.5L12.5 5v9.2H4z"/><path d="M9.5 1.8V5h3M6 8.5h4.5M6 11h4.5"/>',
+    gear: '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/>',
+  };
+  const icon = (name, label) =>
+    `<svg class="svg-icon" viewBox="0 0 16 16" ${label ? `role="img" aria-label="${esc(label)}"` : 'aria-hidden="true"'}>${ICONS[name] || ICONS.dot}</svg>`;
+
+  /** Badge = icon + text, never colour alone. tone: success|warning|danger|info|accent|'' */
+  const TONE_ICON = { success: 'check', warning: 'warn', danger: 'x', info: 'info', accent: 'dot' };
+  const badge = (tone, text, title) =>
+    `<span class="badge ${esc(tone || '')}"${title ? ` title="${esc(title)}"` : ''}>${icon(TONE_ICON[tone] || 'dot')}${esc(text)}</span>`;
+
+  /** DORA-style band → badge. Accepts elite/high/medium/low or good/warn/bad. */
+  function bandBadge(band) {
+    if (!band) return '';
+    const b = String(band).toLowerCase();
+    const tone = b === 'elite' || b === 'high' || b === 'good' || b === 'ok' ? 'success' : b === 'medium' || b === 'warn' ? 'warning' : 'danger';
+    return badge(tone, b);
+  }
+
+  const jiraLink = (key) => {
+    if (!key) return '';
+    const base = TP.state.jiraBase;
+    if (!base) return `<span class="mono">${esc(key)}</span>`;
+    return `<a class="mono" href="${esc(base.replace(/\/+$/, ''))}/browse/${encodeURIComponent(key)}" target="_blank" rel="noopener noreferrer" title="Open ${esc(key)} in Jira">${esc(key)}</a>`;
+  };
+
+  // ---- info popover registry ---------------------------------------------
+  // Every ⓘ shows: definition, formula and input quality — so a number is
+  // never read without knowing what it is and how trustworthy its inputs are.
+  const INFO = new Map();
+  let infoSeq = 0;
+  /** def = {title, definition, formula, direction, quality} (quality may be a string or {level,msg}). */
+  function info(def) {
+    const id = 'i' + ++infoSeq;
+    INFO.set(id, def);
+    const label = `About ${def.title || 'this metric'}`;
+    return `<button type="button" class="info-btn" data-info="${id}" aria-label="${esc(label)}" title="${esc(label)}" aria-haspopup="dialog" aria-expanded="false">${icon('info')}</button>`;
+  }
+  function qualityText(q) {
+    if (!q) return 'Not reported — treat as indicative.';
+    if (typeof q === 'string') return q;
+    const n = isNum(q.n) ? ` (n=${q.n})` : '';
+    return `${q.level ? q.level.toUpperCase() + ': ' : ''}${q.msg || q.note || ''}${n}`;
+  }
+
+  // ---- popovers (clamped into the viewport, Esc closes, focus restore) ---
+  let openPop = null;
+  /** restoreFocus=false when focus is already moving elsewhere (Tab-out). */
+  function closePopover(restoreFocus = true) {
+    if (!openPop) return;
+    const { el, anchor, onClose } = openPop;
+    openPop = null;
+    el.remove();
+    if (anchor) {
+      anchor.setAttribute('aria-expanded', 'false');
+      if (anchor.getAttribute('aria-describedby') === el.id) anchor.removeAttribute('aria-describedby');
+      if (restoreFocus) anchor.focus();
+    }
+    if (onClose) onClose();
+  }
+  function placeClamped(el, anchor) {
+    const r = anchor.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const pad = 8;
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    let left = r.left;
+    if (left + w > vw - pad) left = vw - pad - w;
+    left = Math.max(pad, left);
+    let top = r.bottom + 4;
+    if (top + h > vh - pad) top = Math.max(pad, Math.min(r.top - 4 - h, vh - pad - h));
+    top = Math.max(pad, top);
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+  }
+  /** Open a popover under `anchor`. content: html string. role: dialog|menu. */
+  let popSeq = 0;
+  function popover(anchor, content, { role = 'dialog', label = '', className = '', onClose, onOpen, describe = false } = {}) {
+    if (openPop && openPop.anchor === anchor) return closePopover();
+    closePopover(false);
+    const el = document.createElement('div');
+    el.id = 'tp-pop' + ++popSeq;
+    el.className = `popover ${className}`;
+    el.setAttribute('role', role);
+    if (label) el.setAttribute('aria-label', label);
+    el.innerHTML = content;
+    document.body.appendChild(el);
+    placeClamped(el, anchor);
+    anchor.setAttribute('aria-expanded', 'true');
+    openPop = { el, anchor, onClose };
+    if (onOpen) onOpen(el);
+    // Read-only popovers (describe) take focus themselves so a screen reader
+    // reads them; the anchor is described by them while open.
+    if (describe) {
+      const body = el.querySelector('[data-describe]') || el;
+      if (!body.id) body.id = el.id + 'd';
+      el.setAttribute('aria-describedby', body.id);
+      anchor.setAttribute('aria-describedby', el.id);
+    }
+    const first = describe ? null : el.querySelector('button, input, select, a[href], [tabindex]:not([tabindex="-1"])');
+    if (first) first.focus();
+    else {
+      el.tabIndex = -1;
+      el.focus();
+    }
+    // Tab out of the popover (or focus leaving it any other way) closes it
+    // without stealing focus back.
+    el.addEventListener('focusout', (e) => {
+      if (!openPop || openPop.el !== el) return;
+      const to = e.relatedTarget;
+      if (to && (el.contains(to) || to === anchor)) return;
+      if (to) closePopover(false);
+    });
+    return el;
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && openPop) {
+      e.stopPropagation();
+      closePopover();
+    }
+  }, true);
+  document.addEventListener('mousedown', (e) => {
+    if (openPop && !openPop.el.contains(e.target) && !openPop.anchor.contains(e.target)) closePopover();
+  });
+  window.addEventListener('resize', () => openPop && placeClamped(openPop.el, openPop.anchor));
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-info]');
+    if (!b) return;
+    const def = INFO.get(b.dataset.info);
+    if (!def) return;
+    popover(
+      b,
+      `<dl data-describe><dt>${esc(def.title || 'Metric')}</dt><dd>${esc(def.definition || '')}</dd>
+        <dt>Formula</dt><dd class="mono small">${esc(def.formula || '—')}</dd>
+        ${def.direction ? `<dt>Direction</dt><dd>${esc(def.direction)}</dd>` : ''}
+        <dt>Input quality</dt><dd>${esc(qualityText(def.quality))}</dd></dl>`,
+      { label: def.title, describe: true },
+    );
+  });
+
+  // ---- modal + confirmer --------------------------------------------------
+  /**
+   * Open a modal dialog. Returns {el, close(value), done: Promise<value>}.
+   * opts: {title, body (html), actions:[{label, value, primary, danger}], wide, onOpen(el)}
+   */
+  // While any modal is open the page behind it (toolbar + main) is inert, so
+  // neither pointer, Tab nor a screen reader's virtual cursor can reach it.
+  let modalDepth = 0;
+  const INERT_SEL = ['main', '.toolbar'];
+  function setPageInert(on) {
+    for (const sel of INERT_SEL) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      if (on) el.setAttribute('inert', '');
+      else el.removeAttribute('inert');
+    }
+  }
+  function modal({ title, body, actions = [], wide = false, drawer = false, onOpen, labelledBy } = {}) {
+    const prev = document.activeElement;
+    const back = document.createElement('div');
+    back.className = 'modal-backdrop' + (drawer ? ' drawer-backdrop' : '');
+    const id = 'm' + Date.now().toString(36);
+    back.innerHTML = `<div class="modal${wide ? ' wide' : ''}${drawer ? ' drawer' : ''}" role="dialog" aria-modal="true" aria-labelledby="${labelledBy || id}">
+      ${title ? `<h2 id="${id}">${esc(title)}</h2>` : ''}
+      <div class="modal-body">${body || ''}</div>
+      ${actions.length ? `<footer>${actions.map((a, i) => `<button type="button" data-act="${i}" class="${a.primary ? 'primary' : a.danger ? 'danger' : ''}">${esc(a.label)}</button>`).join('')}</footer>` : ''}
+    </div>`;
+    document.body.appendChild(back);
+    if (modalDepth++ === 0) setPageInert(true);
+    const dlg = back.firstElementChild;
+    let resolve;
+    let closed = false;
+    const done = new Promise((r) => (resolve = r));
+    const close = (value) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey, true);
+      back.remove();
+      if (--modalDepth === 0) setPageInert(false);
+      if (prev && prev.focus) prev.focus();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        close(undefined);
+      } else if (e.key === 'Tab') {
+        const f = [...dlg.querySelectorAll('button, input, select, textarea, a[href], iframe, [tabindex]:not([tabindex="-1"])')].filter((x) => !x.disabled);
+        if (!f.length) return;
+        if (e.shiftKey && document.activeElement === f[0]) {
+          e.preventDefault();
+          f[f.length - 1].focus();
+        } else if (!e.shiftKey && document.activeElement === f[f.length - 1]) {
+          e.preventDefault();
+          f[0].focus();
+        }
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    back.addEventListener('mousedown', (e) => e.target === back && close(undefined));
+    dlg.querySelectorAll('[data-act]').forEach((b) => (b.onclick = () => close(actions[+b.dataset.act].value)));
+    if (onOpen) onOpen(dlg, close);
+    const first = dlg.querySelector('input, select, textarea') || dlg.querySelector('footer .primary, footer button, button');
+    if (first) first.focus();
+    return { el: dlg, close, done };
+  }
+  const confirmer = {
+    /** Resolves true only on explicit confirmation. */
+    ask({ title = 'Are you sure?', message = '', confirmLabel = 'Continue', danger = false } = {}) {
+      return modal({
+        title,
+        body: `<p>${esc(message)}</p>`,
+        actions: [
+          { label: 'Cancel', value: false },
+          { label: confirmLabel, value: true, primary: !danger, danger },
+        ],
+      }).done.then((v) => v === true);
+    },
+  };
+
+  // ---- toasts -------------------------------------------------------------
+  // Each toast is its own live region: errors use the assertive alert role and
+  // stay >= 8s; hover or focus pauses the dismissal timer.
+  const TOAST_MS = { danger: 9000, warning: 7000 };
+  function toastDuration(tone) {
+    return TOAST_MS[tone] || 4500;
+  }
+  function toast(msg, tone = '') {
+    let host = document.querySelector('.toasts');
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'toasts';
+      document.body.appendChild(host);
+    }
+    const t = document.createElement('div');
+    t.className = `toast ${tone}`;
+    t.setAttribute('role', tone === 'danger' ? 'alert' : 'status');
+    if (tone !== 'danger') t.setAttribute('aria-live', 'polite');
+    t.innerHTML = `${tone ? icon(TONE_ICON[tone] || 'dot') : ''}<span class="msg"></span><button type="button" class="icon toast-x" aria-label="Dismiss" title="Dismiss">${icon('x')}</button>`;
+    t.querySelector('.msg').textContent = msg;
+    host.appendChild(t);
+    let left = toastDuration(tone);
+    let started = Date.now();
+    let timer = null;
+    const dismiss = () => {
+      clearTimeout(timer);
+      t.remove();
+    };
+    const resume = () => {
+      clearTimeout(timer);
+      started = Date.now();
+      timer = setTimeout(dismiss, left);
+    };
+    const pause = () => {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      left = Math.max(1500, left - (Date.now() - started));
+    };
+    t.addEventListener('mouseenter', pause);
+    t.addEventListener('mouseleave', () => !t.contains(document.activeElement) && resume());
+    t.addEventListener('focusin', pause);
+    t.addEventListener('focusout', (e) => !t.contains(e.relatedTarget) && !t.matches(':hover') && resume());
+    t.querySelector('.toast-x').onclick = dismiss;
+    resume();
+    return t;
+  }
+
+  // ---- polite announcer (one shared live region) --------------------------
+  let liveT = null;
+  const livePending = [];
+  function announce(msg) {
+    let el = document.getElementById('tp-live');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'tp-live';
+      el.className = 'sr-only';
+      el.setAttribute('role', 'status');
+      el.setAttribute('aria-live', 'polite');
+      document.body.appendChild(el);
+    }
+    livePending.push(msg);
+    clearTimeout(liveT);
+    // Batch bursts (a view loads many sections at once) into one message.
+    liveT = setTimeout(() => {
+      el.textContent = livePending.splice(0).join('. ');
+    }, 400);
+  }
+
+  // ---- states -------------------------------------------------------------
+  const skeleton = (lines = 4, block = true) =>
+    `<div class="skeleton" aria-hidden="true">${block ? '<span class="block"></span>' : ''}${'<span></span>'.repeat(lines)}</div><span class="sr-only">Loading…</span>`;
+  /** EmptyState with an optional first-run checklist [{label, done}]. */
+  const emptyState = ({ title, body = '', steps = [], actionLabel = '', actionId = '' }) => `
+    <div class="empty">
+      <h2>${esc(title)}</h2>
+      ${body ? `<p class="dim">${body}</p>` : ''}
+      ${steps.length ? `<ol class="checklist">${steps.map((s) => `<li data-done="${s.done ? 'true' : 'false'}">${icon(s.done ? 'check' : 'dot')}<span>${esc(s.label)}${s.done ? '<span class="sr-only"> (done)</span>' : ''}</span></li>`).join('')}</ol>` : ''}
+      ${actionLabel ? `<button type="button" class="primary" id="${esc(actionId)}">${esc(actionLabel)}</button>` : ''}
+    </div>`;
+  const notAvailable = (what = 'This metric') => `<p class="na">${esc(what)} is not available yet — it appears after the next scan computes it.</p>`;
+
+  /**
+   * A self-contained section: header (title, ⓘ, sub), then load() → render.
+   * Shows its own skeleton while loading and an inline error + Retry on failure.
+   * opts: {title, infoDef, sub, load: async () => html|Node|null, after(el), empty: html}
+   */
+  function section(host, opts) {
+    const el = document.createElement('section');
+    el.className = 'section';
+    const hid = 'h' + Math.random().toString(36).slice(2, 8);
+    el.setAttribute('aria-labelledby', hid);
+    el.innerHTML = `<header><h2 id="${hid}">${esc(opts.title)}</h2>${opts.infoDef ? info(opts.infoDef) : ''}${opts.headerEnd ? `<div class="end">${opts.headerEnd}</div>` : ''}${opts.sub ? `<p class="sub">${opts.sub}</p>` : ''}</header><div class="body"></div>`;
+    host.appendChild(el);
+    const body = el.querySelector('.body');
+    const run = async () => {
+      body.innerHTML = skeleton(opts.skeletonLines || 3, opts.skeletonBlock !== false);
+      body.setAttribute('aria-busy', 'true');
+      try {
+        const out = await opts.load();
+        body.removeAttribute('aria-busy');
+        if (out == null || out === '') body.innerHTML = opts.empty || notAvailable(opts.title);
+        else if (typeof out === 'string') body.innerHTML = out;
+        else {
+          body.innerHTML = '';
+          body.appendChild(out);
+        }
+        if (opts.after) opts.after(body, run);
+        announce(`${opts.title} loaded`);
+      } catch (e) {
+        body.removeAttribute('aria-busy');
+        announce(`${opts.title} failed to load`);
+        body.innerHTML = `<div class="inline-error" role="alert">${icon('warn')}<span>Couldn’t load ${esc(opts.title.toLowerCase())}: ${esc(e.message)}</span><button type="button" class="compact retry">Retry</button></div>`;
+        body.querySelector('.retry').onclick = run;
+      }
+    };
+    run();
+    return el;
+  }
+
+  // ---- tables -------------------------------------------------------------
+  /**
+   * cols: [{key, label, num, sort:boolean, scope}]; rows: array of html-cell arrays
+   * (or {cells, attrs}). Returns html with a caption and th scope.
+   */
+  function table({ caption, cols, rows, stickyFirst = true, id = '', sortKey = '', sortDir = 'asc' }) {
+    const head = cols
+      .map((c) => {
+        const cls = c.num ? ' class="num"' : '';
+        const aria = c.sort ? ` aria-sort="${sortKey === c.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}"` : '';
+        const inner = c.sort ? `<button type="button" class="sort" data-sort="${esc(c.key)}">${esc(c.label)}${sortKey === c.key ? `<span aria-hidden="true">${sortDir === 'asc' ? ' ▲' : ' ▼'}</span>` : ''}</button>` : esc(c.label);
+        return `<th scope="col"${cls}${aria}${c.title ? ` title="${esc(c.title)}"` : ''}>${inner}${c.info ? ' ' + info(c.info) : ''}</th>`;
+      })
+      .join('');
+    const body = rows
+      .map((r) => {
+        const cells = Array.isArray(r) ? r : r.cells;
+        const attrs = Array.isArray(r) ? '' : r.attrs || '';
+        if (!Array.isArray(r) && r.full) return `<tr ${attrs}><td colspan="${cols.length}">${r.full}</td></tr>`;
+        return `<tr ${attrs}>${cells.map((c, i) => (i === 0 ? `<th scope="row">${c}</th>` : `<td${cols[i] && cols[i].num ? ' class="num"' : ''}>${c}</td>`)).join('')}</tr>`;
+      })
+      .join('');
+    // The scroller is focusable so keyboard users can scroll a wide table.
+    return `<div class="table-wrap" tabindex="0" role="region" aria-label="${esc(caption)}"><table${id ? ` id="${esc(id)}"` : ''} class="${stickyFirst ? 'sticky-first' : ''}"><caption>${esc(caption)}</caption><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  }
+
+  // ---- charts (inline SVG, title+desc, always paired with a table) -------
+  /** Fixed phase → colour token map: every chart/legend/report uses these. */
+  const PHASE_COLORS = Object.freeze({ design: '--cat-4', dev: '--cat-1', review: '--cat-3', deploy: '--cat-6', rework: '--cat-5' });
+  const SERIES = ['--cat-1', '--cat-3', '--cat-2', '--cat-4', '--cat-5', '--cat-6'];
+  let svgSeq = 0;
+  function svgOpen(w, h, title, desc) {
+    const id = 's' + ++svgSeq;
+    return {
+      id,
+      open: `<svg viewBox="0 0 ${w} ${h}" role="img" aria-labelledby="${id}t ${id}d" preserveAspectRatio="xMinYMin meet"><title id="${id}t">${esc(title)}</title><desc id="${id}d">${esc(desc)}</desc>`,
+    };
+  }
+  /** Wrap an SVG + its data table. The table is REQUIRED: every chart has a non-visual twin. */
+  function chartBlock({ svg, legend = '', tableHtml = '' }) {
+    if (!tableHtml) throw new Error('chartBlock: tableHtml is required (every chart needs its data table)');
+    return `<div class="chart">${legend}${svg}<details><summary>Show as table</summary>${tableHtml}</details></div>`;
+  }
+  const legendHtml = (items) =>
+    `<div class="legend">${items.map((i) => `<span class="key"><span class="swatch${i.hatch ? ' hatch' : ''}" ${i.hatch ? '' : `style="background:var(${i.color})"`}></span>${esc(i.label)}</span>`).join('')}</div>`;
+
+  /** Sparkline; values may contain nulls. */
+  function sparkline(values, label = 'trend') {
+    const vs = (values || []).filter(isNum);
+    if (vs.length < 2) return '';
+    const w = 96, h = 24;
+    const lo = Math.min(...vs), hi = Math.max(...vs);
+    const arr = values.slice(-16);
+    const pts = arr
+      .map((v, i) => (isNum(v) ? `${((i / Math.max(1, arr.length - 1)) * (w - 4) + 2).toFixed(1)},${(hi === lo ? h / 2 : h - 2 - ((v - lo) / (hi - lo)) * (h - 4)).toFixed(1)}` : null))
+      .filter(Boolean);
+    const text = `${label}: ${vs.length} points, from ${round(vs[0], 2)} to ${round(vs[vs.length - 1], 2)}`;
+    return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false"><polyline points="${pts.join(' ')}" fill="none" stroke="var(--cat-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/></svg><span class="sr-only">${esc(text)}</span>`;
+  }
+
+  /**
+   * Horizontal stacked bars. rows: [{label, parts:{segKey: number|null}}];
+   * segs: [{key, label, color}] — a null part = NOT TRACKED, drawn hatched.
+   * Segments wider than 28px carry a direct value label; every value is also
+   * in the SVG <desc>. Below 600px the SVG gives way to a list layout (CSS)
+   * so no text is ever scaled under 11px.
+   */
+  const DIRECT_LABEL_MIN = 28;
+  function stackedBars({ rows, segs, title, desc, unit = 'd' }) {
+    const rowH = 26, labelW = 150, endW = 70, w = 760;
+    const val = (r, s) => r.parts[s.key];
+    const totals = rows.map((r) => segs.reduce((a, s) => a + (isNum(val(r, s)) ? val(r, s) : 0), 0));
+    const max = Math.max(1, ...totals);
+    const h = rows.length * rowH + 4;
+    const plotW = w - labelW - endW;
+    const partText = (r, s) => {
+      const v = val(r, s);
+      if (v === null && s.hatchWhenNull) return `${s.label} not tracked`;
+      return isNum(v) ? `${s.label} ${round(v, 1)}${unit}` : null;
+    };
+    const values = rows.map((r, i) => `${r.label}: ${segs.map((s) => partText(r, s)).filter(Boolean).join(', ') || 'no data'}; total ${round(totals[i], 1)}${unit}`).join('. ');
+    const { id, open } = svgOpen(w, h, title, [desc, values].filter(Boolean).join(' — '));
+    let out = open + `<defs><pattern id="${id}hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--surface-2)"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--text-dim)" stroke-width="1.6"/></pattern></defs>`;
+    rows.forEach((r, i) => {
+      const y = i * rowH + 4;
+      const lab = r.label.length > 22 ? r.label.slice(0, 21) + '…' : r.label;
+      out += `<text x="${labelW - 8}" y="${y + 13}" text-anchor="end">${esc(lab)}</text>`;
+      let x = labelW;
+      segs.forEach((s) => {
+        const v = val(r, s);
+        if (v === null && s.hatchWhenNull) {
+          out += `<rect x="${x}" y="${y}" width="18" height="18" rx="2" fill="url(#${id}hatch)"><title>${esc(s.label)}: not tracked</title></rect>`;
+          x += 20;
+          return;
+        }
+        if (!isNum(v) || v <= 0) return;
+        const bw = Math.max(1.5, (v / max) * plotW);
+        const rw = Math.max(1, bw - 1.5);
+        out += `<rect x="${x.toFixed(1)}" y="${y}" width="${rw.toFixed(1)}" height="18" rx="2" fill="var(${s.color})"><title>${esc(s.label)}: ${round(v, 1)}${unit}</title></rect>`;
+        if (rw > DIRECT_LABEL_MIN) out += `<text class="on-bar" x="${(x + rw / 2).toFixed(1)}" y="${y + 13}" text-anchor="middle" aria-hidden="true">${round(v, 1)}</text>`;
+        x += bw;
+      });
+      out += `<text x="${(x + 6).toFixed(1)}" y="${y + 13}">${round(totals[i], 1)}${unit}</text>`;
+    });
+    out += '</svg>';
+    // Narrow-screen twin: same data as a list with proportional meters.
+    const list = `<ul class="sb-list" aria-label="${esc(title)}">${rows
+      .map(
+        (r, i) => `<li><div class="sb-head"><span>${esc(r.label)}</span><span class="num">${round(totals[i], 1)}${unit}</span></div>
+        <div class="sb-bar" aria-hidden="true">${segs
+          .map((s) => {
+            const v = val(r, s);
+            if (v === null && s.hatchWhenNull) return '<span class="hatch" style="inline-size:12px"></span>';
+            return isNum(v) && v > 0 ? `<span style="inline-size:${((v / max) * 100).toFixed(1)}%;background:var(${s.color})"></span>` : '';
+          })
+          .join('')}</div>
+        <p class="sb-parts">${segs.map((s) => partText(r, s)).filter(Boolean).map(esc).join(' · ') || 'no data'}</p></li>`,
+      )
+      .join('')}</ul>`;
+    return `<div class="sb">${out}${list}</div>`;
+  }
+
+  /** Vertical histogram. bins: [{label, n}]. */
+  function histogram({ bins, title, desc, color = '--cat-1' }) {
+    const w = 640, h = 170, pad = 22;
+    const max = Math.max(1, ...bins.map((b) => b.n || 0));
+    const bw = (w - pad) / Math.max(1, bins.length);
+    const { open } = svgOpen(w, h, title, desc);
+    let out = open;
+    bins.forEach((b, i) => {
+      const bh = ((b.n || 0) / max) * (h - pad - 16);
+      const x = pad / 2 + i * bw;
+      out += `<rect x="${(x + 2).toFixed(1)}" y="${(h - pad - bh).toFixed(1)}" width="${Math.max(1, bw - 4).toFixed(1)}" height="${bh.toFixed(1)}" rx="2" fill="var(${b.color || color})"><title>${esc(b.label)}: ${b.n}</title></rect>`;
+      out += `<text x="${(x + bw / 2).toFixed(1)}" y="${h - 6}" text-anchor="middle">${esc(b.label)}</text>`;
+      if (b.n) out += `<text x="${(x + bw / 2).toFixed(1)}" y="${(h - pad - bh - 4).toFixed(1)}" text-anchor="middle">${b.n}</text>`;
+    });
+    return out + '</svg>';
+  }
+
+  /** Column chart for a time series [{label, value}]. */
+  function columns({ points, title, desc, color = '--cat-1', unit = '' }) {
+    const w = 640, h = 150, pad = 20;
+    const max = Math.max(1, ...points.map((p) => (isNum(p.value) ? p.value : 0)));
+    const bw = (w - pad) / Math.max(1, points.length);
+    const { open } = svgOpen(w, h, title, desc);
+    let out = open;
+    points.forEach((p, i) => {
+      const v = isNum(p.value) ? p.value : 0;
+      const bh = (v / max) * (h - pad - 14);
+      const x = pad / 2 + i * bw;
+      out += `<rect x="${(x + 2).toFixed(1)}" y="${(h - pad - bh).toFixed(1)}" width="${Math.max(1, bw - 4).toFixed(1)}" height="${Math.max(0, bh).toFixed(1)}" rx="2" fill="var(${color})"><title>${esc(p.label)}: ${round(v, 2)}${unit}</title></rect>`;
+      if (points.length <= 14 || i % 2 === 0) out += `<text x="${(x + bw / 2).toFixed(1)}" y="${h - 5}" text-anchor="middle">${esc(String(p.label).slice(-5))}</text>`;
+    });
+    return out + '</svg>';
+  }
+
+  const meter = (ratio, label) => {
+    const p = Math.max(0, Math.min(1, isNum(ratio) ? ratio : 0));
+    return `<span class="meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(p * 100)}" aria-label="${esc(label || 'share')}"><span style="inline-size:${(p * 100).toFixed(1)}%"></span></span>`;
+  };
+
+
+  // ---- guardrails -----------------------------------------------------------
+  // Metric key → canonical tile id (mirrors lib/guardrails TILE_OF), so a
+  // canonical guardrail is found whether it names the metric or only the tiles.
+  const TILE_OF = Object.freeze({
+    deploymentFrequency: 'dora_deploy_frequency', leadTime: 'dora_lead_time', changeFailureRate: 'dora_cfr', mttr: 'dora_mttr',
+    'dora.deploy_frequency': 'dora_deploy_frequency', 'dora.lead_time': 'dora_lead_time', 'dora.change_failure_rate': 'dora_cfr', 'dora.mttr': 'dora_mttr',
+    prPickup: 'pr_pickup', prReview: 'pr_review', prSize: 'pr_size', prMerge: 'pr_merge', prUnreviewed: 'pr_unreviewed',
+    estimateAccuracy: 'estimate_accuracy',
+    throughputPerWeek: 'capacity_throughput', wip: 'capacity_wip', agingWip: 'capacity_aging_wip', contextSwitching: 'capacity_context_switching',
+    investmentMix: 'capacity_investment', unplannedShare: 'capacity_unplanned', rework: 'capacity_rework',
+    cycleTimeByPhase: 'phase_cycle_weak',
+  });
+  const levelOf = (g) => (g.level === 'bad' || g.severity === 'danger' || g.severity === 'bad' ? 'bad' : 'warn');
+
+  /**
+   * Guardrail for a metric, looked up by CANONICAL metric id — never by
+   * matching message text. Sources, in order: the per-metric badge map
+   * (guardrail_badges: {metricId: {severity, codes, reasons}}), then canonical
+   * entries whose `metric`, `id` ("code:metric" or a tile id) or `tiles[]`
+   * name one of the ids, then the metric envelope's own weak_reasons (`env`).
+   * → {level:'bad'|'warn', msg, codes} or null.
+   */
+  function guardFor(o, ids, env) {
+    const want = [].concat(ids || []).filter(Boolean);
+    let out = null;
+    if (o && want.length) {
+      const badges = o.guardrail_badges || {};
+      for (const id of want) {
+        const b = badges[id];
+        if (b) {
+          out = { level: b.severity === 'danger' ? 'bad' : 'warn', msg: (b.reasons || []).join(' '), codes: b.codes || [] };
+          break;
+        }
+      }
+      if (!out) {
+        const tiles = new Set(want.concat(want.map((k) => TILE_OF[k]).filter(Boolean)));
+        const metricOf = (g) => g.metric || (typeof g.id === 'string' && g.id.includes(':') ? g.id.slice(g.id.indexOf(':') + 1) : null);
+        const hits = (Array.isArray(o.guardrails) ? o.guardrails : []).filter(
+          (g) => g && g.level !== 'ok' && (want.includes(metricOf(g)) || tiles.has(g.id) || (Array.isArray(g.tiles) && g.tiles.some((t) => tiles.has(t)))),
+        );
+        if (hits.length) out = { level: hits.some((g) => levelOf(g) === 'bad') ? 'bad' : 'warn', msg: hits.map((g) => g.msg || g.reason).filter(Boolean).join(' '), codes: hits.map((g) => g.code || g.id) };
+      }
+    }
+    const weak = env && typeof env === 'object' && Array.isArray(env.weak_reasons) && env.weak_reasons.length ? env.weak_reasons : null;
+    if (weak && !out) out = { level: 'warn', msg: weak.map((r) => WEAK_TEXT[r] || r.replace(/_/g, ' ')).join(' '), codes: weak };
+    return out;
+  }
+  const WEAK_TEXT = { low_n: 'Fewer than 5 items behind this number.', no_sprint_history: 'No sprint history in Jira, so sprint membership is read from the current sprint field only.' };
+  /** Worse of two guardrails (either may be null); messages are joined. */
+  function mergeGuard(a, b) {
+    if (!a) return b || null;
+    if (!b) return a;
+    return { level: a.level === 'bad' || b.level === 'bad' ? 'bad' : 'warn', msg: [a.msg, b.msg].filter(Boolean).join(' '), codes: [...(a.codes || []), ...(b.codes || [])] };
+  }
+  const guardBadge = (g) => (g ? badge(g.level === 'bad' ? 'danger' : 'warning', g.level === 'bad' ? 'weak inputs' : 'check inputs', g.msg) : '');
+  /** A 'bad' guardrail is never hover-only: its reason is printed inline. */
+  const guardReason = (g) => (g && g.level === 'bad' && g.msg ? `<p class="guard-reason">${icon('warn')}<span>${esc(g.msg)}</span></p>` : '');
+
+  /** "over 18 capacity days (20 working − 2 off)" — the context every per-person / per-team rate carries. */
+  function capContext(cap, unit = 'capacity days') {
+    if (!cap || !isNum(cap.capacity_days)) return 'capacity not available yet — not comparable';
+    const parts = isNum(cap.business_days) ? ` (${fmtNum(cap.business_days, 0)} working − ${fmtNum(cap.time_off_days || 0, 0)} off)` : '';
+    return `over ${fmtNum(cap.capacity_days, 0)} ${unit}${parts}`;
+  }
+
+  // ---- drill-down drawer -------------------------------------------------------
+  // A tile value with contributing tickets is a <button>; it opens a drawer
+  // listing those tickets with Jira links, so a number can always be traced.
+  const DRILL = new Map();
+  let drillSeq = 0;
+  /** def = {title, tickets:[{key, summary, value, note}], valueLabel, empty} */
+  function drillRef(def) {
+    const id = 'd' + ++drillSeq;
+    DRILL.set(id, def);
+    return id;
+  }
+  function drawerHtml(def) {
+    const list = Array.isArray(def.tickets) ? def.tickets : [];
+    if (!list.length) return `<p class="dim">${esc(def.empty || 'The scan did not return the tickets behind this number for this scope.')}</p>`;
+    return table({
+      caption: `${list.length} contributing ticket${list.length === 1 ? '' : 's'}`,
+      cols: [{ label: 'Ticket' }, { label: def.valueLabel || 'Value', num: true }, { label: 'Why it counts' }],
+      rows: list.slice(0, 300).map((t) => [
+        `${jiraLink(t.key)} <span class="dim small">${esc(String(t.summary || '').slice(0, 70))}</span>`,
+        t.value == null ? '—' : isNum(t.value) ? fmtNum(t.value, 2) : esc(t.value),
+        esc(t.note || t.reason || ''),
+      ]),
+    });
+  }
+  function drawer(def) {
+    return modal({ title: def.title || 'Contributing tickets', body: (def.intro ? `<p class="dim small">${esc(def.intro)}</p>` : '') + drawerHtml(def), drawer: true, actions: [{ label: 'Close', value: null }] });
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target && e.target.closest && e.target.closest('[data-drill]');
+    if (!b) return;
+    const def = DRILL.get(b.dataset.drill);
+    if (def) drawer(def);
+  });
+
+  /**
+   * The one metric tile. guard 'bad' → hatched + dimmed with the reason
+   * inline; a value with `drill` tickets is a button that opens the drawer.
+   * {title, valueHtml, context, capCtx, guard, def, band, series, drill}
+   */
+  function tile({ title, valueHtml, context = '', capCtx = '', guard = null, def = null, band = '', series = null, drill = null, quality = null }) {
+    const bad = guard && guard.level === 'bad';
+    const val = drill
+      ? `<button type="button" class="tile-value value" data-drill="${drillRef({ title, ...drill })}" aria-haspopup="dialog" title="Show the tickets behind ${esc(title)}">${valueHtml}</button>`
+      : `<span class="value">${valueHtml}</span>`;
+    return `<div class="tile${bad ? ' weak' : ''}">
+      <div class="label">${esc(title)}${def ? ' ' + info({ title, ...def, quality: guard || quality || def.quality }) : ''}</div>
+      <div class="row">${val}${series ? sparkline(series, title) : ''}</div>
+      ${band || guard ? `<div class="row">${band ? bandBadge(band) : ''}${guardBadge(guard)}</div>` : ''}
+      ${context ? `<div class="context">${context}</div>` : ''}
+      ${capCtx ? `<div class="context cap">${esc(capCtx)}</div>` : ''}
+      ${guardReason(guard)}
+    </div>`;
+  }
+
+  // ---- honest empty states -----------------------------------------------------
+  /**
+   * Empty state that names which sources ran. sources: [{label, ran, n, unit}]
+   * → "git blame scanned 4 repos, Jira links 120 tickets — none found", or
+   * "not checked yet" when nothing ran. actions: [{label, act}] (data-empty-act).
+   */
+  function sourcesEmpty({ what, sources = [], actions = [{ label: 'Scan', act: 'scan' }, { label: 'Settings', act: 'settings' }] }) {
+    const ran = sources.filter((x) => x && x.ran !== false && (x.ran || isNum(x.n)));
+    const text = ran.length
+      ? `${ran.map((x) => `${x.label} ${isNum(x.n) ? `${x.n} ${x.unit || ''}`.trim() : 'ran'}`).join(', ')} — none found.`
+      : `${what}: not checked yet — the next scan runs ${sources.map((x) => x.label).join(' and ') || 'the detectors'}.`;
+    return `<div class="empty compact" role="status"><p class="dim">${esc(ran.length ? `No ${what.toLowerCase()} — ${text}` : text)}</p>
+      <div class="form-actions">${actions.map((a) => `<button type="button" class="compact" data-empty-act="${esc(a.act)}">${esc(a.label)}</button>`).join('')}</div></div>`;
+  }
+  /** Wire data-empty-act buttons inside `root` to app.startScan / app.goTab. */
+  function wireEmptyActs(root, app) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('[data-empty-act]').forEach((b) => {
+      b.onclick = () => {
+        if (b.dataset.emptyAct === 'scan' && app && app.startScan) app.startScan(false);
+        else if (app && app.goTab) app.goTab(b.dataset.emptyAct);
+      };
+    });
+  }
+
+  /** Hygiene flag codes (lib/analytics) → human labels + what they mean. */
+  const HYGIENE = Object.freeze({
+    no_code: ['No code found', 'Done in Jira, but no commit carries the ticket key.'],
+    unmerged_code: ['Code never merged', 'Commits exist, but none reached the main branch.'],
+    late_merge: ['Merged after done', 'Marked done more than 2 working days before its code merged.'],
+    done_by_git_only: ['Done by git only', 'Code merged, but the Jira ticket was never closed.'],
+    stale_timing: ['Stale timing', 'Jira statuses span far longer than any git activity.'],
+    zero_time: ['Zero time', 'Closed with no measurable working time.'],
+    multi_dev: ['Several developers', 'Two or more people made substantial commits; time is shared by commit share.'],
+    qa_capped: ['QA time capped', 'QA without commits on enough distinct days does not count as dev time.'],
+    reopened: ['Reopened', 'Reopened after it was done.'],
+    no_estimate: ['No estimate', 'Neither story points nor an estimate.'],
+    skipped_design: ['Design skipped', 'Never passed through the design status.'],
+  });
+  const hygieneLabel = (code) => (HYGIENE[code] ? HYGIENE[code][0] : String(code).replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase()));
+
+  /** Missing median marker (with a full-text tooltip + sr text), and the unestimated badge. */
+  const NT = '<abbr class="nt" title="Not tracked: no evidence, or fewer than 5 tickets for a median">NT</abbr>';
+  const unestimated = () => badge('warning', 'unestimated', 'No story points or estimate — kept out of estimate-based metrics');
+
+  // ---- deep links (location.hash) ---------------------------------------------
+  // #tab=people&person=<id>&period=3&since=2026-01-01 — tab, person and period
+  // survive reloads and can be shared; localStorage stays the fallback.
+  const PERIODS = ['', '1', '3', '6', '12', 'ytd', 'custom'];
+  const route = {
+    parse(hash) {
+      const out = {};
+      try {
+        const q = new URLSearchParams(String(hash || '').replace(/^#/, ''));
+        if (q.get('tab')) out.tab = q.get('tab');
+        if (q.get('person')) out.person = q.get('person');
+        if (q.has('period') && PERIODS.includes(q.get('period'))) out.period = q.get('period');
+        if (/^\d{4}-\d{2}-\d{2}$/.test(q.get('since') || '')) out.since = q.get('since');
+      } catch {
+        /* malformed hash → defaults */
+      }
+      return out;
+    },
+    build({ tab, person, period, since } = {}) {
+      const q = new URLSearchParams();
+      if (tab) q.set('tab', tab);
+      if (person) q.set('person', person);
+      if (period != null) q.set('period', period);
+      if (period === 'custom' && since) q.set('since', since);
+      return '#' + q.toString();
+    },
+  };
+
+  // ---- theme ------------------------------------------------------------------
+  /**
+   * Every variable the host sends, as [name, value] pairs ('--' added when the
+   * host omits it), plus the surfaces Otto derives but does not send
+   * (--surface-3, --hover, --bg-sidebar, --border-strong) computed from them.
+   */
+  function themeVars(theme) {
+    const out = new Map();
+    if (theme && typeof theme === 'object') {
+      for (const [k0, v] of Object.entries(theme)) {
+        if (typeof v !== 'string' || !v.trim() || !/^-{0,2}[a-z0-9-]+$/i.test(k0)) continue;
+        out.set(k0.startsWith('--') ? k0 : '--' + k0.replace(/^-+/, ''), v.trim());
+      }
+    }
+    if (out.has('--surface-2') && out.has('--text') && !out.has('--surface-3')) out.set('--surface-3', 'color-mix(in srgb, var(--surface-2) 88%, var(--text))');
+    if (out.has('--text') && !out.has('--hover')) out.set('--hover', 'color-mix(in srgb, var(--text) 7%, transparent)');
+    if (out.has('--text') && !out.has('--border-strong')) out.set('--border-strong', 'color-mix(in srgb, var(--text) 22%, transparent)');
+    if (out.has('--bg') && !out.has('--bg-sidebar')) out.set('--bg-sidebar', 'color-mix(in srgb, var(--bg) 94%, var(--text))');
+    return [...out];
+  }
+
+  /** localStorage wrappers — private mode / blocked storage must never break the page. */
+  const store = {
+    get(k, d = null) {
+      try {
+        const v = localStorage.getItem('tp:' + k);
+        return v === null ? d : v;
+      } catch {
+        return d;
+      }
+    },
+    set(k, v) {
+      try {
+        localStorage.setItem('tp:' + k, v);
+      } catch {
+        /* storage unavailable */
+      }
+    },
+  };
+
+  Object.assign(TP, {
+    route, themeVars, fmtShare, shareHtml, isOver, overGuard, TILE_OF, guardFor, mergeGuard, guardBadge, guardReason, capContext,
+    drillRef, drawer, drawerHtml, tile, sourcesEmpty, wireEmptyActs, HYGIENE, hygieneLabel, NT, unestimated, setPageInert,
+    esc, isNum, round, fmtD, fmtPct, fmtNum, fmtX, fmtDate, fmtAgo, fmtSecs, M,
+    api, put, post, icon, badge, bandBadge, jiraLink, info, qualityText,
+    popover, closePopover, modal, confirmer, toast, toastDuration, announce,
+    skeleton, emptyState, notAvailable, section, table,
+    PHASE_COLORS, DIRECT_LABEL_MIN, SERIES, chartBlock, legendHtml, sparkline, stackedBars, histogram, columns, meter, store,
+  });
+})();

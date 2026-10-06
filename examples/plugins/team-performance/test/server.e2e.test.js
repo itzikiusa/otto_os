@@ -524,7 +524,9 @@ test('report: generate per quarter, saved to the hub, html retrievable', async (
   assert.equal(list.json.reports.length, 1);
   const html = await api('GET', `/report/html?account=acc1&id=${encodeURIComponent(status.report.id)}`);
   assert.ok(html.json.html.startsWith('<!doctype html>'), 'prose stripped, pure html stored');
-  assert.ok(html.json.html.includes('Report for Alice'));
+  // v0.8: deterministic template — numbers come from the model, the agent only fills narrative slots.
+  assert.ok(html.json.html.includes('Alice'), 'person named in the title');
+  assert.ok(html.json.html.includes('How to read'), 'template sections rendered');
 
   const bad = await api('POST', '/report', { account: 'acc1', assignee: 'u-alice', kind: 'quarter', year: 2026, quarter: 9 });
   assert.equal(bad.status, 400);
@@ -773,4 +775,183 @@ test('report already-running returns the job to attach to (not a 409); active en
   // a second request after completion starts fresh (job re-runs), returns a label
   const second = await api('POST', '/report', { account: 'acc1', scope: 'team', kind: 'year', year: 2026 });
   assert.ok(second.json.label.includes('Team') && second.json.label.includes('2026'));
+});
+
+// ---- v0.8: PRs through a mock daemon, deploy/hotfix tags, guardrails, comments --
+
+test('PR sync via daemon + deploy/hotfix tags → phases, DORA, canonical guardrails, cursor, comments (isolated sidecar)', { timeout: 120000 }, async () => {
+  const G = require('../lib/guardrails.js');
+  const { createMockDaemon } = require('./fixtures/mock-daemon-prs.js');
+  const repo2 = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-e2e-pr-repo-'));
+  const g = (args, when) => execFileSync('git', ['-C', repo2, ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', ...(when ? { GIT_AUTHOR_DATE: when, GIT_COMMITTER_DATE: when } : {}) },
+  });
+  const commit = (msg, when) => { fs.appendFileSync(path.join(repo2, 'f.txt'), `${msg}\n`); g(['add', '.']); g(['commit', '-q', '-m', msg], when); };
+  g(['init', '-q', '-b', 'main']);
+  commit('init', '2026-05-01T09:00:00Z');
+  g(['checkout', '-q', '-b', 'develop']);
+  for (const [key, dev, merge] of [['TP-1', '2026-06-02T12:00:00Z', '2026-06-05T11:00:00Z'], ['TP-4', '2026-06-05T10:00:00Z', '2026-06-10T10:00:00Z']]) {
+    g(['checkout', '-q', '-b', `feature/${key}-work`]);
+    commit(`${key}: implement`, dev);
+    g(['checkout', '-q', 'develop']);
+    g(['merge', '-q', '--no-ff', '-m', `Merge branch 'feature/${key}-work' into develop`, `feature/${key}-work`], merge);
+    if (key === 'TP-1') g(['tag', '-a', 'v1-DEPLOYED', '-m', 'prod'], '2026-06-08T12:00:00Z');
+  }
+  g(['tag', '-a', 'rel-HF2', '-m', 'hotfix'], '2026-06-12T09:00:00Z');
+
+  const mock = createMockDaemon({
+    repos: [{ id: 'r-pr', name: 'fixture-pr', path: repo2 }],
+    prs: {
+      'r-pr': [{
+        summary: { number: 1, title: 'TP-1 implement', source_branch: 'feature/TP-1-work', target_branch: 'develop', author: 'Alice', state: 'MERGED', created_at: '2026-06-02T12:00:00Z', updated_at: '2026-06-05T12:00:00Z', merged_at: '2026-06-05T12:00:00Z' },
+        detail: { reviewers: [{ name: 'Bob', approved: true, reviewed_at: '2026-06-03T12:00:00Z' }], comments: [{ author: 'Bob', created_at: '2026-06-03T12:00:00Z', replies: [] }] },
+        commits: [{ sha: 'a1', date: '2026-06-02T12:00:00Z' }],
+        diff: { files: [{ path: 'f.txt', added: 10, deleted: 2 }] },
+      }],
+    },
+  });
+  // One HTTP server plays both the plugin host (/plugin-host/*) and the daemon (/repos…).
+  const srv = http.createServer(async (req, res) => {
+    const u = new URL(req.url, 'http://localhost');
+    const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (u.pathname.startsWith('/plugin-host/')) {
+      const p = u.pathname.slice('/plugin-host'.length);
+      if (p === '/repos') return send(200, [{ id: 'r-pr', name: 'fixture-pr', path: repo2, remote_url: null }]);
+      if (p === '/jira/accounts') return send(200, [{ id: 'acc1', label: 'Fixture Jira', base_url: `http://127.0.0.1:${mockJira.port}`, email: 'e@e' }]);
+      if (p === '/jira/credentials') return send(200, { base_url: `http://127.0.0.1:${mockJira.port}`, email: 'e@e', token: 'tok' });
+      if (p === '/agents/run') {
+        let b = ''; req.on('data', (c) => (b += c));
+        req.on('end', () => {
+          const body = JSON.parse(b);
+          if (body.prompt.includes('STRICT JSON')) return send(200, { text: JSON.stringify([...body.prompt.matchAll(/key=(\S+)/g)].map((m) => ({ key: m[1], days: 2 }))) });
+          return send(200, { text: '{"summary":"ok","strengths":[],"goals":[]}' });
+        });
+        return undefined;
+      }
+      return send(404, {});
+    }
+    const r = await mock.fetch(`http://daemon${u.pathname}${u.search}`, { headers: { authorization: req.headers.authorization } });
+    return send(r.status, await r.json());
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const dataDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'tp-e2e-pr-'));
+  const port2 = 20000 + Math.floor(Math.random() * 20000);
+  const plugin2 = spawn(process.execPath, ['server.js'], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, OTTO_PLUGIN_PORT: String(port2), OTTO_HOST_API: `http://127.0.0.1:${port}/plugin-host`, OTTO_PLUGIN_TOKEN: 'ptok', OTTO_PLUGIN_DATA_DIR: dataDir2, OTTO_TP_DAEMON_TOKEN: 'dtok' },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  plugin2.stderr.on('data', (c) => process.stderr.write(`[sidecar-pr] ${c}`));
+  const api2 = (method, pathname, body, headers = {}) => new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request({ method, hostname: '127.0.0.1', port: port2, path: pathname, headers: { ...(data ? { 'Content-Type': 'application/json' } : {}), ...headers } }, (res) => {
+      let buf = ''; res.on('data', (c) => (buf += c)); res.on('end', () => resolve({ status: res.statusCode, json: buf ? JSON.parse(buf) : null }));
+    });
+    req.on('error', reject); if (data) req.write(data); req.end();
+  });
+  const scan = async (full) => {
+    const r = await api2('POST', '/scan', { account: 'acc1', projects: ['TP'], ...(full ? { full: true } : {}) });
+    assert.ok([200, 202].includes(r.status), JSON.stringify(r.json));
+    for (let i = 0; ; i++) {
+      const s = (await api2('GET', '/scan/status?account=acc1')).json;
+      if (s.state === 'done') return s;
+      if (s.state === 'error') throw new Error(s.error);
+      if (i > 900) throw new Error('scan never finished');
+      await new Promise((r2) => setTimeout(r2, 100));
+    }
+  };
+  const detailCalls = () => mock.calls.filter((c) => /^\/repos\/[^/]+\/prs\/\d+/.test(c.route)).length;
+  const SINCE = Date.parse('2026-05-01T00:00:00Z');
+  try {
+    for (let i = 0; ; i++) {
+      try { if ((await api2('GET', '/health')).status === 200) break; } catch { /* boot */ }
+      if (i > 100) throw new Error('sidecar never healthy');
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await scan(false);
+    assert.ok(mock.calls.every((c) => c.auth === 'Bearer dtok'), 'daemon calls carry the user token');
+    assert.equal(detailCalls(), 3, 'detail + commits + diff for the one PR');
+
+    // /prs/status: cursor persisted, cached summary visible.
+    const st = (await api2('GET', '/prs/status')).json;
+    assert.equal(st.summary.prs, 1);
+    assert.equal(st.summary.with_reviews, 1);
+    const cache = JSON.parse(fs.readFileSync(path.join(dataDir2, 'data', 'prs', 'r-pr.json'), 'utf8'));
+    assert.equal(cache.cursor.updated_on_max, '2026-06-05T12:00:00.000Z');
+    assert.ok(cache.cursor.synced_at && cache.cursor.in_progress === false);
+
+    const ov = (await api2('GET', `/overview?account=acc1&projects=TP&since=${SINCE}`)).json;
+    // DORA: v1-DEPLOYED + rel-HF2 (hotfix tags count as deployments).
+    assert.equal(ov.dora.deploy_frequency.total, 2);
+    assert.equal(ov.dora.guardrails, undefined, 'no duplicate DORA guardrail list');
+    assert.equal(ov.guardrail_list, undefined);
+    assert.equal(ov.guardrail_badges, undefined);
+    // ONE canonical array: unique stable ids, tile-key shaped, and every weak metric covered.
+    const ids = ov.guardrails.map((x) => x.id);
+    assert.equal(new Set(ids).size, ids.length);
+    for (const x of ov.guardrails) assert.match(x.id, /^(dora|phase|pr|estimate|capacity)_[a-z0-9_]+$/, x.id);
+    assert.deepEqual(G.uncovered(G.envelopesOf(ov), ov.guardrails), []);
+    assert.ok(!ids.includes('dora_no_deploy_tags'));
+    assert.ok(!ids.includes('pr_no_data'), 'PRs were fetched');
+    assert.equal(ov.pr_flow.counts.merged, 1);
+    assert.ok(Array.isArray(ov.flow.throughput_weekly) && ov.flow.throughput_weekly.length > 0);
+    assert.equal(typeof ov.freshness.stale, 'boolean');
+
+    // Phases of TP-1 (PR open Tue Jun 2 12:00, first review Wed 12:00, merge Fri Jun 5 12:00; v1-DEPLOYED Mon Jun 8 12:00).
+    const av = (await api2('GET', `/assignee?account=acc1&projects=TP&assignee=u-alice&since=${SINCE}`)).json;
+    const t1 = av.completed.find((t) => t.key === 'TP-1');
+    assert.ok(t1 && t1.phases, 'TP-1 carries phases');
+    assert.equal(t1.phases.review.pickup, 1, 'pickup: PR open → first review (business days)');
+    assert.equal(t1.phases.review.total, 3, 'review: PR open → merge');
+    assert.equal(t1.phases.deploy.days, 1, 'deploy: merge Fri → v1-DEPLOYED Mon');
+    assert.equal(t1.phases.design.days, 1, 'In Design status = design evidence');
+    const bv = (await api2('GET', `/assignee?account=acc1&projects=TP&assignee=u-bob&since=${SINCE}`)).json;
+    const t5 = bv.completed.find((t) => t.key === 'TP-5');
+    assert.equal(t5.phases.design.days, null, 'no design evidence → not tracked, never a fake 0');
+    assert.equal(t5.phases.dev.days, 2, 'In Progress Mon 10:00 → Done Wed 10:00');
+    assert.equal(av.pr_flow.counts.total, 1, 'person PR flow from their own PRs');
+    assert.ok(/Team context/.test(av.dora_team_context.label));
+
+    // Second scan: incremental — no new detail calls.
+    await scan(false);
+    assert.equal(detailCalls(), 3, 'unchanged PR → zero detail calls');
+
+    // Comments API (host reports view): allowlisted anchors, author from the proxy identity, ISO time, masked scrub.
+    const repDir = path.join(dataDir2, 'reports', 'acc1');
+    fs.mkdirSync(repDir, { recursive: true });
+    fs.writeFileSync(path.join(repDir, 'index.json'), JSON.stringify({ schema: 1, reports: [
+      { id: 'r1', file_name: 'team__q', masked: false },
+      { id: 'r2', file_name: 'team__m', masked: true },
+    ] }));
+    const bad = await api2('POST', '/report/comments?account=acc1&id=r1', { anchor: 'x" onload', text: 'hi' });
+    assert.equal(bad.status, 400);
+    const ok = await api2('POST', '/report/comments?account=acc1&id=r1', { anchor: 'dora', text: 'check this', author: 'spoofed' }, { 'x-otto-user-name': 'Lead One' });
+    assert.equal(ok.status, 200);
+    const c0 = ok.json.comments[0];
+    assert.equal(c0.author, 'Lead One');
+    assert.equal(c0.anchor, 'dora');
+    assert.ok(!Number.isNaN(Date.parse(c0.at)) && /T.*Z$/.test(c0.at));
+    const back = (await api2('GET', '/report/comments?account=acc1&id=r1')).json;
+    assert.equal(back.comments.length, 1);
+    assert.equal(back.max, 500);
+    const m = await api2('POST', '/report/comments?account=acc1&id=r2', { anchor: 'people', text: 'Alice slipped on TP-1' });
+    assert.equal(m.json.comments[0].text, 'a person slipped on ticket');
+
+    // Remove the deploy tags → DORA unavailable, and the canonical guardrail says so.
+    g(['tag', '-d', 'v1-DEPLOYED']);
+    g(['tag', '-d', 'rel-HF2']);
+    await scan(true);
+    const ov2 = (await api2('GET', `/overview?account=acc1&projects=TP&since=${SINCE}`)).json;
+    const nd = ov2.guardrails.find((x) => x.id === 'dora_no_deploy_tags');
+    assert.ok(nd, `no_deploy_tags guardrail present: ${ov2.guardrails.map((x) => x.id)}`);
+    assert.equal(nd.code, 'no_deploy_tags');
+    assert.ok(nd.tiles.includes('dora_deploy_frequency'));
+  } finally {
+    plugin2.kill('SIGKILL');
+    await new Promise((r) => srv.close(r));
+    fs.rmSync(dataDir2, { recursive: true, force: true });
+    fs.rmSync(repo2, { recursive: true, force: true });
+  }
 });

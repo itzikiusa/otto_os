@@ -747,35 +747,33 @@ test('resurrected ancients: multi-year effective cycles are excluded even with g
 
 // ---- v0.4.1: fix-inclusion into the actual ----------------------------------
 
-test('include_fixes folds fix time into the actual; manual override still wins', () => {
-  const base = rec({ key: 'IF-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 4, fix_count: 12 });
-  assert.equal(A.median([5]), 5);
-  // default record (no include_fixes) → base only
-  const b = A.baselines([{ ...base, include_fixes: false }, rec({ key: 'X1', eff_cycle_days: 5, cycle_days: 5 }), rec({ key: 'X2', eff_cycle_days: 5, cycle_days: 5 })]);
-  assert.equal(b.lookup('Story', 3).bucket.total.p50, 5, 'fixes not folded when include_fixes false');
-  // include_fixes true → base + fix_days (5+4=9)
-  const withFix = { ...base, include_fixes: true };
-  const stats = A.assigneeStats([withFix], A.baselines([withFix]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(stats[0].median_cycle, 9, 'actual = cycle + fix_days when included');
-  // manual override beats fix inclusion
-  const manual = { ...base, include_fixes: true, manual_days: 6 };
-  const s2 = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s2[0].median_cycle, 6, 'manual actual wins');
-});
-
-test('fix_days_override folds in a partial fix amount (wins over include mode)', () => {
-  const r = { ...rec({ key: 'FP-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 14, fix_count: 27 }), include_fixes: true };
-  // full include: 5 + 14 = 19
+test('v0.7: post-merge fix time is NOT folded into the actual (stops at QA); lead partial override and manual still apply', () => {
+  const r = { ...rec({ key: 'FP-1', eff_cycle_days: 5, cycle_days: 5, fix_days: 14, fix_count: 27, dev_days: 5 }), include_fixes: true };
   let s = A.assigneeStats([r], A.baselines([r]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s[0].median_cycle, 19);
-  // partial: only 10 of the 14 fix-days → 5 + 10 = 15
+  assert.equal(s[0].median_cycle, 5, 'fix days ignored');
   const partial = { ...r, fix_days_override: 10 };
   s = A.assigneeStats([partial], A.baselines([partial]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
-  assert.equal(s[0].median_cycle, 15, 'partial fix contribution');
-  // manual actual still wins over everything
+  assert.equal(s[0].median_cycle, 15, 'explicit lead fix contribution still added');
   const manual = { ...partial, manual_days: 8 };
   s = A.assigneeStats([manual], A.baselines([manual]), [1, 2, 3, 4, 5], T('2026-06-30T00:00:00Z'), {});
   assert.equal(s[0].median_cycle, 8);
+});
+
+test('v0.7: QA counts only when commits kept landing during QA', () => {
+  const mk = () => rec({ key: 'QW-1', done_at: T('2026-06-26T00:00:00Z'), intervals: [
+    iv('In Progress', '2026-06-15T00:00:00Z', '2026-06-17T00:00:00Z'),
+    iv('QA', '2026-06-17T00:00:00Z', '2026-06-26T00:00:00Z')] });
+  const idle = A.deriveGit(mk(), undefined, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.equal(idle.qa_work_days, 0);
+  const busy = A.deriveGit(mk(), { commit_ts: [T('2026-06-18T10:00:00Z'), T('2026-06-22T10:00:00Z'), T('2026-06-24T10:00:00Z')] }, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.ok(busy.qa_work_days > 0 && busy.dev_days > idle.dev_days, 'QA with commits on 3 days counts as work');
+});
+
+test('v0.7: rework charge-back moves time between tickets', () => {
+  const r = rec({ key: 'RW-1', dev_days: 10, rework_out: 4 });
+  const a = rec({ key: 'RW-0', dev_days: 2, rework_in: 4 });
+  assert.equal(A.actualDays(r), 6);
+  assert.equal(A.actualDays(a), 6);
 });
 
 // ---- v0.6: active-status actual, QA cap, estimate-inflation index ------------
@@ -783,7 +781,7 @@ test('fix_days_override folds in a partial fix amount (wins over include mode)',
 // Interval helper: [status, fromIso, toIso] with default phase classification.
 const iv = (status, from, to) => ({ status, from: T(from), to: T(to), phase: A.classifyStatus(status, {}) });
 
-test('active_days: sums working statuses, ignores idle span; actual prefers it', () => {
+test('dev_days: In Progress + Code Review only; git stretches fill status gaps', () => {
   // Mon..Fri: 2d In Progress + 1d Code Review + 1d QA = 4 active days, but the
   // record's wall span (eff cycle) is 20 days of mostly backlog idle.
   const base = rec({
@@ -800,7 +798,11 @@ test('active_days: sums working statuses, ignores idle span; actual prefers it',
   });
   const r = A.deriveGit(base, undefined, { hasRepos: true });
   assert.equal(r.active_days, 4);
-  assert.equal(A.actualDays(r), 4, 'actual = active status time, not the 20-day span');
+  assert.equal(r.dev_days, 3, 'dev = In Progress + Code Review; To Do and QA excluded');
+  assert.equal(A.actualDays(r), 3, 'actual = dev time (stops at QA), not the 20-day span');
+  // commits widen dev time when statuses lag: a 5-day commit stretch beats 3 status days
+  const g = A.deriveGit(base, { commit_ts: [T('2026-06-15T10:00:00Z'), T('2026-06-17T10:00:00Z'), T('2026-06-19T10:00:00Z')] }, { hasRepos: true, workweek: [1, 2, 3, 4, 5] });
+  assert.ok(g.dev_days >= 5, 'git working stretch counts when statuses were not moved');
 });
 
 test('QA cap: long idle QA is capped; commits during QA lift the cap', () => {
@@ -884,4 +886,105 @@ test('estimateBasis: inflation index adjusts the pace trend', () => {
   assert.ok(Math.abs(b.pace_adjusted - 2.38) < 0.01, `adjusted ${b.pace_adjusted}`);
   assert.equal(b.n, 3);
   assert.equal(b.n_ref, 3);
+});
+
+// ---- P3: rework on every actual branch, manual skip, shared dev-days basis ----
+
+test('rework charge-back applies on the git and legacy branches too', () => {
+  const git = rec({ key: 'RW-2', dev_days: undefined, impl_days_git: 5, rework_in: 1, rework_out: 2 });
+  delete git.dev_days;
+  assert.equal(A.actualDays(git), 4);
+  const legacy = rec({ key: 'RW-3', active_days: 3, rework_in: 2 });
+  delete legacy.dev_days;
+  assert.equal(A.actualDays(legacy), 5);
+  const kidsOnly = rec({ key: 'RW-4', dev_days: 0, child_dev_days: 4, rework_out: 1 });
+  assert.equal(A.actualDays(kidsOnly), 3);
+});
+
+test('manual time is never adjusted by rework; guardrail rework_manual_skip emitted', () => {
+  const m = rec({ key: 'RW-5', dev_days: 3, manual_days: 7, rework_in: 2 });
+  assert.equal(A.actualDays(m), 7);
+  const marked = A.markReworkManualSkips([m, rec({ key: 'RW-6', dev_days: 1 })]);
+  assert.equal(marked[0].rework_skipped_manual, true);
+  assert.equal(marked[1].rework_skipped_manual, undefined);
+  const g = A.reworkGuardrails(marked);
+  assert.equal(g.length, 1);
+  assert.equal(g[0].code, 'rework_manual_skip');
+  assert.deepEqual(g[0].keys, ['RW-5']);
+  assert.deepEqual(A.reworkGuardrails([rec({ key: 'RW-7', dev_days: 2, rework_in: 1 })]), []);
+});
+
+test('devDaysBasis: one denominator for rework rate and investment', () => {
+  const recs = [
+    rec({ key: 'DB-1', dev_days: 5, rework_in: 2 }), // origin: own 5
+    rec({ key: 'DB-2', dev_days: 2, rework_out: 2, rework_of: 'DB-1', scope_excluded: true }), // redo
+    rec({ key: 'DB-3', dev_days: 3 }),
+    // Substantive sub-task (real work, kept standalone): delivered scope.
+    rec({ key: 'DB-4', dev_days: 1, parent_key: 'DB-3', subtask: true, substantive_subtask: true, rollup: false, credited_to: 'u-y' }),
+    rec({ key: 'DB-5', dev_days: 4, parent_key: 'DB-3', subtask: true, rollup: true }), // rolled up: skipped
+  ];
+  const b = A.devDaysBasis(recs);
+  assert.equal(b.delivered, 9);
+  assert.equal(b.incl_subtasks_rework, 11);
+  assert.ok(b.labels.delivered && b.labels.incl_subtasks_rework);
+});
+
+// ---- one time engine: zone + configured weekend + person's time off -------
+test('time engine: UTC+3 Fri/Sat weekend + one vacation day excluded from actual; phases agree', () => {
+  const P = require('../lib/phases.js');
+  // Asia/Riyadh = UTC+3 all year. Workweek Sun–Thu → weekend Fri/Sat.
+  // In Progress Wed 2026-06-03 09:00 local → Done Mon 2026-06-08 09:00 local.
+  //   Wed 0.625 + Thu 1 + (Fri, Sat weekend) + Sun 1 (vacation) + Mon 0.375
+  //   = 3 without the vacation, 2 with it.
+  const config = { workweek: [0, 1, 2, 3, 4], timezone: 'Asia/Riyadh' };
+  const people = { 'u-alice': { time_off: [{ from: '2026-06-07', to: '2026-06-07' }] } };
+  const raw = rawIssue({
+    created: '2026-06-03T06:00:00Z',
+    resolutiondate: '2026-06-08T06:00:00Z',
+    histories: [
+      history('2026-06-03T06:00:00Z', 'To Do', 'In Progress'),
+      history('2026-06-08T06:00:00Z', 'In Progress', 'Done'),
+    ],
+  });
+  const opts = { ...OPTS(), workweek: undefined, config, people, hasDesignStatuses: false };
+  const r = A.analyzeIssue(raw, opts);
+  assert.ok(Math.abs(r.impl_days - 2) < 1e-9, `impl ${r.impl_days}`);
+  assert.ok(Math.abs(r.cycle_days - 2) < 1e-9, `cycle ${r.cycle_days}`);
+  assert.ok(Math.abs(r.dev_days - 2) < 1e-9, `dev ${r.dev_days}`);
+  const actual = A.actualDays(r);
+  assert.ok(Math.abs(actual - 2) < 1e-9, `actual ${actual}`);
+  // Without the person's vacation the same ticket is 3 working days.
+  const noVac = A.analyzeIssue(raw, { ...opts, people: {} });
+  assert.ok(Math.abs(noVac.cycle_days - 3) < 1e-9, `no-vacation cycle ${noVac.cycle_days}`);
+  // phases.js (read-only) under the same zone/weekend/off days: phases sum = actual.
+  const ctx = A.timeCtx({ config, people }, r.assignee_id);
+  const ph = P.phasesFor(r, { tz: ctx.tz, offDays: ctx.offDays, cfg: { weekend: A.weekendOf(config.workweek) } });
+  const sum = [ph.design, ph.dev, ph.review, ph.deploy]
+    .map((p) => (p && typeof p.days === 'number' ? p.days : p && typeof p.total === 'number' ? p.total : 0))
+    .reduce((a, b) => a + b, 0);
+  assert.ok(Math.abs(sum - actual) < 1e-9, `phase sum ${sum} vs actual ${actual}`);
+});
+
+test('time engine: legacy workweek array keeps UTC semantics; addBusinessDays skips time off', () => {
+  // Mon 2026-06-01 12:00 UTC + 2 days with Tue off → Thu 12:00.
+  const ctx = A.timeCtx({ config: { workweek: [1, 2, 3, 4, 5] }, people: { u: { time_off: [{ from: '2026-06-02', to: '2026-06-02' }] } } }, 'u');
+  assert.equal(A.addBusinessDays(T('2026-06-01T12:00:00Z'), 2, ctx), T('2026-06-04T12:00:00Z'));
+  assert.equal(A.addBusinessDays(T('2026-06-01T12:00:00Z'), 2, [1, 2, 3, 4, 5]), T('2026-06-03T12:00:00Z'));
+  assert.equal(A.businessDays(T('2026-06-01T00:00:00Z'), T('2026-06-08T00:00:00Z'), ctx), 4);
+  assert.deepEqual(A.weekendOf([0, 1, 2, 3, 4]), [5, 6]);
+  assert.equal(A.offDaysFor('nobody', {}), null);
+});
+
+test('devDaysBasis: substantive sub-task credited to credited_to, parent points counted once', () => {
+  const recs = [
+    rec({ key: 'ST-1', dev_days: 4, points: 5, assignee_id: 'u-a' }),
+    rec({ key: 'ST-2', dev_days: 2, points: null, parent_key: 'ST-1', subtask: true, substantive_subtask: true, rollup: false, assignee_id: 'u-b', credited_to: 'u-b' }),
+    rec({ key: 'ST-3', dev_days: 1, points: null, parent_key: 'ST-1', subtask: true }), // checklist
+    rec({ key: 'EP-1', dev_days: 9, points: 8, type: 'Epic' }),
+  ];
+  const b = A.devDaysBasis(recs);
+  assert.equal(b.delivered, 6);
+  assert.equal(b.n_delivered, 2);
+  assert.equal(b.delivered_points, 5);
+  assert.deepEqual(b.by_person, { 'u-a': 4, 'u-b': 2 });
 });

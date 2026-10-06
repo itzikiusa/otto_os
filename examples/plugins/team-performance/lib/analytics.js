@@ -17,46 +17,83 @@
 // (stale statuses must not poison the numbers).
 'use strict';
 
+const TZ = require('./tz.js');
+const SR = require('./scope-rules.js');
+
 const DAY = 86400000;
-const WORKWEEK = [1, 2, 3, 4, 5]; // Mon–Fri (UTC day-of-week)
+const WORKWEEK = SR.DEFAULT_WORKWEEK; // legacy default (Mon–Fri)
+const { weekendOf } = SR;
 
 // ---------------------------------------------------------------------------
-// Business-day math (all UTC; fractional days)
+// Business-day math — ONE engine (lib/tz.js): local days in the team's IANA
+// zone, the configured weekend (config.workweek complement) and the person's
+// time off (people.json time_off) + config.holidays. Every duration in this
+// module goes through it; nothing counts raw UTC Mon–Fri days any more.
 // ---------------------------------------------------------------------------
 
-/** Fractional business days between two UTC ms timestamps. */
-function businessDays(fromMs, toMs, workweek = WORKWEEK) {
-  if (!(fromMs < toMs)) return 0;
-  const wd = new Set(workweek);
-  let total = 0;
-  let dayStart = Math.floor(fromMs / DAY) * DAY;
-  // Iterate UTC days overlapped by [from, to); sum only workday overlap.
-  for (; dayStart < toMs; dayStart += DAY) {
-    if (!wd.has(new Date(dayStart).getUTCDay())) continue;
-    const s = Math.max(fromMs, dayStart);
-    const e = Math.min(toMs, dayStart + DAY);
-    if (e > s) total += (e - s) / DAY;
+const offCache = new WeakMap(); // people object -> Map(assigneeId -> Set(dayKey))
+
+/** YYYY-MM-DD Set of an assignee's time off (+ team holidays); null when none. */
+function offDaysFor(assignee, people, holidays) {
+  const hol = Array.isArray(holidays) ? holidays.map((h) => String(h).slice(0, 10)) : [];
+  const person = assignee && people && typeof people === 'object' ? people[assignee] : null;
+  if (!person && !hol.length) return null;
+  let perPeople = people && typeof people === 'object' ? offCache.get(people) : null;
+  if (people && typeof people === 'object' && !perPeople) { perPeople = new Map(); offCache.set(people, perPeople); }
+  const ck = `${assignee || ''}|${hol.join(',')}`;
+  if (perPeople && perPeople.has(ck)) return perPeople.get(ck);
+  const out = new Set(hol);
+  for (const t of (person && person.time_off) || []) {
+    const a = Date.parse(String((t && t.from) || '').slice(0, 10) + 'T00:00:00Z');
+    const b = Date.parse(String((t && (t.to || t.from)) || '').slice(0, 10) + 'T00:00:00Z');
+    if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) continue;
+    for (let d = a; d <= b; d += DAY) out.add(new Date(d).toISOString().slice(0, 10));
   }
-  return total;
+  const res = out.size ? out : null;
+  if (perPeople) perPeople.set(ck, res);
+  return res;
 }
 
-/** The UTC ms timestamp `days` business days after `fromMs` (skips non-workdays). */
-function addBusinessDays(fromMs, days, workweek = WORKWEEK) {
+/**
+ * Normalize a time context. `src` is either a legacy workweek array
+ * ([1..5] → UTC, weekend = complement) or an options object
+ * {config:{workweek,timezone,holidays}, people, workweek?, timezone?|tz?,
+ *  weekend?, offDays?}. `assignee` selects whose time off is skipped.
+ * Defaults (nothing passed) = UTC, Sat/Sun weekend, no time off.
+ */
+function timeCtx(src, assignee) {
+  if (src && src.__timeCtx) return src;
+  if (Array.isArray(src)) return { __timeCtx: true, tz: 'UTC', weekend: weekendOf(src), offDays: null };
+  const o = src || {};
+  const cfg = o.config || {};
+  const workweek = Array.isArray(o.workweek) ? o.workweek : cfg.workweek;
+  return {
+    __timeCtx: true,
+    tz: o.tz || o.timezone || cfg.timezone || 'UTC',
+    weekend: Array.isArray(o.weekend) ? o.weekend : weekendOf(workweek),
+    offDays: o.offDays || offDaysFor(assignee, o.people, cfg.holidays),
+  };
+}
+
+/** Fractional working days in [fromMs, toMs) under a time context (see timeCtx). */
+function businessDays(fromMs, toMs, ctx) {
+  if (!(fromMs < toMs)) return 0;
+  const c = timeCtx(ctx);
+  return TZ.businessDaysTz(fromMs, toMs, c);
+}
+
+/** The ms timestamp `days` working days after `fromMs` (skips weekend/off days). */
+function addBusinessDays(fromMs, days, ctx) {
   if (!(days > 0)) return fromMs;
-  const wd = new Set(workweek);
+  const c = timeCtx(ctx);
   let cur = fromMs;
   let remaining = days;
-  for (let guard = 0; guard < 40000 && remaining > 1e-9; guard++) {
-    const dayStart = Math.floor(cur / DAY) * DAY;
-    if (!wd.has(new Date(dayStart).getUTCDay())) {
-      cur = dayStart + DAY; // jump to next midnight
-      continue;
-    }
-    const available = (dayStart + DAY - cur) / DAY;
-    const used = Math.min(available, remaining);
-    cur += used * DAY;
-    remaining -= used;
-    if (remaining > 1e-9 && used === available) cur = dayStart + DAY;
+  for (let guard = 0; guard < 40000; guard++) {
+    const nm = TZ.nextMidnight(cur, c.tz);
+    const avail = TZ.businessDaysTz(cur, nm, c); // 0 on a weekend / day off
+    if (avail > 0 && avail >= remaining - 1e-9) return Math.round(cur + ((nm - cur) * Math.min(1, remaining / avail)));
+    remaining -= avail;
+    cur = nm;
   }
   return cur;
 }
@@ -70,6 +107,7 @@ const RE_IMPL = /progress|develop|implement|coding|code review|review|test|qa|ve
 // QA-class statuses (a subset of implementation): their time is capped in the
 // actual (QA queues idle for weeks) unless commits landed during the QA window.
 const RE_QA = /\bqa\b|quality|test|verif/;
+const RE_BACKLOG = /to-?\s?do|next sprint|backlog|ready|open|candidate/;
 const RE_WAIT = /to do|todo|open|backlog|blocked|waiting|hold|ready|triage|new/;
 const RE_DONE = /done|closed|resolved|cancel|reject|complete|released|deploy/;
 
@@ -139,14 +177,15 @@ function buildIntervals(createdMs, changelog, nowMs) {
 }
 
 /** Sum business days per phase over classified intervals. */
-function phaseTotals(intervals, statusMap, workweek = WORKWEEK) {
+function phaseTotals(intervals, statusMap, ctx = WORKWEEK) {
+  const tc = timeCtx(ctx);
   let design = 0;
   let impl = 0;
   let wait = 0;
   let firstActive = null;
   for (const iv of intervals) {
     const phase = classifyStatus(iv.status, statusMap);
-    const d = businessDays(iv.from, iv.to, workweek);
+    const d = businessDays(iv.from, iv.to, tc);
     if (phase === 'design') design += d;
     else if (phase === 'implementation') impl += d;
     else if (phase === 'waiting') wait += d;
@@ -168,7 +207,8 @@ const DEFAULT_QA_CAP_DAYS = 10;
  * commits-during-QA check). Pure on the record — no statusMap needed, the
  * intervals already carry their phase.
  */
-function qaTime(record, workweek) {
+function qaTime(record, ctx) {
+  const tc = timeCtx(ctx || WORKWEEK, record.assignee_id);
   const clipAt = record.done_at ?? null;
   let qa = 0;
   const windows = [];
@@ -178,7 +218,7 @@ function qaTime(record, workweek) {
     if (clipAt !== null && iv.from >= clipAt) continue;
     const to = clipAt !== null ? Math.min(iv.to, clipAt) : iv.to;
     if (to <= iv.from) continue;
-    qa += businessDays(iv.from, to, workweek);
+    qa += businessDays(iv.from, to, tc);
     if (windows.length < 60) windows.push([iv.from, to]);
   }
   return { qa, windows };
@@ -202,11 +242,13 @@ function effDoneAt(r) {
  * Apply one git-index entry to a record: raw git fields, derived durations,
  * effective (git-primary) timing, and all git-informed flags. Pure — returns a
  * new record. `gitEntry` may be undefined (no commits mention the key).
- * opts: {workweek, hasRepos, staleDays}
+ * opts: {workweek | config+people | time (a timeCtx), hasRepos, staleDays,
+ *        qaCapDays, qaWorkMinCommitDays}
  */
 function deriveGit(record, gitEntry, opts) {
   const g = gitEntry || {};
-  const workweek = opts.workweek || WORKWEEK;
+  // Time context: team zone + weekend + THIS assignee's time off.
+  const tc = timeCtx(opts.time || opts, record.assignee_id);
   const staleDays = opts.staleDays ?? DEFAULT_STALE_DAYS;
 
   const firstCommit = g.first_commit_at ?? null;
@@ -215,17 +257,17 @@ function deriveGit(record, gitEntry, opts) {
   const lastFix = g.last_fix_at ?? null;
 
   const implGit = firstCommit !== null && doneGit !== null && firstCommit < doneGit
-    ? round2(businessDays(firstCommit, doneGit, workweek))
+    ? round2(businessDays(firstCommit, doneGit, tc))
     : firstCommit !== null && doneGit !== null
       ? 0
       : null;
   const fixDays = doneGit !== null && lastFix !== null && lastFix > doneGit
-    ? round2(businessDays(doneGit, lastFix, workweek))
+    ? round2(businessDays(doneGit, lastFix, tc))
     : null;
   // Deployment step starts where fixing ends (no double counting of fix time).
   const deployFrom = doneGit !== null ? Math.max(doneGit, lastFix ?? doneGit) : null;
   const deployWait = deployFrom !== null && deployed !== null && deployed > deployFrom
-    ? round2(businessDays(deployFrom, deployed, workweek))
+    ? round2(businessDays(deployFrom, deployed, tc))
     : null;
 
   const effDone = doneGit ?? record.done_at ?? null;
@@ -234,7 +276,7 @@ function deriveGit(record, gitEntry, opts) {
     : firstCommit ?? record.first_active_at ?? null;
   const effImpl = implGit ?? record.impl_days ?? null;
   const effCycle = effDone !== null && effStart !== null && effStart < effDone
-    ? round2(businessDays(effStart, effDone, workweek))
+    ? round2(businessDays(effStart, effDone, tc))
     : effDone !== null && effStart !== null
       ? 0
       : null;
@@ -247,9 +289,49 @@ function deriveGit(record, gitEntry, opts) {
   const qaCapDays = opts.qaCapDays ?? DEFAULT_QA_CAP_DAYS;
   const commitTs = (Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts) ||
     [firstCommit, doneGit, lastFix].filter((t) => t !== null);
-  const { qa: qaRaw, windows: qaWindows } = qaTime(record, workweek);
+  const { qa: qaRaw, windows: qaWindows } = qaTime(record, tc);
   const qaHasCommits = qaWindows.some(([from, to]) => commitTs.some((t) => t >= from && t < to));
   const qaCappedDays = qaRaw > qaCapDays && !qaHasCommits ? qaCapDays : qaRaw;
+  // DEV time: hands-on development only — implementation-phase statuses that
+  // are NOT QA and NOT backlog-like (To-Do / Next Sprint / Ready…). Stops at QA.
+  const clipDev = record.done_at ?? doneGit ?? null;
+  let devDays = 0;
+  for (const iv of record.intervals || []) {
+    const phase = iv.phase ?? classifyStatus(iv.status, {});
+    const st = String(iv.status || '').toLowerCase();
+    if (phase !== 'implementation' || RE_QA.test(st) || RE_BACKLOG.test(st)) continue;
+    const to = clipDev !== null ? Math.min(iv.to, clipDev) : iv.to;
+    if (to > iv.from) devDays += businessDays(iv.from, to, tc);
+  }
+  // GIT dev time: statuses are often not moved on time, so commits are the
+  // second witness. Commit timestamps are grouped into working stretches
+  // (gaps ≤ 3 business days bridged); each stretch counts span + 1 day.
+  let gitDev = 0;
+  const cts = (Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts || []).slice().sort((a, b) => a - b);
+  if (cts.length) {
+    let s0 = cts[0];
+    let prev = cts[0];
+    for (let i = 1; i <= cts.length; i++) {
+      const t = cts[i];
+      if (t !== undefined && businessDays(prev, t, tc) <= 3) { prev = t; continue; }
+      gitDev += businessDays(s0, prev, tc) + 1;
+      if (t !== undefined) { s0 = t; prev = t; }
+    }
+  }
+  // QA counts as work ONLY when the branch kept changing during QA: commits on
+  // ≥ qaWorkMinCommitDays distinct days inside a QA window → that window is
+  // still work in progress. Idle QA (waiting for testers) never counts.
+  const qaMin = opts.qaWorkMinCommitDays ?? 2;
+  let qaWork = 0;
+  for (const iv of record.intervals || []) {
+    const phase = iv.phase ?? classifyStatus(iv.status, {});
+    if (phase !== 'implementation' || !RE_QA.test(String(iv.status || '').toLowerCase())) continue;
+    const to = clipDev !== null ? Math.min(iv.to, clipDev) : iv.to;
+    if (!(to > iv.from)) continue;
+    const days = new Set(cts.filter((t) => t >= iv.from && t < to).map((t) => TZ.dayKey(t, tc.tz)));
+    if (days.size >= qaMin) qaWork += businessDays(iv.from, to, tc);
+  }
+  devDays = Math.max(devDays + qaWork, gitDev);
   const activeDays = record.impl_days !== null && record.impl_days !== undefined
     ? round2(Math.max(0, record.impl_days - qaRaw + qaCappedDays))
     : null;
@@ -261,7 +343,7 @@ function deriveGit(record, gitEntry, opts) {
   if (qaCappedDays < qaRaw) flags.push('qa_capped');
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit === null) flags.push('no_code');
   if (record.done_at !== null && opts.hasRepos && doneGit === null && firstCommit !== null) flags.push('unmerged_code');
-  if (record.done_at !== null && doneGit !== null && businessDays(record.done_at, doneGit, workweek) > 2) flags.push('late_merge');
+  if (record.done_at !== null && doneGit !== null && businessDays(record.done_at, doneGit, tc) > 2) flags.push('late_merge');
   if (doneGit !== null && record.done_at === null) flags.push('done_by_git_only');
   if (done && implGit === null && (record.cycle_days ?? 0) > staleDays) flags.push('stale_timing');
   // Bulk-closed junk: "done" with ~zero measured time and no git signal —
@@ -273,7 +355,7 @@ function deriveGit(record, gitEntry, opts) {
   // The guard runs on the SAME base the actual uses (active-status time when
   // present, wall span otherwise) so a 500-day span with sane status history
   // isn't wrongly excluded, and a 500-day "In Progress" IS.
-  const actualBase = activeDays !== null && activeDays > 0 ? activeDays : effCycle;
+  const actualBase = devDays > 0 ? devDays : implGit !== null && implGit > 0 ? implGit : activeDays !== null && activeDays > 0 ? activeDays : effCycle;
   if (done && actualBase !== null && actualBase > 250) {
     if (!flags.includes('stale_timing')) flags.push('stale_timing');
   }
@@ -293,6 +375,8 @@ function deriveGit(record, gitEntry, opts) {
     late_touches: g.late_touches ?? record.late_touches ?? 0,
     last_fix_at: lastFix,
     deployed_at: deployed,
+    deployed_tag: g.deployed_tag ?? record.deployed_tag ?? null,
+    deployed_kind: g.deployed_kind ?? record.deployed_kind ?? null,
     git_authors: authors,
     git_change: g.change ?? record.git_change ?? null,
     commit_ts: Array.isArray(g.commit_ts) && g.commit_ts.length ? g.commit_ts : record.commit_ts ?? null,
@@ -300,6 +384,9 @@ function deriveGit(record, gitEntry, opts) {
     qa_days: round2(qaRaw),
     qa_days_counted: round2(qaCappedDays),
     active_days: activeDays,
+    dev_days: round2(devDays),
+    git_dev_days: round2(gitDev),
+    qa_work_days: round2(qaWork),
     fix_days: fixDays,
     deploy_wait_days: deployWait,
     eff_done_at: effDone,
@@ -320,30 +407,105 @@ const rImpl = (r) => r.eff_impl_days ?? r.impl_days ?? null;
 // resolved upstream (explicit per-task override, else auto by fix-commit
 // count) so a stray one-off touch never inflates a task but a genuine 10-commit
 // fixing effort does.
+// Rework charge-back (blame + Jira) applies to EVERY measured branch: time a
+// later ticket spent redoing this one moves IN (+rework_in), time this ticket
+// spent redoing another moves OUT (−rework_out). A lead-entered manual time is
+// authoritative and is never adjusted (it would double count) — those records
+// are reported via reworkGuardrails() as 'rework_manual_skip'.
+const withRework = (v, r) => round2(Math.max(0, v + (r.rework_in ?? 0) - (r.rework_out ?? 0)));
 const rCycle = (r) => {
   if (r.manual_days != null) return r.manual_days;
-  // Status-based active time (in progress + code review + capped QA) wins when
-  // the issue has real status history — the wall-clock span counts idle time.
-  // Tasks with no active-status signal (bulk-moved, git-only features, pre-v3
-  // records) fall back to the effective (git-primary) span.
+  // DEV actual (v0.7): In Progress / Code Review time only — stops at QA, no
+  // backlog time, no post-merge fix time. Sub-task dev time rolls up into the
+  // story (max of own vs children — they overlap). Falls back to first commit
+  // → merge when the ticket never sat in a dev status; legacy records without
+  // dev_days fall back to the old active/elapsed basis.
+  const own = r.dev_days ?? null;
+  const kids = r.child_dev_days ?? 0;
+  const dev = own !== null ? Math.max(own, kids) : null;
+  if (dev !== null && dev > 0) return round2(withRework(dev, r) + (r.fix_days_override ?? 0));
+  if (r.impl_days_git != null && r.impl_days_git > 0) return withRework(r.impl_days_git, r);
+  if (own !== null) return kids > 0 ? withRework(kids, r) : null;
   const active = r.active_days ?? null;
-  const base = active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
-  if (base == null) return base;
-  // A lead-entered partial fix contribution wins over the full auto fix time —
-  // fold in e.g. 10 of the 14 fix-days rather than all-or-nothing.
-  if (r.fix_days_override != null) return round2(base + r.fix_days_override);
-  if (r.include_fixes && r.fix_days) return round2(base + r.fix_days);
-  return base;
+  const legacy = active !== null && active > 0 ? active : r.eff_cycle_days ?? r.cycle_days ?? null;
+  return legacy === null ? null : withRework(legacy, r);
 };
+const isReworkCharged = (r) => (r.rework_in ?? 0) > 0 || (r.rework_out ?? 0) > 0;
+/**
+ * Guardrails for rework charge-back that could not be applied: a record with
+ * a manual (lead-entered) time that blame/Jira rework tried to charge. Its
+ * manual value stands as-is; the charge is skipped rather than double counted.
+ */
+function reworkGuardrails(records) {
+  const keys = records.filter((r) => r.manual_days != null && (r.rework_skipped_manual === true || isReworkCharged(r))).map((r) => r.key);
+  if (!keys.length) return [];
+  return [{
+    code: 'rework_manual_skip',
+    metric: 'rework',
+    severity: 'info',
+    reason: `${keys.length} ticket(s) with a manual time had rework charged to/from them; the manual time stands and the charge was skipped.`,
+    action: 'Review the manual time if it should include (or exclude) the rework.',
+    keys: keys.slice(0, 50),
+  }];
+}
+/** Mark records whose manual time blocked a rework charge (new array). */
+const markReworkManualSkips = (records) =>
+  records.map((r) => (r.manual_days != null && isReworkCharged(r) && !r.rework_skipped_manual ? { ...r, rework_skipped_manual: true } : r));
+/**
+ * The one dev-days denominator shared by rework rate and investment mix, so
+ * the two never disagree. Both are "own" time: actual minus rework charged IN
+ * (an origin's actual carries time spent by others).
+ *  delivered              scope-rules.isDeliveredScope: non-excluded, non-rework,
+ *                         non-container; substantive sub-tasks count (credited
+ *                         to credited_to), checklist sub-tasks do not
+ *  incl_subtasks_rework   everything worked: + rework tickets' time
+ *                         (rework_out) + substantive (non-rollup) sub-tasks
+ * Roll-up sub-tasks are skipped in both (their time lives in the story).
+ */
+function devDaysBasis(records) {
+  let delivered = 0;
+  let all = 0;
+  let n = 0;
+  let nDelivered = 0;
+  let points = 0;
+  const byPerson = {};
+  for (const r of records) {
+    if (r.rollup === true || String(r.type || '').toLowerCase() === 'epic') continue;
+    const a = rCycle(r);
+    if (a == null) continue;
+    const ownT = r.manual_days != null ? a : Math.max(0, a - (r.rework_in ?? 0));
+    const t = ownT + (r.manual_days != null ? 0 : r.rework_out ?? 0);
+    all += t;
+    n++;
+    if (SR.isDeliveredScope(r)) {
+      delivered += ownT;
+      nDelivered++;
+      // Points: a substantive sub-task brings ONLY its own points (usually
+      // none) — the parent story's points are never counted twice.
+      if (typeof r.points === 'number') points += r.points;
+      const who = SR.creditedOwner(r);
+      if (who) byPerson[who] = round2((byPerson[who] || 0) + ownT);
+    }
+  }
+  return {
+    delivered: round2(delivered),
+    incl_subtasks_rework: round2(all),
+    n,
+    n_delivered: nDelivered,
+    delivered_points: round2(points),
+    // Delivered dev days per credited person (substantive sub-tasks credit
+    // their credited_to, not the parent's assignee).
+    by_person: byPerson,
+    labels: {
+      delivered: 'Dev days on delivered scope (excl. rework tickets and checklist sub-tasks)',
+      incl_subtasks_rework: 'All dev days worked (incl. rework and substantive sub-tasks)',
+    },
+  };
+}
 const rDoneAt = (r) => r.eff_done_at ?? r.done_at ?? null;
-const isStale = (r) => (r.flags || []).includes('stale_timing') || (r.flags || []).includes('zero_time');
-// Excluded from every median/baseline/throughput: a lead-excluded story
-// (excluded_override — hard, wins over everything), stale timing, the lead
-// marked the story as an outlier, or a dev sub-task rolled up into its parent
-// story (counting both would double the same work). A manual time override
-// cures stale/outlier — the story re-enters at the entered value.
-const isExcluded = (r) =>
-  r.excluded_override === true || r.rollup === true || (r.manual_days == null && (r.outlier === true || isStale(r)));
+// Excluded from every median/baseline/throughput (epic, lead override, rolled-up
+// sub-task, stale/outlier timing without a manual time) — lib/scope-rules.js.
+const { isStale, isExcluded } = SR;
 // Timing-sample guard: "done" records with ~zero measured time are bulk-closed
 // Jira junk, not measurements — they poison medians and pace ratios toward 0.
 // A manual override is always a deliberate sample.
@@ -374,6 +536,8 @@ function enrichHierarchy(records) {
   const parents = new Map();
   for (const r of records) if (!r.subtask) parents.set(r.key, r);
   const designByParent = new Map();
+  const devByParent = new Map();
+  const authorsByParent = new Map();
   const out = records.map((r) => {
     if (!r.subtask || !r.parent_key || !parents.has(r.parent_key)) return r;
     // A sub-task that CONTAINS the word "design" (type or anywhere in the
@@ -386,8 +550,25 @@ function enrichHierarchy(records) {
     // EVERY sub-task (dev, QA, design, …) rolls up into its parent story —
     // the story is the unit of work; counting its breakdown too would double
     // it and a pile of tiny QA/dev sub-tasks would drown the real stories.
+    const t = r.dev_days ?? 0;
+    if (t > 0) devByParent.set(r.parent_key, (devByParent.get(r.parent_key) || 0) + t);
+    if ((r.git_authors || []).length) authorsByParent.set(r.parent_key, [...(authorsByParent.get(r.parent_key) || []), ...r.git_authors]);
     return { ...r, rollup: true };
   });
+  // Sub-task dev time + commit authors roll UP into the story: the story is
+  // the rated unit and its credit splits across everyone who did the work.
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i];
+    if (!devByParent.has(r.key) && !authorsByParent.has(r.key)) continue;
+    const merged = new Map();
+    for (const a of [...(r.git_authors || []), ...(authorsByParent.get(r.key) || [])]) {
+      const k = `${a.name}|${a.email}`;
+      const m = merged.get(k) || { ...a, commits: 0 };
+      m.commits += a.commits || 0;
+      merged.set(k, m);
+    }
+    out[i] = { ...r, child_dev_days: round2(devByParent.get(r.key) || 0), git_authors: [...merged.values()] };
+  }
   if (!designByParent.size) return out;
   return out.map((r) =>
     designByParent.has(r.key)
@@ -443,7 +624,8 @@ function assigneeAt(changelog, current, atMs) {
 
 /**
  * Analyze one raw Jira issue (fields + changelog) into an IssueRecord.
- * opts: {statusMap, workweek, pointsField, gitIndex:{byKey,hasRepos},
+ * opts: {statusMap, workweek, config?:{workweek,timezone,holidays}, people?,
+ *        pointsField, gitIndex:{byKey,hasRepos},
  *        hasDesignStatuses, nowMs, staleDays, descText?: (adf)=>string}
  */
 function analyzeIssue(raw, opts) {
@@ -467,14 +649,14 @@ function analyzeIssue(raw, opts) {
         .filter((iv) => iv.from < doneAt)
         .map((iv) => ({ ...iv, to: Math.min(iv.to, doneAt) }))
     : intervals;
-  const totals = phaseTotals(clipped, opts.statusMap, opts.workweek);
+  const attributed = doneAt !== null ? assigneeAt(raw.changelog, f.assignee || null, doneAt) : f.assignee || null;
+  const tc = timeCtx(opts, attributed ? attributed.accountId : null);
+  const totals = phaseTotals(clipped, opts.statusMap, tc);
 
   const cycle = doneAt !== null && totals.first_active_at !== null && totals.first_active_at < doneAt
-    ? businessDays(totals.first_active_at, doneAt, opts.workweek)
+    ? businessDays(totals.first_active_at, doneAt, tc)
     : null;
-  const lead = doneAt !== null ? businessDays(createdMs, doneAt, opts.workweek) : null;
-
-  const attributed = doneAt !== null ? assigneeAt(raw.changelog, f.assignee || null, doneAt) : f.assignee || null;
+  const lead = doneAt !== null ? businessDays(createdMs, doneAt, tc) : null;
 
   const points = typeof f[opts.pointsField] === 'number' ? f[opts.pointsField] : null;
   const estimateDays = typeof f.timeoriginalestimate === 'number' && f.timeoriginalestimate > 0
@@ -501,6 +683,15 @@ function analyzeIssue(raw, opts) {
     parent_key: parentKey,
     subtask: isSubtask,
     labels: Array.isArray(f.labels) ? f.labels : [],
+    priority: (f.priority && f.priority.name) || null,
+    // Normalized issue links ({rel, key, type, summary}) — rework + design evidence.
+    links: (Array.isArray(f.issuelinks) ? f.issuelinks : []).flatMap((l) => {
+      const t = (l && l.type) || {};
+      const o = [];
+      if (l && l.outwardIssue && l.outwardIssue.key) o.push({ rel: t.outward || t.name || '', key: l.outwardIssue.key, type: ((l.outwardIssue.fields || {}).issuetype || {}).name || '', summary: (l.outwardIssue.fields || {}).summary || '' });
+      if (l && l.inwardIssue && l.inwardIssue.key) o.push({ rel: t.inward || t.name || '', key: l.inwardIssue.key, type: ((l.inwardIssue.fields || {}).issuetype || {}).name || '', summary: (l.inwardIssue.fields || {}).summary || '' });
+      return o;
+    }),
     type: f.issuetype ? f.issuetype.name : 'Unknown',
     summary: f.summary || '',
     description_snippet: descText ? descText.replace(/\s+/g, ' ').trim().slice(0, 1500) : (raw.description_snippet || ''),
@@ -523,10 +714,10 @@ function analyzeIssue(raw, opts) {
     updated: ts(f.updated),
   };
   return deriveGit(base, opts.gitIndex ? opts.gitIndex.byKey.get(raw.key) : undefined, {
-    workweek: opts.workweek,
+    time: tc,
     hasRepos: Boolean(opts.gitIndex && opts.gitIndex.hasRepos),
     staleDays: opts.staleDays,
-    qaCapDays: opts.qaCapDays,
+    qaCapDays: opts.qaCapDays, qaWorkMinCommitDays: opts.qaWorkMinCommitDays,
   });
 }
 
@@ -541,9 +732,10 @@ function reanalyzeRecord(record, opts) {
   const clipped = doneAt
     ? raw.filter((iv) => iv.from < doneAt).map((iv) => ({ ...iv, to: Math.min(iv.to, doneAt) }))
     : raw;
-  const totals = phaseTotals(clipped, opts.statusMap, opts.workweek);
+  const tc = timeCtx(opts, record.assignee_id);
+  const totals = phaseTotals(clipped, opts.statusMap, tc);
   const cycle = doneAt !== null && totals.first_active_at !== null && totals.first_active_at < doneAt
-    ? businessDays(totals.first_active_at, doneAt, opts.workweek)
+    ? businessDays(totals.first_active_at, doneAt, tc)
     : null;
   const flags = (record.flags || []).filter((fl) => fl !== 'skipped_design');
   if (doneAt !== null && totals.design_days === 0 && opts.hasDesignStatuses) flags.push('skipped_design');
@@ -566,10 +758,12 @@ function reanalyzeRecord(record, opts) {
       last_fix_at: next.last_fix_at ?? null,
       fix_count: next.fix_count ?? 0,
       deployed_at: next.deployed_at ?? null,
+      deployed_tag: next.deployed_tag ?? null,
+      deployed_kind: next.deployed_kind ?? null,
       authors: next.git_authors || [],
       commit_ts: next.commit_ts || [],
     },
-    { workweek: opts.workweek, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays, qaCapDays: opts.qaCapDays },
+    { time: tc, hasRepos: opts.hasRepos ?? true, staleDays: opts.staleDays, qaCapDays: opts.qaCapDays, qaWorkMinCommitDays: opts.qaWorkMinCommitDays },
   );
 }
 
@@ -855,6 +1049,7 @@ function scale(st, factor) {
  * band shape): agnostic estimate × dev factor = per-dev expected.
  */
 function predict(record, base, factorMap, nowMs, workweek = WORKWEEK, estimates = null) {
+  const tc = timeCtx(workweek, record.assignee_id);
   const hit = base.lookup(record.type, record.points);
   const est = estimates && estimates[record.key];
   if (!hit && !(est && est.days > 0)) return null;
@@ -881,7 +1076,7 @@ function predict(record, base, factorMap, nowMs, workweek = WORKWEEK, estimates 
     est_days_ai: est && est.days > 0 ? est.days : null,
     elapsed_active_days: round2(elapsed),
     pct_consumed: pct,
-    projected_done_at: remaining !== null ? addBusinessDays(nowMs, remaining, workweek) : null,
+    projected_done_at: remaining !== null ? addBusinessDays(nowMs, remaining, tc) : null,
   };
 }
 
@@ -891,15 +1086,16 @@ function predict(record, base, factorMap, nowMs, workweek = WORKWEEK, estimates 
 
 /** Average concurrent WIP over a dev's active windows (business days). */
 function avgWip(windows, workweek, nowMs) {
+  const tc = timeCtx(workweek);
   const spans = windows
     .map((w) => ({ from: w.from, to: w.to ?? nowMs }))
     .filter((w) => w.from !== null && w.to > w.from);
   if (!spans.length) return null;
   const lo = Math.min(...spans.map((w) => w.from));
   const hi = Math.max(...spans.map((w) => w.to));
-  const span = businessDays(lo, hi, workweek);
+  const span = businessDays(lo, hi, tc);
   if (span <= 0) return null;
-  const busy = spans.reduce((acc, w) => acc + businessDays(w.from, w.to, workweek), 0);
+  const busy = spans.reduce((acc, w) => acc + businessDays(w.from, w.to, tc), 0);
   return round2(busy / span);
 }
 
@@ -1091,7 +1287,7 @@ function assigneeStats(records, base, workweek = WORKWEEK, nowMs = Date.now(), o
       // the systemic ideal-vs-elapsed gap). ×1.6 = 60% slower than team pace.
       pace_factor: devPace !== null && g.pace_n >= 3 && teamPace > 0 ? round2(devPace / teamPace) : null,
       mape: errs.length ? round2(median(errs)) : null,
-      avg_wip: avgWip(windows, workweek, nowMs),
+      avg_wip: avgWip(windows, timeCtx(Array.isArray(workweek) ? { workweek, config: opts.config, people: opts.people } : { ...(workweek || {}), people: (workweek && workweek.people) || opts.people }, id), nowMs),
       weighted_done: round2(g.weighted_done),
       // Size-weighted sums behind pace/efficiency — the chart modes plot them.
       sum_actual: round2(g.sum_actual),
@@ -1325,6 +1521,10 @@ module.exports = {
   DAY,
   businessDays,
   addBusinessDays,
+  timeCtx,
+  offDaysFor,
+  weekendOf,
+  isDeliveredScope: SR.isDeliveredScope,
   classifyStatus,
   buildIntervals,
   phaseTotals,
@@ -1335,6 +1535,9 @@ module.exports = {
   isExcluded,
   isTimingSample,
   actualDays: rCycle, // the canonical actual (manual > cycle + folded fixes)
+  devDaysBasis,
+  reworkGuardrails,
+  markReworkManualSkips,
   enrichHierarchy,
   makeCanonical,
   effDoneAt,
