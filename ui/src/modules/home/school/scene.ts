@@ -178,6 +178,19 @@ function build(
   renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = T.PCFShadowMap;
+  // A software rasteriser (SwiftShader / llvmpipe — CI, VMs, no GPU) can't
+  // afford soft shadows at 2× pixels: drop both so the room stays live.
+  try {
+    const gl = renderer.getContext();
+    const info = gl.getExtension('WEBGL_debug_renderer_info');
+    const name = String(info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+    if (/swiftshader|llvmpipe|softpipe|software/i.test(name)) {
+      renderer.shadowMap.enabled = false;
+      renderer.setPixelRatio(1);
+    }
+  } catch {
+    /* keep the defaults */
+  }
   const canvas = renderer.domElement;
   canvas.setAttribute('role', 'img');
   canvas.setAttribute('aria-label', opts.label);
@@ -999,7 +1012,7 @@ function build(
     raf = 0;
     if (!active) return;
     const raw = Math.max(0, now - last);
-    const dt = Math.min(250, raw);
+    const dt = Math.min(1000, raw);
     last = now;
     acc += dt;
     accRaw += raw;
@@ -1007,8 +1020,8 @@ function build(
       raf = requestAnimationFrame(frame);
       return;
     }
-    // Life steps are capped (a long stall never teleports anyone); camera
-    // flights use real time, so a slow GPU still lands them on schedule.
+    // Life steps are capped at 1 s (a long stall never teleports anyone, a
+    // slow GPU still walks in real time); camera flights use real time.
     const step = acc;
     const elapsed = accRaw;
     acc = 0;
