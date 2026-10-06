@@ -72,6 +72,11 @@ pub const SHARE_OTP_ABSOLUTE_MAX_SECS: i64 = 7 * 24 * 60 * 60;
 /// Lifetime of a single emailed OTP (10 minutes). Short by design — the code is
 /// a second factor delivered out-of-band, single-use, and rate-limited.
 pub const SHARE_OTP_TTL_SECS: i64 = 600;
+/// Wrong codes one emailed OTP tolerates before it is burned (S8-301). The
+/// per-IP share throttle can be rotated around (tunnels, IPv6), so this is the
+/// hard, IP-independent bound: after this many misses the guest must request a
+/// fresh code via `POST /share/extend`, which is itself capped per share.
+pub const SHARE_OTP_MAX_FAILURES: i64 = 5;
 /// Minimum age of `last_seen_at` before we touch the row again (throttles
 /// writes; for session tokens this also slides the expiry).
 const TOUCH_THROTTLE_SECS: i64 = 3600;
@@ -131,6 +136,21 @@ fn legacy_session_label(label: &str) -> Option<&str> {
             .bytes()
             .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)))
     .then_some(id)
+}
+
+/// Why `POST /share/verify` did (not) accept a code
+/// ([`AuthRepo::verify_share_otp_outcome`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareOtpOutcome {
+    /// The code matched; the share is verified and the code consumed.
+    Verified,
+    /// Wrong / expired / already-used code, or not an OTP share.
+    Rejected,
+    /// This wrong code was the last one allowed: the code is burned and the
+    /// guest must request a fresh one (S8-301).
+    Burned,
+    /// The argon2 verify bound is saturated; nothing was counted — retry.
+    Busy,
 }
 
 /// Repository for `auth_sessions`.
@@ -1385,6 +1405,22 @@ impl AuthRepo {
     /// the comparison is constant-shape (both sides SHA-256 hex). The caller is
     /// responsible for IP rate-limiting (the share throttle) around this call.
     pub async fn verify_share_otp(&self, token: &str, otp: &str) -> Result<bool> {
+        Ok(self.verify_share_otp_outcome(token, otp).await? == ShareOtpOutcome::Verified)
+    }
+
+    /// [`Self::verify_share_otp`] with the reason a code was not accepted.
+    ///
+    /// Every WRONG code against a live OTP counts on the share itself
+    /// (`otp_failures`); the [`SHARE_OTP_MAX_FAILURES`]th burns the code
+    /// (`otp_hash = NULL`) so no IP rotation can keep guessing it (S8-301).
+    /// The argon2 check runs off the async workers behind the shared verify
+    /// bound ([`crate::passwords::verify_password_bounded`]); a saturated bound
+    /// answers [`ShareOtpOutcome::Busy`] without counting a failure.
+    pub async fn verify_share_otp_outcome(
+        &self,
+        token: &str,
+        otp: &str,
+    ) -> Result<ShareOtpOutcome> {
         let hash = token_hash(token);
         let row = sqlx::query(
             "SELECT otp_hash, otp_expires_at, revoked, recipient_email
@@ -1396,29 +1432,56 @@ impl AuthRepo {
         .await
         .map_err(|e| Error::Internal(format!("verify share otp lookup: {e}")))?;
 
-        let Some(row) = row else { return Ok(false) };
+        let Some(row) = row else {
+            return Ok(ShareOtpOutcome::Rejected);
+        };
         // A revoked share never verifies; an OTP-less share (plain or already
-        // redeemed) has nothing to match.
+        // redeemed / burned) has nothing to match.
         if row.get::<i64, _>("revoked") != 0 {
-            return Ok(false);
+            return Ok(ShareOtpOutcome::Rejected);
         }
         let recipient: Option<String> = row.get("recipient_email");
         if recipient.is_none() {
-            return Ok(false); // not an OTP-gated share
+            return Ok(ShareOtpOutcome::Rejected); // not an OTP-gated share
         }
         let stored_hash: Option<String> = row.get("otp_hash");
         let Some(stored_hash) = stored_hash else {
-            return Ok(false); // already redeemed (single-use) — no code to match
+            // Already redeemed (single-use) or burned — no code to match.
+            return Ok(ShareOtpOutcome::Rejected);
         };
         let otp_expires_at: Option<i64> = row.get("otp_expires_at");
         let now = Utc::now().timestamp();
         if otp_expires_at.map(|e| e <= now).unwrap_or(true) {
-            return Ok(false); // expired code
+            return Ok(ShareOtpOutcome::Rejected); // expired code
         }
         // argon2id, not a plain digest: a 6-digit code behind a fast hash is a
         // one-million-guess offline job for anyone who reads the row.
-        if !crate::passwords::verify_password(otp, &stored_hash).unwrap_or(false) {
-            return Ok(false); // wrong code
+        let matched = match crate::passwords::verify_password_bounded(otp, &stored_hash).await {
+            Ok(r) => r.unwrap_or(false),
+            Err(crate::passwords::VerifySaturated) => return Ok(ShareOtpOutcome::Busy),
+        };
+        if !matched {
+            // Count the miss on the share; the last allowed one burns the code.
+            // Guarded on `otp_hash` so a miss can't touch a newer code that an
+            // extend minted meanwhile. SQLite evaluates SET against the OLD row.
+            let burned: Option<i64> = sqlx::query_scalar(
+                "UPDATE auth_sessions
+                 SET otp_failures = otp_failures + 1,
+                     otp_hash = CASE WHEN otp_failures + 1 >= ? THEN NULL ELSE otp_hash END
+                 WHERE token_hash = ? AND kind = 'share' AND otp_hash = ?
+                 RETURNING otp_hash IS NULL",
+            )
+            .bind(SHARE_OTP_MAX_FAILURES)
+            .bind(&hash)
+            .bind(&stored_hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Internal(format!("verify share otp miss: {e}")))?;
+            return Ok(if burned == Some(1) {
+                ShareOtpOutcome::Burned
+            } else {
+                ShareOtpOutcome::Rejected
+            });
         }
 
         // Match: mark verified and CLEAR the code (single-use). Guard the UPDATE
@@ -1426,7 +1489,7 @@ impl AuthRepo {
         // can't both succeed on the same code.
         let res = sqlx::query(
             "UPDATE auth_sessions
-             SET verified_at = ?, otp_hash = NULL
+             SET verified_at = ?, otp_hash = NULL, otp_failures = 0
              WHERE token_hash = ? AND kind = 'share' AND otp_hash = ?",
         )
         .bind(now)
@@ -1436,7 +1499,59 @@ impl AuthRepo {
         .await
         .map_err(|e| Error::Internal(format!("verify share otp update: {e}")))?;
 
-        Ok(res.rows_affected() > 0)
+        Ok(if res.rows_affected() > 0 {
+            ShareOtpOutcome::Verified
+        } else {
+            ShareOtpOutcome::Rejected
+        })
+    }
+
+    /// The share id of `token` when `POST /share/extend` may act on it: a live
+    /// (not revoked, inside its 7-day lifetime) email-OTP share that is NOT
+    /// currently verified-and-open (S8-307 — extending re-pends the guest, so a
+    /// link holder must not be able to kick a verified guest out). `Ok(None)`
+    /// for anything that is not an OTP share at all. The route takes the
+    /// per-share extend budget only after this resolves (S8-306).
+    pub async fn extendable_share_id(&self, token: &str) -> Result<Option<Id>> {
+        let row = sqlx::query(
+            "SELECT id, recipient_email, revoked, created_at, verified_at, max_expires_at
+             FROM auth_sessions
+             WHERE token_hash = ? AND kind = 'share'",
+        )
+        .bind(token_hash(token))
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| Error::Internal(format!("extendable share lookup: {e}")))?;
+        let Some(row) = row else { return Ok(None) };
+        if row.get::<i64, _>("revoked") != 0
+            || row.get::<Option<String>, _>("recipient_email").is_none()
+        {
+            return Ok(None);
+        }
+        Self::check_extendable(&row)?;
+        Ok(Some(Id::from(row.get::<String, _>("id"))))
+    }
+
+    /// The lifetime / verified-window refusals shared by
+    /// [`Self::extendable_share_id`] and [`Self::extend_share_otp`].
+    fn check_extendable(row: &sqlx::sqlite::SqliteRow) -> Result<()> {
+        let now = Utc::now();
+        let created_at = parse_ts(&row.get::<String, _>("created_at"))?;
+        if now >= created_at + Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS) {
+            return Err(Error::Forbidden(
+                "this share link reached its 7-day lifetime; ask the owner for a new link".into(),
+            ));
+        }
+        let verified_at: Option<i64> = row.get("verified_at");
+        let max_expires_at: Option<i64> = row.get("max_expires_at");
+        if verified_at.is_some() && max_expires_at.is_some_and(|m| m > now.timestamp()) {
+            return Err(Error::Conflict(
+                "this share is verified and still open; it can be extended once its window \
+                 lapses"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Extend an email-OTP share with a **fresh** code, re-emailed to the LOCKED
@@ -1467,7 +1582,8 @@ impl AuthRepo {
     pub async fn extend_share_otp(&self, token: &str) -> Result<Option<(String, String, Id)>> {
         let hash = token_hash(token);
         let row = sqlx::query(
-            "SELECT user_id, recipient_email, revoked, created_at, expires_at
+            "SELECT user_id, recipient_email, revoked, created_at, expires_at,
+                    verified_at, max_expires_at
              FROM auth_sessions
              WHERE token_hash = ? AND kind = 'share'",
         )
@@ -1499,13 +1615,10 @@ impl AuthRepo {
 
         let now = Utc::now();
         // Absolute lifetime (S8-06): past it the link is dead for good — the
-        // holder can no longer revive it, however often they ask.
+        // holder can no longer revive it, however often they ask. A verified
+        // guest inside its window is never re-pended by a link holder (S8-307).
+        Self::check_extendable(&row)?;
         let hard_end = created_at + Duration::seconds(SHARE_OTP_ABSOLUTE_MAX_SECS);
-        if now >= hard_end {
-            return Err(Error::Forbidden(
-                "this share link reached its 7-day lifetime; ask the owner for a new link".into(),
-            ));
-        }
         let otp = generate_otp();
         // Fresh ≤12h window (never past the absolute lifetime); the bearer-token
         // TTL tracks it so the token can never outlive the window it grants.
@@ -1515,7 +1628,7 @@ impl AuthRepo {
 
         let res = sqlx::query(
             "UPDATE auth_sessions
-             SET otp_hash = ?, otp_expires_at = ?, verified_at = NULL,
+             SET otp_hash = ?, otp_expires_at = ?, verified_at = NULL, otp_failures = 0,
                  max_expires_at = ?, expires_at = ?
              WHERE token_hash = ? AND kind = 'share' AND revoked = 0
                    AND recipient_email IS NOT NULL",
@@ -3046,6 +3159,68 @@ mod tests {
             !repo.verify_share_otp(&raw, &otp).await.unwrap(),
             "the OTP must be single-use"
         );
+    }
+
+    /// S8-301: wrong codes count against the SHARE (not just the caller's
+    /// IP): the `SHARE_OTP_MAX_FAILURES`th burns the code, so even the right
+    /// code fails afterwards; a fresh extend (only once the share is not
+    /// verified-and-open) resets the counter.
+    #[tokio::test]
+    async fn wrong_otps_burn_the_code_after_the_cap() {
+        let pool = mem_pool().await;
+        let repo = AuthRepo::new(pool.clone());
+        let owner = seed_user(&pool, "owner").await;
+        let (raw, otp, _info) = repo
+            .issue_share_otp_token(
+                &owner,
+                &Id::from("S1"),
+                WorkspaceRole::Viewer,
+                3600,
+                None,
+                "guest@example.com",
+            )
+            .await
+            .unwrap();
+        let wrong = if otp == "000000" { "111111" } else { "000000" };
+        for i in 1..=SHARE_OTP_MAX_FAILURES {
+            let out = repo.verify_share_otp_outcome(&raw, wrong).await.unwrap();
+            let want = if i == SHARE_OTP_MAX_FAILURES {
+                ShareOtpOutcome::Burned
+            } else {
+                ShareOtpOutcome::Rejected
+            };
+            assert_eq!(out, want, "miss #{i}");
+        }
+        assert!(
+            !repo.verify_share_otp(&raw, &otp).await.unwrap(),
+            "a burned code must not verify, even when correct"
+        );
+        // Pending (never verified) → extendable; the new code works.
+        assert!(repo.extendable_share_id(&raw).await.unwrap().is_some());
+        let (fresh, _, _) = repo.extend_share_otp(&raw).await.unwrap().unwrap();
+        let wrong = if fresh == "000000" {
+            "111111"
+        } else {
+            "000000"
+        };
+        for _ in 1..SHARE_OTP_MAX_FAILURES {
+            assert!(!repo.verify_share_otp(&raw, wrong).await.unwrap());
+        }
+        assert!(
+            repo.verify_share_otp(&raw, &fresh).await.unwrap(),
+            "extend resets the per-share miss counter"
+        );
+        // Verified and open: no longer extendable by a link holder (S8-307).
+        assert!(matches!(
+            repo.extendable_share_id(&raw).await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            repo.extend_share_otp(&raw).await,
+            Err(Error::Conflict(_))
+        ));
+        // A plain token is not an OTP share at all.
+        assert!(repo.extendable_share_id("junk").await.unwrap().is_none());
     }
 
     /// An expired OTP cannot be redeemed (otp_expires_at in the past).

@@ -171,16 +171,59 @@ pub async fn host_guard(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-/// When the `share_base_url` host was read, and its value.
-type CachedShareHost = (std::time::Instant, Option<String>);
+/// Which forwarded-client header (if any) the host guard trusts on a loopback
+/// request that named a non-loopback DNS host — i.e. one that came through a
+/// tunnel daemon running on this Mac (S8-301 / S8-309).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ClientIpTrust {
+    /// `trusted_client_ip_header` unset: the legacy Cloudflare default —
+    /// `CF-Connecting-IP`, only for the `share_base_url` host, and never when
+    /// that host is a Tailscale Funnel name (`*.ts.net`: Funnel forwards a
+    /// client-chosen `CF-Connecting-IP` untouched).
+    Default,
+    /// `trusted_client_ip_header` = `""` / `"none"` / `"off"`: never trust one.
+    Off,
+    /// `trusted_client_ip_header` = a header name: trust it for EVERY allowed
+    /// non-loopback DNS host (the share host, `OTTO_ALLOWED_HOSTS`, `*.ts.net`)
+    /// — the operator asserted their tunnel sets it.
+    Header(String),
+}
+
+impl ClientIpTrust {
+    pub(crate) fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|v| v.trim().to_ascii_lowercase()) {
+            None => Self::Default,
+            Some(v) if v.is_empty() || v == "none" || v == "off" => Self::Off,
+            Some(v) => match axum::http::HeaderName::from_bytes(v.as_bytes()) {
+                Ok(_) => Self::Header(v),
+                // An unusable name trusts nothing (fail closed).
+                Err(_) => Self::Off,
+            },
+        }
+    }
+
+    /// The header to read for a tunnelled request to `host`, if trusted.
+    pub(crate) fn header_for(&self, host: &str, share_host: Option<&str>) -> Option<&str> {
+        match self {
+            Self::Off => None,
+            Self::Header(h) => Some(h.as_str()),
+            Self::Default => (share_host == Some(host) && !host.ends_with(".ts.net"))
+                .then_some("cf-connecting-ip"),
+        }
+    }
+}
+
+/// When the guard settings were read: the `share_base_url` host and the
+/// `trusted_client_ip_header` policy.
+type CachedGuardSettings = (std::time::Instant, Option<String>, ClientIpTrust);
 
 /// State for [`host_guard_with_settings`]: the settings DB + a short cache of
-/// the `share_base_url` host (only consulted for a host the static rules
-/// refuse, so the loopback hot path never touches the DB).
+/// the `share_base_url` host and client-IP trust policy (only consulted for a
+/// DNS-name host, so the loopback hot path never touches the DB).
 #[derive(Clone)]
 pub struct HostGuardState {
     pool: otto_state::DbPool,
-    cache: std::sync::Arc<std::sync::Mutex<Option<CachedShareHost>>>,
+    cache: std::sync::Arc<std::sync::Mutex<Option<CachedGuardSettings>>>,
 }
 
 impl HostGuardState {
@@ -193,14 +236,17 @@ impl HostGuardState {
         }
     }
 
-    async fn share_host(&self) -> Option<String> {
+    async fn guard_settings(&self) -> (Option<String>, ClientIpTrust) {
         const TTL: std::time::Duration = std::time::Duration::from_secs(15);
-        if let Some((at, v)) = self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone() {
+        if let Some((at, host, trust)) =
+            self.cache.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        {
             if at.elapsed() < TTL {
-                return v;
+                return (host, trust);
             }
         }
-        let v = otto_state::SettingsRepo::new(self.pool.clone())
+        let repo = otto_state::SettingsRepo::new(self.pool.clone());
+        let host = repo
             .get("share_base_url")
             .await
             .ok()
@@ -208,9 +254,15 @@ impl HostGuardState {
             .and_then(|v| v.as_str().map(str::to_string))
             .and_then(|u| reqwest::Url::parse(u.trim()).ok())
             .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
+        let trust = match repo.get("trusted_client_ip_header").await {
+            Ok(Some(v)) => ClientIpTrust::parse(Some(v.as_str().unwrap_or(""))),
+            Ok(None) => ClientIpTrust::Default,
+            // Unreadable settings: trust nothing.
+            Err(_) => ClientIpTrust::Off,
+        };
         *self.cache.lock().unwrap_or_else(|p| p.into_inner()) =
-            Some((std::time::Instant::now(), v.clone()));
-        v
+            Some((std::time::Instant::now(), host.clone(), trust.clone()));
+        (host, trust)
     }
 }
 
@@ -218,16 +270,18 @@ impl HostGuardState {
 ///
 /// It also stamps the request with the tunnel-aware
 /// [`otto_sessions::share_throttle::ClientIp`] every throttle and audit row keys
-/// on (S8-02 / S8-07): behind the documented Cloudflare tunnel every client
-/// reaches us as `127.0.0.1`, so `CF-Connecting-IP` is honoured — but only for
-/// a loopback peer that named the `share_base_url` host.
+/// on (S8-02 / S8-07): behind a tunnel every client reaches us as
+/// `127.0.0.1`, so a forwarded-client header is honoured for a loopback peer
+/// that named a DNS host — but only the one [`ClientIpTrust`] (the
+/// `trusted_client_ip_header` setting) names, decided by the SETTING, not by
+/// which allow-list admitted the host (S8-309).
 pub async fn host_guard_with_settings(
     axum::extract::State(st): axum::extract::State<HostGuardState>,
     mut req: Request,
     next: Next,
 ) -> Response {
     let mut host: Option<String> = None;
-    let mut via_tunnel = false;
+    let mut trusted_header: Option<String> = None;
     if let Some(h) = req.headers().get(header::HOST) {
         let Ok(raw) = h.to_str() else {
             return misdirected();
@@ -237,24 +291,29 @@ pub async fn host_guard_with_settings(
         // The tunnel host is a DNS name; a loopback/IP-literal Host never is,
         // so the desktop hot path never consults the settings cache.
         let tunnel_candidate = !is_loopback_name(&name) && !is_ip_literal(&name);
-        let is_share_host = if !statically_ok || tunnel_candidate {
-            st.share_host().await.as_deref() == Some(name.as_str())
+        let (share_host, trust) = if !statically_ok || tunnel_candidate {
+            st.guard_settings().await
         } else {
-            false
+            (None, ClientIpTrust::Off)
         };
+        let is_share_host = share_host.as_deref() == Some(name.as_str());
         if !statically_ok && !is_share_host {
             return misdirected();
         }
-        via_tunnel = is_share_host;
+        if tunnel_candidate {
+            trusted_header = trust
+                .header_for(&name, share_host.as_deref())
+                .map(str::to_string);
+        }
         host = Some(name);
     }
-    stamp_client_ip(&mut req, host.as_deref(), via_tunnel);
+    stamp_client_ip(&mut req, host.as_deref(), trusted_header.as_deref());
     next.run(req).await
 }
 
 /// Insert the resolved [`otto_sessions::share_throttle::ClientIp`] (no-op when
 /// the listener did not wire `ConnectInfo`, e.g. in-process tests).
-fn stamp_client_ip(req: &mut Request, host: Option<&str>, via_tunnel: bool) {
+fn stamp_client_ip(req: &mut Request, host: Option<&str>, trusted_header: Option<&str>) {
     use otto_sessions::share_throttle::{resolve_client_ip, ClientIp};
     let Some(peer) = req
         .extensions()
@@ -263,12 +322,11 @@ fn stamp_client_ip(req: &mut Request, host: Option<&str>, via_tunnel: bool) {
     else {
         return;
     };
-    let cf = req
-        .headers()
-        .get("cf-connecting-ip")
+    let forwarded = trusted_header
+        .and_then(|h| req.headers().get(h))
         .and_then(|v| v.to_str().ok());
-    let ip = resolve_client_ip(peer, via_tunnel, cf);
-    let local = peer.is_loopback() && !via_tunnel && host.is_none_or(is_loopback_name);
+    let ip = resolve_client_ip(peer, trusted_header.is_some(), forwarded);
+    let local = peer.is_loopback() && host.is_none_or(is_loopback_name);
     req.extensions_mut().insert(ClientIp { ip, local });
 }
 
@@ -333,6 +391,38 @@ mod tests {
         assert!(host_allowed_with("my-mac.tail1234.ts.net", &extra));
         // Pinned: another tailnet name is no longer trusted.
         assert!(!host_allowed_with("other.tail9999.ts.net", &extra));
+    }
+
+    #[test]
+    fn client_ip_trust_comes_from_the_setting_not_the_allow_list() {
+        let share = Some("otto.example.com");
+        // Unset: CF-Connecting-IP only for the share host...
+        let d = ClientIpTrust::parse(None);
+        assert_eq!(
+            d.header_for("otto.example.com", share),
+            Some("cf-connecting-ip")
+        );
+        // ...never for another allowed name (OTTO_ALLOWED_HOSTS / Funnel)...
+        assert_eq!(d.header_for("my-mac.tail1.ts.net", share), None);
+        // ...and never when the share host itself is a Funnel name.
+        assert_eq!(
+            d.header_for("my-mac.tail1.ts.net", Some("my-mac.tail1.ts.net")),
+            None
+        );
+        // Explicit off.
+        for off in ["", "none", "OFF", "bad header\n"] {
+            assert_eq!(
+                ClientIpTrust::parse(Some(off)).header_for("otto.example.com", share),
+                None,
+                "{off:?}"
+            );
+        }
+        // Explicit header: applies to every tunnelled DNS host (S8-309).
+        let h = ClientIpTrust::parse(Some("CF-Connecting-IP"));
+        assert_eq!(
+            h.header_for("other.example.org", share),
+            Some("cf-connecting-ip")
+        );
     }
 
     #[tokio::test]
