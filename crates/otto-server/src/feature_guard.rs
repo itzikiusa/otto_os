@@ -72,7 +72,43 @@ impl HasGrants for ServerCtx {
 /// `from_fn_with_state(state, feature_guard::<S>)` as a `route_layer` directly
 /// after the auth middleware, so the [`AuthUser`] extension is present and the
 /// [`MatchedPath`] is set for the matched route.
-pub async fn feature_guard<S>(State(state): State<S>, req: Request, next: Next) -> Response
+pub async fn feature_guard<S>(state: State<S>, req: Request, next: Next) -> Response
+where
+    S: HasGrants + Clone + Send + Sync + 'static,
+{
+    // REQUEST CREDENTIAL (S11 "flip the default", S6-304). Publish what this
+    // request's credential is to every handler: a non-human credential on a
+    // write outside the reviewed agent allow-list has its ROOT AUTHORITY
+    // WITHHELD, so each `require_root` / `require_setup_authority` /
+    // `root_authority` write gate refuses it — a new root-gated route is
+    // closed to agents without anyone remembering to tag it.
+    let cred = request_credential_for(&req);
+    otto_core::auth::with_request_credential(cred, guard_inner(state, req, next)).await
+}
+
+/// The [`otto_core::auth::RequestCredential`] for `req` (its `AuthContext`,
+/// method and matched template). No `AuthContext` ⇒ the default (a person).
+pub fn request_credential_for(req: &Request) -> otto_core::auth::RequestCredential {
+    let Some(ctx) = req.extensions().get::<AuthContext>() else {
+        return Default::default();
+    };
+    let agent = !crate::ui_bridge::is_human(ctx);
+    let method = req.method();
+    let write = !(method == axum::http::Method::GET
+        || method == axum::http::Method::HEAD
+        || method == axum::http::Method::OPTIONS);
+    let template = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str())
+        .unwrap_or("");
+    otto_core::auth::RequestCredential {
+        agent,
+        root_withheld: agent && write && !crate::policy::agent_root_write_allowed(method, template),
+    }
+}
+
+async fn guard_inner<S>(State(state): State<S>, req: Request, next: Next) -> Response
 where
     S: HasGrants + Clone + Send + Sync + 'static,
 {

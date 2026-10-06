@@ -585,6 +585,9 @@ impl DbViewerService {
                 plan.write_count
             )));
         }
+        if plan.needs_confirm && req.confirm_write && !super::person_confirmed(true) {
+            return Err(Error::Forbidden(super::AGENT_CONFIRM_REFUSED.into()));
+        }
         if plan.needs_confirm && !req.confirm_write {
             let mut names: Vec<&str> = plan
                 .runs

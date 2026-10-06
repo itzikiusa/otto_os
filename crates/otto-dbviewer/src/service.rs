@@ -35,6 +35,40 @@ use serde_json::Value;
 use crate::config::{self};
 use crate::driver::Driver;
 use crate::registry::Registry;
+/// The refusal for a guarded write an agent credential "confirmed" (S6-304).
+pub(crate) const AGENT_CONFIRM_REFUSED: &str =
+    "an agent session's credential cannot confirm a write to a production / read-only \
+     connection — a person signed in to Otto must run it";
+
+/// `confirm_write` as a PERSON asserted it: the flag is a body field the
+/// client sets, so a non-human credential (an agent session's own token, a
+/// session MCP credential) never counts as having confirmed (S6-304). Outside
+/// an HTTP request (no request credential) it is the flag itself.
+pub(crate) fn person_confirmed(confirm_write: bool) -> bool {
+    confirm_write && !otto_core::auth::request_is_agent()
+}
+
+#[cfg(test)]
+mod person_confirm_tests {
+    use otto_core::auth::{with_request_credential, RequestCredential};
+
+    #[tokio::test]
+    async fn an_agent_credential_never_confirms_a_guarded_write() {
+        assert!(
+            super::person_confirmed(true),
+            "a person (or no request) confirms"
+        );
+        assert!(!super::person_confirmed(false));
+        let agent = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        assert!(!with_request_credential(agent, async { super::person_confirmed(true) }).await);
+        let human = RequestCredential::default();
+        assert!(with_request_credential(human, async { super::person_confirmed(true) }).await);
+    }
+}
+
 #[cfg(test)]
 use crate::types::QueryHandle;
 use crate::types::{
@@ -1759,7 +1793,7 @@ impl DbViewerService {
     /// and passes the `is_write` check below; only raw writes carrying
     /// `explain:true` are blocked.
     async fn guard_write(&self, conn_id: &Id, req: &QueryRequest) -> Result<()> {
-        if req.confirm_write {
+        if person_confirmed(req.confirm_write) {
             return Ok(());
         }
         let conn = self.connections.get(conn_id).await?;
@@ -1768,7 +1802,7 @@ impl DbViewerService {
 
     /// [`Self::guard_write`] against an already-loaded connection row.
     fn guard_write_conn(conn: &Connection, req: &QueryRequest) -> Result<()> {
-        if req.confirm_write {
+        if person_confirmed(req.confirm_write) {
             return Ok(());
         }
         if !conn.is_write_guarded() {
@@ -1787,6 +1821,11 @@ impl DbViewerService {
             engine == Some(Engine::Redis) && crate::types::redis_uses_keys(&req.statement);
         if !is_write && !blocking_keys {
             return Ok(());
+        }
+        if req.confirm_write {
+            // `confirm_write` from an agent credential (S6-304): the typed
+            // confirmation is a PERSON's, so it never lifts the guard here.
+            return Err(Error::Forbidden(AGENT_CONFIRM_REFUSED.into()));
         }
         let reason = if conn.environment.is_production() {
             format!("production connection '{}'", conn.name)

@@ -281,8 +281,105 @@ pub fn authorize_owner<C: OwnedCredential>(account: &C, user: &User) -> Result<(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Request credential class (S11 "flip the default", S6-304).
+// ---------------------------------------------------------------------------
+
+/// What the server's feature guard learned about the CURRENT request's
+/// credential, published as a task-local around the handler so every crate's
+/// root / setup-authority helper can consult it without threading an
+/// `AuthContext` through each signature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestCredential {
+    /// The bearer is not a person's own credential: an agent session's API
+    /// token, a session's internal MCP credential, an MCP-only token or a share
+    /// link. Such a credential authorizes AS ITS OWNER — often root.
+    pub agent: bool,
+    /// Root authority is WITHHELD for this request: an agent credential on a
+    /// write that is not on the reviewed agent allow-list
+    /// (`otto_server::policy::agent_root_write_allowed`). Every root-gated
+    /// write ([`root_authority`]) then refuses it — deny by default, so a new
+    /// `require_root` route is closed to agents without anyone tagging it.
+    pub root_withheld: bool,
+}
+
+tokio::task_local! {
+    static REQUEST_CREDENTIAL: RequestCredential;
+}
+
+/// Run `fut` (the rest of the request) with `cred` as the request credential.
+pub async fn with_request_credential<F: Future>(cred: RequestCredential, fut: F) -> F::Output {
+    REQUEST_CREDENTIAL.scope(cred, fut).await
+}
+
+/// The current request's credential facts. Outside a request (background
+/// jobs, unit tests that call a handler directly) this is the default — a
+/// person, nothing withheld — so only the guarded HTTP path is affected.
+pub fn request_credential() -> RequestCredential {
+    REQUEST_CREDENTIAL.try_with(|c| *c).unwrap_or_default()
+}
+
+/// `true` when the current request carries a non-human credential.
+pub fn request_is_agent() -> bool {
+    request_credential().agent
+}
+
+/// Whether `user` may exercise ROOT authority on the current request:
+/// `user.is_root`, unless the feature guard withheld root because an agent
+/// credential is writing to a route outside the reviewed agent allow-list.
+/// Every "root only" WRITE gate uses this instead of reading `is_root`.
+pub fn root_authority(user: &User) -> bool {
+    user.is_root && !request_credential().root_withheld
+}
+
+/// The refusal a root-gated write returns when root was withheld from an
+/// agent credential (so the message says WHY, not just "requires root").
+pub fn root_refusal() -> Error {
+    if request_credential().root_withheld {
+        Error::Forbidden(
+            "an agent session's credential cannot use root authority here — \
+             a person signed in to Otto must do this"
+                .into(),
+        )
+    } else {
+        Error::Forbidden("requires root".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn root_authority_is_withheld_only_inside_an_agent_write_scope() {
+        let mut root = User {
+            id: "r".into(),
+            username: "r".into(),
+            display_name: "r".into(),
+            is_root: true,
+            disabled: false,
+            created_at: chrono::Utc::now(),
+        };
+        assert!(root_authority(&root), "outside a request: unchanged");
+        let agent_write = RequestCredential {
+            agent: true,
+            root_withheld: true,
+        };
+        let r2 = root.clone();
+        assert!(!with_request_credential(agent_write, async move { root_authority(&r2) }).await);
+        let r3 = root.clone();
+        let allowed = RequestCredential {
+            agent: true,
+            root_withheld: false,
+        };
+        assert!(with_request_credential(allowed, async move { root_authority(&r3) }).await);
+        root.is_root = false;
+        assert!(!root_authority(&root));
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
     use super::*;
     use crate::domain::{
         GitAccount, GitProviderKind, IssueAccount, IssueProviderKind, Session, SessionKind,

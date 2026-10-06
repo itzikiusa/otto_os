@@ -83,9 +83,15 @@ pub async fn get_workflow(
 pub async fn update_workflow(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UpdateWorkflowReq>,
 ) -> ApiResult<Json<Workflow>> {
+    // S3-301: an agent credential never rewrites a workflow graph — it could
+    // drop the `human_approval` node that supervises it, then run the result.
+    if req.graph.is_some() {
+        require_human_for(&auth, GRAPH_WRITE_REFUSED)?;
+    }
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     if let Some(v) = req.on_restart.as_deref() {
@@ -165,9 +171,12 @@ pub async fn get_version(
 pub async fn restore_version(
     Path((id, v)): Path<(Id, i64)>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     body: Option<Json<RestoreVersionReq>>,
 ) -> ApiResult<Json<Workflow>> {
+    // Restoring swaps the whole graph back in — a graph write (S3-301).
+    require_human_for(&auth, GRAPH_WRITE_REFUSED)?;
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
     let ver = repo(&ctx)
@@ -489,15 +498,76 @@ pub(crate) fn seed_review_mode(
     }
 }
 
+const GRAPH_WRITE_REFUSED: &str =
+    "an agent session's credential cannot change a workflow's graph — \
+     a person signed in to Otto must edit it";
+const APPROVAL_SKIP_REFUSED: &str = "this would skip a human approval step — an agent session's \
+     credential cannot start or retry a run below an approval gate; a person must do it";
+
+/// `require_human` with a message that says what was refused.
+fn require_human_for(
+    auth: &crate::auth::CurrentAuthContext,
+    msg: &'static str,
+) -> Result<(), ApiError> {
+    if crate::ui_bridge::is_human(&auth.0) {
+        Ok(())
+    } else {
+        Err(ApiError(Error::Forbidden(msg.into())))
+    }
+}
+
+/// The `human_approval` nodes strictly UPSTREAM of `start` (S3-301): the
+/// gates a run entered at `start` never passes through.
+pub(crate) fn approval_ancestors(
+    graph: &otto_core::workflows::WorkflowGraph,
+    start: &str,
+) -> Vec<String> {
+    let mut preds: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for e in &graph.edges {
+        preds
+            .entry(e.target.as_str())
+            .or_default()
+            .push(e.source.as_str());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut stack: Vec<&str> = preds.get(start).cloned().unwrap_or_default();
+    let mut gates = Vec::new();
+    while let Some(n) = stack.pop() {
+        if n == start || !seen.insert(n) {
+            continue;
+        }
+        if graph
+            .nodes
+            .iter()
+            .any(|node| node.id == n && node.kind == "human_approval")
+        {
+            gates.push(n.to_string());
+        }
+        if let Some(p) = preds.get(n) {
+            stack.extend(p.iter().copied());
+        }
+    }
+    gates
+}
+
 /// `POST /workflows/{id}/run`
 pub async fn run_workflow(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RunWorkflowReq>,
 ) -> ApiResult<Json<WorkflowRun>> {
     let wf = repo(&ctx).get(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &wf.workspace_id, WorkspaceRole::Editor).await?;
+    // S3-301: a partial run that starts BELOW a `human_approval` gate skips
+    // it — only a person may do that. (A fresh run never adopts an earlier
+    // approval, so every upstream gate counts.)
+    if let Some(start) = req.start_node.as_deref() {
+        if !approval_ancestors(&wf.graph, start).is_empty() {
+            require_human_for(&auth, APPROVAL_SKIP_REFUSED)?;
+        }
+    }
     crate::workflow_validation::ensure_valid(&wf.graph).map_err(ApiError)?;
     if req
         .start_node
@@ -565,6 +635,7 @@ pub async fn run_workflow(
 pub async fn retry_run_node(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RetryRunNodeReq>,
 ) -> ApiResult<Json<WorkflowRun>> {
@@ -617,6 +688,19 @@ pub async fn retry_run_node(
         .definition_for_run(&run)
         .await
         .map_err(ApiError)?;
+    // S3-301: the retry ADOPTS every other step's prior state, so an upstream
+    // `human_approval` gate that did not succeed (rejected, errored, never
+    // reached) would be skipped. Only a person may retry past one.
+    let unapproved = approval_ancestors(&wf.graph, node_id)
+        .into_iter()
+        .any(|gate| {
+            !run.nodes
+                .iter()
+                .any(|n| n.node_id == gate && n.status == NodeStatus::Success)
+        });
+    if unapproved {
+        require_human_for(&auth, APPROVAL_SKIP_REFUSED)?;
+    }
     let ws = ctx
         .workspaces
         .get(&wf.workspace_id)
@@ -2364,5 +2448,40 @@ mod tests {
                 input
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_gate_tests {
+    use super::approval_ancestors;
+
+    #[test]
+    fn approval_ancestors_finds_every_gate_a_partial_run_would_skip() {
+        // implement → approve → pr ; implement → notify ; (approve2 → pr)
+        let graph = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                {"id": "implement", "kind": "agent"},
+                {"id": "approve", "kind": "human_approval"},
+                {"id": "approve2", "kind": "human_approval"},
+                {"id": "pr", "kind": "git_pr"},
+                {"id": "notify", "kind": "channel_notify"}
+            ],
+            "edges": [
+                {"id": "e1", "source": "implement", "target": "approve"},
+                {"id": "e2", "source": "approve", "target": "pr"},
+                {"id": "e3", "source": "approve2", "target": "pr"},
+                {"id": "e4", "source": "implement", "target": "notify"}
+            ]
+        }))
+        .unwrap();
+        let mut gates = approval_ancestors(&graph, "pr");
+        gates.sort();
+        assert_eq!(gates, vec!["approve".to_string(), "approve2".to_string()]);
+        // Starting AT the gate runs it; starting upstream of it, or on a
+        // branch without one, skips nothing.
+        assert!(approval_ancestors(&graph, "approve").is_empty());
+        assert!(approval_ancestors(&graph, "implement").is_empty());
+        assert!(approval_ancestors(&graph, "notify").is_empty());
+        assert!(approval_ancestors(&graph, "missing").is_empty());
     }
 }

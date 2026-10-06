@@ -336,7 +336,9 @@ async fn create_server<S: McpCtx>(
             "transport must be 'stdio' or 'http'".into(),
         )));
     }
-    if !user.is_root {
+    // Root authority as exercised by this request: withheld from an agent
+    // credential's write (S11-301 — the command is spawned unsandboxed).
+    if !otto_core::auth::root_authority(&user) {
         return Err(ApiErr(Error::Forbidden(
             "only the owner can attach MCP credentials or commands".into(),
         )));
@@ -463,7 +465,7 @@ async fn update_server<S: McpCtx>(
         WorkspaceRole::Editor,
     )
     .await?;
-    if !user.is_root
+    if !otto_core::auth::root_authority(&user)
         && (req.command.as_ref().is_some_and(|v| v != &server.command)
             || req.args.as_ref().is_some_and(|v| v != &server.args)
             || req.env.as_ref().is_some_and(|v| v != &server.env)
