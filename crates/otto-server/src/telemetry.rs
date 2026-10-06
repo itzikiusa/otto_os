@@ -6,7 +6,13 @@ use axum::{
 };
 pub use otto_telemetry::context::measure;
 use otto_telemetry::{SpanRecord, TelemetryService};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 /// Accept only version 00, nonzero trace/span IDs and valid trace flags.
 pub fn parent(value: &str) -> Option<(String, String)> {
@@ -72,9 +78,46 @@ fn untimed(route: &str, headers: &axum::http::HeaderMap) -> bool {
             .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
+/// Request extension the middleware attaches to every timed request (S9-304).
+/// A handler whose wall time turns out NOT to be latency — an MCP
+/// `tools/call` of `wait_session`, the same 14-minute park as the LONG_POLLS
+/// route it self-calls — calls [`UntimedMark::mark`], and the span is
+/// discarded on completion AND on a client abort.
+#[derive(Clone, Default)]
+pub struct UntimedMark(Arc<AtomicBool>);
+
+impl UntimedMark {
+    pub fn mark(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    fn marked(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Whether an `otto.*` tool parks like a LONG_POLLS route (its self-call is
+/// `GET /sessions/{id}/wait`).
+pub fn long_poll_tool(tool: &str) -> bool {
+    tool.strip_prefix("otto.").unwrap_or(tool) == "wait_session"
+}
+
+/// Whether a JSON-RPC body (one message or a batch) calls a long-poll tool.
+pub fn jsonrpc_calls_long_poll(body: &serde_json::Value) -> bool {
+    let calls = |m: &serde_json::Value| {
+        m.get("method").and_then(|v| v.as_str()) == Some("tools/call")
+            && m.pointer("/params/name")
+                .and_then(|v| v.as_str())
+                .is_some_and(long_poll_tool)
+    };
+    match body {
+        serde_json::Value::Array(batch) => batch.iter().any(calls),
+        one => calls(one),
+    }
+}
+
 pub async fn middleware(
     State(service): State<Option<Arc<TelemetryService>>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let Some(service) = service.as_ref().filter(|s| s.enabled()) else {
@@ -130,10 +173,13 @@ pub async fn middleware(
     // A client that disconnects drops this future mid-request; the guard
     // still records the span (status `cancelled`, 499) so aborted slow
     // requests are not invisible in the latency data.
+    let untimed = UntimedMark::default();
+    req.extensions_mut().insert(untimed.clone());
     let mut guard = RequestSpan {
         service: Arc::clone(service),
         span: Some(span),
         started: Instant::now(),
+        untimed,
     };
     let parent = guard.span.clone().expect("span present until finish");
     let mut response =
@@ -159,12 +205,16 @@ struct RequestSpan {
     service: Arc<TelemetryService>,
     span: Option<SpanRecord>,
     started: Instant,
+    untimed: UntimedMark,
 }
 impl RequestSpan {
     fn finish(&mut self, status: u16) {
         let Some(mut span) = self.span.take() else {
             return;
         };
+        if self.untimed.marked() {
+            return;
+        }
         span.duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         span.status = match status {
             499 => "cancelled",
@@ -215,6 +265,7 @@ mod tests {
                 service: Arc::clone(&service),
                 span: Some(SpanRecord::new("http.get.repos", "git", 0.0)),
                 started: Instant::now(),
+                untimed: UntimedMark::default(),
             };
             // Dropped without finish(): the client went away mid-request.
         }
@@ -222,9 +273,29 @@ mod tests {
             service: Arc::clone(&service),
             span: Some(SpanRecord::new("http.get.repos", "git", 0.0)),
             started: Instant::now(),
+            untimed: UntimedMark::default(),
         };
         done.finish(200);
         drop(done);
+        // S9-304: a marked long-poll (MCP `wait_session`) records nothing,
+        // whether it completes or the client gives up mid-wait.
+        for completes in [true, false] {
+            let untimed = UntimedMark::default();
+            let mut wait = RequestSpan {
+                service: Arc::clone(&service),
+                span: Some(SpanRecord::new(
+                    "http.post.mcp.otto-tools.invoke",
+                    "mcp",
+                    0.0,
+                )),
+                started: Instant::now(),
+                untimed: untimed.clone(),
+            };
+            untimed.mark();
+            if completes {
+                wait.finish(200);
+            }
+        }
         let statuses: Vec<_> = service
             .queued_spans_for_tests()
             .into_iter()
@@ -253,6 +324,22 @@ mod tests {
         assert!(untimed("/api/v1/rooms/{id}", &upgrade));
         assert!(!untimed("/api/v1/sessions/{id}", &none));
         assert!(!untimed("/api/v1/repos/{id}/fetch", &none));
+        // S9-304: the MCP tool that self-calls the long-poll route.
+        assert!(long_poll_tool("otto.wait_session") && long_poll_tool("wait_session"));
+        assert!(!long_poll_tool("otto.get_session"));
+        let call = |name: &str| {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":name,"arguments":{}}})
+        };
+        assert!(jsonrpc_calls_long_poll(&call("otto.wait_session")));
+        assert!(jsonrpc_calls_long_poll(&serde_json::json!([
+            call("otto.list_sessions"),
+            call("otto.wait_session")
+        ])));
+        assert!(!jsonrpc_calls_long_poll(&call("otto.list_sessions")));
+        assert!(!jsonrpc_calls_long_poll(
+            &serde_json::json!({"method":"tools/list","params":{"name":"otto.wait_session"}})
+        ));
     }
     #[test]
     fn workspace_routes_keep_the_feature_component() {

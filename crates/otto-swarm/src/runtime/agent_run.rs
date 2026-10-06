@@ -78,8 +78,17 @@ fn registry() -> &'static Mutex<HashMap<String, CancelState>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Begin a cancellable plan/recruit for `swarm_id` (replaces any prior handle).
-pub fn begin(swarm_id: &str) -> CancelState {
+/// The meta-agent turn kinds Stop can target separately (S17-307: "Stop
+/// planning" used to kill an in-flight recruit too, and vice versa).
+pub const AGENT_KINDS: [&str; 2] = ["plan", "recruit"];
+
+fn key(swarm_id: &str, kind: &str) -> String {
+    format!("{swarm_id}\u{0}{kind}")
+}
+
+/// Begin a cancellable `kind` (`plan`/`recruit`) turn for `swarm_id`
+/// (replaces any prior handle of the same kind).
+pub fn begin(swarm_id: &str, kind: &str) -> CancelState {
     let cs = CancelState {
         flag: Arc::new(AtomicBool::new(false)),
         sessions: Arc::new(Mutex::new(Vec::new())),
@@ -87,26 +96,35 @@ pub fn begin(swarm_id: &str) -> CancelState {
     registry()
         .lock()
         .unwrap()
-        .insert(swarm_id.to_string(), cs.clone());
+        .insert(key(swarm_id, kind), cs.clone());
     cs
 }
 
 /// Drop the cancel handle once the plan/recruit finishes.
-pub fn end(swarm_id: &str) {
-    registry().lock().unwrap().remove(swarm_id);
+pub fn end(swarm_id: &str, kind: &str) {
+    registry().lock().unwrap().remove(&key(swarm_id, kind));
 }
 
-/// Stop the in-flight plan/recruit for `swarm_id`: flag retries off + kill any
-/// live session(s). No-op if nothing is running.
-pub async fn stop(ctx: &SwarmRt, swarm_id: &str) {
-    let cs = registry().lock().unwrap().get(swarm_id).cloned();
-    if let Some(cs) = cs {
+/// Stop the in-flight `kind` turn for `swarm_id` (every kind when `None`):
+/// flag retries off + kill any live session(s). Returns whether anything was
+/// running.
+pub async fn stop(ctx: &SwarmRt, swarm_id: &str, kind: Option<&str>) -> bool {
+    let handles: Vec<CancelState> = {
+        let reg = registry().lock().unwrap();
+        AGENT_KINDS
+            .iter()
+            .filter(|k| kind.is_none_or(|want| want == **k))
+            .filter_map(|k| reg.get(&key(swarm_id, k)).cloned())
+            .collect()
+    };
+    for cs in &handles {
         cs.flag.store(true, Ordering::Relaxed);
         let sids = cs.sessions.lock().unwrap().clone();
         for sid in sids {
             let _ = ctx.manager().kill_session(&sid).await;
         }
     }
+    !handles.is_empty()
 }
 
 // --- the run -----------------------------------------------------------------
@@ -452,4 +470,29 @@ async fn set_run(
         emit_run(ctx, run_id).await;
     }
     changed
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// S17-307: a plan and a recruit of the same swarm have separate handles
+    /// — stopping one leaves the other running.
+    #[test]
+    fn plan_and_recruit_handles_are_independent() {
+        let plan = begin("sw-reg-test", "plan");
+        let recruit = begin("sw-reg-test", "recruit");
+        {
+            let reg = registry().lock().unwrap();
+            reg.get(&key("sw-reg-test", "plan")).unwrap().signal();
+        }
+        assert!(plan.cancelled());
+        assert!(!recruit.cancelled());
+        end("sw-reg-test", "plan");
+        assert!(registry()
+            .lock()
+            .unwrap()
+            .contains_key(&key("sw-reg-test", "recruit")));
+        end("sw-reg-test", "recruit");
+    }
 }

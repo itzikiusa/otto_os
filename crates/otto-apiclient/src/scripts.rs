@@ -269,6 +269,18 @@ pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_CONCURRENT_SCRIPTS: usize = 4;
 /// Cap on a child's stdout (the serialized outcome).
 const CHILD_OUTPUT_CAP: u64 = 32 * 1024 * 1024;
+/// Memory one script child may use (S6-307). Four `s += s` children growing
+/// for the whole [`SCRIPT_TIMEOUT`] would otherwise push the host into
+/// compression/swap under the daemon and every agent PTY. Enforced twice:
+/// `RLIMIT_DATA` at exec (the kernel bound on Linux; macOS ignores it for
+/// `mmap`), and the child's own peak-RSS watchdog ([`spawn_memory_watchdog`]),
+/// which is what holds on macOS.
+pub const CHILD_MEMORY_CAP: u64 = 512 * 1024 * 1024;
+/// CPU seconds a child may burn (`RLIMIT_CPU`) — a backstop to the wall-clock
+/// kill should the parent's timer not fire.
+const CHILD_CPU_SECS: u64 = SCRIPT_TIMEOUT.as_secs() + 5;
+/// Exit status of a child the memory watchdog stopped.
+const CHILD_EXIT_OOM: i32 = 86;
 
 static SCRIPT_HOST: OnceLock<PathBuf> = OnceLock::new();
 static SCRIPT_SLOTS: Semaphore = Semaphore::const_new(MAX_CONCURRENT_SCRIPTS);
@@ -291,6 +303,7 @@ struct ChildJob {
 /// run it, write the [`ScriptOutcome`] JSON to stdout. Returns success.
 pub fn child_main() -> bool {
     use std::io::{Read, Write};
+    spawn_memory_watchdog(CHILD_MEMORY_CAP);
     let mut input = Vec::new();
     if std::io::stdin().read_to_end(&mut input).is_err() {
         return false;
@@ -304,6 +317,59 @@ pub fn child_main() -> bool {
     };
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&out).is_ok() && stdout.flush().is_ok()
+}
+
+/// Peak resident set size of this process, in bytes (`ru_maxrss` is bytes on
+/// macOS, KiB on Linux).
+fn peak_rss_bytes() -> u64 {
+    // SAFETY: getrusage only writes the zeroed struct we hand it.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return 0;
+    }
+    let max = u64::try_from(usage.ru_maxrss).unwrap_or(0);
+    if cfg!(target_os = "macos") {
+        max
+    } else {
+        max.saturating_mul(1024)
+    }
+}
+
+/// In the script child only: a thread that exits the process with
+/// [`CHILD_EXIT_OOM`] once its peak RSS passes `cap` (polled every 20 ms).
+/// boa has no heap bound and macOS does not enforce `RLIMIT_DATA` on `mmap`,
+/// so this is the bound that holds there; the parent reports the exit as a
+/// memory failure.
+fn spawn_memory_watchdog(cap: u64) {
+    let _ = std::thread::Builder::new()
+        .name("script-mem-watchdog".into())
+        .spawn(move || loop {
+            if peak_rss_bytes() > cap {
+                std::process::exit(CHILD_EXIT_OOM);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        });
+}
+
+/// `pre_exec` hook for a script child: best-effort `RLIMIT_DATA` and
+/// `RLIMIT_CPU`. A refused `setrlimit` never blocks the spawn (the watchdog
+/// and the wall-clock kill still apply).
+#[cfg(unix)]
+fn limit_child_resources() -> std::io::Result<()> {
+    fn set(resource: libc::c_int, value: u64) {
+        let lim = libc::rlimit {
+            rlim_cur: value as libc::rlim_t,
+            rlim_max: value as libc::rlim_t,
+        };
+        // SAFETY: async-signal-safe syscall on a stack value, between fork
+        // and exec.
+        unsafe {
+            libc::setrlimit(resource as _, &lim);
+        }
+    }
+    set(libc::RLIMIT_DATA as libc::c_int, CHILD_MEMORY_CAP);
+    set(libc::RLIMIT_CPU as libc::c_int, CHILD_CPU_SECS);
+    Ok(())
 }
 
 fn failed(error: String) -> ScriptOutcome {
@@ -325,14 +391,21 @@ async fn run_in_child(
         Ok(p) => p,
         Err(e) => return failed(format!("script encode failed: {e}")),
     };
-    let mut child = match tokio::process::Command::new(program)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        // The script is pure JS over stdin/stdout: it needs nothing from the
+        // daemon's environment (tokens, proxy settings, keychain paths…).
+        .env_clear()
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    // SAFETY: the hook only calls setrlimit (async-signal-safe).
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(limit_child_resources);
+    }
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return failed(format!("script runner failed to start: {e}")),
     };
@@ -352,6 +425,10 @@ async fn run_in_child(
     match result {
         Ok(Ok((status, out))) if status.success() => serde_json::from_slice(&out)
             .unwrap_or_else(|e| failed(format!("script outcome parse failed: {e}"))),
+        Ok(Ok((status, _))) if status.code() == Some(CHILD_EXIT_OOM) => failed(format!(
+            "script stopped: it used more than {} MiB of memory",
+            CHILD_MEMORY_CAP / (1024 * 1024)
+        )),
         Ok(Ok((status, _))) => failed(format!(
             "script runner failed ({status}) — the script may have exhausted memory"
         )),
@@ -451,6 +528,67 @@ mod tests {
         )
         .await;
         assert!(out.error.unwrap().contains("script runner failed"));
+    }
+
+    /// S6-307: the child runs with a cleared environment (nothing of the
+    /// daemon's — here the test process's `CARGO_MANIFEST_DIR`)
+    /// and with `RLIMIT_CPU` / `RLIMIT_DATA` set. A `/bin/sh` stand-in
+    /// records what it got and answers an empty outcome.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn script_child_gets_no_env_and_a_cpu_and_data_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("probe");
+        let script = format!(
+            "/usr/bin/env > {p}.env; ulimit -t > {p}.cpu; ulimit -d > {p}.data; /bin/cat >/dev/null; echo '{{}}'",
+            p = probe.display()
+        );
+        let out = run_in_child(
+            OsStr::new("/bin/sh"),
+            &["-c", &script],
+            &job(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(out.error.is_none(), "{:?}", out.error);
+        let env = std::fs::read_to_string(probe.with_extension("env")).unwrap();
+        assert!(!env.contains("CARGO_MANIFEST_DIR="), "{env}");
+        let cpu = std::fs::read_to_string(probe.with_extension("cpu")).unwrap();
+        assert_eq!(cpu.trim(), CHILD_CPU_SECS.to_string());
+        let data = std::fs::read_to_string(probe.with_extension("data")).unwrap();
+        // `ulimit -d` reports KiB. macOS ignores RLIMIT_DATA (it reads back
+        // "unlimited") — there the peak-RSS watchdog is the bound.
+        if cfg!(target_os = "macos") {
+            assert!(
+                ["unlimited", &(CHILD_MEMORY_CAP / 1024).to_string()[..]].contains(&data.trim()),
+                "{data}"
+            );
+        } else {
+            assert_eq!(data.trim(), (CHILD_MEMORY_CAP / 1024).to_string());
+        }
+    }
+
+    /// S6-307: a child stopped by its memory watchdog is reported as a
+    /// memory failure (exit status [`CHILD_EXIT_OOM`]).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn memory_watchdog_exit_is_reported_as_a_memory_failure() {
+        let out = run_in_child(
+            OsStr::new("/bin/sh"),
+            &["-c", &format!("/bin/cat >/dev/null; exit {CHILD_EXIT_OOM}")],
+            &job(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let err = out.error.unwrap();
+        assert!(err.contains("more than 512 MiB"), "{err}");
+    }
+
+    #[test]
+    fn peak_rss_is_measured() {
+        let rss = peak_rss_bytes();
+        // A running test binary is well above 1 MiB and below the cap.
+        assert!(rss > 1024 * 1024 && rss < 8 * CHILD_MEMORY_CAP, "{rss}");
     }
 
     /// The child protocol round-trips: what `child_main` writes is what the

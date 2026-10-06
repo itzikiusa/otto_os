@@ -605,6 +605,111 @@ async fn list_accounts<S: GitCtx>(
     Ok(Json(accounts))
 }
 
+/// Opt-out of the https requirement for a self-hosted forge served over plain
+/// http (set `OTTO_GIT_ALLOW_HTTP_API=1` in the daemon's environment).
+const ALLOW_HTTP_API_ENV: &str = "OTTO_GIT_ALLOW_HTTP_API";
+
+/// DNS-free shape check of a git account's `api_base_url` (S2-311): an
+/// http(s) URL with a host, no userinfo / query / fragment, https unless
+/// [`ALLOW_HTTP_API_ENV`] opts out, and never an IP literal / `localhost` that
+/// is loopback, link-local (cloud metadata), unspecified or multicast.
+/// Private ranges stay allowed — self-hosted GitLab lives there.
+pub(crate) fn api_base_url_shape(url: &str, allow_http: bool) -> Result<reqwest::Url> {
+    let bad = |why: &str| Error::Invalid(format!("api_base_url {why}"));
+    let u = reqwest::Url::parse(url.trim()).map_err(|e| bad(&format!("is not a URL: {e}")))?;
+    match u.scheme() {
+        "https" => {}
+        "http" if allow_http => {}
+        "http" => {
+            return Err(bad(&format!(
+                "must use https — the token would travel unencrypted (set {ALLOW_HTTP_API_ENV}=1                  to allow plain http for a self-hosted forge)"
+            )))
+        }
+        other => return Err(bad(&format!("has an unsupported scheme: {other}"))),
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(bad("must not carry credentials"));
+    }
+    if u.query().is_some() || u.fragment().is_some() || url.contains(['?', '#']) {
+        return Err(bad("must not have a query or fragment"));
+    }
+    let host = u
+        .host_str()
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| bad("has no host"))?;
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return Err(bad("must not point at this machine"));
+    }
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        if internal_only_ip(ip) {
+            return Err(bad(&format!(
+                "must not point at {ip} (loopback / link-local / metadata)"
+            )));
+        }
+    }
+    Ok(u)
+}
+
+/// Addresses a forge API can never legitimately live at: loopback,
+/// link-local (169.254.0.0/16 incl. the cloud-metadata endpoint, fe80::/10),
+/// unspecified, multicast, broadcast — and the IPv4-mapped forms of them.
+fn internal_only_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return internal_only_ip(std::net::IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// [`api_base_url_shape`] plus a resolution check: a hostname that resolves
+/// to an internal-only address is refused the same as the literal (the
+/// test-draft route echoes upstream error text, which would otherwise make it
+/// a readable SSRF). An unresolvable name passes — the forge call fails on
+/// its own, and an offline save must keep working.
+async fn check_api_base_url(url: &str) -> Result<()> {
+    let allow_http = matches!(
+        std::env::var(ALLOW_HTTP_API_ENV).as_deref(),
+        Ok("1") | Ok("true")
+    );
+    let u = api_base_url_shape(url, allow_http)?;
+    let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default()) else {
+        return Ok(());
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), port)).await {
+        for a in addrs {
+            if internal_only_ip(a.ip()) {
+                return Err(Error::Invalid(format!(
+                    "api_base_url host {host} resolves to {} (loopback / link-local / metadata)",
+                    a.ip()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn create_account<S: GitCtx>(
     State(s): State<S>,
     Extension(user): Extension<AuthUser>,
@@ -612,6 +717,9 @@ async fn create_account<S: GitCtx>(
 ) -> ApiResult<Json<GitAccount>> {
     if req.token.trim().is_empty() {
         return Err(Error::Invalid("token must not be empty".into()).into());
+    }
+    if let Some(url) = req.api_base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        check_api_base_url(url).await?;
     }
     if req.username.trim().is_empty() {
         return Err(Error::Invalid("username must not be empty".into()).into());
@@ -667,13 +775,22 @@ async fn update_account<S: GitCtx>(
         Some("") => None,
         Some(v) => Some(v.to_string()),
     };
+    // Only a CHANGED url is vetted: an account saved before the check keeps
+    // working when its label or token is edited.
+    if let Some(url) = api_base_url
+        .as_deref()
+        .filter(|u| Some(*u) != account.api_base_url.as_deref())
+    {
+        check_api_base_url(url).await?;
+    }
 
-    // Token rotation: non-empty → store new ref, delete old; empty/absent → keep.
-    let token_ref = if let Some(tok) = req.token.as_deref().filter(|t| !t.is_empty()) {
+    // Token rotation: non-empty → store the new secret under a NEW ref, point
+    // the row at it, and only THEN delete the old one. The other order (S2-313)
+    // left a row pointing at a deleted secret whenever the DB update failed.
+    let rotated = req.token.as_deref().filter(|t| !t.is_empty());
+    let token_ref = if let Some(tok) = rotated {
         let new_ref = format!("gitacct-{}", new_id());
         s.secrets().put(&new_ref, tok)?;
-        // Best-effort cleanup of old secret; don't fail if it's already gone.
-        let _ = s.secrets().delete(&account.token_ref);
         new_ref
     } else {
         account.token_ref.clone()
@@ -693,8 +810,23 @@ async fn update_account<S: GitCtx>(
             api_base_url.as_deref(),
             token_expires_at,
         )
-        .await?;
-    Ok(Json(updated))
+        .await;
+    match updated {
+        Ok(updated) => {
+            if rotated.is_some() {
+                // Best-effort cleanup of the old secret; don't fail if it's gone.
+                let _ = s.secrets().delete(&account.token_ref);
+            }
+            Ok(Json(updated))
+        }
+        Err(e) => {
+            if rotated.is_some() {
+                // The row still names the old secret: drop the orphan new one.
+                let _ = s.secrets().delete(&token_ref);
+            }
+            Err(e.into())
+        }
+    }
 }
 
 async fn delete_account<S: GitCtx>(
@@ -767,6 +899,9 @@ async fn test_account_draft<S: GitCtx>(
         .as_deref()
         .filter(|t| !t.trim().is_empty())
         .ok_or_else(|| Error::Invalid("token is required".into()))?;
+    if let Some(url) = req.api_base_url.as_deref().filter(|u| !u.trim().is_empty()) {
+        check_api_base_url(url).await?;
+    }
     let account = GitAccount {
         id: String::new(),
         user_id: user.0.id.clone(),
@@ -4045,6 +4180,121 @@ mod tests {
         assert!(r.is_err());
         assert!(after);
         forget_repo_locks(&id);
+    }
+
+    /// Process-local secret store that remembers what is stored.
+    #[derive(Default)]
+    struct MemSecrets(std::sync::Mutex<HashMap<String, String>>);
+    impl SecretStore for MemSecrets {
+        fn put(&self, k: &str, v: &str) -> Result<()> {
+            self.0.lock().unwrap().insert(k.into(), v.into());
+            Ok(())
+        }
+        fn get(&self, k: &str) -> Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(k).cloned())
+        }
+        fn delete(&self, k: &str) -> Result<()> {
+            self.0.lock().unwrap().remove(k);
+            Ok(())
+        }
+    }
+
+    /// S2-313: a token rotation whose DB update fails keeps the OLD secret
+    /// (the row still names it) and drops the orphaned new one; a successful
+    /// rotation deletes the old secret only after the row points at the new.
+    #[tokio::test]
+    async fn token_rotation_never_strands_the_row_on_a_deleted_secret() {
+        let (pool, mut ctx, user, _ws) = fixture().await;
+        let secrets = Arc::new(MemSecrets::default());
+        ctx.secrets = secrets.clone();
+        let acct = seed_account(&ctx, &user, GitProviderKind::Github, "rot").await;
+        secrets.put(&acct.token_ref, "old-token").unwrap();
+        let req = || UpdateGitAccountReq {
+            label: None,
+            username: None,
+            namespace: None,
+            api_base_url: None,
+            token: Some("new-token".into()),
+            token_expires_at: None,
+        };
+
+        sqlx::query(
+            "CREATE TRIGGER fail_acct_update BEFORE UPDATE ON git_accounts \
+             BEGIN SELECT RAISE(FAIL, 'db down'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let r = update_account(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(acct.id.clone()),
+            Json(req()),
+        )
+        .await;
+        assert!(r.is_err());
+        let held = secrets.0.lock().unwrap().clone();
+        assert_eq!(
+            held.get(&acct.token_ref).map(String::as_str),
+            Some("old-token")
+        );
+        assert_eq!(
+            held.len(),
+            1,
+            "the new secret must not be orphaned: {held:?}"
+        );
+
+        sqlx::query("DROP TRIGGER fail_acct_update")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let Json(updated) = update_account(
+            State(ctx.clone()),
+            Extension(auth(&user, false)),
+            Path(acct.id.clone()),
+            Json(req()),
+        )
+        .await
+        .unwrap();
+        assert_ne!(updated.token_ref, acct.token_ref);
+        let held = secrets.0.lock().unwrap().clone();
+        assert!(!held.contains_key(&acct.token_ref), "old secret removed");
+        assert_eq!(
+            held.get(&updated.token_ref).map(String::as_str),
+            Some("new-token")
+        );
+    }
+
+    /// S2-311: `api_base_url` must be an https forge URL — never loopback,
+    /// link-local / metadata, credentials, a query or a fragment; private
+    /// ranges (self-hosted GitLab) stay allowed, http only with the opt-out.
+    #[test]
+    fn api_base_url_refuses_internal_targets() {
+        for ok in [
+            "https://gitlab.example.com",
+            "https://10.0.0.5/gitlab",
+            "https://192.168.1.20:8443",
+        ] {
+            assert!(api_base_url_shape(ok, false).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://gitlab.example.com",
+            "https://127.0.0.1",
+            "https://localhost:7700",
+            "https://169.254.169.254/latest",
+            "https://[::1]",
+            "https://[::ffff:127.0.0.1]",
+            "https://0.0.0.0",
+            "https://user:pw@gitlab.example.com",
+            "https://gitlab.example.com/?x=1",
+            "https://gitlab.example.com/#frag",
+            "file:///etc/passwd",
+            "ftp://gitlab.example.com",
+        ] {
+            assert!(api_base_url_shape(bad, false).is_err(), "{bad}");
+        }
+        assert!(api_base_url_shape("http://gitlab.corp", true).is_ok());
+        assert!(api_base_url_shape("http://127.0.0.1", true).is_err());
     }
 }
 

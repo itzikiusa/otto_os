@@ -121,6 +121,18 @@ fn settle(stats: Option<collector::ExporterStats>, accepted: u64) -> Settlement 
                 s.queue_size
             )),
         },
+        // Queues empty but not every accepted span was written or given up
+        // on (S9-307): a batch was still mid-retry when the collector stopped.
+        Some(s) if s.sent_spans + s.failed_spans < accepted => {
+            let unsettled = accepted - s.sent_spans - s.failed_spans;
+            Settlement {
+                exported: s.sent_spans.min(accepted),
+                failed: accepted - s.sent_spans.min(accepted),
+                error: Some(format!(
+                    "Collector stopped with {unsettled} telemetry records still being retried against ClickHouse; see telemetry/collector.log."
+                )),
+            }
+        }
         Some(s) if s.send_failed > 0 => Settlement {
             exported: accepted.saturating_sub(s.send_failed),
             failed: s.send_failed,
@@ -135,6 +147,10 @@ fn settle(stats: Option<collector::ExporterStats>, accepted: u64) -> Settlement 
             error: None,
         },
     }
+}
+/// Whether a drain may stop: nothing queued and every accepted span settled.
+fn drained(stats: &collector::ExporterStats, accepted: u64) -> bool {
+    stats.queue_size == 0 && stats.sent_spans + stats.failed_spans >= accepted
 }
 #[derive(Default, Serialize, Deserialize)]
 struct Persisted {
@@ -895,7 +911,7 @@ impl TelemetryService {
             Ok::<_, anyhow::Error>(())
         }
         .await;
-        let stats = self.drain(&mut collector).await;
+        let stats = self.drain(&mut collector, accepted).await;
         collector.stop().await;
         drop(lease);
         let settled = settle(stats, accepted);
@@ -984,11 +1000,14 @@ impl TelemetryService {
         }
         Ok(())
     }
-    /// Wait for the exporter queues to empty and the last partial batch to
-    /// be written, then return the run's exporter counters (if exposed).
+    /// Wait for the exporter queues to empty, the last partial batch to be
+    /// written and every `accepted` span to be settled (sent or failed —
+    /// S9-307: an empty queue alone does not cover a batch mid-retry), then
+    /// return the run's exporter counters (if exposed).
     async fn drain(
         &self,
         collector: &mut collector::Collector,
+        accepted: u64,
     ) -> Option<collector::ExporterStats> {
         let started = Instant::now();
         let mut last = None;
@@ -997,7 +1016,7 @@ impl TelemetryService {
             if let Some(stats) = last {
                 self.collector_queue
                     .store(stats.queue_size, Ordering::Relaxed);
-                if stats.queue_size == 0 && started.elapsed() >= DRAIN_WAIT {
+                if drained(&stats, accepted) && started.elapsed() >= DRAIN_WAIT {
                     break;
                 }
             }

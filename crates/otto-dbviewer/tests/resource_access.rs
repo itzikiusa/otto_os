@@ -780,3 +780,51 @@ async fn daemon_host_paths_are_root_only_even_for_legacy_connections() {
     assert!(matches!(err, Error::Forbidden(_)), "{err:?}");
     assert!(!dest.exists(), "nothing written");
 }
+
+/// S16-303: "Export all rows…" re-runs the grid's statement, so an export of
+/// a write would apply it twice. Exports are read-only on EVERY connection —
+/// here a plain Legacy dev connection with no write-guard, as root — refused
+/// before any network I/O.
+#[tokio::test]
+async fn export_refuses_a_write_on_an_unguarded_connection() {
+    let f = Fixture::new(ConnectionKind::Postgres, 1).await;
+    let repo = ResourceAccessRepo::new(f.pool.clone());
+    let mut policy = repo
+        .get_policy(ResourceKind::Connection, &f.profile)
+        .await
+        .unwrap();
+    let revision = policy.revision;
+    policy.mode = AccessMode::Legacy;
+    policy.rules.clear();
+    repo.put_policy(
+        &policy,
+        revision,
+        &AccessActor {
+            real_user_id: f.root.id.clone(),
+            effective_user_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    for sql in [
+        "UPDATE counters SET n = n + 1 RETURNING *",
+        "INSERT INTO t (a) VALUES (1) RETURNING *",
+        "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+        "SELECT pg_terminate_backend(1)",
+        "SELECT query_to_xml('DELETE FROM t RETURNING 1', true, false, '')",
+    ] {
+        let error = f
+            .service
+            .guard_export(&f.profile, &f.root.id, sql, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("export re-runs the statement"),
+            "{sql}: {error:?}"
+        );
+    }
+    f.service
+        .guard_export(&f.profile, &f.root.id, "SELECT * FROM counters", None)
+        .await
+        .unwrap();
+}

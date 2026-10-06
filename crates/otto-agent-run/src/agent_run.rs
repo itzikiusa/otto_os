@@ -402,7 +402,10 @@ where
             }
         }
 
-        match manager.live_handle(sid) {
+        // The stuck clock this poll measured (guarded: the transcript +
+        // sub-agent artifacts, not just the parent PTY) — the deadline below
+        // reuses it.
+        let quiet_for = match manager.live_handle(sid) {
             Some(handle) => {
                 if handle.on_exit().borrow().is_some() {
                     return RunOutcome::failed(Some(sid.clone()), FailReason::Exited);
@@ -433,9 +436,10 @@ where
                     flagged_waiting = false;
                     on_status(WatchStatus::Resumed).await;
                 }
+                quiet_for
             }
             None => return RunOutcome::failed(Some(sid.clone()), FailReason::SessionGone),
-        }
+        };
 
         if Instant::now() >= deadline {
             // The grace period is a budget for the WORK, not a hard kill switch:
@@ -445,14 +449,13 @@ where
             // exactly the "kills and respawns forever" loop observed. So the
             // deadline only fires once the agent has ALSO gone quiet for the
             // waiting window; a wedged one is caught by `stuck_idle` either way.
-            let idle = manager
-                .live_handle(sid)
-                .map(|h| h.last_output_at().elapsed())
-                .unwrap_or(Duration::MAX);
-            if deadline_fires(idle, waiting_idle) {
+            // "Quiet" is the GUARDED progress clock (an orchestrator's parent
+            // PTY is mute while its sub-agents work), and a findings file the
+            // guard is holding is never thrown away for a fresh attempt (S2-308).
+            if deadline_fires(quiet_for, waiting_idle, out_exists) {
                 warn!(
                     "agent_run: session ({provider}) timed out (idle {}s past grace)",
-                    idle.as_secs()
+                    quiet_for.as_secs()
                 );
                 return RunOutcome::failed(Some(sid.clone()), FailReason::Timeout);
             }
@@ -471,8 +474,8 @@ where
 /// Whether an elapsed grace deadline should fail the run: only when the agent
 /// has been silent for at least the waiting window (i.e. it is not visibly
 /// working). Pure so the policy is unit-testable without a PTY.
-pub fn deadline_fires(idle: Duration, waiting_idle: Duration) -> bool {
-    idle >= waiting_idle
+pub fn deadline_fires(idle: Duration, waiting_idle: Duration, out_exists: bool) -> bool {
+    !out_exists && idle >= waiting_idle
 }
 
 /// Run `attempt` up to `max_attempts` times with auto-recovery: between tries it
@@ -583,12 +586,22 @@ mod tests {
     fn deadline_only_fires_on_a_quiet_agent() {
         let waiting = Duration::from_secs(120);
         // Still producing output past its grace → keep waiting.
-        assert!(!deadline_fires(Duration::from_secs(3), waiting));
-        assert!(!deadline_fires(Duration::from_secs(119), waiting));
+        assert!(!deadline_fires(Duration::from_secs(3), waiting, false));
+        assert!(!deadline_fires(Duration::from_secs(119), waiting, false));
         // Quiet for the whole waiting window → the grace really elapsed.
-        assert!(deadline_fires(Duration::from_secs(120), waiting));
-        // A vanished PTY handle reports MAX idle → fires.
-        assert!(deadline_fires(Duration::MAX, waiting));
+        assert!(deadline_fires(Duration::from_secs(120), waiting, false));
+        assert!(deadline_fires(Duration::MAX, waiting, false));
+    }
+
+    /// S2-308: an orchestrator whose parent PTY is quiet while its sub-agents
+    /// work reports a SHORT guarded quiet time (the caller passes the progress
+    /// clock, not the PTY's), and a held findings file never trips the
+    /// deadline — killing it would throw the finished result away.
+    #[test]
+    fn deadline_never_discards_a_held_result() {
+        let waiting = Duration::from_secs(120);
+        assert!(!deadline_fires(Duration::MAX, waiting, true));
+        assert!(!deadline_fires(Duration::from_secs(600), waiting, true));
     }
 
     #[test]

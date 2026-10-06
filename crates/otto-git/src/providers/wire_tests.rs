@@ -745,6 +745,36 @@ mod client {
         );
     }
 
+    /// S2-305: the GitLab client never follows a redirect to another origin,
+    /// so its custom `PRIVATE-TOKEN` header cannot leak to an SSO host.
+    #[tokio::test]
+    async fn gitlab_token_is_not_sent_across_a_cross_origin_redirect() {
+        let forge = MockServer::start().await;
+        let sso = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/o%2Fr/merge_requests/1"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/login", sso.uri()).as_str()),
+            )
+            .mount(&forge)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&sso)
+            .await;
+        let gl = crate::providers::gitlab::Gitlab::new("glpat-secret".into(), Some(forge.uri()));
+        let r = RemoteRef {
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        assert!(gl.get_pr(&r, 1).await.is_err());
+        assert!(
+            sso.received_requests().await.unwrap().is_empty(),
+            "the cross-origin hop must not be followed"
+        );
+    }
+
     #[tokio::test]
     async fn get_cached_long_rate_limit_is_upstream() {
         let server = MockServer::start().await;
@@ -1345,6 +1375,78 @@ mod merge_pin {
         gl.merge_pinned(&rr(), 5, MergeStrategy::Merge, false, Some("abc1234def"))
             .await
             .unwrap();
+    }
+
+    /// S2-306: a pinned Rebase merge checks the reviewed head on an UNCACHED
+    /// read, waits for the async rebase, then pins `/merge` to the head the
+    /// rebase produced; a head that moved is refused before any rebase.
+    #[tokio::test]
+    async fn gitlab_rebase_checks_uncached_and_pins_the_rebased_head() {
+        let reviewed = "abc1234def0123456789abcdef0123456789abcd";
+        let rebased = "9999999999999999999999999999999999999999";
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        let mr = || path_regex(r"^/api/v4/projects/.+/merge_requests/5$");
+        // 1st read: the pin check (pre-rebase head). 2nd: still rebasing.
+        // Then: done, at the rebased head.
+        Mock::given(method("GET"))
+            .and(mr())
+            .and(query_param("include_rebase_in_progress", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sha": reviewed})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(mr())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"sha": reviewed, "rebase_in_progress": true})),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(mr())
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"sha": rebased, "rebase_in_progress": false})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5/rebase$"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5/merge$"))
+            .and(body_partial_json(json!({"sha": rebased})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        gl.merge_pinned(&rr(), 5, MergeStrategy::Rebase, false, Some(reviewed))
+            .await
+            .unwrap();
+
+        // A head that moved since review: refused, nothing is rebased.
+        let server = MockServer::start().await;
+        let gl = Gitlab::new("tok".into(), Some(server.uri()));
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/.+/merge_requests/5$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sha": rebased})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let res = gl
+            .merge_pinned(&rr(), 5, MergeStrategy::Rebase, false, Some(reviewed))
+            .await;
+        assert!(matches!(res, Err(Error::Conflict(_))), "{res:?}");
     }
 
     /// Bitbucket has no forge-side pin: a moved head (abbreviated hash) is

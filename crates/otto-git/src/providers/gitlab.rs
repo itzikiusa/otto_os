@@ -12,7 +12,7 @@ use otto_core::api::{
     CreatePrReq, DiffResp, FileChangeStatus, FileDiff, MergeStrategy, NewPrCommentReq, PrComment,
     PrCommentSide, PrCommit, PrDetail, PrReviewer, PrState, PrSummary, UpdatePrReq,
 };
-use otto_core::Result;
+use otto_core::{Error, Result};
 use serde_json::{json, Value};
 
 use crate::types::CiStatus;
@@ -38,6 +38,12 @@ fn percent_encode_query(s: &str) -> String {
     out
 }
 
+/// Interval between polls of an in-flight GitLab rebase.
+#[cfg(not(test))]
+const REBASE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const REBASE_POLL: std::time::Duration = std::time::Duration::from_millis(5);
+
 pub struct Gitlab {
     http: Http,
     token: String,
@@ -51,7 +57,8 @@ impl Gitlab {
             .trim_end_matches('/')
             .to_string();
         Self {
-            http: Http::new("gitlab"),
+            // Custom `PRIVATE-TOKEN` header ⇒ never follow a cross-origin redirect.
+            http: Http::new_same_origin_redirects("gitlab"),
             token,
             base,
         }
@@ -67,6 +74,57 @@ impl Gitlab {
     /// `PRIVATE-TOKEN` pair for the raw-`reqwest` pagination helper.
     fn auth_header(&self) -> (&'static str, String) {
         ("PRIVATE-TOKEN", self.token.clone())
+    }
+
+    /// The MR row read UNCACHED (bypassing the ETag/TTL cache `get_pr` uses),
+    /// with `rebase_in_progress` included — for decisions that must see the
+    /// forge's state as of now.
+    async fn mr_uncached(&self, r: &RemoteRef, number: u64) -> Result<Value> {
+        self.http
+            .json(
+                self.req(
+                    reqwest::Method::GET,
+                    &Self::mr_path(r, &format!("/{number}")),
+                )
+                .query(&[("include_rebase_in_progress", "true")]),
+            )
+            .await
+    }
+
+    /// Poll until GitLab's async rebase finishes (≤ 60 s). Returns the MR's
+    /// post-rebase head sha; a rebase that failed (`merge_error`) or never
+    /// finished is a Conflict — merging then would merge the old head.
+    async fn wait_for_rebase(&self, r: &RemoteRef, number: u64) -> Result<Option<String>> {
+        const POLLS: u32 = 60;
+        for i in 0..POLLS {
+            if i > 0 {
+                tokio::time::sleep(REBASE_POLL).await;
+            }
+            let mr = self.mr_uncached(r, number).await?;
+            if mr.get("rebase_in_progress").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            if let Some(err) = vstr_opt(&mr, &["merge_error"]).filter(|e| !e.is_empty()) {
+                return Err(Error::Conflict(format!("GitLab rebase failed: {err}")));
+            }
+            return Ok(vstr_opt(&mr, &["sha"]));
+        }
+        Err(Error::Conflict(
+            "GitLab rebase did not finish within 60s — merge again once it has".into(),
+        ))
+    }
+
+    /// A GitLab discussion id is 40 hex chars; anything else (`../`, `?`) is
+    /// refused before it can steer the request to another endpoint (S2-312).
+    fn discussion_id(id: &str) -> Result<&str> {
+        let ok = !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit());
+        if ok {
+            Ok(id)
+        } else {
+            Err(Error::Invalid(format!(
+                "not a GitLab discussion id: {id:?}"
+            )))
+        }
     }
 
     fn project_id(r: &RemoteRef) -> String {
@@ -537,6 +595,7 @@ impl super::GitProvider for Gitlab {
     async fn comment(&self, r: &RemoteRef, number: u64, c: &NewPrCommentReq) -> Result<PrComment> {
         // Reply to an existing discussion (id = discussion id, as exposed by get_pr).
         if let Some(disc_id) = &c.in_reply_to {
+            let disc_id = Self::discussion_id(disc_id)?;
             let v = self
                 .http
                 .json(
@@ -598,6 +657,7 @@ impl super::GitProvider for Gitlab {
         thread_id: &str,
         resolved: bool,
     ) -> Result<()> {
+        let thread_id = Self::discussion_id(thread_id)?;
         self.http
             .ok(self
                 .req(
@@ -640,22 +700,30 @@ impl super::GitProvider for Gitlab {
         expected_head_sha: Option<&str>,
     ) -> Result<()> {
         let pin = expected_head_sha.map(str::trim).filter(|s| !s.is_empty());
+        // The `sha` the merge call is pinned to (None ⇒ unpinned).
+        let mut merge_sha = pin.map(str::to_string);
         if strategy == MergeStrategy::Rebase {
-            // A rebase REWRITES the head, so GitLab's `sha` pin would always
-            // miss afterwards: check the reviewed head before rebasing instead.
+            // A rebase REWRITES the head, so the reviewed sha would always miss
+            // afterwards: check it before rebasing — on an UNCACHED read (the
+            // 15 s ETag cache would let a push from seconds ago through, and
+            // the rebase would then merge commits nobody reviewed; S2-306).
             if let Some(want) = pin {
-                let pr = self.get_pr(r, number).await?;
-                super::check_head(pr.summary.head_sha.as_deref(), want)?;
+                let mr = self.mr_uncached(r, number).await?;
+                super::check_head(vstr_opt(&mr, &["sha"]).as_deref(), want)?;
             }
-            // Rebase the source branch first (async on GitLab's side), give it
-            // a moment, then merge fast-forward style.
+            // Rebase the source branch (async on GitLab's side) and wait for
+            // it to finish, then pin the merge to the head the rebase produced
+            // — a push landing between the two is refused by the forge.
             self.http
                 .ok(self.req(
                     reqwest::Method::PUT,
                     &Self::mr_path(r, &format!("/{number}/rebase")),
                 ))
                 .await?;
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let rebased = self.wait_for_rebase(r, number).await?;
+            if pin.is_some() {
+                merge_sha = rebased;
+            }
         }
         self.http
             .ok(self
@@ -665,7 +733,7 @@ impl super::GitProvider for Gitlab {
                 )
                 .json(&{
                     let mut body = merge_body(strategy, delete_source_branch);
-                    if let Some(sha) = pin.filter(|_| strategy != MergeStrategy::Rebase) {
+                    if let Some(sha) = merge_sha.as_deref() {
                         body["sha"] = serde_json::json!(sha);
                     }
                     body
@@ -964,8 +1032,25 @@ pub(crate) fn merge_body(strategy: MergeStrategy, delete_source_branch: bool) ->
 mod tests {
     use super::{
         create_mr_body, member_to_collaborator, note_to_comment, parse_gitlab_expiry,
-        parse_pipeline_fixture, strip_draft_prefix, summary_from,
+        parse_pipeline_fixture, strip_draft_prefix, summary_from, Gitlab,
     };
+
+    /// S2-312: only a hex discussion id reaches the API path.
+    #[test]
+    fn discussion_ids_are_hex_only() {
+        let id = "6a9c1750b37d513a43987b574953fceb50b03ce7";
+        assert_eq!(Gitlab::discussion_id(id).unwrap(), id);
+        for bad in [
+            "",
+            "../../../users",
+            "abc?x=1",
+            "abc/def",
+            "zz",
+            &"a".repeat(65),
+        ] {
+            assert!(Gitlab::discussion_id(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn note_resolved_flag_maps() {

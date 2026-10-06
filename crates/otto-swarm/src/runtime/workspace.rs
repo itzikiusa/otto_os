@@ -3,7 +3,7 @@
 //! Each agent gets a UNIQUE cwd (required for Codex token attribution and to keep
 //! per-agent materialized context — `.claude/skills`, `CLAUDE.md`/`AGENTS.md` —
 //! from clobbering siblings):
-//! - `worktree`: a linked git worktree of the project repo on `swarm/<s>/<a>`.
+//! - `worktree`: a linked git worktree of the project repo on `swarm/<s>/<a>-<p>`.
 //! - `scratch` : `<data_dir>/swarm/<swarm>/<agent>/work` (non-code roles).
 //!
 //! Then it materializes the agent's skills + soul + identity into that cwd via
@@ -59,6 +59,11 @@ fn swarm_base(ctx: &SwarmRt, swarm_id: &str, agent_id: &str) -> PathBuf {
 /// repo merged project A's commits into B's integration branch. Worktrees
 /// made before this change (`<agent>/wt`, branch `swarm/<s>/<a>`) are left
 /// in place; their branch keeps any unmerged work.
+///
+/// The branch is `swarm/<s>/<a>-<p>`, deliberately NOT `swarm/<s>/<a>/<p>`
+/// (S4-301): git refs are paths, so a nested name cannot be created while the
+/// legacy `refs/heads/swarm/<s>/<a>` exists ("cannot lock ref") — every
+/// pre-existing worktree agent then silently fell back to scratch.
 pub fn agent_worktree(
     ctx: &SwarmRt,
     swarm: &Swarm,
@@ -74,7 +79,7 @@ fn agent_worktree_names(swarm_id: &str, agent_id: &str, project_id: &str) -> (St
     (
         format!("wt-{}", short(project_id)),
         format!(
-            "swarm/{}/{}/{}",
+            "swarm/{}/{}-{}",
             short(swarm_id),
             short(agent_id),
             short(project_id)
@@ -234,7 +239,7 @@ pub async fn ensure_cwd(
 }
 
 /// Ensure the agent's working directory and report how it was provisioned.
-/// In worktree mode the agent's branch (`swarm/<s>/<a>`) is based on the project's
+/// In worktree mode the agent's branch (`swarm/<s>/<a>-<p>`) is based on the project's
 /// pinned integration branch so per-task work merges back cleanly.
 pub async fn ensure_cwd_info(
     ctx: &SwarmRt,
@@ -606,6 +611,7 @@ pub const HELPER_NAMES: [&str; 4] = [
 /// the user's PR (or, in per-agent repo mode, straight into the checkout).
 /// Root-anchored lines go into the repo's `info/exclude` (shared by all its
 /// worktrees, never committed); a cwd that is not a git checkout is a no-op.
+#[allow(clippy::disallowed_methods)] // sync by contract: provision_agent runs in spawn_blocking
 pub fn exclude_helpers(cwd: &str) {
     let Ok(out) = otto_git::hardened_std_command()
         .args(["-C", cwd, "rev-parse", "--git-path", "info/exclude"])
@@ -678,10 +684,21 @@ mod tests {
         assert_ne!(ba, bb);
         assert!(ba.starts_with("swarm/"));
         assert_ne!(pa, "wt", "never the legacy per-agent dir");
+        // S4-301: never nested under the legacy `swarm/<s>/<a>` ref.
+        let legacy = format!(
+            "swarm/{}/{}",
+            short("swarm0000000001"),
+            short("agent000000001")
+        );
+        assert!(
+            !ba.starts_with(&format!("{legacy}/")),
+            "{ba} nests under {legacy}"
+        );
     }
 
     /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.
     #[test]
+    #[allow(clippy::disallowed_methods)] // test: blocking git setup
     fn helpers_are_excluded_from_git_in_a_checkout() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();

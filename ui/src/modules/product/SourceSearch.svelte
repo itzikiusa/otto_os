@@ -2,7 +2,8 @@
   // SourceSearch — unified Jira issue / Confluence page picker.
   // Mirrors the structure and CSS of JiraIssuePicker.svelte.
   import { api } from '../../lib/api/client';
-  import type { IssueProject, IssueSummary } from '../../lib/api/types';
+  import type { IssueProject, IssueSummary, ListingPage } from '../../lib/api/types';
+  import { truncatedNote, unwrapListing } from '../../lib/listingPage';
   import type { ConfluenceSpace, ConfluencePageSummary } from './types';
   import { loadErrorText } from '../../lib/loadError';
   import Skeleton from '../../lib/components/Skeleton.svelte';
@@ -22,6 +23,8 @@
   // --- Jira state ---
   let projects: IssueProject[] = $state([]);
   let projectsLoading = $state(false);
+  /** The project / space list stopped at its page cap (S5-22). */
+  let listTruncated = $state(false);
   let selectedProjectKey = $state('');
 
   // --- Confluence state ---
@@ -87,11 +90,17 @@
     filterError = '';
     projectsLoading = true;
     projects = [];
+    listTruncated = false;
     try {
-      const rows = await api.get<IssueProject[]>(
-        `/issue/projects?account_id=${encodeURIComponent(aid)}`,
+      const page = unwrapListing(
+        await api.get<ListingPage<IssueProject>>(
+          `/issue/projects?account_id=${encodeURIComponent(aid)}&meta=1`,
+        ),
       );
-      if (current()) projects = rows;
+      if (current()) {
+        projects = page.items;
+        listTruncated = page.truncated;
+      }
     } catch (e) {
       if (current()) filterError = loadErrorText(e);
     } finally {
@@ -105,11 +114,17 @@
     filterError = '';
     spacesLoading = true;
     spaces = [];
+    listTruncated = false;
     try {
-      const rows = await api.get<ConfluenceSpace[]>(
-        `/issue/confluence/spaces?account_id=${encodeURIComponent(aid)}`,
+      const page = unwrapListing(
+        await api.get<ListingPage<ConfluenceSpace>>(
+          `/issue/confluence/spaces?account_id=${encodeURIComponent(aid)}&meta=1`,
+        ),
       );
-      if (current()) spaces = rows;
+      if (current()) {
+        spaces = page.items;
+        listTruncated = page.truncated;
+      }
     } catch (e) {
       if (current()) filterError = loadErrorText(e);
     } finally {
@@ -268,6 +283,9 @@
           <option value={p.key}>{p.name} ({p.key})</option>
         {/each}
       </select>
+      {#if listTruncated}
+        <p class="trunc-note" role="note">{truncatedNote('projects', projects.length)}</p>
+      {/if}
     {/if}
   </div>
 {:else}
@@ -282,6 +300,9 @@
           <option value={s.key}>{s.name} ({s.key})</option>
         {/each}
       </select>
+      {#if listTruncated}
+        <p class="trunc-note" role="note">{truncatedNote('spaces', spaces.length)}</p>
+      {/if}
     {/if}
   </div>
 {/if}
@@ -350,6 +371,11 @@
 </div>
 
 <style>
+  .trunc-note {
+    margin: 4px 0 0;
+    font-size: var(--fs-xs);
+    color: var(--warning);
+  }
   .picker-field {
     display: flex;
     flex-direction: column;

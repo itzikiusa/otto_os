@@ -26,6 +26,8 @@
   import { pollWhileVisible, type Poller } from '../../lib/poll';
   import { latestOnly } from '../../lib/latest';
   import type { Tone } from '../../lib/status';
+  import type { RejectedSender } from '../../lib/api/types';
+  import { pendingRejected, senderLabel, withAllowed } from './channelAllow';
 
   // ---------------------------------------------------------------------------
   // State
@@ -289,6 +291,47 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Allow a turned-away sender (S5-308) — the Telegram id the owner can't see
+  // in the app, so the bot can be restricted instead of opened to everyone.
+  // ---------------------------------------------------------------------------
+
+  /** The sender whose "Allow" save is in flight (that button disables). */
+  let allowing = $state<string | null>(null);
+
+  async function allowSender(intg: Integration, r: RejectedSender): Promise<void> {
+    if (!wsId || allowing) return;
+    const label = channelLabel(intg.channel);
+    const ok = await confirmer.ask(
+      `${senderLabel(r)} will be able to message the ${label} bot and run an agent on this Mac as you — reading code and running commands — and receive its output.`,
+      { title: `Allow ${senderLabel(r)}?`, confirmLabel: 'Allow', danger: true },
+    );
+    if (!ok) return;
+    allowing = r.user;
+    try {
+      const body: UpsertIntegrationReq = {
+        enabled: intg.enabled,
+        allowed_users: withAllowed(intg.allowed_users, r.user),
+        // A non-blank list replaces any "open to everyone" opt-in.
+        open_to_all: false,
+        agent_reply: intg.agent_reply,
+        reply_instructions: intg.reply_instructions,
+        channel_id: intg.channel_id,
+        preferred_cli: intg.preferred_cli,
+        bot_token: null, // keep existing
+        ...(intg.channel === 'slack' ? { app_token: null } : {}),
+      };
+      const updated = await api.put<Integration>(`/workspaces/${wsId}/integrations/${intg.channel}`, body);
+      integrations = integrations.map((i) => (i.channel === updated.channel ? updated : i));
+      refreshStatusSoon();
+      toasts.success(`${senderLabel(r)} can now message the ${label} bot`);
+    } catch (e) {
+      toasts.error(`Couldn’t allow ${senderLabel(r)}`, loadErrorText(e));
+    } finally {
+      allowing = null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Delete
   // ---------------------------------------------------------------------------
 
@@ -470,6 +513,28 @@
               </div>
             {:else if h?.lastEvent && h.tone === 'success'}
               <div class="ch-status">Last message <RelTime iso={h.lastEvent} /></div>
+            {/if}
+            {#if intg && h}
+              {@const turnedAway = pendingRejected(statuses.find((x) => x.channel === channel)?.rejected_senders, intg.allowed_users)}
+              {#if turnedAway.length}
+                <div class="ch-rejected" data-testid="channel-rejected-{channel}">
+                  <div class="ch-status">Recently turned away (not on the allowed list):</div>
+                  <ul>
+                    {#each turnedAway as r (r.user)}
+                      <li>
+                        <span class="mono" dir="ltr">{senderLabel(r)}</span>
+                        <span class="dim">· <RelTime iso={r.at} /></span>
+                        <button
+                          class="btn small"
+                          title="Add {r.user} to the {label} allowed users"
+                          disabled={allowing !== null}
+                          onclick={() => void allowSender(intg, r)}
+                        >{allowing === r.user ? 'Allowing…' : 'Allow…'}</button>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
+              {/if}
             {/if}
           </div>
           <div class="ch-actions">
@@ -785,6 +850,28 @@
   }
   .hint.warn {
     color: var(--warning);
+  }
+  .ch-rejected ul {
+    list-style: none;
+    margin: 4px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .ch-rejected li {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: var(--fs-s);
+    min-width: 0;
+  }
+  .ch-rejected .mono {
+    overflow-wrap: anywhere;
+  }
+  .ch-rejected .dim {
+    color: var(--text-dim);
   }
   .ch-status {
     font-size: var(--fs-s);

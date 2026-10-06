@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { componentFunctions } from './componentFunctions.ts';
 import { deferred } from './sourceHarness.ts';
+import { unwrapListing } from '../src/lib/listingPage.ts';
 
 function fixture(get: (path: string) => Promise<unknown>, mode: 'story' | 'rfc') {
   return componentFunctions(new URL('../src/modules/product/PublishDialog.svelte', import.meta.url),
@@ -11,6 +12,7 @@ function fixture(get: (path: string) => Promise<unknown>, mode: 'story' | 'rfc')
       spaceKey: '', parentId: '123', rfcTitle: 'My RFC title', setError() {},
       projectsSequence: 0, spacesSequence: 0, issueTypesSequence: 0,
       projectsError: '', spacesError: '', formError: '',
+      projectsTruncated: false, spacesTruncated: false, unwrapListing,
     });
 }
 

@@ -72,16 +72,18 @@
 
   const working = $derived(busy || editor?.isGenerating());
 
-  // Stop: interrupt the canvas agent's turn (Esc into its PTY). The pending
-  // Ask Otto request then settles on its own; the board keeps what was saved.
+  // Stop: flag the turn as stopped server-side (it then commits nothing and
+  // restores the pre-turn board, S4-20), then interrupt the agent (Esc into
+  // its PTY) so the pending Ask Otto request settles.
   let stopping = $state(false);
   async function stop(): Promise<void> {
     const sid = canvas.sessionId;
     if (!sid || stopping) return;
     stopping = true;
     try {
+      await canvas.stopAssist();
       await interruptSession(sid);
-      toasts.info('Stopped Ask Otto', 'The agent’s turn was interrupted.');
+      toasts.info('Stopped Ask Otto', 'The board was left as it was before this turn.');
     } catch (e) {
       toastError('Couldn’t stop the agent', e);
     } finally {

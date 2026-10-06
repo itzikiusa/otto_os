@@ -136,6 +136,8 @@ pub trait AssistantCtx: Clone + Send + Sync + 'static {
     fn extract_summary(report: &str) -> String;
     /// `report_delivery::report_hash`.
     fn report_hash(report: &str) -> String;
+    /// `report_delivery::report_hash_matches` (a stored hash may be legacy).
+    fn report_hash_matches(stored: &str, report: &str) -> bool;
     /// `report_delivery::write_report`.
     fn write_report<'a>(abs: &'a Path, report: &'a str) -> BoxFut<'a, Result<()>>;
 

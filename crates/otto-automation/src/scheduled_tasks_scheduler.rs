@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::cadence;
 use crate::cancel_signal::CancelSignal;
-use crate::scheduled_tasks_engine::{in_flight, run_task};
+use crate::scheduled_tasks_engine::{in_flight, resume_workflow_handoff, run_task};
 use crate::AutomationCtx;
 
 const SCAN: Duration = Duration::from_secs(60);
@@ -37,11 +37,24 @@ pub fn start(ctx: impl AutomationCtx) -> CancelSignal {
 /// The daemon AWAITS this before serving the router and before [`start`] — run
 /// inside the spawned supervisor it raced the first manual "Run now" and could
 /// mark that brand-new run interrupted.
+///
+/// A run that had handed off to a workflow is not reaped: the workflow
+/// survives the restart, so its waiter is re-attached (in the background —
+/// this stays a pair of DB statements on the boot path) and the run records
+/// the workflow's real outcome (S3-303).
 pub async fn reap_interrupted(ctx: &impl AutomationCtx) {
     match ctx.scheduled_tasks().reap_running().await {
         Ok(n) if n > 0 => info!("scheduled tasks: reaped {n} interrupted run(s) on startup"),
         Ok(_) => {}
         Err(e) => warn!("scheduled tasks: startup reap failed: {e}"),
+    }
+    match ctx.scheduled_tasks().list_running_workflow_handoffs().await {
+        Ok(runs) => {
+            for run in runs {
+                resume_workflow_handoff(ctx, run);
+            }
+        }
+        Err(e) => warn!("scheduled tasks: listing workflow hand-offs failed: {e}"),
     }
 }
 

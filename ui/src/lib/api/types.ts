@@ -165,6 +165,9 @@ export interface Session {
   live?: boolean;
   /** Transient (list/get only): attached `/ws/term` viewer count. */
   viewers?: number;
+  /** Transient (list/get only): the live PTY runs in a PTY holder and
+   *  session persistence is on — it survives a daemon restart. */
+  held?: boolean;
 }
 
 /** Query for `GET /workspaces/{id}/sessions` (#17) and the cross-workspace
@@ -611,6 +614,17 @@ export interface McpAuditQuery {
   decision?: string;
   limit?: number;
   offset?: number;
+}
+
+/** `GET /mcp/audit?paged=true` — one page of the rows the caller may see.
+ *  Visibility is checked AFTER the ledger read, so `rows` can be short (even
+ *  empty) mid-ledger: page on `has_more` / `next_offset`, never on length. */
+export interface McpAuditPage {
+  rows: McpCallLogRow[];
+  /** Ledger offset of the next page (`offset` + ledger rows read). */
+  next_offset: number;
+  /** The ledger read was a full `limit` — older rows may exist. */
+  has_more: boolean;
 }
 
 /** Per-tool aggregate stats (cost = bytes proxy; latency / error counts). */
@@ -3919,6 +3933,9 @@ export interface ReviewAgentState {
    *  lens are the same lens on different providers. Absent on the summarizer
    *  row and on reviews persisted before the field existed. */
   lens?: string;
+  /** Orchestrator rows only: the lens slugs delegated to sub-agents. A retry
+   *  re-spawns the row as the same orchestrator. */
+  lens_slugs?: string[];
 }
 
 export interface ReviewComment {
@@ -4273,6 +4290,13 @@ export interface IssueProject {
   name: string;
 }
 
+/** `GET /issue/projects?meta=1` / `/issue/confluence/spaces?meta=1`: the
+ *  listing plus whether it stopped at its page cap (later rows not shown). */
+export interface ListingPage<T> {
+  items: T[];
+  truncated: boolean;
+}
+
 export interface IssueSummary {
   key: string;
   summary: string;
@@ -4366,6 +4390,17 @@ export interface ListenerStatus {
   last_error_at?: string;
   /** Consecutive failed attempts since the last good connection. */
   failures: number;
+  /** Last senders the allow-list dropped, newest first (omitted when none). */
+  rejected_senders?: RejectedSender[];
+}
+
+/** A sender a channel's allow-list turned away (`ListenerStatus.rejected_senders`). */
+export interface RejectedSender {
+  /** Channel-native user id — what goes into `allowed_users`. */
+  user: string;
+  /** @handle / display name when the platform sent one (display only). */
+  name?: string;
+  at: string;
 }
 
 export interface UpsertIntegrationReq {
@@ -9751,6 +9786,10 @@ export interface K8sMonitorStatus {
   pods_scraped: number;
   pods_failed: number;
   cycle_ms: number;
+  /** Set on `monitor/workloads` for a namespace-scoped caller: the row is
+   *  cluster-wide, so counts/`cycle_ms` are zeroed, `last_error` is blank and
+   *  `metrics_server` keeps only its status word (timestamps survive). */
+  restricted?: boolean;
 }
 
 export interface K8sMonitorPreset {

@@ -131,6 +131,29 @@ pub fn ensure_trusted(provider: &str, cwd: &str) {
     }
 }
 
+/// Pre-trust a THROWAWAY `cwd` created under the stable Otto scratch `root`
+/// (product scratch runs, canvas previews, untrusted reconcile turns) without
+/// growing the CLI's config per call (S4-14 / S4-303 / S4-305). Trusting each
+/// fresh dir left one dead `projects.<path>` entry (plus its `/private`
+/// variant) in `~/.claude.json` per run, parsed by every later CLI start.
+///
+/// claude's trust check walks the cwd's PARENTS, so trusting `root` once
+/// covers every child: the write happens on the first call only. Other CLIs
+/// (codex looks up the exact cwd or its git root) still get the child itself.
+/// A `cwd` outside `root` is trusted as-is.
+pub fn ensure_trusted_scratch(provider: &str, root: &Path, cwd: &str) {
+    ensure_trusted(provider, &scratch_trust_target(provider, root, cwd));
+}
+
+/// The path [`ensure_trusted_scratch`] grants: `root` for claude when `cwd`
+/// lies under it, else `cwd`.
+pub fn scratch_trust_target(provider: &str, root: &Path, cwd: &str) -> String {
+    if provider == "claude" && !root.as_os_str().is_empty() && Path::new(cwd).starts_with(root) {
+        return root.to_string_lossy().into_owned();
+    }
+    cwd.to_string()
+}
+
 /// Every path spelling an agent CLI might compare `$PWD` against: the path
 /// itself, its symlink-resolved form, and the `/private` prefix macOS adds
 /// for `/var` and `/tmp`. Trusting only the literal path can still leave a
@@ -364,6 +387,31 @@ mod tests {
     #[test]
     fn claude_corrupt_config_is_an_error_not_an_overwrite() {
         assert!(claude_with_trust("{\"projects\":", &v(&["/w"])).is_err());
+    }
+
+    /// S4-14/S4-303: a throwaway child of the scratch root trusts the ROOT
+    /// for claude (one entry ever), the child for other CLIs, and a path
+    /// outside the root is left as-is.
+    #[test]
+    fn scratch_children_trust_the_stable_root_for_claude() {
+        let root = Path::new("/tmp/otto-product-scratch");
+        let a = scratch_trust_target("claude", root, "/tmp/otto-product-scratch/a1");
+        let b = scratch_trust_target("claude", root, "/tmp/otto-product-scratch/b2");
+        assert_eq!(a, "/tmp/otto-product-scratch");
+        assert_eq!(a, b, "every child maps to the same single grant");
+        assert_eq!(
+            scratch_trust_target("codex", root, "/tmp/otto-product-scratch/a1"),
+            "/tmp/otto-product-scratch/a1"
+        );
+        assert_eq!(
+            scratch_trust_target("claude", root, "/Users/me/repo"),
+            "/Users/me/repo"
+        );
+        // A sibling sharing the root's string prefix is not under it.
+        assert_eq!(
+            scratch_trust_target("claude", root, "/tmp/otto-product-scratch-x/a"),
+            "/tmp/otto-product-scratch-x/a"
+        );
     }
 
     #[test]

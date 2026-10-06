@@ -2267,7 +2267,7 @@ async fn namespace_workloads_do_not_grant_secrets_metrics_exec_or_mutation() {
         .unwrap();
     // The guard rechecks at most once per GUARD_RECHECK (S6-08); past that
     // window the revoked grant must stop the next chunk.
-    tokio::time::sleep(otto_k8s::access::GUARD_RECHECK).await;
+    tokio::time::sleep(otto_connections::stream_guard::GUARD_RECHECK).await;
     assert!(
         stream.next().await.is_none(),
         "revoked logs still emitted a chunk"
@@ -2528,6 +2528,58 @@ async fn monitor_routes_enforce_cluster_grants() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{text}");
+}
+
+/// S6-306: `workloads` filters rows to the caller's namespaces, and the
+/// collector's cluster-wide status row (pod counts over every namespace, a
+/// `last_error` naming pods elsewhere) is redacted for a namespace-scoped
+/// caller — only the cycle timestamps survive. A cluster-wide caller still
+/// sees the full row.
+#[tokio::test]
+async fn scoped_workloads_redact_the_cluster_wide_status_row() {
+    let (ctx, owner) = TestCtx::new().await;
+    let cluster = create_cluster(&ctx, &owner).await;
+    let id = cluster["id"].as_str().unwrap().to_string();
+    let scoped = limited_user(
+        &ctx,
+        &owner,
+        &id,
+        vec![
+            (vec!["discover"], None),
+            (vec!["metrics"], Some(vec!["namespace:shop"])),
+        ],
+    )
+    .await;
+    let mut row = otto_state::K8sMonitorStatusRow::empty(&id);
+    row.last_cycle_at = Some("2026-10-06T00:00:00Z".into());
+    row.last_ok_at = Some("2026-10-06T00:00:00Z".into());
+    row.last_error = "scrape payments/ledger-7f9: connection refused".into();
+    row.metrics_server = "forbidden: pods.metrics.k8s.io in payments".into();
+    row.pods_seen = 42;
+    row.pods_scraped = 40;
+    row.pods_failed = 2;
+    otto_state::K8sMonitorRepo::new(ctx.pool.clone())
+        .upsert_status(&row)
+        .await
+        .unwrap();
+    let uri = format!("/k8s/clusters/{id}/monitor/workloads?window=1h&ns=shop");
+    let (st, body, text) = call(&ctx, &scoped, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    let status = &body["status"];
+    assert_eq!(status["pods_seen"], 0, "{status}");
+    assert_eq!(status["pods_scraped"], 0, "{status}");
+    assert_eq!(status["pods_failed"], 0, "{status}");
+    assert_eq!(status["last_error"], "", "{status}");
+    assert_eq!(status["metrics_server"], "forbidden", "{status}");
+    assert_eq!(status["restricted"], true, "{status}");
+    assert_eq!(status["last_ok_at"], "2026-10-06T00:00:00Z", "{status}");
+    assert!(!text.contains("payments"), "{text}");
+    // The owner (cluster-wide `metrics`) sees the real row — the redaction is
+    // applied on the way out, not to the shared cached answer.
+    let (st, body, text) = call(&ctx, &owner, "GET", &uri, None).await;
+    assert_eq!(st, StatusCode::OK, "{text}");
+    assert_eq!(body["status"]["pods_seen"], 42, "{text}");
+    assert!(body["status"].get("restricted").is_none(), "{text}");
 }
 
 /// S6-05: fleet + overview answer per caller — no cluster names, namespaces

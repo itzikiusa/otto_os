@@ -166,6 +166,8 @@ impl VaultWriter {
 }
 
 /// Read every `.md` note in a directory into `NewMemory` candidates.
+/// Blocking: async callers run it via `spawn_blocking`.
+#[allow(clippy::disallowed_methods)] // sync by contract (see above)
 pub fn read_dir_notes(dir: &Path) -> Result<Vec<NewMemory>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(io)? {

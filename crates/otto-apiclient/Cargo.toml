@@ -30,6 +30,7 @@ prost-reflect.workspace = true
 prost-types.workspace = true
 tonic.workspace = true
 boa_engine = "0.22.0"
+libc = "0.2.190"
 
 [dev-dependencies]
 # The gRPC endpoint test builds a TLS config, which needs the process-level

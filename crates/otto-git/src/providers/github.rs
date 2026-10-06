@@ -91,7 +91,12 @@ impl Github {
             .await
             .map_err(super::pinned_merge_err)?;
         if !head_ref.is_empty() {
-            let path = format!("/repos/{}/{}/git/refs/heads/{head_ref}", r.owner, r.repo);
+            let path = format!(
+                "/repos/{}/{}/git/refs/heads/{}",
+                r.owner,
+                r.repo,
+                encode_ref_path(&head_ref)
+            );
             if let Err(e) = self.http.ok(self.req(reqwest::Method::DELETE, &path)).await {
                 // The merge is the operation the caller asked for; the delete
                 // is best-effort. The repo's "automatically delete head
@@ -1291,6 +1296,17 @@ fn merge_json(method: &str, expected_head_sha: Option<&str>) -> serde_json::Valu
 
 /// Parse a small inline check-runs JSON fixture into a CiStatus aggregate.
 /// Used by tests; not exposed to the public API.
+/// Percent-encode each `/`-separated segment of a branch name for a REST path.
+/// Unencoded, a `#` truncates the path (everything after it is a fragment):
+/// deleting `fix#123` would delete an unrelated branch named `fix` (S2-307).
+/// `/` stays a separator — GitHub's ref routes take `heads/feat/x` as is.
+pub(crate) fn encode_ref_path(name: &str) -> String {
+    name.split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
     let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
@@ -1335,7 +1351,7 @@ fn parse_check_runs_fixture(json_str: &str) -> crate::types::CiStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_thread_resolution, collaborator_from, comment_from, create_pr_body,
+        apply_thread_resolution, collaborator_from, comment_from, create_pr_body, encode_ref_path,
         parse_check_runs_fixture, parse_github_expiry, reviewer_warning, scopes_header,
         summary_from,
     };
@@ -1577,5 +1593,15 @@ mod tests {
             ]
         );
         assert_eq!(rows[0].url.as_deref(), Some("https://ci.example.com/b"));
+    }
+
+    /// S2-307: a `#` (or `?`, `%`) in a branch name is encoded so the DELETE
+    /// can never land on a truncated, unrelated ref; `/` stays a separator.
+    #[test]
+    fn ref_path_segments_are_percent_encoded() {
+        assert_eq!(encode_ref_path("fix#123"), "fix%23123");
+        assert_eq!(encode_ref_path("feat/a?b"), "feat/a%3Fb");
+        assert_eq!(encode_ref_path("feat/x"), "feat/x");
+        assert_eq!(encode_ref_path("100%"), "100%25");
     }
 }
