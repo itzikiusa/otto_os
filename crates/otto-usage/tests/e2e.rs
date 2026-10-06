@@ -10,6 +10,9 @@
 //! Skips (does not fail) when no `clickhouse` binary is present, so it's safe
 //! in CI that lacks one.
 
+// Test harness: blocking std calls (ps, kill, read_dir) are fine here.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::Duration;
 
 use otto_usage::{

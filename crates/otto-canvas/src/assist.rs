@@ -413,8 +413,20 @@ struct PreviewCleanup<C: CanvasAssistCtx> {
 }
 
 impl<C: CanvasAssistCtx> Drop for PreviewCleanup<C> {
+    // The recursive delete leaves the async workers when dropped on one (S9-305).
+    #[allow(clippy::disallowed_methods)] // sync fallback outside a runtime, or inside spawn_blocking
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let dir = std::mem::take(&mut self.dir);
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn_blocking(move || {
+                    let _ = std::fs::remove_dir_all(&dir);
+                });
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
         if let Some(sid) = self.sid.lock().unwrap().take() {
             let ctx = self.ctx.clone();
             if let Ok(rt) = tokio::runtime::Handle::try_current() {

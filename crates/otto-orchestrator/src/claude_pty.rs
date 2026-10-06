@@ -744,6 +744,7 @@ mod tests {
     /// sidechain end_turns, a tool_use turn, an api error and an
     /// unterminated last line; a shrunk file restarts from byte 0.
     #[test]
+    #[allow(clippy::disallowed_methods)] // test: blocking temp-dir cleanup
     fn reply_tail_matches_the_whole_file_scan_at_every_split() {
         let jsonl = concat!(
             r#"{"type":"summary","summary":"meta"}"#,

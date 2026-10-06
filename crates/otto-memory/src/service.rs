@@ -74,7 +74,11 @@ impl MemoryService {
     /// Re-index a (possibly externally edited / git-synced) vault directory into
     /// the store. Returns the number of notes ingested.
     pub async fn reindex_vault(&self, ws: &str, by: &str, dir: &std::path::Path) -> Result<usize> {
-        let notes = crate::vault::read_dir_notes(dir)?;
+        // A directory walk + a read per note: off the async workers (S9-305).
+        let owned = dir.to_path_buf();
+        let notes = tokio::task::spawn_blocking(move || crate::vault::read_dir_notes(&owned))
+            .await
+            .map_err(|e| otto_core::Error::Internal(format!("vault reindex task: {e}")))??;
         let n = notes.len();
         self.save(ws, by, notes).await?;
         Ok(n)

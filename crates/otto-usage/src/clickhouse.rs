@@ -173,6 +173,7 @@ impl ClickHouse {
     /// Resolve the `clickhouse` binary in priority order: an explicit configured
     /// path, then `PATH`, then well-known install locations. Returns an absolute
     /// path so the daemon can run it regardless of the working directory.
+    #[allow(clippy::disallowed_methods)] // sync by contract: async callers run it via spawn_blocking (S9-11)
     pub fn locate(configured: Option<&str>) -> Option<PathBuf> {
         if let Some(p) = configured.map(str::trim).filter(|s| !s.is_empty()) {
             let pb = PathBuf::from(p);

@@ -5,6 +5,9 @@
 //! literals, so these tests pin the wire contract and survive new optional
 //! fields on the request types.
 
+// Test harness: blocking std calls (ps, kill, read_dir) are fine here.
+#![allow(clippy::disallowed_methods)]
+
 use otto_core::Id;
 use otto_state::SwarmRepo;
 use otto_swarm::presets::{instantiate, list_presets};

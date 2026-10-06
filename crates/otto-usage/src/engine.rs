@@ -2419,7 +2419,18 @@ fn ws_filter(otto_only: bool) -> String {
     }
 }
 
-/// Recursive on-disk size of `dir` in bytes (best-effort).
+/// [`dir_size`] off the async workers (S9-305: the walk is a syscall per
+/// part file).
+async fn dir_size_async(dir: &Path) -> u64 {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || dir_size(&dir))
+        .await
+        .unwrap_or(0)
+}
+
+/// Recursive on-disk size of `dir` in bytes (best-effort). Blocking: async
+/// callers go through [`dir_size_async`].
+#[allow(clippy::disallowed_methods)] // sync by contract; async callers use dir_size_async (spawn_blocking)
 fn dir_size(dir: &Path) -> u64 {
     let mut total = 0;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2452,7 +2463,7 @@ async fn maybe_compact(ch: Arc<ClickHouse>, ch_dir: PathBuf, retention_days: u32
         return;
     }
     let before_rows = scalar_count(&ch).await;
-    let before_mb = dir_size(&ch_dir) / 1_048_576;
+    let before_mb = dir_size_async(&ch_dir).await / 1_048_576;
     tracing::info!("usage: one-time compaction starting (rows={before_rows}, dir={before_mb} MB)");
 
     // Ensure the retention window is applied so expired rows get dropped in the merge.
@@ -2468,7 +2479,7 @@ async fn maybe_compact(ch: Arc<ClickHouse>, ch_dir: PathBuf, retention_days: u32
             // Also compact the metrics table (cheap).
             let _ = ch.exec("OPTIMIZE TABLE system_metrics FINAL").await;
             let after_rows = scalar_count(&ch).await;
-            let after_mb = dir_size(&ch_dir) / 1_048_576;
+            let after_mb = dir_size_async(&ch_dir).await / 1_048_576;
             tracing::info!(
                 "usage: compaction done (rows {before_rows}->{after_rows}, {before_mb} MB -> {after_mb} MB)"
             );

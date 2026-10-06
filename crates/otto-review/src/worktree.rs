@@ -134,6 +134,7 @@ mod tests {
         assert!(!sha_matches("0123456", full));
     }
 
+    #[allow(clippy::disallowed_methods)] // test helper: a blocking git call is fine here
     fn sh(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .args(args)
