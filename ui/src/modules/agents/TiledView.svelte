@@ -26,6 +26,7 @@
   import { winKey } from '../../lib/win';
   import { MAX_PANES, applyTileOrder } from '../../lib/stores/splitLayout';
   import { layout } from '../../lib/stores/splitLayout.svelte';
+  import { liveTracks, type Tracks } from './tileTracks';
 
   // Max number of tiles allowed to hold a live terminal/WS at once. Visible,
   // recently-focused tiles win the budget; everything else stays a placeholder.
@@ -60,7 +61,6 @@
   // corner grip that drags its width and height at once, like a window.
   // Weights are kept per grid SHAPE (`cols×rows`) and per workspace, so a 2×2
   // arrangement remembers its sizes when a third row comes and goes.
-  type Tracks = { rows: number[]; cols: number[][] };
   const MIN_TRACK_PX = 120;
   const tracksKey = (): string => winKey(`otto_tile_tracks_${ws.currentId ?? 'scratch'}`);
   function loadTracks(): Record<string, Tracks> {
@@ -83,13 +83,11 @@
     for (let r = 0; r < rows; r++) out.push(ordered.slice(r * cols, (r + 1) * cols));
     return out;
   });
-  /** Positive finite weights of exactly `n` entries, else all-equal. */
-  function normalize(fr: number[] | undefined, n: number): number[] {
-    if (!Array.isArray(fr) || fr.length !== n || fr.some((f) => !Number.isFinite(f) || f <= 0)) return Array(n).fill(1);
-    return fr;
-  }
-  const rowFr = $derived(normalize(tracks[shapeKey]?.rows, rows));
-  const colFr = $derived(tileRows.map((tiles, r) => normalize(tracks[shapeKey]?.cols?.[r], tiles.length)));
+  /** The weights as rendered — the stored ones normalized to the live row
+   *  lengths (see tileTracks.ts). */
+  const live = $derived(liveTracks(tracks[shapeKey], tileRows.map((tiles) => tiles.length)));
+  const rowFr = $derived(live.rows);
+  const colFr = $derived(live.cols);
   const gridStyle = $derived(`grid-template-rows: ${rowFr.map((f) => `minmax(220px, ${f}fr)`).join(' 8px ')};`);
   const rowStyle = (r: number): string => `grid-template-columns: ${colFr[r].map((f) => `minmax(0, ${f}fr)`).join(' 8px ')};`;
   function saveTracks(): void {
@@ -99,8 +97,11 @@
       /* private mode */
     }
   }
+  /** A fresh, editable copy of the RENDERED weights. Edits start here, never
+   *  from the raw stored arrays (S14-302: a stale per-shape row was dropped
+   *  as a length mismatch, so the divider would not move). */
   function currentTracks(): Tracks {
-    return { rows: [...rowFr], cols: colFr.map((c) => [...c]) };
+    return liveTracks(tracks[shapeKey], tileRows.map((tiles) => tiles.length));
   }
   let resizing = $state(false);
   /** One pair of neighbouring tracks measured for a drag: the pointer offset
@@ -163,7 +164,8 @@
     const shape = shapeKey;
     resizing = true;
     const move = (ev: PointerEvent): void => {
-      const t = tracks[shape] ? { rows: [...tracks[shape].rows], cols: tracks[shape].cols.map((c) => [...c]) } : currentTracks();
+      if (shapeKey !== shape) return; // the grid reshaped under the drag
+      const t = currentTracks();
       if (col) col.apply(t, splitOf(col, ev.clientX - col.start));
       if (row) row.apply(t, splitOf(row, ev.clientY - row.start));
       tracks = { ...tracks, [shape]: t };
@@ -193,7 +195,7 @@
     const inc = col ? e.key === 'ArrowRight' : e.key === 'ArrowDown';
     if (!dec && !inc) return;
     e.preventDefault();
-    const t = tracks[shapeKey] ? { rows: [...tracks[shapeKey].rows], cols: tracks[shapeKey].cols.map((c) => [...c]) } : currentTracks();
+    const t = currentTracks();
     // Current first-track share, nudged and clamped to 10..90 % of the pair.
     const first = Math.min(p.total * 0.9, Math.max(p.total * 0.1, firstOf(t, col, row) + p.total * 0.05 * (inc ? 1 : -1)));
     p.apply(t, first);
