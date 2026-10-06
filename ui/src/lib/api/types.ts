@@ -2914,6 +2914,15 @@ export interface FsBrowse {
   entries: FsEntry[];
 }
 
+/** `GET /fs/stat` — one path's existence and kind, without a listing. */
+export interface FsStat {
+  /** Canonical path (symlinks, `..` and `~` resolved). */
+  path: string;
+  is_dir: boolean;
+  /** True when the directory is itself a git repo. */
+  is_git_repo: boolean;
+}
+
 export interface LogFileEntry {
   name: string;
   size: number;

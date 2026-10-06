@@ -899,6 +899,7 @@ mod root_route_tests {
     fn host_files_routes_are_recognised() {
         assert!(is_host_files_route("/api/v1/fs/read"));
         assert!(is_host_files_route("/api/v1/fs/browse"));
+        assert!(is_host_files_route("/api/v1/fs/stat"));
         assert!(!is_host_files_route("/api/v1/fsx"));
         assert!(!is_host_files_route("/api/v1/workspaces/{id}/files"));
     }

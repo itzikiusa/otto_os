@@ -20,8 +20,7 @@
   import { loadErrorText } from '../../lib/loadError';
   import FolderPicker from '../../lib/components/FolderPicker.svelte';
   import { api } from '../../lib/api/client';
-  import type { FsBrowse } from '../../lib/api/types';
-  import { browsePath, checkFolder } from '../../lib/folderCheck';
+  import { checkFolder } from '../../lib/folderCheck';
   import { agentProviders as registryAgentProviders, providerReadiness } from '../../lib/providers';
 
   interface Props {
@@ -80,7 +79,7 @@
     wsBusy = true;
     pathError = '';
     try {
-      const check = await checkFolder(wsPath, (p) => api.get<FsBrowse>(browsePath(p)));
+      const check = await checkFolder(wsPath, (url) => api.get(url));
       if (!check.ok) {
         pathError = check.message;
         return;
