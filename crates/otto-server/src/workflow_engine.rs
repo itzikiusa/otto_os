@@ -1267,11 +1267,17 @@ impl otto_workflows::WorkflowCtx for ServerCtx {
             s.insert(skip_marker_key(run_id, node_id));
         }
     }
-    async fn check_run_location(&self, ws: &Workspace, input: &Value) -> Result<(), String> {
-        ensure_run_location(self, ws, input).await.map_err(|e| match e {
-            otto_core::Error::Invalid(m) => m,
-            other => other.to_string(),
-        })
+    async fn check_run_location(
+        &self,
+        ws: &Workspace,
+        input: &Value,
+    ) -> std::result::Result<(), String> {
+        ensure_run_location(self, ws, input)
+            .await
+            .map_err(|e| match e {
+                otto_core::Error::Invalid(m) => m,
+                other => other.to_string(),
+            })
     }
 }
 
@@ -7265,7 +7271,10 @@ pub(crate) async fn ensure_run_location(
     input: &Value,
 ) -> otto_core::Result<()> {
     let repos = ctx.git_store.list_repos(&ws.id).await?;
-    let pairs: Vec<(String, String)> = repos.iter().map(|r| (r.id.clone(), r.path.clone())).collect();
+    let pairs: Vec<(String, String)> = repos
+        .iter()
+        .map(|r| (r.id.clone(), r.path.clone()))
+        .collect();
     let text = |k: &str, v: &Value| {
         v.get(k)
             .and_then(Value::as_str)
@@ -7326,7 +7335,11 @@ async fn ensure_path_in_workspace(
     // ancestor (canonical) plus the rest — so it may not climb out with `..`.
     let target = match std::fs::canonicalize(path) {
         Ok(p) => p,
-        Err(_) if path.components().any(|c| c == std::path::Component::ParentDir) => {
+        Err(_)
+            if path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir) =>
+        {
             return Err(otto_core::Error::Invalid(format!(
                 "working directory '{raw}' may not contain '..'"
             )));

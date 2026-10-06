@@ -386,7 +386,12 @@ async fn manual_run_location_is_limited_to_the_workflows_workspace() {
         format!("{}/src/new", b_repo.display()),
     ] {
         let r = run(json!({"working_directory": wd})).await.unwrap();
-        assert_eq!(r.status(), 200, "{wd}: {}", r.text().await.unwrap_or_default());
+        assert_eq!(
+            r.status(),
+            200,
+            "{wd}: {}",
+            r.text().await.unwrap_or_default()
+        );
     }
     let r = run(json!({"repos": [{"repo": "b-repo", "name": "main", "type": "branch"}]}))
         .await

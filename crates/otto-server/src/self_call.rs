@@ -375,12 +375,14 @@ mod tests {
         let now = chrono::Utc::now().to_rfc3339();
         let ws = otto_core::new_id();
         let sid = otto_core::new_id();
-        sqlx::query("INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)")
-            .bind(&ws)
-            .bind(&now)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO workspaces (id, name, root_path, created_at) VALUES (?, 'w', '/tmp', ?)",
+        )
+        .bind(&ws)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO sessions (id, workspace_id, kind, provider, title, status, cwd, created_by, created_at, last_active_at)
              VALUES (?, ?, 'agent', 'claude', 't', 'idle', '/tmp', ?, ?, ?)",

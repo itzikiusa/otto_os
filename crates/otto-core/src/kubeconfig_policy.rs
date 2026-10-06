@@ -171,11 +171,9 @@ pub fn check_kubeconfig(cfg: &Value, context: Option<&str>) -> Result<(), String
             .map(str::to_string)
     });
     let selected: Vec<&Value> = match &wanted_user {
-        Some(u) if users.iter().any(|x| name_of(x) == *u) => users
-            .iter()
-            .copied()
-            .filter(|x| name_of(x) == *u)
-            .collect(),
+        Some(u) if users.iter().any(|x| name_of(x) == *u) => {
+            users.iter().copied().filter(|x| name_of(x) == *u).collect()
+        }
         _ => users,
     };
     for u in selected {
@@ -242,7 +240,10 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.contains("'/bin/sh'") && err.contains("user 'u'"), "{err}");
+        assert!(
+            err.contains("'/bin/sh'") && err.contains("user 'u'"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -254,7 +255,8 @@ mod tests {
         std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
         let err = check_exec_command(link.to_str().unwrap()).unwrap_err();
         assert!(err.contains("resolves to"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

@@ -36,7 +36,6 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::Json;
 use otto_core::auth::AuthContext;
-use otto_core::domain::User;
 use otto_core::Error;
 use serde::Deserialize;
 use serde_json::{json, Value};

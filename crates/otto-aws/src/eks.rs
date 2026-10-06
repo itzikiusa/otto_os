@@ -430,7 +430,8 @@ mod tests {
         std::fs::write(&path, kc("/bin/bash")).unwrap();
         let err = check_generated_kubeconfig(&path, "prod").unwrap_err();
         assert!(err.to_string().contains("/bin/bash"), "{err}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

@@ -1077,8 +1077,12 @@ async fn mutating_calls_stay_within_their_statement_budgets() {
 /// read, the usable / still-pending approval lookups, the approval insert +
 /// its re-read, the decision read and the audit insert — fixed per call.
 const PENDING_CALL_BUDGET: u64 = 19;
-/// Measured 14, INCLUDING the self-call's own route.
-const AUTO_APPROVED_CALL_BUDGET: u64 = 16;
+/// Measured 18, INCLUDING the self-call's own route. Since S8-305 the
+/// self-call credential is bound to the calling agent session, so it costs
+/// two statements a person's PAT did not: the lease's liveness re-check of
+/// the cached session-bound token, and the route's managed-token session
+/// check (managed credentials are never served from the auth cache).
+const AUTO_APPROVED_CALL_BUDGET: u64 = 20;
 
 /// R7: the badge count equals the list's length (same visibility) and costs
 /// a fixed handful of statements.
@@ -1640,7 +1644,9 @@ async fn self_call_scopes(d: &Daemon) -> Vec<Option<String>> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_governed_self_call_is_bound_to_the_calling_session() {
     let d = boot().await;
-    let env = d.agent_invoke("list_repos", json!({"workspace_id": "ws1"})).await;
+    let env = d
+        .agent_invoke("list_repos", json!({"workspace_id": "ws1"}))
+        .await;
     assert_eq!(env["executed"], true, "{env}");
     assert_eq!(self_call_scopes(&d).await, vec![Some(d.sid.clone())]);
 
@@ -1674,7 +1680,9 @@ async fn an_agent_improvement_edit_decision_always_needs_a_person() {
         .await;
     assert!(st == 201 || st == 400, "{rule}");
     let args = json!({"edit_id": "edit-does-not-exist"});
-    let env = d.agent_invoke("approve_improvement_edit", args.clone()).await;
+    let env = d
+        .agent_invoke("approve_improvement_edit", args.clone())
+        .await;
     assert_eq!(env["decision"], "pending_approval", "{env}");
     assert_eq!(env["executed"], false, "{env}");
     let id = env["approval_id"].as_str().unwrap().to_string();

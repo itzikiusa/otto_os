@@ -621,6 +621,8 @@ pub(crate) async fn governed_invoke(
     } else {
         "allowed".into()
     };
+    // A person approved THIS call (read before the audit row is moved).
+    let person_approved = audit.approval_id.is_some();
     let audit_id = ctx.mcp.call_log().insert(audit).await.map_err(ApiError)?;
 
     let started = std::time::Instant::now();
@@ -701,7 +703,7 @@ pub(crate) async fn governed_invoke(
         None => {
             let as_ = if !person_only_by_agent {
                 SelfCallAs::Caller(self_call_binding(auth))
-            } else if audit.approval_id.is_some() {
+            } else if person_approved {
                 // The person who approved THIS call (single-use card, bound to
                 // the args hash and the requesting session) decided it.
                 SelfCallAs::Caller(None)
