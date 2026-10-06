@@ -126,7 +126,10 @@
 <div class="rwo">
 
   {#if ws.currentId}
-    <RunLauncher wsId={ws.currentId} {onLaunched} />
+    <!-- Keyed per workspace: no draft/repo pick leaks across a switch. -->
+    {#key ws.currentId}
+      <RunLauncher wsId={ws.currentId} {onLaunched} />
+    {/key}
 
   <div class="body-wrap">
   <div class="body" class:has-detail={openRun}>

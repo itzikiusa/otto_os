@@ -10,7 +10,8 @@
 //!     snappy live UI. NEVER calls the usage engine (a `clickhouse local`
 //!     process spawn) inline, so it can't back the broadcast buffer up into
 //!     `Lagged`.
-//!   * **reconcile (5 min, `OTTO_WORKGRAPH_RECONCILE_SECS`) + boot backfill** —
+//!   * **reconcile (5-min tick, `OTTO_WORKGRAPH_RECONCILE_SECS`; a full pass
+//!     only after the live loop lagged, else every 30 min) + boot backfill** —
 //!     enumerate the authoritative repos and re-derive every item (idempotent,
 //!     self-healing for missed/lagged events) AND refresh per-session cost via
 //!     the usage engine, off the hot path. The boot backfill is `tokio::spawn`ed
@@ -49,6 +50,25 @@ fn reconcile_secs() -> u64 {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(RECONCILE_SECS)
 }
+/// Unconditional full re-derive cadence at the default tick (S9-09): every
+/// pass re-reads all swarm projects, loops, runs, reviews and stories —
+/// hundreds of statements — so on a quiet daemon the 5-min tick only runs it
+/// when the live loop LAGGED (missed events) since the last pass, and
+/// otherwise every 30 min as the safety net for writes that emit no event.
+/// An explicit `OTTO_WORKGRAPH_RECONCILE_SECS` keeps its old meaning (a full
+/// pass every tick).
+const SAFETY_NET_SECS: u64 = 30 * 60;
+
+/// Should this reconcile tick run a full pass?
+fn reconcile_due(lagged: bool, since_full: Duration, tick_secs: u64) -> bool {
+    let full_every = if tick_secs == RECONCILE_SECS {
+        SAFETY_NET_SECS
+    } else {
+        tick_secs
+    };
+    lagged || since_full >= Duration::from_secs(full_every)
+}
+
 /// Per-workflow run cap when backfilling (a workflow can have many historical
 /// runs; the recent ones are what Mission Control cares about).
 const RUNS_PER_WORKFLOW: usize = 5;
@@ -113,6 +133,9 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
             tracing::info!("workgraph: boot backfill complete");
         });
     }
+    // Set by the live loop when it lagged (events were missed) — the only
+    // thing the reconcile must heal promptly.
+    let lagged = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Reconcile loop (skipped entirely when the operator sets the cadence to 0).
     match reconcile_secs() {
         0 => tracing::info!(
@@ -120,12 +143,20 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
         ),
         secs => {
             let ctx = ctx.clone();
+            let lagged = std::sync::Arc::clone(&lagged);
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(secs));
                 tick.tick().await; // consume the immediate first tick
+                                   // The boot backfill just ran a full pass.
+                let mut last_full = tokio::time::Instant::now();
                 loop {
                     tick.tick().await;
+                    let missed = lagged.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    if !reconcile_due(missed, last_full.elapsed(), secs) {
+                        continue;
+                    }
                     backfill_all(&ctx).await;
+                    last_full = tokio::time::Instant::now();
                 }
             });
         }
@@ -147,6 +178,7 @@ pub fn spawn(ctx: ServerCtx) -> tokio::task::JoinHandle<()> {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
+                    lagged.store(true, std::sync::atomic::Ordering::SeqCst);
                     tracing::warn!("workgraph projector lagged {n} events; reconcile will heal");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -949,6 +981,22 @@ mod tests {
             Some(v) => std::env::set_var(VAR, v),
             None => std::env::remove_var(VAR),
         }
+    }
+
+    /// S9-09: at the default tick a quiet daemon re-derives the graph only
+    /// every SAFETY_NET_SECS, or at once after the live loop lagged; an
+    /// explicit cadence keeps a full pass per tick.
+    #[test]
+    fn reconcile_runs_on_lag_or_the_safety_net() {
+        let five = Duration::from_secs(RECONCILE_SECS);
+        assert!(!reconcile_due(false, five, RECONCILE_SECS));
+        assert!(reconcile_due(true, five, RECONCILE_SECS));
+        assert!(reconcile_due(
+            false,
+            Duration::from_secs(SAFETY_NET_SECS),
+            RECONCILE_SECS
+        ));
+        assert!(reconcile_due(false, Duration::from_secs(30), 30));
     }
 
     /// A local (PR-less) review must NOT project a `pr` item — otherwise every

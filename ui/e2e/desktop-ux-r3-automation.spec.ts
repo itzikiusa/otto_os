@@ -27,7 +27,7 @@ async function rooms(page: Page) {
 
 test('rooms: drafts belong to their conversation', async ({ page }) => {
   await rooms(page);
-  const composer = page.getByLabel('Message to the room');
+  const composer = page.getByLabel('Message to the channel');
   await composer.fill('Design-only draft');
   await page.getByRole('button', { name: 'Release room 0 agents' }).click();
   await expect(composer).toHaveValue('');
@@ -45,7 +45,7 @@ test('rooms: a pending send neither duplicates nor clears newer text', async ({ 
     if (r.request().method() !== 'POST') return r.continue();
     posts++; await gate; await r.fulfill({ json: { id: 'synthetic-message' } });
   });
-  const composer = page.getByLabel('Message to the room');
+  const composer = page.getByLabel('Message to the channel');
   await composer.fill('Submitted message');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect.poll(() => posts).toBe(1);
@@ -67,13 +67,13 @@ test('rooms: live messages append from the WS event without a refetch (perf R2/R
   await page.goto('/#/personal-agents/rooms');
   await page.getByRole('button', { name: 'Live room 0 agents' }).click();
   await expect.poll(() => gets.length).toBeGreaterThan(0);
-  await expect(page.getByRole('log', { name: 'Room messages' })).toBeVisible();
+  await expect(page.getByRole('log', { name: 'Channel messages' })).toBeVisible();
   const before = gets.length;
   // Another author posts (REST as the same user stands in for an agent).
   await ctx.post(`${base}/api/v1/agent-rooms/${room.id}/messages`, { data: { text: 'Pushed over the event stream' } });
   await expect(page.getByText('Pushed over the event stream', { exact: true })).toBeVisible();
   // Our own post appends the POST's returned row, deduped against its echo.
-  await page.getByLabel('Message to the room').fill('Sent from the composer');
+  await page.getByLabel('Message to the channel').fill('Sent from the composer');
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText('Sent from the composer', { exact: true })).toHaveCount(1);
   await page.waitForTimeout(300);
@@ -284,9 +284,9 @@ test('rooms: a late previous-room reply cannot replace the selected conversation
   await page.getByRole('button', { name: 'Current room 0 agents' }).click();
   await expect(page.getByRole('log')).toContainText('Current room reply');
   release();
-  await page.getByLabel('Message to the room').fill('Current room draft');
+  await page.getByLabel('Message to the channel').fill('Current room draft');
   await expect(page.getByRole('log')).not.toContainText('Old room reply');
-  await expect(page.getByLabel('Message to the room')).toHaveValue('Current room draft');
+  await expect(page.getByLabel('Message to the channel')).toHaveValue('Current room draft');
 });
 
 test('rooms: opens the latest 200 messages and pages earlier evidence', async ({ page }) => {

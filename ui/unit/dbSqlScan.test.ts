@@ -42,8 +42,8 @@ const FIXTURES: string[] = [
   'SELECT :a, :a, {a}, {{a}}; SELECT :b',
   // Backtick identifiers (a string in SQL mode, NOT in line mode).
   'SELECT `weird;col`, `x``y:z` FROM `t:1`;',
-  // Postgres dollar-quoting is NOT special-cased by codeMask — the scanner must
-  // match that (a `;` inside $$…$$ still splits, like every other helper here).
+  // Postgres dollar-quoting: code in `sql` mode, a string in `pg` mode — the
+  // scanner must match codeMask in both.
   'CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT :v',
   // Mongo buffers (sql mode) and a mongosh script.
   'db.users.find({ name: "a;b", age: { $gt: 1 } }); db.orders.find({})',
@@ -55,7 +55,7 @@ const FIXTURES: string[] = [
 ];
 
 test('analyzeStatement matches countStatements + extractVars on fixtures', () => {
-  for (const sql of FIXTURES) for (const mode of ['sql', 'line'] as const) parity(sql, mode);
+  for (const sql of FIXTURES) for (const mode of ['sql', 'line', 'pg'] as const) parity(sql, mode);
 });
 
 test('analyzeStatement matches on a 200-INSERT paste (the lag report)', () => {
@@ -73,7 +73,7 @@ test('analyzeStatement matches on a 200-INSERT paste (the lag report)', () => {
 test('analyzeStatement matches on randomized buffers (differential)', () => {
   const alphabet = [
     "'", '"', '`', '\\', ';', ';', ':', ':', '{', '{', '}', '}', '-', '#', '/', '*',
-    '\n', '\n', ' ', '\t', '\r', 'a', 'b', '_', 'x', '1', '$', ' ', '﻿', 'Z',
+    '\n', '\n', ' ', '\t', '\r', 'a', 'b', '_', 'x', '1', '$', ' ', '﻿', 'Z', '$', 'E',
   ];
   let seed = 20260927;
   const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
@@ -83,6 +83,7 @@ test('analyzeStatement matches on randomized buffers (differential)', () => {
     for (let k = 0; k < len; k++) s += alphabet[Math.floor(rnd() * alphabet.length)];
     parity(s, 'sql');
     parity(s, 'line');
+    parity(s, 'pg');
   }
 });
 

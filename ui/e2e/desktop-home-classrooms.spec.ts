@@ -102,7 +102,7 @@ test('focus / hover shows a tooltip fully inside the viewport', async ({ page })
   await listView(page);
   const row = ours(page).getByRole('button', { name: /^Open E2E Shell/ });
   await row.hover();
-  const tip = page.getByRole('tooltip');
+  const tip = page.getByRole('group', { name: /— details$/ });
   await expect(tip).toContainText('E2E Shell');
   await expect(tip).toContainText('Shell');
   await expect(tip).toContainText(WS_NAME);
@@ -111,14 +111,14 @@ test('focus / hover shows a tooltip fully inside the viewport', async ({ page })
   await page.setViewportSize({ width: 820, height: 420 });
   await row.scrollIntoViewIfNeeded();
   await row.hover();
-  await expectFullyInViewport(page, page.getByRole('tooltip'), 'classrooms tooltip (short window)');
+  await expectFullyInViewport(page, page.getByRole('group', { name: /— details$/ }), 'classrooms tooltip (short window)');
   // Keyboard path in 3D view: focusing a student shows its tooltip too.
   const threeD = box(page).getByRole('button', { name: '3D', exact: true });
   if (await threeD.count()) {
     await threeD.click();
     await ours(page).getByRole('button', { name: /^Open E2E Shell/ }).focus();
-    await expect(page.getByRole('tooltip')).toContainText('E2E Shell');
-    await expectFullyInViewport(page, page.getByRole('tooltip'), 'classrooms tooltip (focus)');
+    await expect(page.getByRole('group', { name: /— details$/ })).toContainText('E2E Shell');
+    await expectFullyInViewport(page, page.getByRole('group', { name: /— details$/ }), 'classrooms tooltip (focus)');
   }
 });
 

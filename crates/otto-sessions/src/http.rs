@@ -438,8 +438,39 @@ async fn get_session<S: SessionsCtx>(
 }
 
 /// `session.meta` keys a PATCH may never change (an unchanged round-trip is
-/// accepted and dropped): the agent-UI-control grant and the device stamp.
-pub const SERVER_OWNED_META: &[&str] = &["ui_control", "client_id"];
+/// accepted and dropped): the agent-UI-control grant, the device stamp, the
+/// delegation stamp, and the nested-agent capture (`nested_*`) — on resume
+/// Otto TYPES `cd <nested_cwd> && <provider> --resume <sid>` into the shell's
+/// PTY, so a token that could rewrite those values would type commands into a
+/// sibling (unsandboxed) shell.
+pub const SERVER_OWNED_META: &[&str] = &[
+    "ui_control",
+    "client_id",
+    DELEGATED_BY_META,
+    "nested_provider",
+    "nested_cwd",
+    "nested_pid",
+];
+
+/// Meta key naming the agent session that opened this one as a worker
+/// (`POST /workspaces/{id}/sessions/open`). The server stamps it from the
+/// caller's credential; it decides whether that agent's own token may
+/// message this session, so a PATCH must never set or change it.
+pub const DELEGATED_BY_META: &str = "delegated_by";
+
+/// `session.meta` keys that bind a session to its swarm/project/task/run. The
+/// swarm ingest endpoints (`otto-post`, `otto-mockup`…) act on these ids with
+/// the session's token, so a PATCH may never repoint them at another
+/// workspace's swarm or project (S4-03). An unchanged round-trip is accepted
+/// and dropped, like the resource bindings.
+pub const SWARM_BINDING_META: &[&str] = &[
+    "swarm_id",
+    "agent_id",
+    "project_id",
+    "task_id",
+    "run_id",
+    "swarm_run_id",
+];
 
 /// #20 PATCH /sessions/{id} — owner-or-admin
 async fn patch_session<S: SessionsCtx>(
@@ -455,6 +486,7 @@ async fn patch_session<S: SessionsCtx>(
         // Ordinary metadata edits must not detach or replace that binding.
         if ["k8s", "aws", "connection_id", "source", "resource_node"]
             .iter()
+            .chain(SWARM_BINDING_META)
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
@@ -471,7 +503,8 @@ async fn patch_session<S: SessionsCtx>(
             .any(|key| meta.get(*key).is_some() && meta.get(*key) != session.meta.get(*key))
         {
             return Err(ApiErr(Error::Forbidden(
-                "ui_control / client_id are server-owned; use POST /sessions/{id}/ui-control"
+                "ui_control / client_id / delegated_by / nested_* are server-owned (ui_control: \
+                 use POST /sessions/{id}/ui-control)"
                     .into(),
             )));
         }
@@ -483,6 +516,7 @@ async fn patch_session<S: SessionsCtx>(
         for key in ["k8s", "aws", "connection_id", "source", "resource_node"]
             .iter()
             .chain(SERVER_OWNED_META)
+            .chain(SWARM_BINDING_META)
         {
             object.remove(*key);
         }

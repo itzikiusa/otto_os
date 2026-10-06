@@ -120,7 +120,9 @@
     resolved = new Set(resolved).add(path);
     // Auto-advance to the next unresolved file for a smoother flow.
     const next = pending.find((f) => !resolved.has(f) && f !== path);
-    if (next) selected = next;
+    // The last file: clear the pane — leaving it mounted invited a second
+    // "Mark resolved" that 409'd (the file is no longer conflicted).
+    selected = next ?? null;
     // Quietly reconcile against the daemon: a second pull / an agent / the CLI
     // may have added or resolved conflicts since this view seeded its list.
     void reconcile();
@@ -286,7 +288,15 @@
 
       <!-- RIGHT: selected file -->
       <div class="file-detail">
-        {#if selected}
+        {#if selected && isResolved(selected)}
+          <!-- Re-opening a resolved file: the daemon no longer serves it as a
+               conflict (409), so a load error with a Retry that always fails
+               was all this pane could show. -->
+          <div class="detail-empty dim" role="status">
+            <Icon name="check" size={14} />
+            <span>{selected.split('/').pop()} is resolved.</span>
+          </div>
+        {:else if selected}
           {#key selected}
             <ConflictFilePane
               {repoId}
@@ -298,7 +308,7 @@
           {/key}
         {:else}
           <div class="detail-empty dim">
-            <span>Select a file to resolve its conflicts.</span>
+            <span>{allFiles.length > 0 && allFiles.every(isResolved) ? 'All files resolved — continue the operation below.' : 'Select a file to resolve its conflicts.'}</span>
           </div>
         {/if}
       </div>

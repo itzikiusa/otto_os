@@ -25,10 +25,12 @@ pub async fn list(
 /// `POST /api/v1/users` — 409 on duplicate username.
 pub async fn create(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<CreateUserReq>,
 ) -> ApiResult<Json<User>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     if req.username.trim().is_empty() {
         return Err(Error::Invalid("username must not be empty".into()).into());
     }
@@ -46,10 +48,12 @@ pub async fn create(
 pub async fn update(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<UpdateUserReq>,
 ) -> ApiResult<Json<User>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = UsersRepo::new(ctx.pool.clone());
     let target = repo.get(&id).await?;
     if target.is_root && req.disabled == Some(true) {
@@ -88,9 +92,11 @@ pub async fn update(
 pub async fn remove(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = UsersRepo::new(ctx.pool.clone());
     let target = repo.get(&id).await?;
     if target.is_root {

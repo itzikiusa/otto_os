@@ -843,13 +843,14 @@
   <div class="tabstrip" role="tablist" aria-label="Request parts">
     {#each tabs as t (t.id)}
       <button class="tab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
+        id="api-req-tab-{t.id}" aria-controls="api-req-panel-{t.id}"
         onclick={() => (tab = t.id)} onkeydown={onTabKey}>
         {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
       </button>
     {/each}
   </div>
 
-  <div class="tabbody" role="tabpanel">
+  <div class="tabbody" role="tabpanel" id="api-req-panel-{tab}" aria-labelledby="api-req-tab-{tab}">
     {#if tab === 'params'}
       <p class="tab-help">Added to the URL as <code>?key=value</code>. Untick a row to skip it without deleting it.</p>
       {@render kvEditor('query', draft.query)}

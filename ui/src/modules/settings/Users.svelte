@@ -153,6 +153,16 @@
     if (!userId || savingWs.length || allMembersLoading || allMembersError) return;
     const targets = ws.workspaces.filter((w) => roleIn(w.id, userId) !== role);
     if (targets.length === 0) return;
+    // Removing revokes access everywhere at once and drops the role history:
+    // irreversible from here, so it asks first (patterns §6).
+    if (role === 'none') {
+      const name = users.find((u) => u.id === userId)?.username ?? 'this user';
+      const ok = await confirmer.ask(
+        `Remove @${name} from ${plural(targets.length, 'workspace')}? They lose access to each one immediately; their roles there are not kept.`,
+        { title: 'Remove from all workspaces', confirmLabel: 'Remove', danger: true },
+      );
+      if (!ok || memberUserId !== userId) return;
+    }
     const results = await Promise.all(targets.map((w) => setRoleIn(w.id, userId, role)));
     const updated = results.filter(Boolean).length;
     if (updated !== targets.length) {
@@ -170,13 +180,6 @@
   );
 
   // ---- feature grant matrix -----------------------------------------------
-  const ALL_FEATURES: Feature[] = [
-    'agents', 'mission_control', 'connections', 'database', 'git', 'issues', 'product', 'swarm',
-    'api_client', 'workflows', 'channels', 'skill_eval', 'skills', 'insights',
-    'usage', 'self_improvement', 'context', 'settings', 'users', 'canvas', 'design',
-    'proof_pack', 'mcp', 'scheduled_tasks', 'run_with_otto', 'browser',
-    'aws', 'aws_s3', 'aws_sqs', 'aws_ec2', 'aws_athena', 'aws_eks', 'aws_rds', 'kubernetes',
-  ];
   const FEATURE_LABELS: Record<Feature, string> = {
     agents: 'Agents', mission_control: 'Mission Control', connections: 'Connections', database: 'Database',
     git: 'Git', issues: 'Issues', product: 'Product', swarm: 'Swarm',
@@ -189,6 +192,10 @@
     aws: 'AWS — accounts', aws_s3: 'AWS — S3', aws_sqs: 'AWS — SQS', aws_ec2: 'AWS — EC2',
     aws_athena: 'AWS — Athena', aws_eks: 'AWS — EKS', aws_rds: 'AWS — RDS', kubernetes: 'Kubernetes',
   };
+  // Derived, never hand-listed: the grants PUT is a full replace, so a
+  // `Feature` missing from a hand-kept list was wiped on the next save. The
+  // `Record<Feature, …>` type makes a new feature a compile error here instead.
+  const ALL_FEATURES = Object.keys(FEATURE_LABELS) as Feature[];
   const CAP_OPTIONS: Capability[] = ['none', 'view', 'edit', 'admin'];
 
   /** Selected user for the grant matrix (non-root only). */
@@ -366,7 +373,15 @@
     return members.find((m) => m.user_id === userId)?.role ?? 'none';
   }
 
+  /** A role write in flight (members PUT is a full replace: a second click
+   *  racing the first would undo it), with the workspace it was made for. */
+  let roleSaving = $state(false);
   async function setRole(userId: string, role: WorkspaceRole | 'none'): Promise<void> {
+    if (roleSaving || matrixLoading || matrixError) return;
+    // Capture the workspace: the picker can change while the PUT is in flight,
+    // and A's reply must never be cached or shown as B's (the next click
+    // would then PUT A's members into B, dropping B's users).
+    const wsId = matrixWs;
     const next = members.filter((m) => m.user_id !== userId);
     if (role !== 'none') {
       const u = users.find((x) => x.id === userId);
@@ -377,15 +392,19 @@
         role,
       });
     }
+    roleSaving = true;
     try {
-      members = await api.put<MemberEntry[]>(`/workspaces/${matrixWs}/members`, {
+      const saved = await api.put<MemberEntry[]>(`/workspaces/${wsId}/members`, {
         members: next.map((m) => ({ user_id: m.user_id, role: m.role })),
       });
+      if (matrixWs === wsId) members = saved;
       // Keep the by-user view's cache honest too.
-      if (allMembers[matrixWs]) allMembers = { ...allMembers, [matrixWs]: members };
+      if (allMembers[wsId]) allMembers = { ...allMembers, [wsId]: saved };
       flashSaved('roles');
     } catch (e) {
       toastError('Couldn’t change the workspace role', e);
+    } finally {
+      roleSaving = false;
     }
   }
 
@@ -524,7 +543,7 @@
         </button>
       </div>
       {#if membershipAxis === 'workspace'}
-        <select class="input picker" bind:value={matrixWs} aria-label="Workspace">
+        <select class="input picker" bind:value={matrixWs} aria-label="Workspace" disabled={roleSaving}>
           {#each ws.workspaces as w (w.id)}
             <option value={w.id}>{w.name}</option>
           {/each}
@@ -557,7 +576,7 @@
                   <button
                     class:active={roleOf(u.id) === r}
                     aria-pressed={roleOf(u.id) === r}
-                    disabled={u.disabled}
+                    disabled={u.disabled || roleSaving}
                     title={u.disabled ? 'Enable the account to change its role' : undefined}
                     onclick={() => setRole(u.id, r)}
                   >
@@ -581,15 +600,24 @@
         <span class="grow"></span>
         <span class="dim">Set all to</span>
         <div class="segmented" role="group" aria-label="Set the role in every workspace">
-          {#each roleOptions as r (r)}
+          {#each roleOptions.filter((r) => r !== 'none') as r (r)}
             <button
               disabled={savingWs.length > 0}
               onclick={() => void setRoleEverywhere(r)}
             >
-              {r === 'none' ? 'Remove' : ROLE_LABEL[r]}
+              {ROLE_LABEL[r]}
             </button>
           {/each}
         </div>
+        <!-- Removal is not a role value: kept out of the picker, styled as
+             destructive, and confirmed before it runs. -->
+        <button
+          class="btn small danger"
+          disabled={savingWs.length > 0 || memberWsCount === 0}
+          onclick={() => void setRoleEverywhere('none')}
+        >
+          Remove from all…
+        </button>
       </div>
       <div class="card matrix">
         <div class="matrix-head">

@@ -173,3 +173,62 @@ test('load() keeps notices ingested while the GET was in flight and queues one t
   assert.equal(gets, 2, 'exactly one trailing reload');
   assert.deepEqual(n.notices.map((x: { id: string }) => x.id), ['live', 'n1']);
 });
+
+test('ensureLoaded() joins the in-flight first load instead of fetching twice (boot perf)', async () => {
+  let release!: (v: unknown[]) => void;
+  let gets = 0;
+  let settingsGets = 0;
+  const { notifications: n } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
+    svelte: { untrack: (fn: () => unknown) => fn() },
+    '../api/client': { api: { get: (p: string) => {
+      if (p.endsWith('/settings')) { settingsGets++; return Promise.resolve({}); }
+      gets++;
+      return new Promise((r) => (release = r));
+    } } },
+    '../toast.svelte': { toasts: {} }, '../toastError': { toastError() {} },
+    '../external': { openExternal: async () => {} }, '../desktop': { isEmbedded: false },
+    './workspace.svelte': { ws: { sessions: [], getSession: () => null, statusMap: {}, markNeedsYou() {}, needsYou: {} } },
+    '../router.svelte': { router: { go() {} } }, '../noticeRoute': { parseNoticeRoute: () => null },
+    '../confirm.svelte': { confirmer: {} },
+  });
+  n.wantsNative = () => false;
+  const bell = n.ensureLoaded(); // the bell mounts first
+  const home = n.ensureLoaded(); // Home's Today mounts while it is out
+  release([notice()]);
+  await Promise.all([bell, home]);
+  assert.equal(gets, 1, 'one GET /notifications at boot');
+  assert.equal(settingsGets, 1, 'one GET /notifications/settings at boot');
+  await n.ensureLoaded(); // already loaded: no request
+  assert.equal(gets, 1);
+});
+
+test('identity change: a load answered for the previous identity is dropped, then re-run (S13-02)', async () => {
+  const pending: ((v: unknown) => void)[] = [];
+  let calls = 0;
+  const { notifications: n } = loadSource(new URL('../src/lib/stores/notifications.svelte.ts', import.meta.url), {
+    svelte: { untrack: (fn: () => unknown) => fn() },
+    '../api/client': { api: { get: (path: string) => {
+      if (path !== '/notifications') return Promise.resolve({});
+      calls += 1;
+      return new Promise((r) => pending.push(r));
+    }, post: async () => ({}), del: async () => ({}) } },
+    '../toast.svelte': { toasts: { warn() {}, info() {} } }, '../toastError': { toastError() {} },
+    '../external': { openExternal: async () => {} },
+    './workspace.svelte': { ws: { sessions: [], getSession: () => null } },
+    '../desktop': { isEmbedded: false },
+    '../router.svelte': { router: { go() {} } },
+    '../noticeRoute': { parseNoticeRoute: () => null }, '../confirm.svelte': { confirmer: { ask: async () => true } },
+  });
+  n.notices = [notice({ id: 'root-old' })];
+  const first = n.load();
+  n.resetForIdentity();
+  assert.equal(n.notices.length, 0, 'the previous identity\'s bell is cleared at once');
+  void n.load(); // the resync's load queues behind the in-flight one
+  pending[0]([notice({ id: 'root-1' })]);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(n.notices.length, 0, 'root\'s late answer never lands under the new identity');
+  assert.equal(calls, 2, 'reloaded for the new identity');
+  pending[1]([notice({ id: 'x-1' })]);
+  await first;
+  assert.deepEqual(n.notices.map((x: { id: string }) => x.id), ['x-1']);
+});

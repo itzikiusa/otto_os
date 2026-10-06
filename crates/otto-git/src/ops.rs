@@ -221,7 +221,11 @@ impl LocalGit {
         mode: PullMode,
     ) -> Result<(PullOutcome, Option<String>)> {
         let dirty = !self
-            .run(&["status", "--porcelain"])
+            .run(&[
+                "status",
+                "--porcelain",
+                crate::local::STATUS_IGNORE_SUBMODULES,
+            ])
             .await?
             .trim()
             .is_empty();
@@ -503,6 +507,32 @@ pub fn router<S: GitCtx>() -> Router<S> {
         .route("/repos/{id}/commit-config", get(repo_commit_config::<S>))
 }
 
+impl LocalGit {
+    /// `git diff -M <base>...<head>` — what branch `head` changes relative to
+    /// its merge-base with `base` — held to its first `max` bytes (git is
+    /// killed there; `bool` = cut). Unlike [`LocalGit::diff_text_capped`] it
+    /// never looks at the checked-out HEAD or the working tree: drafting a PR
+    /// for a branch that isn't checked out must describe THAT branch.
+    pub async fn range_diff_text_capped(
+        &self,
+        base: &str,
+        head: &str,
+        max: usize,
+    ) -> Result<(String, bool)> {
+        Self::guard_ref(base)?;
+        Self::guard_ref(head)?;
+        if !self.verify_commit_ref(head).await {
+            return Err(Error::Invalid(format!("unknown source branch '{head}'")));
+        }
+        let range = format!("{base}...{head}");
+        let cmd = crate::local::GitCmd::diff("diff")
+            .args(["-M", "--end-of-options", range.as_str(), "--"])
+            .truncate_stdout(max);
+        let (out, cut) = self.exec_truncated(&cmd, None).await?;
+        Ok((String::from_utf8_lossy(&out).into_owned(), cut))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +580,46 @@ mod tests {
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-m", "init"]);
         (tmp, dir)
+    }
+
+    /// S15-04: a PR draft for a branch that is NOT checked out diffs
+    /// merge-base(base, head)..head — never the checked-out branch's changes
+    /// or the dirty worktree.
+    #[tokio::test]
+    async fn range_diff_describes_the_named_head_not_the_checkout() {
+        let (_tmp, dir) = repo();
+        sh_git(&dir, &["checkout", "-b", "feature-x"]);
+        write(&dir, "feature.txt", "feature work\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "feature"]);
+        sh_git(&dir, &["checkout", "main"]);
+        sh_git(&dir, &["checkout", "-b", "develop"]);
+        write(&dir, "develop.txt", "develop work\n");
+        sh_git(&dir, &["add", "."]);
+        sh_git(&dir, &["commit", "-m", "develop"]);
+        write(&dir, "a.txt", "dirty\n");
+
+        let git = LocalGit::new(&dir);
+        let (diff, cut) = git
+            .range_diff_text_capped("main", "feature-x", 1 << 20)
+            .await
+            .unwrap();
+        assert!(!cut);
+        assert!(diff.contains("feature.txt"), "{diff}");
+        assert!(
+            !diff.contains("develop.txt"),
+            "checked-out branch leaked: {diff}"
+        );
+        assert!(!diff.contains("dirty"), "worktree leaked: {diff}");
+        let err = git
+            .range_diff_text_capped("main", "nope", 1 << 20)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(git
+            .range_diff_text_capped("main", "--output=/tmp/x", 1 << 20)
+            .await
+            .is_err());
     }
 
     /// A bare "origin" + a clone of it, both with the test identity.

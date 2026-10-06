@@ -33,7 +33,7 @@ use otto_core::Error;
 use otto_state::GrantsRepo;
 
 use crate::error::ApiError;
-use crate::policy::{policy_for, PolicyDecision};
+use crate::policy::{policy_for, route_class, PolicyDecision, RouteClass};
 use crate::state::ServerCtx;
 
 /// App state that can hand the guard a [`GrantsRepo`].
@@ -121,6 +121,16 @@ where
                 .into_response()
             };
         }
+        // CREDENTIAL CLASS (S11-01/03, S8-01, S1-02, S3-01). An agent session's
+        // own token authorizes AS ITS OWNER (often root), so `require_root` and
+        // the feature grant both pass it. Admin and Secret routes — identity /
+        // policy / daemon administration, human approval gates, plaintext
+        // credentials and credential minting — need a person's own credential.
+        if let Some(class) = route_class(&method, &template) {
+            if let Err(msg) = credential_class_gate(class, crate::ui_bridge::is_human(ctx)) {
+                return forbidden(msg).into_response();
+            }
+        }
         // READ-ONLY AGENT SESSIONS (crate::personal_agent_policy). A session
         // confined read-only (a proactive personal-agent run, or a run of a
         // read-only schedule) may READ through its own token but never write:
@@ -128,8 +138,10 @@ where
         // route (searches, introspection, the governed invoke — which applies
         // the same policy per tool). This is what makes the native stdio tools
         // (room posts, canvas/swarm writes, PR comments…) read-only too, not
-        // just the governed catalog. A session row that no longer exists is not
-        // read-only (its tokens are revoked when the session is removed).
+        // just the governed catalog. An unreadable row (a DB error, or a row
+        // already gone — its tokens are revoked with it) fails CLOSED, like the
+        // root-route gate: a transient SQLITE_BUSY must never let a read-only
+        // agent's write through (S8-08).
         if let Some(sid) = ctx
             .managed_session_id
             .clone()
@@ -139,7 +151,7 @@ where
                 if let Some(pool) = state.resource_pool() {
                     let read_only = crate::personal_agent_policy::session_read_only(&pool, &sid)
                         .await
-                        .unwrap_or(false);
+                        .unwrap_or(true);
                     if read_only {
                         return forbidden(
                             "this agent session is read-only: it may read but not change anything",
@@ -278,6 +290,29 @@ where
                 Err(e) => ApiError(e).into_response(),
             }
         }
+    }
+}
+
+/// Pure credential-class decision: `human` is [`crate::ui_bridge::is_human`]
+/// for the caller. Admin and Secret routes refuse every non-human credential
+/// (agent session, internal/external MCP, share link). Outward routes are
+/// tagged but still allowed — the user has not decided yet whether an
+/// agent's own token may merge/push/post directly (the `otto-pr` skill relies
+/// on it). Enforcing them is adding `RouteClass::Outward` to the match below.
+pub fn credential_class_gate(class: RouteClass, human: bool) -> Result<(), &'static str> {
+    if human {
+        return Ok(());
+    }
+    match class {
+        RouteClass::Admin => Err(
+            "an agent session's credential cannot administer Otto or decide a human approval — \
+             a person signed in to Otto must do this",
+        ),
+        RouteClass::Secret => Err(
+            "an agent session's credential cannot reveal or mint credentials — \
+             a person signed in to Otto must do this",
+        ),
+        RouteClass::Outward => Ok(()),
     }
 }
 
@@ -957,5 +992,21 @@ mod root_route_tests {
                 "{file} must apply `{marker}` for {path}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod credential_class_tests {
+    use super::*;
+
+    #[test]
+    fn non_human_credentials_are_refused_on_admin_and_secret_only() {
+        for class in [RouteClass::Admin, RouteClass::Secret, RouteClass::Outward] {
+            assert!(credential_class_gate(class, true).is_ok(), "{class:?}");
+        }
+        assert!(credential_class_gate(RouteClass::Admin, false).is_err());
+        assert!(credential_class_gate(RouteClass::Secret, false).is_err());
+        // Outward is a tag only until the user decides (see the gate's doc).
+        assert!(credential_class_gate(RouteClass::Outward, false).is_ok());
     }
 }

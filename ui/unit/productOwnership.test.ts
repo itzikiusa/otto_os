@@ -71,3 +71,27 @@ test('A to B to A cannot revive a request from the earlier A lifetime', async ()
   first.resolve({story:{id:'A'},source:{body_md:'old request'}}); await pending;
   assert.equal(product.detail.source.body_md, 'A');
 });
+
+test('S18-01: a Jira title/description write for A never patches B after a switch', async () => {
+  const { product } = fixture({ get: async () => detail('B') });
+  product.stories = [{ id: 'A', title: 'A' }, { id: 'B', title: 'B' }];
+  await product.select('B');
+  // A's save resolved after the switch: the caller passes A's id.
+  product.patchLocalTitle('A', 'A renamed');
+  product.patchLocalBody('A', 'A body');
+  assert.equal(product.detail.story.title, 'B', 'B header keeps its title');
+  assert.equal(product.detail.source.body_md, 'B', 'B body keeps its text');
+  assert.equal(product.stories.find((s: { id: string }) => s.id === 'A').title, 'A renamed', 'A row still updated');
+  product.patchLocalBody('B', 'B edited');
+  assert.equal(product.detail.source.body_md, 'B edited');
+});
+
+test('S18-03: captureSelection goes stale on A → B → A (a re-open is a new owner)', async () => {
+  const { product } = fixture({ get: async (url: string) => detail(url.includes('/A') ? 'A' : 'B') });
+  const owned = product.captureSelection();
+  assert.equal(owned(), true);
+  await product.select('B');
+  assert.equal(owned(), false);
+  await product.select('A');
+  assert.equal(owned(), false, 'the confirm opened for the first A must not publish into the re-opened A');
+});

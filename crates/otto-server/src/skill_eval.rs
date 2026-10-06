@@ -330,7 +330,7 @@ fn resolve_skill_source(
 
 /// True if `repo_path` is inside a git work tree.
 async fn is_git_repo(repo_path: &str) -> bool {
-    tokio::process::Command::new("git")
+    otto_git::hardened_command()
         .arg("-C")
         .arg(repo_path)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -343,7 +343,7 @@ async fn is_git_repo(repo_path: &str) -> bool {
 /// True if `repo` has at least one commit (HEAD resolves) — required before
 /// `git worktree add … HEAD` can work.
 async fn has_head_commit(repo: &str) -> bool {
-    tokio::process::Command::new("git")
+    otto_git::hardened_command()
         .arg("-C")
         .arg(repo)
         .args(["rev-parse", "--verify", "HEAD"])
@@ -376,7 +376,7 @@ async fn ensure_scratch_repo() -> Result<String> {
     let path = dir.to_string_lossy().to_string();
 
     if !is_git_repo(&path).await {
-        let out = tokio::process::Command::new("git")
+        let out = otto_git::hardened_command()
             .arg("-C")
             .arg(&path)
             .arg("init")
@@ -402,13 +402,13 @@ async fn ensure_scratch_repo() -> Result<String> {
              evaluations when the workspace root is not a git repository. Safe to delete.\n",
         )
         .await;
-        let _ = tokio::process::Command::new("git")
+        let _ = otto_git::hardened_command()
             .arg("-C")
             .arg(&path)
             .args(["add", "-A"])
             .output()
             .await;
-        let out = tokio::process::Command::new("git")
+        let out = otto_git::hardened_command()
             .arg("-C")
             .arg(&path)
             .args([
@@ -453,7 +453,7 @@ async fn add_worktree(repo_path: &str, base_ref: &str, dest: &Path) -> Result<()
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(repo_path)
         .args(["worktree", "add", "--detach"])
@@ -1359,7 +1359,7 @@ async fn run_skill_eval_core(
         let precomputed_diff: Option<String> = {
             let dest_c = dest_str.clone();
             tokio::task::spawn_blocking(move || {
-                std::process::Command::new("git")
+                otto_git::hardened_std_command()
                     .args(["diff", "HEAD"])
                     .current_dir(&dest_c)
                     .output()
@@ -2264,10 +2264,12 @@ async fn get_config(
 
 async fn put_config(
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(body): Json<SkillEvalConfig>,
 ) -> ApiResult<Json<SkillEvalConfig>> {
     require_root(&user)?;
+    crate::auth::require_human(&auth.0)?;
     let repo = otto_state::SettingsRepo::new(ctx.pool.clone());
     let value = serde_json::to_value(&body)
         .map_err(|e| ApiError(Error::Internal(format!("serialize: {e}"))))?;
@@ -2309,7 +2311,7 @@ async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
                 // Not an Otto-created worktree (e.g. a score_only target) — leave it.
                 continue;
             }
-            let _ = tokio::process::Command::new("git")
+            let _ = otto_git::hardened_command()
                 .arg("-C")
                 .arg(repo_root)
                 .args(["worktree", "remove", "--force"])
@@ -2322,7 +2324,7 @@ async fn remove_eval_worktrees(repo_root: &str, eval: &SkillEval) {
         }
     }
     if removed_any {
-        let _ = tokio::process::Command::new("git")
+        let _ = otto_git::hardened_command()
             .arg("-C")
             .arg(repo_root)
             .args(["worktree", "prune"])
@@ -2468,10 +2470,12 @@ fn pick_iteration<'a>(
 async fn promote_skill(
     AxPath(eval_id): AxPath<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<PromoteSkillReq>,
 ) -> ApiResult<Json<LibrarySkill>> {
     require_root(&user)?; // writes to the shared Otto library (like PUT /library/skills)
+    crate::auth::require_human(&auth.0)?;
     let eval = ctx
         .skill_evals_store
         .get_eval(&eval_id)
@@ -2818,13 +2822,13 @@ async fn impl_diff(
     }
     // Stage everything (incl. new files, honoring .gitignore) in the disposable
     // worktree, then show the full staged diff against its base.
-    let _ = tokio::process::Command::new("git")
+    let _ = otto_git::hardened_command()
         .arg("-C")
         .arg(&wt)
         .args(["add", "-A"])
         .output()
         .await;
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(&wt)
         .args(["--no-pager", "diff", "--cached", "--no-color"])
@@ -2922,7 +2926,7 @@ async fn retry_validation(
     let retry_diff: Option<String> = {
         let wt = worktree.clone();
         tokio::task::spawn_blocking(move || {
-            std::process::Command::new("git")
+            otto_git::hardened_std_command()
                 .args(["diff", "HEAD"])
                 .current_dir(&wt)
                 .output()

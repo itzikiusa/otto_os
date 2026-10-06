@@ -127,7 +127,7 @@
             {stopping[i] ? 'Stopping…' : 'Stop'}
           </button>
         {/if}
-        {#if i < lastRetryable}
+        {#if i < lastRetryable && (agent.status === 'done' || agent.status === 'error' || agent.status === 'skipped')}
           <button
             class="btn small ghost"
             disabled={retrying[i]}

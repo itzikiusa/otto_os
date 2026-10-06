@@ -5,7 +5,7 @@
   // WIP row is selected. Unstaged / Staged file trees (per-file + per-folder
   // stage toggles, discard), a per-file working diff, and the commit composer.
   // Replaces the old separate "Changes" tab — staging now lives on the graph.
-  import { untrack } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { toastError } from '../../lib/toastError';
   import { api, isAbortError } from '../../lib/api/client';
   import type {
@@ -135,6 +135,11 @@
   // and resume the spinner on one still running. Declared before the
   // `wipRequest` effect so a "Commit with message…" prefill still wins.
   let composerRepo = '';
+  /** False once unmounted: a draft landing after that must not reach the
+   *  confirmer (its ask() supersedes — cancels — whatever dialog is open) or
+   *  toast; the commitComposer parking slot delivers it to the next panel. */
+  let alive = true;
+  onDestroy(() => (alive = false));
   $effect(() => {
     const repo = repoId;
     const unwatch = untrack(() => {
@@ -588,6 +593,19 @@
   const canCommit = $derived(
     !committing && !drafting && (subject.trim() !== '' || amend) && (staged.length > 0 || amend),
   );
+  /** Why Commit is grey — a disabled button with no reason reads as broken
+   *  (a draft works from UNSTAGED changes, so a good message can exist). */
+  const commitHint = $derived(
+    committing || drafting || canCommit
+      ? ''
+      : staged.length === 0 && !amend
+        ? unstaged.length > 0
+          ? 'Stage files to commit'
+          : 'Nothing to commit'
+        : subject.trim() === '' && !amend
+          ? 'Write a summary to commit'
+          : '',
+  );
   /** ⌘/Ctrl+Enter in the summary or description commits — the standard
    *  composer shortcut; plain Enter keeps its meaning (newline / nothing). */
   function commitKey(e: KeyboardEvent): void {
@@ -615,11 +633,11 @@
     const tick = setInterval(() => (draftElapsed += 1), 1000);
     try {
       const d = await p;
-      // Switched repos meanwhile: the reply was parked for that repo.
-      if (repo !== repoId) return;
+      // Unmounted, or switched repos meanwhile: the reply was parked.
+      if (!alive || repo !== repoId) return;
       await applyDraft(d);
     } catch (e) {
-      if (repo === repoId) toastError('Couldn’t draft the message', e);
+      if (alive && repo === repoId) toastError('Couldn’t draft the message', e);
     } finally {
       clearInterval(tick);
       drafting = false;
@@ -628,6 +646,7 @@
 
   /** Put an agent draft into the fields — asking first over typed text. */
   async function applyDraft(d: DraftCommitMessageResp): Promise<void> {
+    if (!alive) return;
     const text = d.message.trim();
     // Never overwrite what the person already typed without asking.
     if (subject.trim() || body.trim()) {
@@ -635,6 +654,7 @@
         'The agent’s message will replace the summary and description you have typed.',
         { title: 'Replace your title and description?', confirmLabel: 'Replace', cancelLabel: 'Keep mine', danger: false },
       );
+      if (!alive) return;
       if (!ok) {
         draftSessionId = d.session_id ?? null;
         draftedAt = null;
@@ -932,9 +952,9 @@
         <span class="grow"></span>
         {#if partial.has(selectedPath)}
           <!-- Both sides exist: pick which one the hunk actions operate on. -->
-          <div class="segmented wp-target">
-            <button class:active={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
-            <button class:active={stagedView} onclick={() => (stagedView = true)}>Staged</button>
+          <div class="segmented wp-target" role="group" aria-label="Diff side">
+            <button class:active={!stagedView} aria-pressed={!stagedView} onclick={() => (stagedView = false)}>Unstaged</button>
+            <button class:active={stagedView} aria-pressed={stagedView} onclick={() => (stagedView = true)}>Staged</button>
           </div>
         {/if}
         <button class="icon-btn wp-close" onclick={() => (selectedPath = null)} title="Close diff" aria-label="Close diff"><Icon name="x" size={14} /></button>
@@ -1052,11 +1072,13 @@
         </span>
       {/if}
       <span class="grow"></span>
+      {#if commitHint}<span id="wp-commit-hint" class="wp-commit-hint dim">{commitHint}</span>{/if}
       <button
         class="btn primary"
         disabled={!canCommit}
         onclick={commit}
-        title="Commit (⌘↵)"
+        title={commitHint || 'Commit (⌘↵)'}
+        aria-describedby={commitHint ? 'wp-commit-hint' : undefined}
       >
         {committing ? 'Committing…' : `${amend ? 'Amend' : 'Commit'}${staged.length > 0 ? ` (${staged.length})` : ''}`}
       </button>
@@ -1065,6 +1087,13 @@
 </div>
 
 <style>
+  .wp-commit-hint {
+    font-size: var(--fs-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
   .draft-term {
     height: 220px;
     margin: 6px 0;

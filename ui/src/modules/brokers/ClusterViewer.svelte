@@ -1,7 +1,7 @@
 <script lang="ts">
   import Badge from '../../lib/components/Badge.svelte';
   import { CLUSTER_VIEWS, type ClusterView } from './types';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import { toastError } from '../../lib/toastError';
   // Embeddable Kafka cluster viewer: the header + per-cluster tab strip
   // (Overview / Topics / Consumer Groups / Schema Registry / Replay / Lag Alerts)
@@ -93,13 +93,9 @@
     </div>
   </header>
 
-  <div class="cv-tabs" role="tablist" aria-label="Kafka cluster views" tabindex="-1" onkeydown={onTabKey}>
-        {#each CLUSTER_VIEWS as v (v.id)}
-          <button class:on={tab === v.id} role="tab" aria-selected={tab === v.id} tabindex={tab === v.id ? 0 : -1} onclick={() => (tab = v.id)}>{v.label}</button>
-        {/each}
-      </div>
+  <Tabs label="Kafka cluster views" tabs={CLUSTER_VIEWS} value={tab} onchange={(id) => (tab = id)} idBase="kafka-cv" />
 
-  <div class="cv-body">
+  <div class="cv-body" role="tabpanel" id="kafka-cv-panel-{tab}" aria-labelledby="kafka-cv-tab-{tab}">
     {#key cluster.id}
       {#if tab === 'overview'}
         <OverviewTab clusterId={cluster.id} />
@@ -160,32 +156,6 @@
     display: flex;
     gap: 6px;
     flex: 0 0 auto;
-  }
-  .cv-tabs {
-    display: flex;
-    gap: 2px;
-    padding: 4px 10px 0;
-    border-bottom: 1px solid var(--border);
-    flex: 0 0 auto;
-    overflow-x: auto;
-  }
-  .cv-tabs button {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: var(--fs-s);
-    padding: 6px 10px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .cv-tabs button:hover {
-    color: var(--text);
-  }
-  .cv-tabs button.on {
-    color: var(--text);
-    border-bottom-color: var(--accent);
   }
   .cv-body {
     flex: 1 1 auto;

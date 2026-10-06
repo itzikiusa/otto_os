@@ -11,12 +11,14 @@
   });
 
   function renderSnippet(s: string): string {
-    // Server marks matches with ‹ › — escape everything else.
+    // Server marks matches with ‹ › — escape everything else. Only a
+    // balanced ‹…› pair (no nested ‹) becomes a <mark>: a stray literal ‹ or
+    // › in the note stays text instead of opening/closing tags (S18-26).
     const esc = s
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    return esc.replace(/‹/g, '<mark>').replace(/›/g, '</mark>');
+    return esc.replace(/‹([^‹›]*)›/g, '<mark>$1</mark>');
   }
 </script>
 

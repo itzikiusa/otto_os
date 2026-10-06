@@ -16,6 +16,7 @@ export const SOURCE_MODULE: Record<WorkKind, string> = {
   review: 'Git',
   product_story: 'Product',
   pr: 'Git',
+  otto_run: 'Run with Otto',
 };
 
 /** A `pr` item's source id is `<repo_id>:<pr_number>` (workgraph_projector's
@@ -46,6 +47,8 @@ export function directRoute(kind: WorkKind, sourceId: string): string | null {
       return `product/${id}`;
     case 'pr':
       return prRoute(sourceId);
+    case 'otto_run':
+      return `run-with-otto/${id}`;
     default:
       return null;
   }
@@ -64,6 +67,8 @@ export function stopPath(kind: WorkKind, sourceId: string): string | null {
       return `/workflow-runs/${id}/cancel`;
     case 'review':
       return `/reviews/${id}/cancel`;
+    case 'otto_run':
+      return `/runs/${id}/cancel`;
     default:
       return null;
   }

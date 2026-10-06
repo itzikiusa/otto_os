@@ -13,6 +13,7 @@
   import Modal from '../../lib/components/Modal.svelte';
   import EmptyState from '../../lib/components/EmptyState.svelte';
   import AutomateGuide from '../../lib/components/AutomateGuide.svelte';
+  import AutomateGuideButton from '../../lib/components/AutomateGuideButton.svelte';
   import LoadState from '../../lib/components/LoadState.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
   import StatusBadge from '../../lib/components/StatusBadge.svelte';
@@ -525,6 +526,7 @@
       {/if}
     {/snippet}
     {#snippet actions()}
+      <AutomateGuideButton current="swarm" />
       {#if detail}
         <!-- Settings · Recruit · lifecycle · ⋯. The destructive verbs (Abort all,
              Delete swarm) live in ⋯, one step away from the lifecycle action —

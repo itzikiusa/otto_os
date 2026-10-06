@@ -335,18 +335,18 @@ impl WorkflowsRepo {
         rows.iter().map(row_to_workflow).collect()
     }
 
-    /// Resolve a workflow by name **globally** (across all workspaces),
-    /// case-insensitively. Workflows are a global library; a chat trigger that
-    /// names a workflow finds it regardless of which workspace's integration
-    /// received the message. Ties prefer `prefer_ws` (the message's workspace),
-    /// then the most recently updated.
-    pub async fn find_by_name(&self, name: &str, prefer_ws: &Id) -> Result<Option<Workflow>> {
+    /// Resolve a workflow by name within ONE workspace, case-insensitively
+    /// (most recently updated wins a tie). Chat triggers resolve through this
+    /// with the receiving integration's workspace: a member of workspace A's
+    /// channel must never start workspace B's workflow — running as B's
+    /// creator, posting A's channel content into B's run (S3-03).
+    pub async fn find_by_name(&self, name: &str, workspace_id: &Id) -> Result<Option<Workflow>> {
         let row = sqlx::query(
-            "SELECT * FROM workflows WHERE name = ? COLLATE NOCASE
-             ORDER BY (workspace_id = ?) DESC, updated_at DESC LIMIT 1",
+            "SELECT * FROM workflows WHERE name = ? COLLATE NOCASE AND workspace_id = ?
+             ORDER BY updated_at DESC LIMIT 1",
         )
         .bind(name.trim())
-        .bind(prefer_ws)
+        .bind(workspace_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(dberr("find workflow by name"))?;
@@ -433,12 +433,39 @@ impl WorkflowsRepo {
         Ok(())
     }
 
+    /// Delete a workflow — refused (`Conflict`) while it has a live
+    /// (`pending`/`running`) run. `ON DELETE CASCADE` would otherwise remove
+    /// the run row out from under its engine driver, which then could no
+    /// longer be canceled (404) and kept spawning sessions invisibly (S17-01).
+    /// The live-run check and the DELETE are one statement, so a run admitted
+    /// concurrently either blocks the delete or is never admitted (its INSERT
+    /// sees no parent row).
     pub async fn delete(&self, id: &Id) -> Result<()> {
-        sqlx::query("DELETE FROM workflows WHERE id = ?")
+        let done = sqlx::query(
+            "DELETE FROM workflows WHERE id = ?
+             AND NOT EXISTS (SELECT 1 FROM workflow_runs
+                             WHERE workflow_id = ? AND status IN ('pending','running'))",
+        )
+        .bind(id)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(dberr("delete workflow"))?;
+        if done.rows_affected() == 0 {
+            let live: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM workflow_runs
+                 WHERE workflow_id = ? AND status IN ('pending','running')",
+            )
             .bind(id)
-            .execute(&self.pool)
+            .fetch_one(&self.pool)
             .await
-            .map_err(dberr("delete workflow"))?;
+            .map_err(dberr("delete workflow live runs"))?;
+            if live > 0 {
+                return Err(Error::Conflict(format!(
+                    "this workflow has {live} active run(s) — cancel them before deleting it"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -781,6 +808,38 @@ impl WorkflowsRepo {
         .await
         .map_err(dberr("active run ids"))?;
         Ok(rows)
+    }
+
+    /// The live (`pending`/`running`) run a chat message controls: its input
+    /// carries this `channel`/`chat` (and the message's workspace as origin or
+    /// owner). An exact `thread` match wins, else the newest channel/chat
+    /// match. Ids only, filtered in SQL — the old scan `SELECT *`-loaded every
+    /// active run's 50–200 KB `nodes_json` per inbound message (S3-09).
+    pub async fn find_active_run_for_chat(
+        &self,
+        workspace_id: &str,
+        channel: &str,
+        chat: &str,
+        thread: Option<&str>,
+    ) -> Result<Option<Id>> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM workflow_runs
+             WHERE status IN ('pending','running')
+               AND json_valid(input_json)
+               AND json_extract(input_json, '$.channel') = ?
+               AND json_extract(input_json, '$.chat') = ?
+               AND (json_extract(input_json, '$.origin_workspace_id') = ? OR workspace_id = ?)
+             ORDER BY (json_extract(input_json, '$.thread') IS ?) DESC, started_at DESC
+             LIMIT 1",
+        )
+        .bind(channel)
+        .bind(chat)
+        .bind(workspace_id)
+        .bind(workspace_id)
+        .bind(thread)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(dberr("active run for chat"))
     }
 
     // --- node output cache ------------------------------------------------
@@ -1194,12 +1253,14 @@ impl WorkflowsRepo {
         Ok(row.and_then(|(s, w)| RunStatus::parse(&s).map(|st| (st, w != 0))))
     }
 
-    /// True when the run's status is `canceled` (status-only read; a DB error
-    /// or a missing row reads as not canceled, like the old `get_run` checks).
+    /// True when the run's status is `canceled` — or the row is gone (its
+    /// workflow was deleted): a driver whose run no longer exists must stop
+    /// rather than keep spawning sessions nobody can see or cancel (S17-01).
+    /// A transient DB error still reads as not canceled.
     pub async fn is_canceled(&self, id: &Id) -> bool {
         matches!(
             self.run_status(id).await,
-            Ok(Some((RunStatus::Canceled, _)))
+            Ok(Some((RunStatus::Canceled, _)) | None)
         )
     }
 
@@ -1973,7 +2034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_by_name_is_global_and_prefers_workspace() {
+    async fn find_by_name_is_scoped_to_the_workspace() {
         let pool = mem_pool().await;
         let repo = WorkflowsRepo::new(pool);
         let g = WorkflowGraph::default();
@@ -1986,30 +2047,21 @@ mod tests {
             .await
             .unwrap();
 
-        // Global resolution finds it from a third workspace; case-insensitive.
-        let any = repo
+        // S3-03: another workspace's workflow is never resolved.
+        assert!(repo
             .find_by_name("write TESTS", &"wsC".into())
             .await
-            .unwrap();
-        assert!(any.is_some(), "resolves across all workspaces");
-
-        // Ties prefer the requested workspace.
-        assert_eq!(
-            repo.find_by_name("Write tests", &"wsA".into())
+            .unwrap()
+            .is_none());
+        // Case-insensitive, and each workspace gets its own.
+        for (ws, want) in [("wsA", &a.id), ("wsB", &b.id)] {
+            let got = repo
+                .find_by_name("write TESTS", &ws.into())
                 .await
                 .unwrap()
-                .unwrap()
-                .id,
-            a.id
-        );
-        assert_eq!(
-            repo.find_by_name("Write tests", &"wsB".into())
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            b.id
-        );
+                .unwrap();
+            assert_eq!(&got.id, want);
+        }
         assert!(repo
             .find_by_name("nope", &"wsA".into())
             .await
@@ -2542,5 +2594,111 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    /// S17-01: deleting a workflow with a live run is refused (the cascade
+    /// would orphan its driver); once the run settles the delete goes through,
+    /// and a driver whose row is gone reads as canceled so it stops.
+    #[tokio::test]
+    async fn delete_refuses_live_runs_and_missing_run_reads_canceled() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let run = repo
+            .create_run(&wf.id, &"ws1".into(), &serde_json::json!({}), None)
+            .await
+            .unwrap();
+        let err = repo.delete(&wf.id).await.unwrap_err();
+        assert!(matches!(err, Error::Conflict(_)), "got {err:?}");
+        assert!(repo.get(&wf.id).await.is_ok(), "workflow must survive");
+        sqlx::query("UPDATE workflow_runs SET status='success' WHERE id=?")
+            .bind(&run.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.delete(&wf.id).await.unwrap();
+        assert!(repo.get(&wf.id).await.is_err());
+        // The test pool runs without foreign keys; do the cascade by hand.
+        sqlx::query("DELETE FROM workflow_runs WHERE id=?")
+            .bind(&run.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            repo.is_canceled(&run.id).await,
+            "a run whose row is gone must read as canceled"
+        );
+    }
+
+    /// S3-09: chat control resolves the run by SQL on the input keys — exact
+    /// thread first, then the newest channel/chat match; settled runs and
+    /// other chats never match.
+    #[tokio::test]
+    async fn find_active_run_for_chat_prefers_exact_thread() {
+        let pool = mem_pool().await;
+        let repo = WorkflowsRepo::new(pool.clone());
+        let wf = repo
+            .create(
+                &"ws1".into(),
+                "WF",
+                "",
+                "",
+                &WorkflowGraph::default(),
+                &"u1".into(),
+            )
+            .await
+            .unwrap();
+        let mk = |thread: Option<&str>, chat: &str| serde_json::json!({"channel":"slack","chat":chat,"thread":thread,"origin_workspace_id":"ws1"});
+        let threaded = repo
+            .create_run(&wf.id, &"ws1".into(), &mk(Some("t1"), "C1"), None)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let newer = repo
+            .create_run(&wf.id, &"ws1".into(), &mk(None, "C1"), None)
+            .await
+            .unwrap();
+        let _other = repo
+            .create_run(&wf.id, &"ws1".into(), &mk(Some("t1"), "C2"), None)
+            .await
+            .unwrap();
+        let find = |t: Option<&'static str>| {
+            let repo = repo.clone();
+            async move {
+                repo.find_active_run_for_chat("ws1", "slack", "C1", t)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(find(Some("t1")).await, Some(threaded.id.clone()));
+        assert_eq!(find(None).await, Some(newer.id.clone()));
+        assert_eq!(
+            find(Some("t9")).await,
+            Some(newer.id.clone()),
+            "newest fallback"
+        );
+        assert_eq!(
+            repo.find_active_run_for_chat("wsX", "slack", "C1", None)
+                .await
+                .unwrap(),
+            None,
+            "another workspace's message never controls the run"
+        );
+        sqlx::query("UPDATE workflow_runs SET status='success' WHERE workflow_id=?")
+            .bind(&wf.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(find(Some("t1")).await, None, "settled runs never match");
     }
 }

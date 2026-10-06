@@ -21,6 +21,13 @@ on:
     paths:
       - 'crates/otto-dbviewer/**'
       - 'crates/otto-brokers/**'
+      # Drivers reach their servers through these: SSH tunnels (otto-ssh),
+      # the governed-query / connection rows (otto-state) and the shared
+      # domain types (otto-core). A break there must not wait for nightly.
+      - 'crates/otto-ssh/**'
+      - 'crates/otto-state/**'
+      - 'crates/otto-core/**'
+      - 'crates/otto-netguard/**'
       - 'dev/dbviewer/**'
       - 'dev/brokers/**'
       - 'Cargo.lock'
@@ -30,6 +37,11 @@ on:
     paths:
       - 'crates/otto-dbviewer/**'
       - 'crates/otto-brokers/**'
+      - 'crates/otto-ssh/**'
+      - 'crates/otto-state/**'
+      - 'crates/otto-core/**'
+      - 'crates/otto-netguard/**'
+      - 'Cargo.lock'
       - 'dev/dbviewer/**'
       - 'dev/brokers/**'
   schedule:

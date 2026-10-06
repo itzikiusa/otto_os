@@ -51,6 +51,7 @@
     type SplitMode,
     type VarSpec,
   } from './sql-util';
+  import { splitModeFor } from './sql-dialect';
   import { api } from '../../lib/api/client';
   import type { MongoshInfo } from '../../lib/api/types';
   import { paneResizer } from '../../lib/paneResizer';
@@ -147,8 +148,12 @@
       { filter: entries.length > 0, filterPlaceholder: 'Filter copies made in Otto…', maxVisible: 30 },
     );
   }
-  // Statement separator: redis is one command per line; others use `;`.
-  const splitMode = $derived<SplitMode>(database.queryLanguage === 'redis' ? 'line' : 'sql');
+  // Statement separator + lexing: redis is one command per line; others use
+  // `;`, lexed per engine (Postgres: dollar quotes, no `#` comments, `\` only
+  // escapes in E'…') — `sql-dialect.ts`. Variables render per engine too.
+  const splitMode = $derived<SplitMode>(
+    database.queryLanguage === 'redis' ? 'line' : splitModeFor(database.selectedConn?.kind),
+  );
   // Live selection + cursor (from CodeEditor) → run only the selected/current
   // statement instead of the whole buffer. Plain (non-reactive) on purpose:
   // only run() reads it, and `text` is a lazy getter — nothing re-renders or
@@ -764,9 +769,13 @@
       persistEditorH();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    // A cancelled gesture (system gesture, focus loss) ends the drag too —
+    // else pointermove stays attached and the pane follows the cursor.
+    window.addEventListener('pointercancel', onUp);
   }
   function setEditorH(h: number): void {
     editorH = h;

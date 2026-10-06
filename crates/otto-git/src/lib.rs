@@ -24,6 +24,9 @@ pub mod watch;
 mod worktree_probe;
 
 pub use http::{router, GitCtx};
-pub use local::{clone_repo, DiffOpts, DiffTarget, LocalGit, ResolvedBase};
+pub use local::{
+    clone_repo, hardened_command, hardened_std_command, DiffOpts, DiffTarget, LocalGit,
+    ResolvedBase,
+};
 pub use providers::{detect, make_provider, GitProvider, RemoteRef};
 pub use types::CiStatus;

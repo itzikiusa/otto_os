@@ -27,8 +27,11 @@ pub struct MemoryService {
     /// When set, saved memories are also written through to an Obsidian-compatible
     /// markdown vault (git-shareable; the file-based path to a shared vault).
     vault: Option<crate::vault::VaultWriter>,
-    /// FTS5 availability (lazily probed once): unknown/yes/no.
+    /// FTS5 availability (probed once): unknown/yes/no.
     fts: AtomicU8,
+    /// Single-flight for the probe: `ensure_fts` reconciles the whole index
+    /// under the write lock, so concurrent first callers wait for one run.
+    fts_probe: tokio::sync::Mutex<()>,
 }
 
 impl MemoryService {
@@ -40,6 +43,7 @@ impl MemoryService {
             remote,
             vault: None,
             fts: AtomicU8::new(FTS_UNKNOWN),
+            fts_probe: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -87,6 +91,16 @@ impl MemoryService {
         self.repo.pool()
     }
 
+    /// Run the FTS probe + reconcile now (boot background task) so the first
+    /// memory call after boot doesn't pay the O(n) reconcile under the write
+    /// lock (S7-10). A remote-backed service has no local index to warm.
+    pub async fn warm_fts(&self) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        self.fts_ready().await
+    }
+
     /// Probe FTS5 once and cache the result; subsequent calls are a cheap atomic
     /// read. Returns whether FTS5-backed keyword search is available.
     async fn fts_ready(&self) -> bool {
@@ -94,6 +108,12 @@ impl MemoryService {
             FTS_YES => true,
             FTS_NO => false,
             _ => {
+                let _probe = self.fts_probe.lock().await;
+                match self.fts.load(Ordering::Relaxed) {
+                    FTS_YES => return true,
+                    FTS_NO => return false,
+                    _ => {}
+                }
                 let ok = self.repo.ensure_fts().await.unwrap_or(false);
                 self.fts
                     .store(if ok { FTS_YES } else { FTS_NO }, Ordering::Relaxed);

@@ -896,27 +896,36 @@ impl Store {
 
     /// HARD delete (workspace-admin only, explicit `?hard=true`): the row, its
     /// versions, its outgoing links and its search row. Incoming links are kept
-    /// and flagged `broken` (consumers show a badge). Blobs are NOT touched —
-    /// only the opt-in prune GC ever removes a blob.
-    pub async fn delete_artifact(&self, id: &str) -> Result<()> {
+    /// and flagged `broken` (consumers show a badge). Returns the DISTINCT
+    /// blobs the deleted rows referenced (version contents + thumbnail) — GC
+    /// CANDIDATES the caller re-checks with [`Self::blob_in_use`] under the
+    /// blob GC fence after this commit (S7-03: they used to stay on disk
+    /// forever, deleted design bytes included).
+    pub async fn delete_artifact(&self, id: &str) -> Result<Vec<String>> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(dberr("design.artifact.delete.begin"))?;
-        let res = sqlx::query("DELETE FROM design_artifacts WHERE id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("design.artifact.delete"))?;
-        if res.rows_affected() == 0 {
+        let deleted: Option<Option<String>> =
+            sqlx::query_scalar("DELETE FROM design_artifacts WHERE id = ? RETURNING thumb_blob")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(dberr("design.artifact.delete"))?;
+        let Some(thumb) = deleted else {
             return Err(Error::NotFound(format!("design artifact {id}")));
-        }
-        sqlx::query("DELETE FROM design_versions WHERE artifact_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(dberr("design.artifact.delete.versions"))?;
+        };
+        let version_blobs: Vec<String> = sqlx::query_scalar(
+            "DELETE FROM design_versions WHERE artifact_id = ? RETURNING blob_sha256",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(dberr("design.artifact.delete.versions"))?;
+        let mut blobs: Vec<String> = version_blobs.into_iter().chain(thumb).collect();
+        blobs.sort();
+        blobs.dedup();
         sqlx::query("DELETE FROM design_links WHERE src_artifact_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -933,7 +942,7 @@ impl Store {
             .await
             .map_err(dberr("design.artifact.delete.commit"))?;
         self.fts_remove(id).await;
-        Ok(())
+        Ok(blobs)
     }
 
     // -- versions -------------------------------------------------------------
@@ -1394,6 +1403,19 @@ impl Store {
         otto_state::SettingsRepo::new(self.pool.clone())
             .put(crate::retention::AUTO_TIDY_SETTING, &Value::Bool(on))
             .await
+    }
+
+    /// Every blob a version or thumbnail references (the orphan sweep's
+    /// keep-set; read under the exclusive GC fence).
+    pub async fn referenced_blobs(&self) -> Result<std::collections::HashSet<String>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT blob_sha256 FROM design_versions
+             UNION SELECT thumb_blob FROM design_artifacts WHERE thumb_blob IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(dberr("design.blob.referenced"))?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Is `sha` still referenced by any version or thumbnail?

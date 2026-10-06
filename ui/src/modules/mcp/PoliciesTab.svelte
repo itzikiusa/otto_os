@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import { toastError } from '../../lib/toastError';
   // Policy-as-code rules (global + this workspace). List / create / edit /
   // delete, export the whole ruleset to JSON, import a ruleset (append or
@@ -34,15 +35,23 @@
   let editing = $state<McpPolicy | null>(null);
   let formOpen = $state(false);
 
+  // A workspace switch mid-load must not show (or let you edit) the previous
+  // workspace's policies under the new one.
+  const loads = latestOnly();
   async function load(): Promise<void> {
+    const t = loads.begin();
+    const id = wsId;
     loading = true;
     try {
-      policies = await mcpCpApi.cpPolicies(wsId);
+      const rows = await mcpCpApi.cpPolicies(id);
+      if (!t.current) return;
+      policies = rows;
       loadError = null;
     } catch (e) {
+      if (!t.current) return;
       loadError = loadErrorText(e);
     } finally {
-      loading = false;
+      if (t.current) loading = false;
     }
   }
 

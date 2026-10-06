@@ -107,6 +107,23 @@ impl BlobStore {
         }
     }
 
+    /// Every blob file name (sha) under the store root — temp files and
+    /// strays excluded. A missing root is empty. For the orphan sweep.
+    pub async fn list(&self) -> Vec<String> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(rd) = std::fs::read_dir(&root) else {
+                return Vec::new();
+            };
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| is_sha(n))
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
     /// Storage gauge: `(blob files, total bytes)` under the store root. A walk
     /// of one flat directory, off the runtime. A missing root is `(0, 0)`.
     pub async fn usage(&self) -> (u64, u64) {
@@ -167,8 +184,9 @@ impl BlobStore {
         Ok(self.fence().await?.write_owned().await)
     }
 
-    /// Remove a blob — ONLY called by the opt-in prune after it proved no
-    /// version/thumbnail references the blob, under [`Self::gc_guard`].
+    /// Remove a blob — ONLY called by the GC (prune, hard delete, thumbnail
+    /// replacement, orphan sweep) after it proved no version/thumbnail
+    /// references the blob, under [`Self::gc_guard`].
     /// Returns whether a file existed.
     pub async fn remove(&self, sha: &str) -> Result<bool> {
         let p = self.path(sha)?;

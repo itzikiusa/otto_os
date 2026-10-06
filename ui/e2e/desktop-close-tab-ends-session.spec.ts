@@ -11,7 +11,8 @@ import { expectFullyInViewport } from './helpers';
 // gesture (tab ×, sidebar ×) asks Archive / Delete (Cancel keeps the tab).
 // A remembered Archive or Delete applies without asking for ONE tab (the
 // user opted out of the question — confirming anyway made "Always delete" a
-// lie), and a bulk close that ends more than one session always confirms
+// lie); a remembered Delete archives first and deletes when its Undo toast
+// runs out (S13-01: a stray ⌘W is never instantly irreversible), and a bulk close that ends more than one session always confirms
 // once, naming the count. An AGENT working mid-turn still asks; these plain
 // shells read as "working" whenever they print, but are never mid-turn.
 // ─────────────────────────────────────────────────────────────────────────────

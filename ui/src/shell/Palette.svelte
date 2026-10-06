@@ -291,6 +291,9 @@
   }
 
   function onCommandsKey(e: KeyboardEvent): void {
+    // An IME composition's Enter/arrows belong to the IME (CJK input), not
+    // to the list — confirming a composition must not run the top command.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Tab') {
       e.preventDefault();
       toggleMode();
@@ -314,6 +317,7 @@
   }
 
   function onEnglishKey(e: KeyboardEvent): void {
+    if (e.isComposing || e.keyCode === 229) return; // IME composition (see onCommandsKey)
     if (e.key === 'Tab' && englishText === '') {
       e.preventDefault();
       toggleMode();

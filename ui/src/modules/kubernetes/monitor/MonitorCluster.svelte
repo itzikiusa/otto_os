@@ -284,8 +284,8 @@
     try {
       const memMetric = status?.metrics_server === 'ok' ? 'mem_working_set_bytes' : 'mem_sys_bytes';
       const [mem, rps] = await Promise.all([
-        k8sApi.monitorSeries(cluster.id, { metric: memMetric, workload: r.workload, window }, ctrl.signal),
-        k8sApi.monitorSeries(cluster.id, { metric: 'http_requests_total', workload: r.workload, window }, ctrl.signal),
+        k8sApi.monitorSeries(cluster.id, { metric: memMetric, workload: r.workload, ns: r.namespace || undefined, window }, ctrl.signal),
+        k8sApi.monitorSeries(cluster.id, { metric: 'http_requests_total', workload: r.workload, ns: r.namespace || undefined, window }, ctrl.signal),
       ]);
       if (request === seriesRequest) series = { mem, rps, err: null };
     } catch (e) {
@@ -309,7 +309,7 @@
     const ctrl = (eventsAbort = new AbortController());
     if (!quiet) eventsLoading = true;
     try {
-      const next = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, limit: 300 }, ctrl.signal);
+      const next = await k8sApi.monitorEvents(cluster.id, { window, class: classFilter || undefined, ns: ns || undefined, limit: 300 }, ctrl.signal);
       if (request !== eventsRequest) return;
       events = next;
       eventsError = '';
@@ -325,6 +325,7 @@
     const c = classFilter;
     void c;
     void window;
+    void ns;
     void cluster.id;
     if (activeTab === 'events') untrack(() => void loadEvents());
   });

@@ -49,3 +49,51 @@ test('a failed re-boot of a running app keeps the shell up', async () => {
   await h.auth.boot(true);
   assert.equal(h.auth.phase, 'ready');
 });
+
+test('a stalled /meta moves boot to offline instead of spinning forever (S13-05)', async () => {
+  let aborted = false;
+  const api = {
+    get: (path: string, signal?: AbortSignal) => {
+      if (path !== '/meta') return Promise.resolve({});
+      signal?.addEventListener('abort', () => { aborted = true; });
+      return new Promise(() => {}); // accepted, never answers
+    },
+  };
+  const { auth } = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
+    '../api/client': {
+      api, ApiError, UNAUTHORIZED_EVENT: 'otto:unauthorized', setAltLoopbackBase() {},
+      getToken: () => null, setToken() {},
+    },
+    '../storage': { lsGet: () => null, lsSet() {}, lsRemove() {} },
+  }, {
+    // Compress the 5 s deadline so the test is instant.
+    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms === 5_000 ? 5 : ms),
+  });
+  await auth.boot();
+  assert.equal(auth.phase, 'offline');
+  assert.equal(aborted, true, 'the stalled request is aborted, not leaked');
+});
+
+test('impersonation start lives in this tab\'s sessionStorage, not shared localStorage (S13-07)', async () => {
+  const ss = new Map<string, string>();
+  const lsRemoved: string[] = [];
+  let token: string | null = 'admin';
+  const api = {
+    post: async () => ({ token: 'imp' }),
+    get: async (path: string) => (path === '/auth/me' ? { user: { id: 'x' }, real_user: { id: 'root' } } : { capabilities: {} }),
+  };
+  const mod = loadSource(new URL('../src/lib/stores/auth.svelte.ts', import.meta.url), {
+    '../api/client': { api, ApiError, UNAUTHORIZED_EVENT: 'u', setAltLoopbackBase() {}, getToken: () => token, setToken: (t: string | null) => { token = t; } },
+    '../storage': {
+      lsGet: () => null, lsSet() {}, lsRemove: (k: string) => void lsRemoved.push(k),
+      ssGet: (k: string) => ss.get(k) ?? null, ssSet: (k: string, v: string) => void ss.set(k, v), ssRemove: (k: string) => void ss.delete(k),
+    },
+  });
+  assert.ok(lsRemoved.includes('otto_imp_start_ms'), 'purges the old shared copy');
+  assert.equal(mod.impersonationStartedMs(), null);
+  const before = Date.now();
+  await mod.auth.impersonate('x');
+  const started = mod.impersonationStartedMs();
+  assert.ok(started !== null && started >= before);
+  assert.equal(ss.get('otto_admin_token'), 'admin');
+});

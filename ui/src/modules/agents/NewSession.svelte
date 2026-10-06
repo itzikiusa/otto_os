@@ -10,6 +10,9 @@
   import Icon from '../../lib/components/Icon.svelte';
   import ContextPreview from './ContextPreview.svelte';
   import { router } from '../../lib/router.svelte';
+  import { api } from '../../lib/api/client';
+  import type { FsBrowse } from '../../lib/api/types';
+  import { browsePath, checkFolder } from '../../lib/folderCheck';
   import { ws, SCRATCH_WORKSPACE_ID } from '../../lib/stores/workspace.svelte';
   import { auth } from '../../lib/stores/auth.svelte';
   import { toasts } from '../../lib/toast.svelte';
@@ -82,6 +85,9 @@
   /** Optional opening message (A6) — delivered by the daemon once the CLI is ready. */
   let prompt = $state('');
   let cwd = $state('');
+  /** Inline reason a typed working folder was refused (missing / a file). */
+  let cwdError = $state('');
+  let checkingCwd = false;
   let browser = $state(false);
   let busy = $state(false);
   interface PendingSpawn {
@@ -321,6 +327,22 @@
     let dir = cwd.trim();
     const home = ws.scratch?.root_path;
     if (home && (dir === '~' || dir.startsWith('~/'))) dir = home + dir.slice(1);
+    // A typo must not start an agent in a fresh, empty stray folder (the
+    // daemon creates a missing cwd): check it exists first, like onboarding.
+    if (dir !== '') {
+      if (checkingCwd) return;
+      checkingCwd = true;
+      cwdError = '';
+      try {
+        const check = await checkFolder(dir, (p) => api.get<FsBrowse>(browsePath(p)));
+        if (!check.ok) {
+          cwdError = check.message;
+          return;
+        }
+      } finally {
+        checkingCwd = false;
+      }
+    }
     const options = {scratch: scratchMode};
     const workspaceId = ws.currentId;
     const sessionModel = supportsModel && model.trim() !== '' ? model.trim() : null;
@@ -548,6 +570,9 @@
         id="ns-cwd"
         class="input mono"
         bind:value={cwd}
+        oninput={() => (cwdError = '')}
+        aria-invalid={cwdError !== ''}
+        aria-describedby="ns-cwd-err"
         spellcheck="false"
         list="ns-recent-dirs"
         placeholder="/absolute/path/to/folder"
@@ -561,6 +586,7 @@
       Any folder on this machine — it does not have to be inside a workspace.
       {scratchMode ? 'Defaults to your home folder.' : 'Defaults to the workspace root.'}
     </span>
+    <span id="ns-cwd-err" class="hint cwd-err" role="status">{cwdError}</span>
     {#if isHome(cwd)}
       <!-- Trust and the sandbox follow the session cwd (not the workspace):
            a home-rooted session is trusted for, and may write under, all of ~. -->
@@ -950,5 +976,11 @@
     background: var(--surface-2);
     max-height: 360px;
     overflow: auto;
+  }
+  .cwd-err {
+    color: var(--danger);
+  }
+  .cwd-err:empty {
+    display: none;
   }
 </style>

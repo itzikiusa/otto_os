@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use otto_core::api::CreateSessionReq;
@@ -21,7 +20,7 @@ use crate::state::ServerCtx;
 /// `git -C <dir> rev-parse HEAD` → the current commit sha, if `dir` is a repo.
 #[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn head_of(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = otto_git::hardened_std_command()
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "HEAD"])
@@ -42,7 +41,7 @@ pub fn head_of(dir: &Path) -> Option<String> {
 /// test, across common languages).
 #[allow(clippy::disallowed_methods)] // sync helper: async callers run it via spawn_blocking / offload::blocking
 pub fn list_test_files(dir: &Path) -> HashSet<String> {
-    let out = match Command::new("git")
+    let out = match otto_git::hardened_std_command()
         .arg("-C")
         .arg(dir)
         .args(["ls-files"])

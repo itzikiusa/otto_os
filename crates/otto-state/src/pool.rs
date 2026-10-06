@@ -363,10 +363,13 @@ impl<'a> sqlx::Acquire<'a> for &'_ DbPool {
         Box::pin(self.write.acquire())
     }
 
+    /// `BEGIN IMMEDIATE`, like [`DbPool::begin`]: a generic `Acquire` caller
+    /// gets the same write-lock-up-front invariant (a DEFERRED begin here
+    /// was a latent `SQLITE_BUSY_SNAPSHOT` on the read→write upgrade).
     fn begin(self) -> BoxFuture<'static, Result<Transaction<'a, Sqlite>, sqlx::Error>> {
         self.tick();
         let write = self.write.clone();
-        Box::pin(async move { write.begin().await })
+        Box::pin(async move { write.begin_with("BEGIN IMMEDIATE").await })
     }
 }
 
@@ -540,6 +543,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after, 2);
+    }
+
+    /// S7-08: `Acquire::begin` on `&DbPool` takes the write lock at BEGIN
+    /// (IMMEDIATE), before any statement runs — an independent connection
+    /// can't start a write transaction while it is open.
+    #[tokio::test]
+    async fn acquire_begin_is_immediate() {
+        use sqlx::{ConnectOptions as _, Connection as _};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let pool = crate::open(&path).await.unwrap();
+        // Explicitly the TRAIT method (the inherent `begin` would win `.begin()`).
+        let tx = sqlx::Acquire::begin(&pool).await.unwrap();
+        let mut other = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .busy_timeout(std::time::Duration::ZERO)
+            .connect()
+            .await
+            .unwrap();
+        let err = sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut other)
+            .await
+            .expect_err("the Acquire transaction must already hold the write lock");
+        assert!(err.to_string().to_lowercase().contains("locked"), "{err}");
+        drop(tx);
+        other.close().await.unwrap();
     }
 
     /// The point of the split: while a writer holds SQLite's write lock (and

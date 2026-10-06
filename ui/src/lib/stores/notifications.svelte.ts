@@ -205,6 +205,9 @@ export function mergeInFlight(fetched: Notice[], ingested: Notice[]): Notice[] {
   return capNotices(out);
 }
 
+/** Internal marker: a load answered for a previous identity (dropped). */
+const STALE = Symbol('stale-identity');
+
 class NotificationStore {
   /** Raw: every write replaces the array (and edited notices) wholesale. */
   notices: Notice[] = $state.raw([]);
@@ -244,8 +247,39 @@ class NotificationStore {
   /** Whether we've already asked the OS for notification permission this run. */
   private permissionRequested = false;
 
+  /** The first load in flight, for {@link ensureLoaded} to join. */
+  private inflight: Promise<void> | null = null;
+
+  /** Make sure notices are loaded at least once: joins a load already in
+   *  flight instead of queueing a second fetch (Home and Settings mount while
+   *  the bell's first load is still out — a queued reload doubled boot's
+   *  `/notifications` + `/notifications/settings` requests). Use {@link load}
+   *  when newer server state is wanted (reconnect resync, Retry). */
+  ensureLoaded(): Promise<void> {
+    if (untrack(() => this.loaded)) return Promise.resolve();
+    const running = untrack(() => this.inflight);
+    if (running) return running;
+    return this.load();
+  }
+
   /** Load notices + settings from the daemon. Safe to call more than once. */
-  async load(): Promise<void> {
+  load(): Promise<void> {
+    // Already fetching: loadOnce queues one trailing reload; hand back the
+    // running load rather than recording the queued no-op as "in flight".
+    const running = untrack(() => this.inflight);
+    if (running && untrack(() => this.loading)) {
+      void this.loadOnce();
+      return running;
+    }
+    const p = this.loadOnce();
+    this.inflight = p;
+    void p.finally(() => {
+      if (this.inflight === p) this.inflight = null;
+    });
+    return p;
+  }
+
+  private async loadOnce(): Promise<void> {
     // Read the re-entrancy guard UNtracked: callers like NotificationBell wrap
     // this in a bare `$effect(() => void notifications.load())` intending a
     // load-once-on-mount. Reading `this.loading` inside that effect's tracking
@@ -264,11 +298,15 @@ class NotificationStore {
     // Notices ingested from the event stream while the GET is in flight may
     // be newer than its snapshot — merged back below, never overwritten.
     const since = this.ingestSeq;
+    const epoch = this.identityEpoch;
     try {
       const [notices, settings] = await Promise.all([
         api.get<Notice[]>('/notifications'),
         api.get<NotificationSettings>('/notifications/settings').catch(() => this.settings),
       ]);
+      // Answered for the previous identity: drop it (the queued reload
+      // below fetches the new identity's notices).
+      if (epoch !== this.identityEpoch) throw STALE;
       const fetched = notices.filter((n) => !this.isChannelSessionNotice(n));
       this.notices = mergeInFlight(fetched, this.ingestedSince(since));
       this.settings = settings;
@@ -280,9 +318,13 @@ class NotificationStore {
       }
       this.error = null;
     } catch (e) {
-      // Backend may not be ready yet (the events WS reloads on connect) — keep
-      // whatever we had and surface the failure so the bell can offer Retry.
-      this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+      // A previous identity's answer (or failure) is dropped; the queued
+      // reload below runs for the new one.
+      if (e !== STALE && epoch === this.identityEpoch) {
+        // Backend may not be ready yet (the events WS reloads on connect) — keep
+        // whatever we had and surface the failure so the bell can offer Retry.
+        this.error = (e instanceof Error ? e.message : String(e)) || 'Request failed';
+      }
     } finally {
       this.loading = false;
     }
@@ -293,6 +335,21 @@ class NotificationStore {
   }
 
   private reloadQueued = false;
+  /** Bumped on an identity change; a load answered for the old one is dropped. */
+  private identityEpoch = 0;
+
+  /** The signed-in identity changed (impersonate / stop / re-login, S13-02):
+   *  notices are per user on the daemon, so the previous identity's list,
+   *  in-flight load and ingest log must not mix with the new one's. Clears
+   *  (a load in flight is dropped); the caller then calls `load()`, which
+   *  queues behind a dropped in-flight one. */
+  resetForIdentity(): void {
+    this.identityEpoch += 1;
+    this.notices = [];
+    this.ingestLog = [];
+    this.loaded = false;
+    this.error = null;
+  }
   /** Event-stream ingests, in order, for {@link load}'s in-flight merge. */
   private ingestSeq = 0;
   private ingestLog: { seq: number; notice: Notice }[] = [];

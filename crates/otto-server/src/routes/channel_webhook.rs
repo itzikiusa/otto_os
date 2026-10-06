@@ -210,6 +210,7 @@ pub async fn inbound(
         thread: req.thread.filter(|t| !t.trim().is_empty()),
         user: user.unwrap_or_else(|| "webhook".to_string()),
         text,
+        edited: false,
     };
     let adapter: Arc<dyn Adapter> = Arc::new(WebhookAdapter::new(callback));
     tokio::spawn(async move {

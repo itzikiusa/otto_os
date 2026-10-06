@@ -3235,3 +3235,79 @@ mod tests {
             .expect("accountless story passes");
     }
 }
+
+/// Validate a caller-supplied agent working directory (S4-13). Product agents
+/// are spawned there AND the folder is pre-trusted for the CLI (a grant
+/// written into `~/.claude.json` that covers its subfolders), so `/` or
+/// `$HOME` would hand every agent a trust grant over the whole disk.
+///
+/// Accepted: an existing directory (canonicalized) that is NOT `/`, `$HOME`
+/// or an ancestor of `$HOME`, and that lies under the workspace root, under
+/// the system temp dir, or is itself a git checkout. Returns the canonical
+/// path.
+pub fn validate_agent_cwd(cwd: &str, ws_root: Option<&str>) -> otto_core::Result<String> {
+    use std::path::{Path, PathBuf};
+    let bad = |why: &str| otto_core::Error::Invalid(format!("cwd {cwd:?}: {why}"));
+    let expanded = otto_core::paths::expand_tilde(cwd.trim());
+    let canon = std::fs::canonicalize(&expanded).map_err(|_| bad("not an existing folder"))?;
+    if !canon.is_dir() {
+        return Err(bad("not a folder"));
+    }
+    if canon.parent().is_none() {
+        return Err(bad("the filesystem root is not allowed"));
+    }
+    let canon_of = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| !h.as_os_str().is_empty())
+    {
+        if canon_of(&home).starts_with(&canon) {
+            return Err(bad(
+                "your home folder (or above it) is not allowed — pick a project folder",
+            ));
+        }
+    }
+    let under = |root: &Path| {
+        let r = canon_of(root);
+        r.parent().is_some() && canon.starts_with(&r)
+    };
+    let in_ws = ws_root
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .is_some_and(|r| under(Path::new(&otto_core::paths::expand_tilde(r))));
+    if in_ws || under(&std::env::temp_dir()) || canon.join(".git").exists() {
+        return Ok(canon.to_string_lossy().into_owned());
+    }
+    Err(bad("must be inside the workspace folder or a git checkout"))
+}
+
+#[cfg(test)]
+mod cwd_tests {
+    use super::validate_agent_cwd;
+
+    #[test]
+    fn root_home_and_missing_cwds_are_rejected() {
+        assert!(validate_agent_cwd("/", None).is_err());
+        if let Some(home) = std::env::var_os("HOME") {
+            let h = home.to_string_lossy().to_string();
+            assert!(validate_agent_cwd(&h, Some(&h)).is_err(), "$HOME");
+            assert!(validate_agent_cwd("~", None).is_err(), "~");
+        }
+        assert!(validate_agent_cwd("/definitely/not/here", None).is_err());
+    }
+
+    #[test]
+    fn workspace_temp_and_git_cwds_are_accepted() {
+        let ws = tempfile::tempdir().unwrap();
+        let sub = ws.path().join("svc");
+        std::fs::create_dir_all(&sub).unwrap();
+        let root = ws.path().to_string_lossy().to_string();
+        assert!(validate_agent_cwd(&sub.to_string_lossy(), Some(&root)).is_ok());
+        // Under the system temp dir (scratch) is fine even without a ws root.
+        assert!(validate_agent_cwd(&sub.to_string_lossy(), None).is_ok());
+        // A file is not a folder.
+        let f = ws.path().join("f.txt");
+        std::fs::write(&f, "x").unwrap();
+        assert!(validate_agent_cwd(&f.to_string_lossy(), Some(&root)).is_err());
+    }
+}

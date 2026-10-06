@@ -21,98 +21,10 @@ pub(crate) mod sandbox {
     //! NON-root callers of `/fs/browse` and `/fs/read` (`non_root_fs_denied`).
     //! Input paths have already been canonicalized (symlinks + `..` resolved).
 
-    use std::path::{Path, PathBuf};
+    //! The lists themselves live in [`otto_core::secret_paths`] so the vault
+    //! root/asset guard refuses exactly the same set.
 
-    /// Directories (relative to `$HOME`) that hold credentials/secrets and must
-    /// never be served through the session artifact endpoint.
-    const HOME_DENY_DIRS: &[&str] = &[
-        ".ssh",
-        ".aws",
-        ".gnupg",
-        ".kube",
-        ".docker",
-        ".config/gcloud",
-        ".config/gh",
-        ".azure",
-        ".password-store",
-    ];
-
-    /// Absolute prefixes excluded from session artifacts (system secret stores).
-    const ABS_DENY_PREFIXES: &[&str] = &[
-        "/etc",
-        "/private/etc",
-        "/root",
-        "/var/root",
-        "/proc",
-        "/sys",
-    ];
-
-    /// Exact (case-insensitive) filenames that are known secret stores and are
-    /// never served as session artifacts, even outside the denied directories.
-    const DENY_FILE_NAMES: &[&str] = &[
-        "id_rsa",
-        "id_dsa",
-        "id_ecdsa",
-        "id_ed25519",
-        "credentials",
-        ".env",
-        ".netrc",
-        ".pgpass",
-        ".npmrc",
-        ".pypirc",
-        ".dockercfg",
-    ];
-
-    /// Filename substrings whose presence marks a likely secret (private keys,
-    /// keystores). Matched case-insensitively against the file name only.
-    const DENY_FILE_SUFFIXES: &[&str] = &[".pem", ".key", ".pfx", ".p12", ".keystore"];
-
-    fn home() -> Option<PathBuf> {
-        std::env::var("HOME")
-            .ok()
-            .filter(|h| !h.is_empty())
-            .map(PathBuf::from)
-    }
-
-    /// True when `canonical` (an already-resolved path) is inside a denied
-    /// directory or under a denied absolute prefix for session artifacts.
-    pub(crate) fn is_denied_dir(canonical: &Path) -> bool {
-        // Home-relative secret dirs.
-        if let Some(home) = home() {
-            if let Ok(home_canon) = home.canonicalize() {
-                for rel in HOME_DENY_DIRS {
-                    let denied = home_canon.join(rel);
-                    if canonical == denied || canonical.starts_with(&denied) {
-                        return true;
-                    }
-                }
-            }
-        }
-        // Absolute system prefixes.
-        for prefix in ABS_DENY_PREFIXES {
-            let p = Path::new(prefix);
-            if canonical == p || canonical.starts_with(p) {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// True when `canonical` names a known secret file (by exact name or
-    /// extension). Applied to session artifacts on top of [`is_denied_dir`].
-    pub(crate) fn is_denied_file(canonical: &Path) -> bool {
-        let name = match canonical.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_ascii_lowercase(),
-            None => return false,
-        };
-        if DENY_FILE_NAMES
-            .iter()
-            .any(|d| d.eq_ignore_ascii_case(&name))
-        {
-            return true;
-        }
-        DENY_FILE_SUFFIXES.iter().any(|s| name.ends_with(s))
-    }
+    pub(crate) use otto_core::secret_paths::{is_denied_dir, is_denied_file};
 }
 
 /// Keep OS errors actionable, rather than turning denied access into "not found".
@@ -282,40 +194,27 @@ fn browse_canceled(flag: &std::sync::atomic::AtomicBool) -> ApiResult<()> {
 /// unrestricted (OS-permission) access. `raw` is the caller's path; it is
 /// expanded + canonicalized here so `..`/symlinks can't dodge the prefixes.
 fn non_root_fs_denied(raw: &str) -> ApiResult<()> {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     let expanded = expand_home(if raw.is_empty() { "~" } else { raw });
     // A path that doesn't resolve is left to the handler's own error.
     let Ok(canonical) = Path::new(&expanded).canonicalize() else {
         return Ok(());
     };
-    let home = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from);
-    let mut data_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(d) = std::env::var_os("OTTO_DATA_DIR").filter(|d| !d.is_empty()) {
-        data_dirs.push(PathBuf::from(d));
-    }
-    if let Some(h) = &home {
-        data_dirs.push(h.join("Library/Application Support/Otto"));
-    }
-    if in_otto_data_dir(&canonical, &data_dirs)
-        || sandbox::is_denied_dir(&canonical)
-        || sandbox::is_denied_file(&canonical)
-    {
+    non_root_canonical_denied(&canonical)
+}
+
+/// [`non_root_fs_denied`] for a path that is ALREADY canonical — `/fs/read`
+/// checks the very path it then opens (S8-09: no second resolution a symlink
+/// swap could slip between).
+fn non_root_canonical_denied(canonical: &std::path::Path) -> ApiResult<()> {
+    use otto_core::secret_paths as sp;
+    if sp::in_protected_dir(canonical) || sp::is_denied_file(canonical) {
         return Err(ApiError(Error::Forbidden(format!(
             "{} holds credentials or Otto's own state; only the root user can open it",
             canonical.display()
         ))));
     }
     Ok(())
-}
-
-/// True when the CANONICAL `path` is (inside) one of Otto's data dirs.
-fn in_otto_data_dir(path: &std::path::Path, data_dirs: &[std::path::PathBuf]) -> bool {
-    data_dirs.iter().any(|d| {
-        let d = d.canonicalize().unwrap_or_else(|_| d.clone());
-        path.starts_with(&d)
-    })
 }
 
 /// `GET /api/v1/fs/browse?path=<abs-or-~-path>[&files=true]`
@@ -462,10 +361,9 @@ pub async fn read_file(
         std::time::Duration::from_secs(10),
         move |cancel| {
             browse_canceled(&cancel)?;
-            if restricted {
-                non_root_fs_denied(&params.path)?;
-            }
-            let result = read_file_sync(&params.path);
+            // The deny check runs inside `read_file_sync`, on the canonical
+            // path it opens (one resolution — S8-09).
+            let result = read_file_sync(&params.path, restricted);
             browse_canceled(&cancel)?;
             result
         },
@@ -474,12 +372,15 @@ pub async fn read_file(
     .map(Json)
 }
 
-fn read_file_sync(path: &str) -> ApiResult<FsRead> {
+fn read_file_sync(path: &str, restricted: bool) -> ApiResult<FsRead> {
     let expanded = expand_home(path);
     let target = std::path::Path::new(&expanded);
     let canonical = target
         .canonicalize()
         .map_err(|e| filesystem_error("resolve file", target, e))?;
+    if restricted {
+        non_root_canonical_denied(&canonical)?;
+    }
     let metadata = std::fs::metadata(&canonical)
         .map_err(|e| filesystem_error("inspect file", &canonical, e))?;
     if !metadata.is_file() {
@@ -541,10 +442,14 @@ fn read_at_most(path: &std::path::Path, limit: usize) -> std::io::Result<Vec<u8>
     options.read(true);
     // A path can change between metadata and open. Nonblocking open avoids a
     // replaced FIFO hanging a worker; verify the actual open handle as well.
+    // `path` is canonical, so its last component is never a symlink: refuse
+    // one that appeared since (a swap after the deny check, S8-09).
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        options.custom_flags(
+            (rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::NOFOLLOW).bits() as i32,
+        );
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
@@ -594,7 +499,7 @@ mod tests {
         let path = outside.path().join("id_ed25519");
         std::fs::write(&path, "synthetic fixture, not a key").unwrap();
         assert_eq!(
-            super::read_file_sync(path.to_str().unwrap())
+            super::read_file_sync(path.to_str().unwrap(), false)
                 .unwrap()
                 .content,
             "synthetic fixture, not a key"
@@ -872,12 +777,12 @@ mod tests {
         let cap = super::MAX_READ_BYTES as usize;
         for bytes in [vec![b'x'; cap + 9], vec![0xff; cap]] {
             std::fs::write(&path, bytes).unwrap();
-            let read = super::read_file_sync(path.to_str().unwrap()).unwrap();
+            let read = super::read_file_sync(path.to_str().unwrap(), false).unwrap();
             assert!(read.truncated);
             assert!(read.content.len() <= cap);
         }
         std::fs::write(&path, b"binary\0fixture").unwrap();
-        let read = super::read_file_sync(path.to_str().unwrap()).unwrap();
+        let read = super::read_file_sync(path.to_str().unwrap(), false).unwrap();
         assert!(read.truncated);
         assert!(read.content.is_empty());
         std::fs::write(&path, b"synthetic fixture").unwrap();
@@ -885,26 +790,26 @@ mod tests {
         {
             let link = temp.path().join("symlink");
             std::os::unix::fs::symlink(&path, &link).unwrap();
-            let read = super::read_file_sync(link.to_str().unwrap()).unwrap();
+            let read = super::read_file_sync(link.to_str().unwrap(), false).unwrap();
             assert_eq!(read.path, path.canonicalize().unwrap().to_string_lossy());
             assert_eq!(read.content, "synthetic fixture");
             let socket = temp.path().join("socket");
             let _socket = std::os::unix::net::UnixListener::bind(&socket).unwrap();
             assert!(matches!(
-                super::read_file_sync(socket.to_str().unwrap())
+                super::read_file_sync(socket.to_str().unwrap(), false)
                     .unwrap_err()
                     .0,
                 otto_core::Error::Invalid(_)
             ));
         }
         assert!(matches!(
-            super::read_file_sync(temp.path().to_str().unwrap())
+            super::read_file_sync(temp.path().to_str().unwrap(), false)
                 .unwrap_err()
                 .0,
             otto_core::Error::Invalid(_)
         ));
         assert!(matches!(
-            super::read_file_sync(temp.path().join("missing").to_str().unwrap())
+            super::read_file_sync(temp.path().join("missing").to_str().unwrap(), false)
                 .unwrap_err()
                 .0,
             otto_core::Error::NotFound(_)
@@ -935,7 +840,7 @@ mod tests {
         std::fs::write(&path, "synthetic fixture").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o0)).unwrap();
-        let read = super::read_file_sync(path.to_str().unwrap());
+        let read = super::read_file_sync(path.to_str().unwrap(), false);
         let browse = super::browse_sync(
             super::BrowseParams {
                 path: Some(folder.to_string_lossy().into()),
@@ -960,9 +865,12 @@ mod tests {
 
     #[test]
     fn non_root_deny_covers_otto_data_dir_and_its_secrets() {
-        let data = tempfile::tempdir().unwrap();
-        let dirs = vec![data.path().to_path_buf()];
-        let canon = data.path().canonicalize().unwrap();
+        // The default data dir is refused even when `$OTTO_DATA_DIR` points
+        // elsewhere (the shared list in `otto_core::secret_paths`).
+        let Some(home) = otto_core::secret_paths::home_dir() else {
+            return;
+        };
+        let data = home.join("Library/Application Support/Otto");
         for rel in [
             "",
             "secrets.json",
@@ -971,15 +879,12 @@ mod tests {
             "logs/ottod.log",
         ] {
             assert!(
-                super::in_otto_data_dir(&canon.join(rel), &dirs),
+                super::non_root_canonical_denied(&data.join(rel)).is_err(),
                 "{rel} must be denied"
             );
         }
         let other = tempfile::tempdir().unwrap();
-        assert!(!super::in_otto_data_dir(
-            &other.path().canonicalize().unwrap(),
-            &dirs
-        ));
+        assert!(super::non_root_canonical_denied(&other.path().canonicalize().unwrap()).is_ok());
     }
 
     #[test]
@@ -1005,6 +910,43 @@ mod tests {
         assert!(super::non_root_fs_denied(key.to_str().unwrap()).is_err());
         assert!(super::non_root_fs_denied(ok.to_str().unwrap()).is_ok());
         assert!(super::non_root_fs_denied(dir.path().to_str().unwrap()).is_ok());
+    }
+
+    /// S8-09 / S11-08: a restricted read is checked on the canonical path it
+    /// opens — histories and git credentials are refused, also through a
+    /// symlink with an innocent name; a plain file still reads.
+    #[test]
+    fn restricted_read_refuses_credential_files_and_links_to_them() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [".zsh_history", ".git-credentials", ".bash_history"] {
+            let secret = dir.path().join(name);
+            std::fs::write(&secret, "token=hunter2").unwrap();
+            let err = super::read_file_sync(secret.to_str().unwrap(), true).unwrap_err();
+            assert!(
+                matches!(err.0, otto_core::Error::Forbidden(_)),
+                "{name} must be refused"
+            );
+            #[cfg(unix)]
+            {
+                let link = dir
+                    .path()
+                    .join(format!("notes-{}.txt", name.trim_start_matches('.')));
+                std::os::unix::fs::symlink(&secret, &link).unwrap();
+                let err = super::read_file_sync(link.to_str().unwrap(), true).unwrap_err();
+                assert!(
+                    matches!(err.0, otto_core::Error::Forbidden(_)),
+                    "a link to {name} must be refused"
+                );
+            }
+        }
+        let ok = dir.path().join("readme.md");
+        std::fs::write(&ok, "hi").unwrap();
+        assert_eq!(
+            super::read_file_sync(ok.to_str().unwrap(), true)
+                .unwrap()
+                .content,
+            "hi"
+        );
     }
 
     #[test]

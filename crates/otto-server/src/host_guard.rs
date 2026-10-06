@@ -9,7 +9,9 @@
 //!   - any IP literal (v4 or `[v6]`): an IP in `Host` means the browser was
 //!     pointed at that address, never re-resolved — not a rebinding vector;
 //!   - `localhost` / `*.localhost` (and Tauri's `tauri.localhost`);
-//!   - mDNS `*.local` (the TLS listener's `otto.local` + the Mac's Bonjour name);
+//!   - mDNS: ONLY the TLS listener's `otto.local` and this Mac's own Bonjour
+//!     name (`scutil --get LocalHostName`) — never any other `*.local`, which a
+//!     LAN peer could answer for and rebind (S8-11);
 //!   - Tailscale MagicDNS `*.ts.net` — narrowed to the names listed in
 //!     `OTTO_ALLOWED_HOSTS` when that lists any `.ts.net` name;
 //!   - the host of the **Public link domain** (`share_base_url` setting) — the
@@ -82,13 +84,58 @@ pub(crate) fn tailscale_name_allowed(host: &str, extra: &[String]) -> bool {
     pinned.is_empty() || pinned.iter().any(|p| p.as_str() == host)
 }
 
-/// Pure verdict for a (port-stripped, lower-cased) host.
-pub(crate) fn host_allowed_with(host: &str, extra: &[String]) -> bool {
+/// This Mac's own mDNS names: the TLS listener's `otto.local` plus the Bonjour
+/// `LocalHostName` (`scutil --get LocalHostName` → `<name>.local`). Read once.
+///
+/// Only these are trusted (S8-11) — not every `*.local`: any LAN peer can
+/// answer mDNS for `evil.local` and rebind it to 127.0.0.1.
+///
+/// The one `scutil` spawn is warmed off the async workers at boot
+/// ([`warm_own_mdns_names`]); a request that races the warm-up pays it once.
+#[allow(clippy::disallowed_methods)] // one-shot ~ms probe, memoized; warmed via spawn_blocking at boot
+fn own_mdns_names() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        // Only the macOS branch below pushes; elsewhere the vec stays as-is.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut names = vec!["otto.local".to_string()];
+        #[cfg(target_os = "macos")]
+        if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
+            .args(["--get", "LocalHostName"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .to_ascii_lowercase();
+            if out.status.success() && !name.is_empty() {
+                names.push(format!("{name}.local"));
+            }
+        }
+        names
+    })
+}
+
+/// Resolve [`own_mdns_names`] on a blocking thread so the first guarded
+/// request doesn't run `scutil` on an async worker.
+pub fn warm_own_mdns_names() {
+    tokio::task::spawn_blocking(|| {
+        let _ = own_mdns_names();
+    });
+}
+
+/// Pure verdict for a (port-stripped, lower-cased) host, given the trusted
+/// `.local` names.
+pub(crate) fn host_allowed_in(host: &str, extra: &[String], own_local: &[String]) -> bool {
     is_ip_literal(host)
         || is_loopback_name(host)
-        || host.ends_with(".local")
+        || own_local.iter().any(|h| h == host)
         || tailscale_name_allowed(host, extra)
         || extra.iter().any(|h| h == host)
+}
+
+/// [`host_allowed_in`] with this Mac's own mDNS names.
+pub(crate) fn host_allowed_with(host: &str, extra: &[String]) -> bool {
+    host_allowed_in(host, extra, own_mdns_names())
 }
 
 pub(crate) fn host_allowed(host: &str) -> bool {
@@ -140,6 +187,8 @@ pub struct HostGuardState {
 
 impl HostGuardState {
     pub fn new(pool: otto_state::DbPool) -> Self {
+        // Warm the mDNS-name lookup at router build, off the request path.
+        let _ = own_mdns_names();
         Self {
             pool,
             cache: Default::default(),
@@ -168,21 +217,61 @@ impl HostGuardState {
 }
 
 /// Production middleware: the static rules, plus the Public link domain host.
+///
+/// It also stamps the request with the tunnel-aware
+/// [`otto_sessions::share_throttle::ClientIp`] every throttle and audit row keys
+/// on (S8-02 / S8-07): behind the documented Cloudflare tunnel every client
+/// reaches us as `127.0.0.1`, so `CF-Connecting-IP` is honoured — but only for
+/// a loopback peer that named the `share_base_url` host.
 pub async fn host_guard_with_settings(
     axum::extract::State(st): axum::extract::State<HostGuardState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    let mut host: Option<String> = None;
+    let mut via_tunnel = false;
     if let Some(h) = req.headers().get(header::HOST) {
         let Ok(raw) = h.to_str() else {
             return misdirected();
         };
-        let host = host_of(raw);
-        if !host_allowed(&host) && st.share_host().await.as_deref() != Some(host.as_str()) {
+        let name = host_of(raw);
+        let statically_ok = host_allowed(&name);
+        // The tunnel host is a DNS name; a loopback/IP-literal Host never is,
+        // so the desktop hot path never consults the settings cache.
+        let tunnel_candidate = !is_loopback_name(&name) && !is_ip_literal(&name);
+        let is_share_host = if !statically_ok || tunnel_candidate {
+            st.share_host().await.as_deref() == Some(name.as_str())
+        } else {
+            false
+        };
+        if !statically_ok && !is_share_host {
             return misdirected();
         }
+        via_tunnel = is_share_host;
+        host = Some(name);
     }
+    stamp_client_ip(&mut req, host.as_deref(), via_tunnel);
     next.run(req).await
+}
+
+/// Insert the resolved [`otto_sessions::share_throttle::ClientIp`] (no-op when
+/// the listener did not wire `ConnectInfo`, e.g. in-process tests).
+fn stamp_client_ip(req: &mut Request, host: Option<&str>, via_tunnel: bool) {
+    use otto_sessions::share_throttle::{resolve_client_ip, ClientIp};
+    let Some(peer) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip())
+    else {
+        return;
+    };
+    let cf = req
+        .headers()
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok());
+    let ip = resolve_client_ip(peer, via_tunnel, cf);
+    let local = peer.is_loopback() && !via_tunnel && host.is_none_or(is_loopback_name);
+    req.extensions_mut().insert(ClientIp { ip, local });
 }
 
 #[cfg(test)]
@@ -198,8 +287,23 @@ mod tests {
     }
 
     #[test]
+    fn only_our_own_mdns_names_are_trusted() {
+        let none: Vec<String> = vec![];
+        let own = vec!["otto.local".to_string(), "my-mac.local".to_string()];
+        assert!(host_allowed_in("otto.local", &none, &own));
+        assert!(host_allowed_in("my-mac.local", &none, &own));
+        for bad in ["evil.local", "other-mac.local", "local"] {
+            assert!(!host_allowed_in(bad, &none, &own), "{bad}");
+        }
+        // `otto.local` is always ours, whatever the Bonjour name is.
+        assert!(host_allowed_with("otto.local", &none));
+        assert!(!host_allowed_with("evil-rebind.local", &none));
+    }
+
+    #[test]
     fn rebinding_names_are_refused_ip_literals_and_ours_allowed() {
         let none: Vec<String> = vec![];
+        let own = vec!["otto.local".to_string(), "my-mac.local".to_string()];
         for ok in [
             "127.0.0.1",
             "localhost",
@@ -212,7 +316,7 @@ mod tests {
             "my-mac.local",
             "my-mac.tail1234.ts.net",
         ] {
-            assert!(host_allowed_with(ok, &none), "{ok}");
+            assert!(host_allowed_in(ok, &none, &own), "{ok}");
         }
         for bad in [
             "evil.example",

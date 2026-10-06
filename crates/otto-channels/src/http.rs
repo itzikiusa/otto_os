@@ -203,6 +203,11 @@ async fn upsert_integration<S: ChannelsCtx>(
             &req.preferred_cli,
         )
         .await?;
+    if let Some(open) = req.open_to_all {
+        s.integrations()
+            .set_open_to_all(&ws_id, channel, open)
+            .await?;
+    }
 
     let integration = s
         .integrations()
@@ -459,6 +464,7 @@ mod tests {
             channel,
             enabled: true,
             allowed_users: String::new(),
+            open_to_all: false,
             agent_reply: true,
             reply_instructions: String::new(),
             channel_id: String::new(),

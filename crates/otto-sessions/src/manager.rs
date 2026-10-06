@@ -104,14 +104,32 @@ fn lean_turn_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
 /// ([`SessionManager::apply_sandbox`]). Otto's own tools are refused at the
 /// daemon (otto-server `personal_agent_policy`). Claude-only flag; other
 /// providers rely on the sandbox + the daemon-side policy.
+///
+/// Two review-only refinements (code review runs against PR checkouts whose
+/// content an outsider wrote):
+/// - `meta.allow_subagents = true` keeps the sub-agent tool (an orchestrator
+///   reviewer delegates each lens to one) while the shell stays removed;
+/// - `meta.project_settings = false` adds `--setting-sources user`, so the
+///   checkout's `.claude/settings*.json` (hooks, MCP servers, permission
+///   rules) never loads — a repo hook would otherwise run on SessionStart.
 fn read_only_args(provider: &str, meta: &serde_json::Value) -> Vec<String> {
     if provider != "claude" || meta.get("read_only").and_then(|v| v.as_bool()) != Some(true) {
         return vec![];
     }
-    vec![
+    let subagents = meta.get("allow_subagents").and_then(|v| v.as_bool()) == Some(true);
+    let mut args = vec![
         "--disallowed-tools".to_string(),
-        "Bash NotebookEdit Task".to_string(),
-    ]
+        if subagents {
+            "Bash NotebookEdit".to_string()
+        } else {
+            "Bash NotebookEdit Task".to_string()
+        },
+    ];
+    if meta.get("project_settings").and_then(|v| v.as_bool()) == Some(false) {
+        args.push("--setting-sources".to_string());
+        args.push("user".to_string());
+    }
+    args
 }
 
 /// Per-session creds file for the Codex `otto` MCP server: a daemon-private temp
@@ -194,15 +212,22 @@ struct OttoToolsInjection {
 /// One row of the live process table: (pid, ppid, cumulative CPU ms).
 type ProcRow = (u32, u32, u64);
 
-/// Snapshot the OS process table via one `ps -axo pid=,ppid=,time=` pass.
+/// `ps` flags for [`process_table`]. On macOS `-S` sums each process's
+/// EXITED (reaped) children into it, so a tree's total stays monotonic: without
+/// it a tree that churns short processes (test runners, `make`, a shell loop)
+/// lost each reaped child's CPU and read as non-increasing — busy background
+/// work looked idle to the working-but-quiet guard (review S1-16).
+#[cfg(target_os = "macos")]
+const PS_ARGS: [&str; 3] = ["-axS", "-o", "pid=,ppid=,time="];
+#[cfg(not(target_os = "macos"))]
+const PS_ARGS: [&str; 3] = ["-ax", "-o", "pid=,ppid=,time="];
+
+/// Snapshot the OS process table via one `ps` pass ([`PS_ARGS`]).
 /// Used by the idle-suspend sweep; a failed/absent `ps` yields an empty table
 /// (the sweep then behaves exactly as before the guard existed).
 #[allow(clippy::disallowed_methods)] // sync helper: blocking by contract — async callers offload it
 fn process_table() -> Vec<ProcRow> {
-    let out = match std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,time="])
-        .output()
-    {
+    let out = match std::process::Command::new("ps").args(PS_ARGS).output() {
         Ok(o) if o.status.success() => o.stdout,
         _ => return Vec::new(),
     };
@@ -267,6 +292,83 @@ fn parse_ps_time_ms(s: &str) -> Option<u64> {
         _ => return None,
     };
     Some((days * 86_400_000) + (h * 3_600_000) + (m * 60_000) + (sec * 1000.0) as u64)
+}
+
+/// Pause between provider-id capture scans, by time since the first input:
+/// quick while the CLI is most likely to flush its rollout, then backing off
+/// (review S1-28 — a 500 ms rescan for up to 180 s was pure overhead).
+fn capture_scan_pause(since_input: Duration) -> Duration {
+    if since_input < Duration::from_secs(10) {
+        Duration::from_secs(1)
+    } else if since_input < Duration::from_secs(60) {
+        Duration::from_secs(2)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
+/// Row-level auto-archive eligibility (`session_auto_archive_days`): an
+/// unarchived, unpinned agent session last active before `cutoff`. Liveness
+/// and attachment are checked separately (in-memory state).
+fn is_auto_archive_candidate(s: &Session, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    !s.archived
+        && s.kind == SessionKind::Agent
+        && s.last_active_at < cutoff
+        && !s
+            .meta
+            .get("keep_alive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
+/// The descendant-CPU guard's verdict for one session in one sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CpuVerdict {
+    /// The tree accrued more than [`CPU_GROWTH_MS`] since the last sample:
+    /// in-flight work (a quiet build/test run).
+    Growing { prev: u64, now: u64 },
+    /// No previous sample but descendants exist: decide on the next sweep.
+    Baselining,
+    /// Nothing accrued (or no descendants): the guard does not hold.
+    Idle,
+}
+
+/// CPU growth between two sweeps that counts as in-flight work.
+const CPU_GROWTH_MS: u64 = 200;
+
+/// Pure descendant-CPU decision for one sample against the previous one.
+fn cpu_verdict(prev: Option<u64>, now: u64) -> CpuVerdict {
+    match prev {
+        Some(prev) if now > prev.saturating_add(CPU_GROWTH_MS) => CpuVerdict::Growing { prev, now },
+        Some(_) => CpuVerdict::Idle,
+        None if now > 0 => CpuVerdict::Baselining,
+        None => CpuVerdict::Idle,
+    }
+}
+
+/// The CPU verdicts of ONE sweep, shared by the idle pass and the cap pass
+/// (review S1-07). Sampling a session updates its `suspend_cpu` baseline, so
+/// a second sample in the same sweep — the same lazily-cached process table
+/// — always read `prev == now` and voided the guard: the cap pass suspended
+/// exactly the sessions the idle pass had just held for "descendant CPU".
+#[derive(Default)]
+struct SweepCpu {
+    table: LazyProcTable,
+    verdicts: std::collections::HashMap<Id, CpuVerdict>,
+}
+
+impl SweepCpu {
+    /// This sweep's verdict for `id` — sampled (and the baseline advanced)
+    /// at most once per sweep.
+    async fn verdict(&mut self, baselines: &DashMap<Id, u64>, id: &Id, pid: u32) -> CpuVerdict {
+        if let Some(v) = self.verdicts.get(id) {
+            return *v;
+        }
+        let now = descendant_cpu_ms(pid, self.table.get().await);
+        let v = cpu_verdict(baselines.insert(id.clone(), now), now);
+        self.verdicts.insert(id.clone(), v);
+        v
+    }
 }
 
 /// Total cumulative CPU (ms) of every DESCENDANT of `root` — children,
@@ -1597,6 +1699,12 @@ pub(crate) async fn wait_exit_code(
 /// must not make the session unopenable.
 const RETIRED_EXIT_WAIT: Duration = Duration::from_secs(5);
 
+/// Longest one session's shutdown waits for its resume lock, and the budget
+/// all of them share (see `SessionManager::shutdown_ids`): well inside the
+/// daemon's 12 s teardown timeout.
+const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(1);
+const SHUTDOWN_LOCK_BUDGET: Duration = Duration::from_secs(4);
+
 /// Wait (bounded by [`RETIRED_EXIT_WAIT`]) for a retired process's exit.
 async fn await_retired_exit(id: &Id, mut rx: tokio::sync::watch::Receiver<Option<i32>>) {
     if tokio::time::timeout(RETIRED_EXIT_WAIT, wait_exit_code(&mut rx))
@@ -1687,6 +1795,15 @@ struct TitleProbe {
 }
 
 pub struct SessionManager {
+    /// Holders [`Self::adopt_holders`] could not decide on (a transient DB
+    /// error on the session lookup), by session id → socket. Left running,
+    /// and kept out of the boot dormant pass and credential sweep; retried
+    /// by [`Self::retry_deferred_adoptions`] and by [`Self::ensure_live`]
+    /// before it would ever start a second CLI (review S1-09).
+    deferred_holders: Arc<DashMap<Id, std::path::PathBuf>>,
+    /// Daemon shutdown has begun ([`Self::shutdown_all`] /
+    /// [`Self::shutdown_for_restart`]): no restart may spawn any more.
+    shutting_down: std::sync::atomic::AtomicBool,
     /// Shared so the per-session status task can evict an exited handle
     /// (otherwise dead PtyHandles — and their emulator + ring buffer — leak).
     live: Arc<DashMap<Id, Arc<PtyHandle>>>,
@@ -1784,6 +1901,10 @@ pub struct SessionManager {
         otto_state::provider_accounts::ProviderAccountsRepo,
         std::path::PathBuf,
     )>,
+    /// The daemon's configured data dir (`$OTTO_DATA_DIR` or the default),
+    /// which the process sandbox write-denies (and whose secrets / state DB it
+    /// read-denies). `None` ⇒ resolved like `ottod`'s config does.
+    data_dir: Option<std::path::PathBuf>,
     /// Absolute path to the `ottod` binary that backs the `otto` MCP tool server
     /// (`<path> mcp-tools`). Defaults to the running executable's own path so the
     /// tools subcommand is always the same build as the daemon.
@@ -1849,6 +1970,8 @@ impl SessionManager {
             size_owner: Arc::new(DashMap::new()),
             room_authority: Default::default(),
             suspend_cpu: Arc::new(DashMap::new()),
+            deferred_holders: Arc::new(DashMap::new()),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             suspend_hold: Arc::new(DashMap::new()),
             passive_resume: Arc::new(DashMap::new()),
             retiring: Arc::new(DashMap::new()),
@@ -1871,6 +1994,7 @@ impl SessionManager {
             settings: None,
             auth: None,
             provider_accounts: None,
+            data_dir: None,
             // Default to this daemon's own binary so `mcp-tools` is the same build.
             mcp_tools_bin: std::env::current_exe()
                 .ok()
@@ -1987,6 +2111,27 @@ impl SessionManager {
     pub fn with_auth_repo(mut self, auth: AuthRepo) -> Self {
         self.auth = Some(auth);
         self
+    }
+
+    /// The daemon's configured data dir — the one the process sandbox must
+    /// protect. Without it the sandbox falls back to `$OTTO_DATA_DIR` / the
+    /// default location, which is wrong for a daemon started with a custom
+    /// `--data-dir`-style config.
+    pub fn with_data_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.data_dir = Some(dir.into());
+        self
+    }
+
+    /// The data dir the sandbox protects: the configured one, else resolved
+    /// exactly like `ottod::config` (`$OTTO_DATA_DIR`, then the default).
+    fn sandbox_data_dir(&self, home: &std::path::Path) -> std::path::PathBuf {
+        if let Some(d) = &self.data_dir {
+            return d.clone();
+        }
+        std::env::var_os("OTTO_DATA_DIR")
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join("Library/Application Support/Otto"))
     }
 
     pub fn with_provider_accounts(
@@ -2425,7 +2570,7 @@ impl SessionManager {
         let home = std::env::var("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default();
-        let data_dir = home.join("Library/Application Support/Otto");
+        let data_dir = self.sandbox_data_dir(&home);
         // Resolve the git dir so commits in a worktree (whose .git lives outside
         // cwd) still work. Best-effort; absent for non-repos.
         let mut extra: Vec<std::path::PathBuf> = Vec::new();
@@ -2438,8 +2583,7 @@ impl SessionManager {
         if let Some(account_home) = self.provider_home(session) {
             extra.push(account_home);
         }
-        let policy =
-            otto_sandbox::SandboxPolicy::for_agent(&cwd, &home, &data_dir, &extra, network);
+        let policy = sandbox_policy(&cwd, &home, &data_dir, &extra, network, forced);
         let (program, args) = policy.wrap(&spec.program, &spec.args);
         spec.program = program;
         spec.args = args;
@@ -2448,6 +2592,37 @@ impl SessionManager {
             provider = %session.provider,
             "process sandbox enabled (network={network:?})"
         );
+    }
+
+    /// The `process_sandbox` policy for a NON-PTY process the daemon runs on a
+    /// user's behalf as `provider` in `cwd` — today a scheduled `shell` task's
+    /// `/bin/sh -c`. Same decision and profile as a session spawn
+    /// ([`Self::apply_sandbox`]): `None` when the setting is off or excludes
+    /// `provider`, or on a host without Seatbelt.
+    pub async fn process_sandbox_policy(
+        &self,
+        provider: &str,
+        cwd: &std::path::Path,
+    ) -> Option<otto_sandbox::SandboxPolicy> {
+        if !otto_sandbox::is_supported() {
+            return None;
+        }
+        let cfg = self
+            .settings
+            .as_ref()?
+            .get("process_sandbox")
+            .await
+            .ok()??;
+        let network = sandbox_decision(&cfg, SessionKind::Agent, provider)?;
+        let home = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        let data_dir = self.sandbox_data_dir(&home);
+        let extra: Vec<std::path::PathBuf> =
+            resolve_git_common_dir(cwd).await.into_iter().collect();
+        Some(sandbox_policy(
+            cwd, &home, &data_dir, &extra, network, false,
+        ))
     }
 
     /// Is Otto's first-party MCP tool server enabled for `workspace_id`?
@@ -3083,8 +3258,12 @@ impl SessionManager {
             let started = std::time::Instant::now();
             let mut captured: Option<String> = None;
             let mut logged_ambiguous = false;
+            // Waiting for the first input costs one map lookup per tick; the
+            // scans after it back off (review S1-28): each one walks the
+            // rollout dir and reads files, and loads every claimed id.
+            let mut pause = Duration::from_millis(500);
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(pause).await;
                 // Snapshot the probe (guard must not be held across awaits).
                 let Some((first_at, probe_text)) = probes
                     .get(&id)
@@ -3104,6 +3283,7 @@ impl SessionManager {
                 if since_input > WINDOW_AFTER_INPUT {
                     break;
                 }
+                pause = capture_scan_pause(since_input);
                 let floor = first_at
                     .checked_sub(Duration::from_secs(2))
                     .unwrap_or(std::time::UNIX_EPOCH);
@@ -3112,16 +3292,35 @@ impl SessionManager {
                 // tolerant of probe-garbling edits (arrow keys etc.).
                 let contended = in_flight.get(&cwd).map(|v| *v).unwrap_or(1) > 1;
                 let probe = contended.then_some(probe_text.as_str());
+                if !matches!(provider.as_str(), "codex" | "agy") {
+                    break;
+                }
                 let _guard = lock.lock().await;
                 let claimed_rows = repo.provider_session_ids().await.unwrap_or_default();
-                let claimed: std::collections::HashSet<&str> =
-                    claimed_rows.iter().map(String::as_str).collect();
-                let pick = match provider.as_str() {
-                    "codex" => pick_codex_rollout(&codex_root, &cwd, floor, &claimed, probe),
-                    "agy" => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
-                        .map(RolloutPick::Claim)
-                        .unwrap_or(RolloutPick::Nothing),
-                    _ => break,
+                // Directory walks + file reads: off the async workers.
+                let pick = {
+                    let provider = provider.clone();
+                    let codex_root = codex_root.clone();
+                    let cwd = cwd.clone();
+                    let probe = probe.map(str::to_owned);
+                    tokio::task::spawn_blocking(move || {
+                        let claimed: std::collections::HashSet<&str> =
+                            claimed_rows.iter().map(String::as_str).collect();
+                        match provider.as_str() {
+                            "codex" => pick_codex_rollout(
+                                &codex_root,
+                                &cwd,
+                                floor,
+                                &claimed,
+                                probe.as_deref(),
+                            ),
+                            _ => scan_agy_conversation(&agy_cli_root(), &cwd, floor, &claimed)
+                                .map(RolloutPick::Claim)
+                                .unwrap_or(RolloutPick::Nothing),
+                        }
+                    })
+                    .await
+                    .unwrap_or(RolloutPick::Nothing)
                 };
                 match pick {
                     RolloutPick::Claim(psid) => {
@@ -3568,6 +3767,18 @@ impl SessionManager {
         if self.is_live(id) {
             return Ok(());
         }
+        // A holder whose boot adoption was deferred may still run this
+        // session's agent: adopt it rather than resume a second CLI.
+        if let Some(path) = self.deferred_holders.get(id).map(|p| p.clone()) {
+            if self.adopt_deferred(id, path).await {
+                return Ok(());
+            }
+            if self.deferred_holders.contains_key(id) {
+                return Err(Error::Conflict(
+                    "this session's process is still running but could not be reattached yet — try again shortly".into(),
+                ));
+            }
+        }
         let mut session = self.repo.get(id).await?;
         if session.archived {
             return Err(Error::Conflict(
@@ -3749,6 +3960,9 @@ impl SessionManager {
                 live.push((id, pid));
             }
         }
+        // A shell idling at its prompt has no child process, so it cannot be
+        // hosting an agent: skip it without the whole-box `ps` (S9-10).
+        live.retain(|(_, pid)| pid.is_some_and(crate::nested::has_children));
         if live.is_empty() {
             return 0;
         }
@@ -4569,7 +4783,11 @@ impl SessionManager {
             // Transcript not on disk yet (id just captured, first turn pending).
             return Ok(false);
         };
-        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        // Async stat: this runs every ~20 s per candidate on a runtime worker.
+        let mtime = tokio::fs::metadata(&path)
+            .await
+            .and_then(|m| m.modified())
+            .ok();
         // Nothing new since the last look — skip the re-parse.
         if let Some(prev) = self.title_probe.get(&s.id) {
             if mtime.is_some() && prev.mtime == mtime {
@@ -4710,8 +4928,9 @@ impl SessionManager {
         // CPU ⇒ active ⇒ skip. Descendants only (not the agent CLI itself, whose
         // idle TUI redraws accrue CPU forever) — long-lived idle helpers (MCP
         // servers) accrue ~none, so genuinely idle sessions still suspend.
-        // Taken only when a candidate passed the cheap checks below.
-        let mut proc_table = LazyProcTable::default();
+        // Taken only when a candidate passed the cheap checks below; the
+        // verdicts are shared with the cap pass.
+        let mut sweep_cpu = SweepCpu::default();
 
         let mut suspended = 0;
         for (id, last_output, pid) in candidates {
@@ -4732,26 +4951,23 @@ impl SessionManager {
             }
             // Working-but-quiet guard (see the sweep comment above).
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
-                let prev = self.suspend_cpu.insert(id.clone(), cpu);
-                match prev {
+                match sweep_cpu.verdict(&self.suspend_cpu, &id, pid).await {
                     // Tree accrued >200ms CPU since the last sweep → in-flight work.
-                    Some(prev_cpu) if cpu > prev_cpu.saturating_add(200) => {
+                    CpuVerdict::Growing { prev, now } => {
                         self.note_hold(
                             &id,
                             "descendant CPU",
-                            &format!(" (descendants accrued {prev_cpu}→{cpu}ms)"),
+                            &format!(" (descendants accrued {prev}→{now}ms)"),
                         );
                         continue;
                     }
-                    Some(_) => {}
                     // No baseline yet and descendants exist: measure this sweep,
                     // decide on the next one (60s later).
-                    None if cpu > 0 => {
+                    CpuVerdict::Baselining => {
                         self.note_hold(&id, "descendant CPU", " (baselining descendant CPU)");
                         continue;
                     }
-                    None => {}
+                    CpuVerdict::Idle => {}
                 }
             }
             let session = match self.repo.get(&id).await {
@@ -4836,7 +5052,7 @@ impl SessionManager {
         }
         suspended
             + self
-                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut proc_table)
+                .enforce_live_cap(cap, grace.min(CAP_MIN_QUIET), &mut sweep_cpu)
                 .await
     }
 
@@ -4853,7 +5069,7 @@ impl SessionManager {
         &self,
         cap: usize,
         min_quiet: Duration,
-        proc_table: &mut LazyProcTable,
+        sweep_cpu: &mut SweepCpu,
     ) -> usize {
         if cap == 0 || self.live.len() <= cap {
             return 0;
@@ -4892,14 +5108,11 @@ impl SessionManager {
             if last_output.elapsed() < min_quiet || self.is_watched(&id) {
                 continue;
             }
-            // Same descendant-CPU rule as the idle pass (its sample for this
-            // session, when it took one, is the baseline).
+            // Same descendant-CPU rule as the idle pass — and the SAME
+            // verdict when the idle pass already sampled this session.
             if let Some(pid) = pid {
-                let cpu = descendant_cpu_ms(pid, proc_table.get().await);
-                match self.suspend_cpu.insert(id.clone(), cpu) {
-                    Some(prev) if cpu > prev.saturating_add(200) => continue,
-                    None if cpu > 0 => continue,
-                    _ => {}
+                if sweep_cpu.verdict(&self.suspend_cpu, &id, pid).await != CpuVerdict::Idle {
+                    continue;
                 }
             }
             let resumable = session.provider_session_id.is_some()
@@ -4992,20 +5205,18 @@ impl SessionManager {
         };
         let mut archived = 0;
         for s in all {
-            if s.archived
-                || s.kind != SessionKind::Agent
-                || s.last_active_at >= cutoff
+            // Cheap pre-filter on the snapshot; re-decided under the lock.
+            if !is_auto_archive_candidate(&s, cutoff)
                 || self.is_live(&s.id)
                 || self.is_attached(&s.id)
-                || s.meta
-                    .get("keep_alive")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
             {
                 continue;
             }
-            match self.archive(&s.id).await {
-                Ok(_) => {
+            match self.archive_if_stale(&s.id, cutoff).await {
+                Ok(false) => {
+                    tracing::debug!(session = %s.id, "auto-archive: session became active mid-sweep; skipped");
+                }
+                Ok(true) => {
                     archived += 1;
                     tracing::info!(
                         session = %s.id, title = %s.title,
@@ -5102,6 +5313,8 @@ impl SessionManager {
     /// closes (no orphaned agent processes left running) and on daemon
     /// shutdown. Returns the number of sessions terminated.
     pub async fn shutdown_all(&self) -> usize {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let ids: Vec<Id> = self.live.iter().map(|e| e.key().clone()).collect();
         self.shutdown_ids(ids).await
     }
@@ -5114,11 +5327,29 @@ impl SessionManager {
     /// that already passed that check BEFORE our `Exited`. Without it, a
     /// tick's `Working`/`Idle` could land after `Exited` and the next boot
     /// counted the killed (engine) session as a suspended live one.
+    ///
+    /// The lock wait is BOUNDED (review S1-15): a resume in flight can hold
+    /// it for seconds (`RETIRED_EXIT_WAIT`, the pre-spawn hook, the spawn),
+    /// and the whole shutdown sits under the daemon's 12 s teardown budget —
+    /// two slow resumes used to exhaust it, leaving every later session
+    /// neither killed nor marked exited. Past [`SHUTDOWN_LOCK_WAIT`] (or the
+    /// shared [`SHUTDOWN_LOCK_BUDGET`]) the session is retired without the
+    /// lock; the in-flight resume then refuses to spawn (`shutting_down`).
     async fn shutdown_ids(&self, ids: Vec<Id>) -> usize {
         let count = ids.len();
+        let budget_end = tokio::time::Instant::now() + SHUTDOWN_LOCK_BUDGET;
         for id in ids {
             let lock = self.resume_lock(&id);
-            let _guard = lock.lock().await;
+            let wait = budget_end
+                .saturating_duration_since(tokio::time::Instant::now())
+                .min(SHUTDOWN_LOCK_WAIT);
+            let _guard = match tokio::time::timeout(wait, lock.lock()).await {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    tracing::warn!(session = %id, "shutdown: resume lock busy — retiring the session without it");
+                    None
+                }
+            };
             self.networks.clear(&id);
             if let Some((_, handle)) = self.live.remove(&id) {
                 let _ = handle.kill();
@@ -5149,6 +5380,31 @@ impl SessionManager {
         let lock = self.resume_lock(id);
         let _guard = lock.lock().await;
         let session = self.repo.get(id).await?;
+        self.archive_locked(id, session).await
+    }
+
+    /// [`Self::archive`] for the auto-archive sweep: archive only if the
+    /// session is STILL stale under its resume lock (review S1-17). The
+    /// sweep's checks run on a `list_all` snapshot outside the lock, so a
+    /// session the user opened as the sweep reached it was resumed and then
+    /// immediately killed and archived. `Ok(false)` = no longer stale.
+    async fn archive_if_stale(
+        &self,
+        id: &Id,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        let lock = self.resume_lock(id);
+        let _guard = lock.lock().await;
+        let session = self.repo.get(id).await?;
+        if !is_auto_archive_candidate(&session, cutoff) || self.is_live(id) || self.is_attached(id)
+        {
+            return Ok(false);
+        }
+        self.archive_locked(id, session).await.map(|_| true)
+    }
+
+    /// The archive body; the caller holds `id`'s resume lock.
+    async fn archive_locked(&self, id: &Id, session: Session) -> Result<Session> {
         self.networks.clear(id);
         if let Some((_, handle)) = self.live.remove(id) {
             let _ = handle.kill();
@@ -5329,6 +5585,12 @@ impl SessionManager {
                 "session is archived — unarchive it first".into(),
             ));
         }
+        // Checked BEFORE the old process is retired: a refusal leaves it as is.
+        if session.kind == SessionKind::Agent {
+            if let Some(msg) = missing_cwd_refusal(&session) {
+                return Err(Error::Conflict(msg));
+            }
+        }
         let mut spec = match spec_override {
             Some(s) => s,
             None => {
@@ -5456,9 +5718,22 @@ impl SessionManager {
         self.apply_sandbox(&mut spec, &session).await;
         // Blocking-pool fork/exec, mirroring create(): idle-resume runs on the
         // terminal-attach path, so a blocked async worker here is user-visible.
-        let spawned = self
-            .spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
-            .await;
+        // Shutdown has begun (review S1-15): a respawn completing now would
+        // land after the teardown iterated past this session — a live CLI
+        // nobody kills, its row later counted as a suspended live one.
+        let spawned = if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(Error::Conflict("the daemon is shutting down".into()))
+        } else {
+            self.spawn_session_pty(&session, spec.clone(), grid_cols, grid_rows)
+                .await
+        };
+        let spawned = match spawned {
+            Ok(handle) if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) => {
+                let _ = handle.kill();
+                Err(Error::Conflict("the daemon is shutting down".into()))
+            }
+            other => other,
+        };
         let handle = match spawned {
             Ok(handle) => Arc::new(handle),
             Err(e) => {
@@ -5577,96 +5852,183 @@ impl SessionManager {
                 tracing::warn!(session = %sid, "duplicate pty holder for one session — ending the older one");
                 drop(dup);
             }
-            if handle.has_exited() {
-                tracing::info!(session = %sid, "session's process exited while the daemon was down");
-                drop(handle);
-                continue;
+            if self.adopt_one(&sid, handle).await {
+                adopted.push(sid);
             }
-            // A transient DB error gets a couple of short retries before the
-            // holder is left alone (see below).
-            let mut lookup = self.repo.get(&sid).await;
-            for backoff_ms in [100, 500] {
-                if matches!(lookup, Ok(_) | Err(Error::NotFound(_))) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                lookup = self.repo.get(&sid).await;
-            }
-            let session = match lookup {
-                Ok(s) => s,
-                Err(Error::NotFound(_)) => {
-                    tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
-                    drop(handle);
-                    continue;
-                }
-                Err(e) => {
-                    // A transient DB failure (busy, I/O) is no proof the
-                    // session is gone: killing here would end a live agent
-                    // mid-turn. Leave the holder running (detached, not
-                    // killed on drop) for the next adoption pass / restart.
-                    tracing::warn!(session = %sid, "pty holder: session lookup failed ({e}) — leaving it running for a later adoption");
-                    handle.detach();
-                    drop(handle);
-                    continue;
-                }
-            };
-            if session.archived || !is_user_started(&session) || self.is_live(&sid) {
-                tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
-                drop(handle);
-                continue;
-            }
-            if let Some(token) = handle
-                .holder()
-                .and_then(|i| i.meta.get("ingest_token"))
-                .and_then(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-            {
-                self.ingest_tokens.insert(sid.clone(), token.to_string());
-            }
-            let pid = handle.pid();
-            let handle = Arc::new(handle);
-            self.live.insert(sid.clone(), Arc::clone(&handle));
-            // Not activity: a restart must not reset the idle clock (A14).
-            if let Err(e) = self
-                .repo
-                .update_status_keep_activity(&sid, SessionStatus::Running)
-                .await
-            {
-                tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
-            }
-            let _ = self.events.send(Event::SessionStatus {
-                session_id: sid.clone(),
-                workspace_id: session.workspace_id.clone(),
-                status: SessionStatus::Running,
-            });
-            self.record_lifecycle(
-                &session,
-                "Reattached after a daemon restart (process kept running)",
-            );
-            self.start_status_task(
-                sid.clone(),
-                session.workspace_id.clone(),
-                session.provider.clone(),
-                handle,
-                true,
-            );
-            // A codex/agy id capture that was still pending died with the old
-            // daemon: re-arm it (it waits for the next input, as at spawn).
-            if session.kind == SessionKind::Agent
-                && session.provider_session_id.is_none()
-                && self.providers.captures_session_id(&session.provider)
-            {
-                self.spawn_session_id_capture(&session);
-            }
-            tracing::info!(
-                session = %sid,
-                provider = %session.provider,
-                pid = ?pid,
-                "re-adopted live session from its pty holder"
-            );
-            adopted.push(sid);
         }
         adopted
+    }
+
+    /// Decide on one adoptable holder handle for `sid` (the body of
+    /// [`Self::adopt_holders`]): re-register it as live (`true`), end it, or
+    /// — on a transient lookup error — detach it and record it in
+    /// `deferred_holders` for a retry.
+    async fn adopt_one(&self, sid: &Id, handle: PtyHandle) -> bool {
+        let sid = sid.clone();
+        if handle.has_exited() {
+            tracing::info!(session = %sid, "session's process exited while the daemon was down");
+            drop(handle);
+            return false;
+        }
+        // A transient DB error gets a couple of short retries before the
+        // holder is left alone (see below).
+        let mut lookup = self.repo.get(&sid).await;
+        for backoff_ms in [100, 500] {
+            if matches!(lookup, Ok(_) | Err(Error::NotFound(_))) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            lookup = self.repo.get(&sid).await;
+        }
+        let session = match lookup {
+            Ok(s) => s,
+            Err(Error::NotFound(_)) => {
+                tracing::warn!(session = %sid, "pty holder for a session that no longer exists — ending it");
+                drop(handle);
+                return false;
+            }
+            Err(e) => {
+                // A transient DB failure (busy, I/O) is no proof the
+                // session is gone: killing here would end a live agent
+                // mid-turn. Leave the holder running (detached, not
+                // killed on drop) and record it: the boot dormant pass
+                // and credential sweep skip it, and a retry (or the
+                // first open) adopts it instead of forking a second CLI.
+                tracing::warn!(session = %sid, "pty holder: session lookup failed ({e}) — leaving it running for a later adoption");
+                if let Some(path) = handle.holder_socket().map(|p| p.to_path_buf()) {
+                    self.deferred_holders.insert(sid.clone(), path);
+                }
+                handle.detach();
+                drop(handle);
+                return false;
+            }
+        };
+        if session.archived || !is_user_started(&session) || self.is_live(&sid) {
+            tracing::info!(session = %sid, "pty holder not re-adoptable (archived / engine-owned / already live) — ending it");
+            drop(handle);
+            return false;
+        }
+        if let Some(token) = handle
+            .holder()
+            .and_then(|i| i.meta.get("ingest_token"))
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty())
+        {
+            self.ingest_tokens.insert(sid.clone(), token.to_string());
+        }
+        let pid = handle.pid();
+        let handle = Arc::new(handle);
+        self.live.insert(sid.clone(), Arc::clone(&handle));
+        // Not activity: a restart must not reset the idle clock (A14).
+        if let Err(e) = self
+            .repo
+            .update_status_keep_activity(&sid, SessionStatus::Running)
+            .await
+        {
+            tracing::warn!(session = %sid, "re-adopted session: status update failed: {e}");
+        }
+        let _ = self.events.send(Event::SessionStatus {
+            session_id: sid.clone(),
+            workspace_id: session.workspace_id.clone(),
+            status: SessionStatus::Running,
+        });
+        self.record_lifecycle(
+            &session,
+            "Reattached after a daemon restart (process kept running)",
+        );
+        self.start_status_task(
+            sid.clone(),
+            session.workspace_id.clone(),
+            session.provider.clone(),
+            handle,
+            true,
+        );
+        // A codex/agy id capture that was still pending died with the old
+        // daemon: re-arm it (it waits for the next input, as at spawn).
+        if session.kind == SessionKind::Agent
+            && session.provider_session_id.is_none()
+            && self.providers.captures_session_id(&session.provider)
+        {
+            self.spawn_session_id_capture(&session);
+        }
+        tracing::info!(
+            session = %sid,
+            provider = %session.provider,
+            pid = ?pid,
+            "re-adopted live session from its pty holder"
+        );
+        self.deferred_holders.remove(&sid);
+        true
+    }
+
+    /// Retry the holders [`Self::adopt_holders`] deferred on a transient DB
+    /// error. Returns the ids adopted now. A holder that is gone (or ended)
+    /// is forgotten; one still undecidable stays deferred.
+    pub async fn retry_deferred_adoptions(&self) -> Vec<Id> {
+        let pending: Vec<(Id, std::path::PathBuf)> = self
+            .deferred_holders
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        let mut adopted = Vec::new();
+        for (sid, path) in pending {
+            if self.adopt_deferred(&sid, path).await {
+                adopted.push(sid);
+            }
+        }
+        adopted
+    }
+
+    /// One deferred holder: adopt it if its session can be decided now.
+    async fn adopt_deferred(&self, sid: &Id, path: std::path::PathBuf) -> bool {
+        if self.is_live(sid) {
+            self.deferred_holders.remove(sid);
+            return false;
+        }
+        let res = tokio::task::spawn_blocking(move || PtyHandle::adopt(&path)).await;
+        match res {
+            Ok(Ok(handle)) => {
+                if handle.has_exited() {
+                    self.deferred_holders.remove(sid);
+                    drop(handle);
+                    return false;
+                }
+                // Not deferred any more unless this lookup fails again
+                // (`adopt_one` re-records it then).
+                self.deferred_holders.remove(sid);
+                self.adopt_one(sid, handle).await
+            }
+            Ok(Err(otto_pty::AdoptError::Failed(e))) => {
+                tracing::debug!(session = %sid, "deferred pty holder still unreachable: {e}");
+                false
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Gone (stale socket) or incompatible: nothing to adopt.
+                self.deferred_holders.remove(sid);
+                false
+            }
+        }
+    }
+
+    /// Retry deferred adoptions in the background, 5 s and 30 s after boot.
+    pub fn spawn_deferred_adoption_retries(self: &Arc<Self>) {
+        if self.deferred_holders.is_empty() {
+            return;
+        }
+        let this = Arc::downgrade(self);
+        tokio::spawn(async move {
+            for wait in [Duration::from_secs(5), Duration::from_secs(25)] {
+                tokio::time::sleep(wait).await;
+                let Some(this) = this.upgrade() else { return };
+                let ids = this.retry_deferred_adoptions().await;
+                if !ids.is_empty() {
+                    tracing::info!(count = ids.len(), "re-adopted deferred pty holders");
+                }
+                if this.deferred_holders.is_empty() {
+                    return;
+                }
+            }
+        });
     }
 
     /// Daemon shutdown. With session persistence on
@@ -5676,6 +6038,8 @@ impl SessionManager {
     /// exited exactly as [`Self::shutdown_all`] does. With it off, everything
     /// is killed. Returns `(killed, kept_running)`.
     pub async fn shutdown_for_restart(&self) -> (usize, usize) {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let persist = self.persistence_enabled().await;
         if persist {
             // No teardown path from here on may end a held session.
@@ -5723,9 +6087,14 @@ impl SessionManager {
         _fallback_cwd: &(dyn Fn(&Id) -> Option<String> + Send + Sync),
     ) -> Result<RestoreSummary> {
         let adopted = self.adopt_holders().await;
-        self.expire_orphaned_session_credentials(&adopted).await;
+        // Deferred holders (transient lookup error) still run their agent:
+        // neither revoke its credential nor mark its row dormant (review
+        // S1-09) — a dormant row's next open would resume a SECOND CLI.
+        let mut keep = adopted.clone();
+        keep.extend(self.deferred_holders.iter().map(|e| e.key().clone()));
+        self.expire_orphaned_session_credentials(&keep).await;
         let at = chrono::Utc::now().to_rfc3339();
-        let pass = self.repo.mark_dormant_except(&adopted, &at).await?;
+        let pass = self.repo.mark_dormant_except(&keep, &at).await?;
         for (id, workspace_id, meta) in &pass.suspended {
             let _ = self.events.send(Event::SessionStatus {
                 session_id: id.clone(),
@@ -6112,8 +6481,29 @@ fn sandbox_decision(
 /// main repo's `.git` (which holds the objects + the worktree's gitdir), which
 /// lives OUTSIDE `cwd` — without it a sandboxed agent in a worktree couldn't
 /// commit. Best-effort: `None` when `cwd` isn't a git repo.
+/// The Seatbelt policy for one agent session. A read-only session (untrusted
+/// input, always confined) additionally may not plant project-scope claude
+/// config (`.claude/settings*.json`, hooks, `.mcp.json`) in its own folder —
+/// Otto pre-trusts every cwd, so the user's next unconfined `claude` there
+/// would load it without a prompt.
+fn sandbox_policy(
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+    data_dir: &std::path::Path,
+    extra: &[std::path::PathBuf],
+    network: otto_sandbox::NetworkPolicy,
+    read_only: bool,
+) -> otto_sandbox::SandboxPolicy {
+    let policy = otto_sandbox::SandboxPolicy::for_agent(cwd, home, data_dir, extra, network);
+    if read_only {
+        policy.deny_project_agent_config(cwd)
+    } else {
+        policy
+    }
+}
+
 async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let out = tokio::process::Command::new("git")
+    let out = otto_git::hardened_command()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--git-common-dir"])
@@ -6137,10 +6527,70 @@ async fn resolve_git_common_dir(cwd: &std::path::Path) -> Option<std::path::Path
     Some(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
+/// Resume refuses an agent whose folder is gone (S20-04). The respawn used to
+/// `create_dir_all` it: the agent then woke in an EMPTY folder, believed the
+/// project had been wiped and could start recreating files. A moved/deleted
+/// repo is the user's to restore — say so instead (409). Exempt (still
+/// recreated on spawn): the scratch ("No workspace") home and Otto-managed
+/// folders under its data dir, which are Otto's to rebuild.
+fn missing_cwd_refusal(session: &Session) -> Option<String> {
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    missing_cwd_refusal_in(session, &home.join("Library/Application Support/Otto"))
+}
+
+fn missing_cwd_refusal_in(session: &Session, otto_data: &std::path::Path) -> Option<String> {
+    let cwd = std::path::Path::new(&session.cwd);
+    if session.cwd.trim().is_empty()
+        || session.workspace_id == otto_core::domain::SCRATCH_WORKSPACE_ID
+        || cwd.starts_with(otto_data)
+        || cwd.is_dir()
+    {
+        return None;
+    }
+    Some(format!(
+        "folder {} no longer exists — restore it (or move the session's repo back), or read the conversation in History",
+        session.cwd
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use otto_core::domain::{SessionKind, Workspace};
+
+    #[test]
+    fn resume_refuses_a_missing_folder_but_not_scratch_or_otto_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("moved-away");
+        let data = dir.path().join("otto-data");
+        let mk = |ws: &str, cwd: &std::path::Path| Session {
+            id: "s".into(),
+            workspace_id: ws.into(),
+            kind: SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: SessionStatus::Exited,
+            cwd: cwd.to_string_lossy().into_owned(),
+            provider_session_id: Some("p".into()),
+            connection_id: None,
+            created_by: "u".into(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta: serde_json::json!({}),
+        };
+        let msg = missing_cwd_refusal_in(&mk("ws", &gone), &data).expect("missing folder refused");
+        assert!(msg.contains("no longer exists"), "{msg}");
+        assert!(!gone.exists(), "the refusal must not recreate the folder");
+        assert!(missing_cwd_refusal_in(&mk("ws", dir.path()), &data).is_none());
+        assert!(
+            missing_cwd_refusal_in(&mk(otto_core::domain::SCRATCH_WORKSPACE_ID, &gone), &data)
+                .is_none()
+        );
+        assert!(missing_cwd_refusal_in(&mk("ws", &data.join("db-assist/x")), &data).is_none());
+    }
     use otto_state::NewSession;
 
     /// r3-01-09: the process table is only read when a sweep needs it, and
@@ -6153,6 +6603,70 @@ mod tests {
         assert!(t.taken());
         assert!(first > 0, "ps lists at least this test process");
         assert_eq!(t.get().await.len(), first, "same snapshot reused");
+    }
+
+    #[test]
+    fn capture_scan_backs_off_after_the_first_input() {
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(30)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            capture_scan_pause(Duration::from_secs(120)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn cpu_verdict_is_the_pure_descendant_cpu_rule() {
+        assert_eq!(
+            cpu_verdict(Some(1_000), 1_500),
+            CpuVerdict::Growing {
+                prev: 1_000,
+                now: 1_500
+            }
+        );
+        assert_eq!(cpu_verdict(Some(1_000), 1_200), CpuVerdict::Idle);
+        assert_eq!(cpu_verdict(None, 5), CpuVerdict::Baselining);
+        assert_eq!(cpu_verdict(None, 0), CpuVerdict::Idle);
+    }
+
+    /// Review S1-07: the cap pass re-sampled the same cached table after the
+    /// idle pass had advanced the baseline, read `prev == now`, and suspended
+    /// a session the idle pass had just held for descendant CPU. A sweep's
+    /// verdict is now taken once and shared.
+    #[tokio::test]
+    async fn sweep_cpu_verdict_is_shared_between_the_idle_and_cap_passes() {
+        let root = std::process::id();
+        let id: Id = new_id();
+        let baselines: DashMap<Id, u64> = DashMap::new();
+        // A table where `root` has a busy child.
+        let mut sweep = SweepCpu {
+            table: LazyProcTable(Some(vec![(root, 1, 10), (root + 1, root, 5_000)])),
+            ..Default::default()
+        };
+        baselines.insert(id.clone(), 1_000);
+        let first = sweep.verdict(&baselines, &id, root).await;
+        assert_eq!(
+            first,
+            CpuVerdict::Growing {
+                prev: 1_000,
+                now: 5_000
+            }
+        );
+        // The baseline advanced, but the cap pass sees the SAME verdict.
+        assert_eq!(baselines.get(&id).map(|v| *v), Some(5_000));
+        assert_eq!(sweep.verdict(&baselines, &id, root).await, first);
+        // The next sweep compares against the advanced baseline.
+        let mut next = SweepCpu {
+            table: LazyProcTable(Some(vec![(root, 1, 10), (root + 1, root, 5_050)])),
+            ..Default::default()
+        };
+        assert_eq!(next.verdict(&baselines, &id, root).await, CpuVerdict::Idle);
     }
 
     #[test]
@@ -6490,6 +7004,128 @@ mod tests {
         assert_eq!(shutdown.await.unwrap(), 1);
         assert_eq!(repo.get(&id).await.unwrap().status, SessionStatus::Exited);
         assert_eq!(manager.live_count(), 0);
+    }
+
+    /// Review S1-15: resumes stuck holding their locks used to stall the
+    /// serial shutdown past the daemon's 12 s teardown budget, leaving later
+    /// sessions neither killed nor marked exited. The lock waits are bounded
+    /// now, and a restart after shutdown began refuses to spawn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_retires_every_session_within_its_budget_despite_held_locks() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let mut ids = Vec::new();
+        for n in 0..4 {
+            let s = manager
+                .create(
+                    &workspace,
+                    &user,
+                    CreateSessionReq {
+                        kind: SessionKind::Agent,
+                        provider: Some("shell".into()),
+                        title: Some(format!("Held {n}")),
+                        cwd: Some("/tmp".into()),
+                        connection_id: None,
+                        model: None,
+                        meta: None,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            ids.push(s.id);
+        }
+        // Every session looks mid-resume: its lock is held and never freed.
+        let locks: Vec<_> = ids.iter().map(|id| manager.resume_lock(id)).collect();
+        let mut guards = Vec::new();
+        for lock in &locks {
+            guards.push(lock.lock().await);
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(manager.shutdown_all().await, ids.len());
+        assert!(
+            started.elapsed() < SHUTDOWN_LOCK_BUDGET + Duration::from_secs(3),
+            "shutdown took {:?}",
+            started.elapsed()
+        );
+        for id in &ids {
+            assert_eq!(repo.get(id).await.unwrap().status, SessionStatus::Exited);
+        }
+        assert_eq!(manager.live_count(), 0);
+        drop(guards);
+        // A resume that reaches its spawn after shutdown began must not spawn.
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "exec /bin/sleep 60".into()],
+            cwd: Some("/tmp".into()),
+            env: vec![],
+        };
+        let err = manager
+            .restart(&ids[0], Some(spec))
+            .await
+            .expect_err("shutting down");
+        assert!(matches!(err, Error::Conflict(_)), "{err:?}");
+        assert_eq!(manager.live_count(), 0);
+    }
+
+    /// Review S1-17: auto-archive re-decides under the resume lock against
+    /// the CURRENT row, so a session that became active after the sweep's
+    /// snapshot is left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_archive_rechecks_staleness_under_the_lock() {
+        let (manager, repo, workspace, user) = test_manager().await;
+        let s = manager
+            .create(
+                &workspace,
+                &user,
+                CreateSessionReq {
+                    kind: SessionKind::Agent,
+                    provider: Some("shell".into()),
+                    title: Some("Stale".into()),
+                    cwd: Some("/tmp".into()),
+                    connection_id: None,
+                    model: None,
+                    meta: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        manager.kill_session(&s.id).await.unwrap();
+        // `kill_session` kills the PTY in place; the status task's exit arm
+        // evicts the handle from `live` and stamps `Exited` (+ last_active_at)
+        // later, under the resume lock. On a slow runner that lands after the
+        // stale stamp below — the session still looks live/fresh and the
+        // archive is (correctly) refused. Wait for the eviction, then take the
+        // lock once so the exit arm's status write is done too.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while manager.is_live(&s.id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("killed PTY is evicted from live");
+        drop(manager.resume_lock(&s.id).lock().await);
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(3);
+        let set_active = |at: chrono::DateTime<chrono::Utc>| {
+            let pool = repo.pool();
+            let id = s.id.clone();
+            async move {
+                sqlx::query("UPDATE sessions SET last_active_at = ? WHERE id = ?")
+                    .bind(at.to_rfc3339())
+                    .bind(&id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        // The snapshot said stale, but the row is fresh now (the user opened it).
+        set_active(chrono::Utc::now()).await;
+        assert!(!manager.archive_if_stale(&s.id, cutoff).await.unwrap());
+        assert!(!repo.get(&s.id).await.unwrap().archived);
+        // Still stale under the lock → archived.
+        set_active(chrono::Utc::now() - chrono::Duration::days(10)).await;
+        assert!(manager.archive_if_stale(&s.id, cutoff).await.unwrap());
+        assert!(repo.get(&s.id).await.unwrap().archived);
     }
 
     async fn test_manager() -> (Arc<SessionManager>, SessionsRepo, Workspace, Id) {
@@ -7495,17 +8131,24 @@ mod tests {
         // Static file → not actively written.
         assert!(!rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
         // A concurrent writer appending during the settle window → detected.
+        // It appends until told to stop (not a fixed 6×40 ms burst): on a
+        // slow CI runner the burst could finish before the walk + first stat
+        // even ran, leaving a static file inside the window.
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = std::thread::spawn({
-            let p = p.clone();
+            let (p, stop) = (p.clone(), Arc::clone(&stop));
             move || {
-                for _ in 0..6 {
+                while !stop.load(Ordering::Relaxed) {
                     append_user_message(&p, "more output");
-                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
         });
-        assert!(rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await);
+        let detected =
+            rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await;
+        stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
+        assert!(detected);
         // Unknown psid → never blocks a resume.
         assert!(!rollout_actively_written(tmp.path(), "NOPE", Duration::from_millis(50)).await);
     }
@@ -8838,6 +9481,27 @@ mod tests {
         assert!(read_only_args("claude", &serde_json::json!({})).is_empty());
         assert!(read_only_args("claude", &serde_json::json!({ "read_only": "yes" })).is_empty());
         assert!(read_only_args("codex", &on).is_empty());
+        // No project settings unless the caller opts out of them.
+        assert!(!args.iter().any(|a| a == "--setting-sources"));
+    }
+
+    /// A review session: shell gone, sub-agents kept for orchestrator lenses,
+    /// and the checkout's own `.claude/settings*.json` (hooks) never loaded.
+    #[test]
+    fn read_only_review_args_keep_subagents_and_drop_project_settings() {
+        let meta = serde_json::json!({
+            "read_only": true, "allow_subagents": true, "project_settings": false
+        });
+        let args = read_only_args("claude", &meta);
+        assert_eq!(args[0], "--disallowed-tools");
+        assert!(args[1].split(' ').any(|t| t == "Bash"));
+        assert!(!args[1].split(' ').any(|t| t == "Task"));
+        let at = args.iter().position(|a| a == "--setting-sources").unwrap();
+        assert_eq!(args[at + 1], "user");
+        // project_settings without read_only does nothing (never a silent opt-in).
+        assert!(
+            read_only_args("claude", &serde_json::json!({ "project_settings": false })).is_empty()
+        );
     }
 
     /// claude with a model set → ["--model", name].
@@ -8962,6 +9626,69 @@ mod tests {
         let (rows, cols) = handle.screen_size();
         assert_eq!(cols, 132, "restored cols");
         assert_eq!(rows, 50, "restored rows");
+    }
+
+    /// S1-10: the sandbox protects the CONFIGURED data dir, not a hard-coded
+    /// default — a daemon on `$OTTO_DATA_DIR` must not leave its real
+    /// `secrets.json` / `otto.db` / `bin/ottod` open to the agent.
+    #[tokio::test]
+    async fn sandbox_protects_the_configured_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = otto_state::open(&dir.path().join("t.db")).await.unwrap();
+        let (events, _rx) = broadcast::channel(16);
+        let home = std::path::Path::new("/nonexistent-otto-home/u");
+        let custom = std::path::PathBuf::from("/nonexistent-otto-data/custom");
+        let mgr = SessionManager::new(SessionsRepo::new(pool), events, ProviderRegistry::new(None))
+            .with_data_dir(custom.clone());
+        assert_eq!(mgr.sandbox_data_dir(home), custom);
+        let sbpl = sandbox_policy(
+            std::path::Path::new("/nonexistent-otto-work/p"),
+            home,
+            &mgr.sandbox_data_dir(home),
+            &[],
+            otto_sandbox::NetworkPolicy::Full,
+            false,
+        )
+        .to_sbpl();
+        assert!(sbpl.contains("(deny file-write* (subpath \"/nonexistent-otto-data/custom\"))"));
+        assert!(sbpl.contains("(literal \"/nonexistent-otto-data/custom/secrets.json\")"));
+        assert!(!sbpl.contains("Library/Application Support/Otto"));
+    }
+
+    /// S1-03(d): only read-only sessions lose write access to the project's
+    /// claude config.
+    #[test]
+    fn read_only_sandbox_denies_project_claude_config() {
+        let p = |ro| {
+            sandbox_policy(
+                std::path::Path::new("/nonexistent-otto-work/p"),
+                std::path::Path::new("/nonexistent-otto-home/u"),
+                std::path::Path::new("/nonexistent-otto-data/d"),
+                &[],
+                otto_sandbox::NetworkPolicy::Full,
+                ro,
+            )
+            .to_sbpl()
+        };
+        let needle = "(literal \"/nonexistent-otto-work/p/.mcp.json\")";
+        assert!(p(true).contains(needle));
+        assert!(!p(false).contains(needle));
+    }
+
+    /// S3-04: a scheduled shell task (`process_sandbox_policy("shell", …)`)
+    /// is gated exactly like a `shell` agent session: off when the setting is
+    /// off or names other providers, on by default when enabled.
+    #[test]
+    fn sandbox_decision_covers_scheduled_shell_tasks() {
+        let off = serde_json::json!({ "enabled": false });
+        let not_shell = serde_json::json!({ "enabled": true, "providers": ["claude"] });
+        let on = serde_json::json!({ "enabled": true });
+        assert_eq!(sandbox_decision(&off, SessionKind::Agent, "shell"), None);
+        assert_eq!(
+            sandbox_decision(&not_shell, SessionKind::Agent, "shell"),
+            None
+        );
+        assert!(sandbox_decision(&on, SessionKind::Agent, "shell").is_some());
     }
 
     #[test]

@@ -1754,9 +1754,13 @@ async fn delete_credential(
 async fn reveal_credential(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<RevealCredentialReq>,
 ) -> ApiResult<Json<RevealCredentialResp>> {
+    // S11-03: a plaintext password is for the person only — `browser_login`
+    // is how an agent signs in without ever seeing it.
+    crate::auth::require_human(&auth.0)?;
     let existing = ctx
         .browser_credentials
         .get(&id)
@@ -2242,6 +2246,18 @@ pub(crate) mod tests {
         };
         let mut req = req;
         req.extensions_mut().insert(AuthUser(user.clone()));
+        // The full auth context `auth_middleware` inserts — a human token
+        // (handlers like `reveal_credential` refuse agent credentials).
+        req.extensions_mut().insert(otto_core::auth::AuthContext {
+            real_user: user.clone(),
+            effective_user: user.clone(),
+            scope: None,
+            mcp_only: false,
+            mcp_scope: None,
+            mcp_internal: false,
+            mcp_session_id: None,
+            managed_session_id: None,
+        });
         let resp = app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
         let body = resp

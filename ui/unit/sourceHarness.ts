@@ -29,6 +29,11 @@ export function loadSource(path: URL, imports: Record<string, unknown>, globals:
       if (!(name in imports) && (name === '../telemetry' || name === './telemetry')) {
         return loadSource(new URL('../src/lib/telemetry.ts', import.meta.url), {}, globals);
       }
+      // The shared stale-response guard (lib/latest.ts) is pure TS: stores
+      // that adopt it run the REAL helper unless a test overrides it.
+      if (!(name in imports) && (name === '../latest' || name === './latest' || name === '../../lib/latest')) {
+        return loadSource(new URL('../src/lib/latest.ts', import.meta.url), {}, globals);
+      }
       if (!(name in imports)) throw new Error(`Missing fixture import: ${name}`);
       return imports[name];
     },

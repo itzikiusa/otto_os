@@ -31,7 +31,12 @@
   const origin = new URL(baseUrl()).origin;
   /** Display name: the manifest name once the nav list has it, else the slug. */
   const name = $derived(plugins.get(slug)?.name ?? slug);
-  const src = $derived(`${origin}/plugins/${slug}/ui/`);
+  /** Plugin slugs are plain identifiers. Anything else (`..`, `/`, `%2e`) is
+   *  never interpolated into a URL: `/plugins/../ui/` resolves to Otto's own
+   *  SPA (served 200), which would then load inside the frame and receive
+   *  `otto:init` with the viewer's token. */
+  const slugOk = $derived(/^[a-z][a-z0-9-]{0,63}$/.test(slug)); // = plugins.rs `valid_slug`
+  const src = $derived(`${origin}/plugins/${encodeURIComponent(slug)}/ui/`);
   let frame = $state<HTMLIFrameElement | undefined>();
 
   // 'missing' = the daemon has no UI for this slug (disabled, uninstalled or
@@ -47,6 +52,11 @@
     const url = src;
     probe = 'loading';
     frameLoaded = false;
+    if (!slugOk) {
+      probeError = null;
+      probe = 'missing';
+      return;
+    }
     try {
       // HEAD (V8): the probe only needs the status; a GET downloaded the whole
       // entry once here and again when the iframe loaded it. Axum answers HEAD
@@ -95,11 +105,12 @@
 
   function onload() {
     frameLoaded = true;
+    if (!slugOk) return;
     frame?.contentWindow?.postMessage(
       {
         type: 'otto:init',
         slug,
-        apiBase: `${baseUrl()}/api/v1/plugins/${slug}`,
+        apiBase: `${baseUrl()}/api/v1/plugins/${encodeURIComponent(slug)}`,
         token: getToken(),
         theme: themeVars(),
         scheme: ui.resolvedScheme,

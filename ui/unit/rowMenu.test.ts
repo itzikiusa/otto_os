@@ -27,3 +27,16 @@ test('keyboard menu opens at the start edge, mirrored in RTL', () => {
   assert.deepEqual(keyboardMenuPoint(r, true), { x: 492, y: 64 });
   assert.deepEqual(keyboardMenuPoint({ left: 0, right: 10, top: 0, bottom: 12 }, false), { x: 8, y: 12 }, 'short rows clamp to their bottom');
 });
+
+test('the menu chord works from a non-editable descendant, not from a field', async () => {
+  const { ownsMenuKey } = await import('../src/lib/rowMenu.ts');
+  const field = { closest: (sel: string) => (sel.includes('input') ? field : null) };
+  const sortBtn = { closest: () => null };
+  const outside = { closest: () => null };
+  const host = { contains: (t: unknown) => t === host || t === field || t === sortBtn };
+  assert.equal(ownsMenuKey(host, host as never), true, 'the host itself');
+  assert.equal(ownsMenuKey(host, sortBtn), true, 'a column header sort button inside the host (GridView th)');
+  assert.equal(ownsMenuKey(host, field), false, 'a text field keeps the chord');
+  assert.equal(ownsMenuKey(host, outside), false, 'focus outside the host');
+  assert.equal(ownsMenuKey(host, null), false);
+});

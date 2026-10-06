@@ -285,7 +285,10 @@ pub(crate) async fn repo_ctx<S: GitCtx>(
 ) -> Result<(Repo, LocalGit)> {
     let repo = s.store().get_repo(repo_id).await?;
     s.roles().check(&user.0, &repo.workspace_id, min).await?;
-    let git = LocalGit::new(&repo.path);
+    // A git route call is a person's deliberate act: their hooks run, an
+    // in-work-tree `core.hooksPath` (husky) included. (An agent's own token
+    // calling these routes is the open outward-route decision, S11-05.)
+    let git = LocalGit::new(&repo.path).person_initiated();
     Ok((repo, git))
 }
 
@@ -2060,6 +2063,12 @@ struct DeleteBranchReq {
     /// `-d`, which refuses to drop unmerged work.
     #[serde(default)]
     force: Option<bool>,
+    /// Which remote the `remote:true` delete targets. Defaults to `origin`.
+    /// A remote-ref row such as `upstream/feature-x` sends
+    /// `remote_name:"upstream"` so the push deletes THAT branch — previously the
+    /// prefix was stripped and `origin/feature-x` was destroyed instead.
+    #[serde(default)]
+    remote_name: Option<String>,
 }
 
 async fn repo_branch_delete<S: GitCtx>(
@@ -2092,10 +2101,53 @@ async fn repo_branch_delete<S: GitCtx>(
         git.delete_branch(name, req.force.unwrap_or(false)).await?;
     }
     if want_remote {
-        let token = optional_token(&s, &user, &repo).await?;
-        git.delete_remote_branch(name, token).await?;
+        let remote = req
+            .remote_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .unwrap_or("origin");
+        // The bound account's token belongs to origin's host. Offer it to
+        // another remote only when that remote points at the SAME host — a
+        // fork's `upstream` on another forge must never receive it.
+        let token = if remote == "origin" || remote_shares_origin_host(&git, remote).await {
+            optional_token(&s, &user, &repo).await?
+        } else {
+            None
+        };
+        git.delete_remote_branch_on(remote, name, token).await?;
     }
     status_after_release(&git, _g).await
+}
+
+/// True when `remote`'s push URL has the same host as origin's — the only
+/// case where the repo's bound account token may be offered to it.
+async fn remote_shares_origin_host(git: &LocalGit, remote: &str) -> bool {
+    let Ok(remotes) = git.remotes().await else {
+        return false;
+    };
+    let host_of = |name: &str| {
+        remotes
+            .iter()
+            .find(|r| r.name == name)
+            .and_then(|r| url_host(&r.push_url))
+    };
+    matches!((host_of("origin"), host_of(remote)), (Some(a), Some(b)) if a == b)
+}
+
+/// Lower-cased host of a git remote URL — `https://host/…`,
+/// `ssh://git@host:22/…` or scp-like `git@host:owner/repo`. `None` for local
+/// paths and anything unparseable (so they never share a token).
+fn url_host(url: &str) -> Option<String> {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None if url.contains(':') && !url.starts_with('/') => url,
+        None => return None,
+    };
+    let authority = rest.split(['/']).next()?;
+    let host_port = authority.rsplit('@').next()?;
+    let host = host_port.split(':').next()?.trim();
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 #[derive(Deserialize)]
@@ -2781,8 +2833,16 @@ async fn pr_merge<S: GitCtx>(
 ) -> ApiResult<StatusCode> {
     let (repo, _) = repo_ctx(&s, &user, &id, WorkspaceRole::Editor).await?;
     let (provider, remote) = provider_ctx(&s, &user, &repo).await?;
+    // Pinned to the head the user checked (S15-10): a push that landed while
+    // the merge dialog was open is a 409 "PR changed — re-check", never a
+    // merge of commits nobody reviewed or CI-checked.
+    let pin = req
+        .expected_head_sha
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     provider
-        .merge(&remote, number, req.strategy, req.delete_source_branch)
+        .merge_pinned(&remote, number, req.strategy, req.delete_source_branch, pin)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2838,6 +2898,30 @@ mod tests {
     use otto_state::{GitStore, NewGitAccount, NewRepo, WorkspacesRepo};
 
     use super::*;
+
+    /// S15-01: a non-origin remote only receives origin's account token when
+    /// it lives on the same host; local paths never match anything.
+    #[test]
+    fn url_host_parses_https_ssh_and_scp_forms() {
+        assert_eq!(
+            url_host("https://GitHub.com/o/r.git").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            url_host("https://x@github.com:443/o/r").as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(
+            url_host("ssh://git@gitlab.com:22/o/r").as_deref(),
+            Some("gitlab.com")
+        );
+        assert_eq!(
+            url_host("git@bitbucket.org:o/r.git").as_deref(),
+            Some("bitbucket.org")
+        );
+        assert_eq!(url_host("/tmp/origin.git"), None);
+        assert_eq!(url_host("relative/path"), None);
+    }
 
     /// In-memory secret store that returns a fixed token for any ref.
     struct FixedSecret;

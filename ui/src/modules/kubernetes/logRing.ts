@@ -27,3 +27,14 @@ export function appendFiltered(
   for (const l of trimmed) if (keep(l)) drop++;
   if (drop) view.splice(0, drop);
 }
+
+/** Queue `parts` onto the not-yet-rendered `pending` buffer, keeping at most
+ *  `cap` lines (the newest). The flush runs on an animation frame, which
+ *  WKWebView pauses while the window is hidden — without this cap a busy
+ *  stream grew `pending` without bound until the window came back. A loop,
+ *  not `push(...parts)` (stack overflow on a huge chunk). */
+export function pushPendingCapped(pending: string[], parts: readonly string[], cap: number): void {
+  for (const l of parts) pending.push(l);
+  const overflow = pending.length - Math.max(0, cap);
+  if (overflow > 0) pending.splice(0, overflow);
+}

@@ -1,15 +1,20 @@
 //! Workflow trigger scheduler: fires `schedule`-kind triggers on their cadence
-//! (interval / daily / weekly) and starts a workflow run in the background.
+//! and starts a workflow run in the background.
 //!
-//! Modeled on [`otto_swarm::runtime::scheduler`]: 60-second tick (one timer, woken by `CancelSignal`),
-//! Cursor/eligibility claim and queued run are committed together; a captured
-//! tick cannot admit after retiming or disabling its trigger.
+//! Modeled on [`otto_swarm::runtime::scheduler`]: one 60-second tick (a single
+//! timer, woken early by `CancelSignal`). The cursor/eligibility claim and the
+//! queued run are committed together, so a captured tick can never admit a run
+//! after its trigger was retimed or disabled.
 //!
-//! Schedule spec keys (mirrors the swarm-scheduler format):
-//!   `cadence`    — "interval" | "daily" | "weekly" (default "interval")
+//! Schedule spec keys (the shared [`otto_core::cadence`] format):
+//!   `cadence`    — "interval" | "daily" | "weekly" | "cron" | "once"
+//!                  (default "interval")
 //!   `every_min`  — minutes between fires (cadence=interval; default 60)
-//!   `at`         — "HH:MM" UTC wall time to fire (daily/weekly)
+//!   `at`         — "HH:MM" wall time in `timezone` (daily/weekly)
 //!   `weekday`    — 0-6, Mon=0 (weekly only; default Monday)
+//!   `expr`       — 5-field cron expression (cadence=cron)
+//!   `run_at`     — the single fire instant (cadence=once)
+//!   `timezone`   — IANA zone for `at`/`expr`/`run_at` (default UTC)
 //!   `last_run`   — RFC-3339 timestamp of last fire (cursor; set by scheduler)
 //!   `enabled`    — bool; missing/false → skip
 

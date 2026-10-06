@@ -52,6 +52,36 @@ fn swarm_base(ctx: &SwarmRt, swarm_id: &str, agent_id: &str) -> PathBuf {
     ctx.data_dir().join("swarm").join(swarm_id).join(agent_id)
 }
 
+/// The agent's worktree path + branch FOR ONE PROJECT (S4-08). An agent
+/// serves every project of its swarm: keyed per agent alone, a second
+/// project in another repo hit "directory exists" on `git worktree add` (and
+/// silently fell back to scratch → "done, unverified"), and one in the same
+/// repo merged project A's commits into B's integration branch. Worktrees
+/// made before this change (`<agent>/wt`, branch `swarm/<s>/<a>`) are left
+/// in place; their branch keeps any unmerged work.
+pub fn agent_worktree(
+    ctx: &SwarmRt,
+    swarm: &Swarm,
+    agent: &SwarmAgent,
+    project: &SwarmProject,
+) -> (PathBuf, String) {
+    let (path, branch) = agent_worktree_names(&swarm.id, &agent.id, &project.id);
+    (swarm_base(ctx, &swarm.id, &agent.id).join(path), branch)
+}
+
+/// Pure naming for [`agent_worktree`]: (dir under the agent base, branch).
+fn agent_worktree_names(swarm_id: &str, agent_id: &str, project_id: &str) -> (String, String) {
+    (
+        format!("wt-{}", short(project_id)),
+        format!(
+            "swarm/{}/{}/{}",
+            short(swarm_id),
+            short(agent_id),
+            short(project_id)
+        ),
+    )
+}
+
 fn cwd_mode(swarm: &Swarm, agent: &SwarmAgent, has_repo: bool) -> String {
     // 1. An explicit PER-AGENT choice always wins: "repo" opts a *single* agent
     //    out (a deliberately single-agent project), "scratch" for non-code roles,
@@ -242,9 +272,8 @@ pub async fn ensure_cwd_info(
                     return Ok(scratch_info(ctx, swarm, agent).await);
                 }
             };
-            let wt = swarm_base(ctx, &swarm.id, &agent.id).join("wt");
+            let (wt, branch) = agent_worktree(ctx, swarm, agent, project);
             let wt_str = wt.to_string_lossy().to_string();
-            let branch = format!("swarm/{}/{}", short(&swarm.id), short(&agent.id));
             let git = otto_git::LocalGit::new(repo_path);
             // Base the agent worktree on the pinned integration branch — but only
             // on first creation. `worktree_add_if_absent` reuses an existing tree
@@ -560,6 +589,66 @@ pub fn provision_agent(
     install_helper(cwd, "otto-product", OTTO_PRODUCT);
     install_helper(cwd, "otto-mockup", OTTO_MOCKUP);
     install_helper(cwd, "otto-discovery-report", OTTO_DISCOVERY_REPORT);
+    exclude_helpers(cwd);
+}
+
+/// The helper executables `provision_agent` drops into the agent's cwd.
+pub const HELPER_NAMES: [&str; 4] = [
+    "otto-post",
+    "otto-product",
+    "otto-mockup",
+    "otto-discovery-report",
+];
+
+/// Keep the helpers out of git (S4-09): they sit untracked in the worktree
+/// root (the prompts invoke them as `./otto-post`), and the fix prompt tells
+/// the agent to COMMIT — a `git add -A` would carry them into the merge and
+/// the user's PR (or, in per-agent repo mode, straight into the checkout).
+/// Root-anchored lines go into the repo's `info/exclude` (shared by all its
+/// worktrees, never committed); a cwd that is not a git checkout is a no-op.
+pub fn exclude_helpers(cwd: &str) {
+    let Ok(out) = otto_git::hardened_std_command()
+        .args(["-C", cwd, "rev-parse", "--git-path", "info/exclude"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let rel = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if rel.is_empty() {
+        return;
+    }
+    let path = std::path::Path::new(cwd).join(&rel);
+    let _ = append_exclude_lines(&path);
+}
+
+/// Append each missing `/<helper>` line to an exclude file (idempotent).
+fn append_exclude_lines(path: &std::path::Path) -> std::io::Result<()> {
+    let cur = std::fs::read_to_string(path).unwrap_or_default();
+    let have: std::collections::HashSet<&str> = cur.lines().map(str::trim).collect();
+    let missing: Vec<String> = HELPER_NAMES
+        .iter()
+        .map(|n| format!("/{n}"))
+        .filter(|l| !have.contains(l.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut add = String::new();
+    if !cur.is_empty() && !cur.ends_with('\n') {
+        add.push('\n');
+    }
+    add.push_str("# Otto swarm agent helpers (never commit)\n");
+    for l in missing {
+        add.push_str(&l);
+        add.push('\n');
+    }
+    std::fs::write(path, format!("{cur}{add}"))
 }
 
 /// Write a helper script into `cwd` and mark it executable (best-effort).
@@ -578,6 +667,61 @@ pub fn install_helper(cwd: &str, name: &str, body: &str) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// S4-08: one worktree + branch per (agent, project) — never shared
+    /// across an agent's projects.
+    #[test]
+    fn agent_worktree_is_keyed_by_project() {
+        let (pa, ba) = agent_worktree_names("swarm0000000001", "agent000000001", "proj000000000A");
+        let (pb, bb) = agent_worktree_names("swarm0000000001", "agent000000001", "proj000000000B");
+        assert_ne!(pa, pb);
+        assert_ne!(ba, bb);
+        assert!(ba.starts_with("swarm/"));
+        assert_ne!(pa, "wt", "never the legacy per-agent dir");
+    }
+
+    /// S4-09: the helpers are git-ignored via `info/exclude`, idempotently.
+    #[test]
+    fn helpers_are_excluded_from_git_in_a_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return; // no git on PATH — nothing to assert
+        }
+        let cwd = repo.to_string_lossy().to_string();
+        for n in HELPER_NAMES {
+            install_helper(&cwd, n, "#!/bin/sh\n");
+        }
+        exclude_helpers(&cwd);
+        exclude_helpers(&cwd); // idempotent
+        let ex = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        for n in HELPER_NAMES {
+            assert_eq!(ex.matches(&format!("/{n}\n")).count(), 1, "{n}: {ex}");
+        }
+        let st = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&st.stdout).trim().is_empty(),
+            "helpers must not show as untracked"
+        );
+    }
+
+    /// A non-git cwd (scratch fallback) is left alone.
+    #[test]
+    fn exclude_helpers_is_a_noop_outside_git() {
+        let dir = tempfile::tempdir().unwrap();
+        exclude_helpers(&dir.path().to_string_lossy());
+        assert!(!dir.path().join(".git").exists());
+    }
 
     fn swarm(config: serde_json::Value) -> Swarm {
         let now = chrono::Utc::now();

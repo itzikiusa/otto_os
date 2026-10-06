@@ -43,23 +43,9 @@ pub trait InsightsCtx: Clone + Send + Sync + 'static {
     fn submit_prompt(&self, sid: &Id, prompt: &str) -> impl Future<Output = bool> + Send;
 }
 
-/// Run synchronous std::fs work on the blocking pool (timed like the host's
-/// `offload::blocking`), re-raising a panic on the caller.
-pub(crate) async fn blocking<T, F>(f: F) -> T
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    match otto_telemetry::context::measure("server.blocking", tokio::task::spawn_blocking(f)).await
-    {
-        Ok(v) => v,
-        Err(e) => match e.try_into_panic() {
-            Ok(payload) => std::panic::resume_unwind(payload),
-            // Only on runtime shutdown — nothing is waiting for the answer.
-            Err(e) => panic!("blocking task cancelled: {e}"),
-        },
-    }
-}
+/// Run synchronous std::fs work on the blocking pool, re-raising a panic on
+/// the caller (the one shared copy lives in otto-agent-run).
+pub(crate) use otto_agent_run::offload::blocking;
 
 /// Require the global root role.
 pub(crate) fn require_root(user: &User) -> Result<(), ApiError> {

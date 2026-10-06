@@ -1147,3 +1147,320 @@ async fn a_ui_tool_reply_carries_the_session_grant() {
         .await;
     assert!(env.get("ui_granted").is_none(), "{env}");
 }
+
+// ---------------------------------------------------------------------------
+// Review S5: the pin echo, the spoofed decision workspace, single-use and
+// session-bound approvals
+// ---------------------------------------------------------------------------
+
+/// An agent session of alice's in `ws` (plus its managed token).
+async fn extra_session(d: &Daemon, ws: &str) -> (Id, String) {
+    let s = SessionsRepo::new(d.pool.clone())
+        .create(NewSession {
+            workspace_id: ws.into(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: format!("Other session in {ws}"),
+            cwd: "/tmp".into(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: "alice".into(),
+            meta: json!({}),
+        })
+        .await
+        .unwrap();
+    let (token, _) = AuthRepo::new(d.pool.clone())
+        .issue_session_api_token(&"alice".to_string(), &s.id)
+        .await
+        .unwrap();
+    (s.id, token)
+}
+
+async fn enable_tools(d: &Daemon, tools: &[&str]) {
+    let (st, body) = d
+        .send(
+            "PATCH",
+            &d.human,
+            "/mcp/otto-server",
+            Some(json!({"enabled": true, "tools": tools})),
+        )
+        .await;
+    assert_eq!(st, 200, "enable tools: {body}");
+}
+
+async fn invoke_as(d: &Daemon, token: &str, tool: &str, args: Value, extra: Value) -> Value {
+    let mut body = json!({"tool": format!("otto.{tool}"), "arguments": args});
+    if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
+        b.extend(e.clone());
+    }
+    let (st, env) = d
+        .send("POST", token, "/mcp/otto-tools/invoke", Some(body))
+        .await;
+    assert_eq!(st, 200, "invoke {tool}: {env}");
+    env
+}
+
+/// S5-01: a token pinned to ws1 that names `workspace_id: ws1` (its own pin)
+/// for an id-only object in ws2 is denied — the object's workspace is probed
+/// and replaces the echo; the unverifiable tools are denied outright.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_token_echoing_its_pin_cannot_reach_another_workspace() {
+    let d = boot().await;
+    enable_tools(
+        &d,
+        &["get_session", "wait_session", "send_message", "get_finding"],
+    )
+    .await;
+    let (other, _) = extra_session(&d, "ws2").await;
+    let (st, minted) = d
+        .send(
+            "POST",
+            &d.human,
+            "/mcp/tokens",
+            Some(
+                json!({"label": "pinned", "scope": {"allow_writes": true, "workspace_id": "ws1"}}),
+            ),
+        )
+        .await;
+    assert_eq!(st, 200, "{minted}");
+    let pinned = minted["token"].as_str().unwrap().to_string();
+    let dry = json!({"dry_run": true});
+    for tool in ["get_session", "wait_session", "send_message"] {
+        let env = invoke_as(
+            &d,
+            &pinned,
+            tool,
+            json!({"session_id": other, "workspace_id": "ws1", "text": "rm -rf"}),
+            dry.clone(),
+        )
+        .await;
+        assert_eq!(env["decision"], "denied", "{tool}: {env}");
+        assert_eq!(env["executed"], false, "{tool}: {env}");
+    }
+    // The pin's own session is still reachable.
+    let env = invoke_as(
+        &d,
+        &pinned,
+        "get_session",
+        json!({"session_id": d.sid, "workspace_id": "ws1"}),
+        dry.clone(),
+    )
+    .await;
+    assert_eq!(env["decision"], "dry_run", "{env}");
+    // An unverifiable tool is denied whatever workspace the caller names.
+    let env = invoke_as(
+        &d,
+        &pinned,
+        "get_finding",
+        json!({"finding_id": "F", "workspace_id": "ws1"}),
+        dry,
+    )
+    .await;
+    assert_eq!(env["decision"], "denied", "{env}");
+}
+
+/// S5-03: a workspace-scoped auto-approve rule keys on the workspace the
+/// call really lands in — a caller-sent `workspace_id` cannot pick it, and a
+/// global-row tool (a K8s cluster) is never covered by a workspace rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spoofed_workspace_never_selects_an_auto_approve_rule() {
+    let d = boot().await;
+    enable_tools(&d, &["send_message", "k8s_action"]).await;
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws2", "target_kind": "tool",
+                     "target": "send_message"}),
+        )
+        .await;
+    assert_eq!(st, 201, "{rule}");
+    // The target session lives in ws1; the caller claims ws2 → still gated.
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "send_message",
+        json!({"session_id": d.sid, "workspace_id": "ws2", "text": "hello"}),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let pending = d.pending_approvals().await;
+    assert_eq!(
+        pending[0]["workspace_id"], "ws1",
+        "card under the real workspace"
+    );
+
+    // An irreversible K8s rule for the CALLING session's workspace (and the
+    // caller naming it) does not cover a cluster, which is global.
+    let (st, rule) = d
+        .rule(
+            json!({"scope": "workspace", "workspace_id": "ws1", "target_kind": "tool",
+                     "target": "k8s_action", "allow_irreversible": true}),
+        )
+        .await;
+    assert_eq!(st, 201, "{rule}");
+    for args in [
+        json!({"cluster_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V", "action": "delete_pod",
+               "namespace": "prod", "name": "api-0", "workspace_id": "ws1"}),
+        json!({"cluster_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V", "action": "delete_pod",
+               "namespace": "prod", "name": "api-1"}),
+    ] {
+        let env = invoke_as(&d, &d.agent, "k8s_action", args, json!({"wait_seconds": 0})).await;
+        assert_ne!(env["executed"], true, "{env}");
+        assert!(env.get("auto_approved_by").is_none(), "{env}");
+    }
+}
+
+/// S5-04: two identical calls waiting on ONE card both wake on the decision;
+/// the single-use approval runs exactly one of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_approval_runs_one_of_two_waiting_calls() {
+    // `receiver_count` also counts unrelated bus subscribers, so on a loaded
+    // runner the "both parked" check can pass early; retry the scenario until
+    // both calls really shared one card (strict assertions otherwise).
+    for _ in 0..5 {
+        if two_calls_share_one_card().await {
+            return;
+        }
+    }
+    panic!("never got two calls parked on one card in 5 attempts");
+}
+
+async fn two_calls_share_one_card() -> bool {
+    let d = Arc::new(boot().await);
+    let spawn = |d: Arc<Daemon>| {
+        tokio::spawn(async move {
+            let (_, body) = d
+                .send(
+                    "POST",
+                    &d.agent,
+                    "/mcp/otto-tools/invoke",
+                    Some(json!({"tool": "otto.create_pr", "arguments": pr_args(),
+                                "wait_seconds": 10})),
+                )
+                .await;
+            body
+        })
+    };
+    // Each waiting call subscribes to the bus before its first status read:
+    // the receiver count says when BOTH calls are parked on the card (a fixed
+    // sleep raced a loaded runner — the second call arrived after the first
+    // had spent the approval and opened a fresh card).
+    let base = d.events.receiver_count();
+    let a = spawn(d.clone());
+    let id = loop {
+        if let Some(a) = d.pending_approvals().await.first() {
+            break a["id"].as_str().unwrap().to_string();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let b = spawn(d.clone());
+    // Let the second call find the shared card and start waiting.
+    let parked = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    while d.events.receiver_count() < base + 2 {
+        assert!(
+            tokio::time::Instant::now() < parked,
+            "both calls should be waiting on the card"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(d.pending_approvals().await.len(), 1, "one shared card");
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let _ = d.events.send(otto_core::event::Event::McpApprovalChanged {
+        approval_id: Some(id.clone()),
+        workspace_id: Some("ws1".into()),
+        status: "approved".into(),
+    });
+    let (ea, eb) = (a.await.unwrap(), b.await.unwrap());
+    let ran = [&ea, &eb]
+        .iter()
+        .filter(|e| e["executed"] == json!(true))
+        .count();
+    assert_eq!(ran, 1, "exactly one execution: {ea} / {eb}");
+    let other = if ea["executed"] == json!(true) {
+        &eb
+    } else {
+        &ea
+    };
+    // The second call reached the card only after the first had spent the
+    // approval: it correctly opened a FRESH card — the scenario under test
+    // (two calls parked on one card) did not happen, so the caller retries.
+    if other["decision"] == "pending_approval" && other["approval_id"] != json!(id) {
+        return false;
+    }
+    assert_eq!(other["decision"], "denied", "{other}");
+    true
+}
+
+/// S5-13: an approval a human granted for one session's call is not spent
+/// by a sibling session of the same owner making the identical call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_approval_is_bound_to_the_requesting_session() {
+    let d = boot().await;
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    let id = env["approval_id"].as_str().unwrap().to_string();
+    let (st, body) = d
+        .send(
+            "POST",
+            &d.human,
+            &format!("/mcp/approvals/{id}/decide"),
+            Some(json!({"approved": true})),
+        )
+        .await;
+    assert_eq!(st, 200, "{body}");
+    let (_, sibling) = extra_session(&d, "ws1").await;
+    let env = invoke_as(
+        &d,
+        &sibling,
+        "create_pr",
+        pr_args(),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(
+        env["decision"], "pending_approval",
+        "sibling gets its own card: {env}"
+    );
+    assert_ne!(env["approval_id"], json!(id), "{env}");
+    // The requesting session itself still spends it.
+    let env = d.agent_invoke("create_pr", pr_args()).await;
+    assert_eq!(env["executed"], true, "{env}");
+}
+
+/// S5-07: the stdio bridge's native irreversible writers run through the
+/// governed path — reachable from a session credential even when the operator
+/// never ticked them in the catalog, and approval-gated there; a person's own
+/// token still needs the catalog switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_native_irreversible_writer_is_governed_for_its_session() {
+    let d = boot().await;
+    let args = json!({"account_id": "01KZTKNK3Z8N6VD9Q0MTDQSJ3V",
+                      "url": "https://sqs.example/q", "body": "hello"});
+    let env = invoke_as(
+        &d,
+        &d.agent,
+        "aws_sqs_send",
+        args.clone(),
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "pending_approval", "{env}");
+    assert_eq!(env["executed"], false, "{env}");
+    let env = invoke_as(
+        &d,
+        &d.human,
+        "aws_sqs_send",
+        args,
+        json!({"wait_seconds": 0}),
+    )
+    .await;
+    assert_eq!(env["decision"], "denied", "{env}");
+}

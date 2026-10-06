@@ -87,7 +87,10 @@
   {/if}
 {:else if loading && empty}
   <div class="ls-loading" class:page={variant === 'page'} role="status" aria-label="Loading {what}" style="min-block-size:{reserve}px">
-    {#if showSkeleton}<Skeleton announce={false} grace={false} rows={skelRows} height={skelHeight} />{/if}
+    <!-- A live region announces its CONTENT, not its aria-label: the text is
+         what tells a screen reader a load is under way (after the same grace,
+         so a fast load stays silent). -->
+    {#if showSkeleton}<span class="sr-only">Loading {what}…</span><Skeleton announce={false} grace={false} rows={skelRows} height={skelHeight} />{/if}
   </div>
 {:else if empty}
   {#if emptyView}{@render emptyView()}{/if}

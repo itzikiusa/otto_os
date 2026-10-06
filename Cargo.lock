@@ -408,7 +408,7 @@ dependencies = [
  "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1526,15 +1526,6 @@ name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
-name = "dirs"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
 dependencies = [
  "dirs-sys",
 ]
@@ -3813,16 +3804,19 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "hex",
  "otto-agent-run",
  "otto-channels",
  "otto-core",
  "otto-git",
  "otto-orchestrator",
+ "otto-sandbox",
  "otto-sessions",
  "otto-state",
  "rustix",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "tempfile",
  "tokio",
@@ -3836,7 +3830,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
- "dirs 7.0.0",
+ "dirs",
  "futures-util",
  "http-body-util",
  "otto-connections",
@@ -3865,7 +3859,7 @@ dependencies = [
  "apache-avro",
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "dashmap",
  "futures-util",
@@ -3897,9 +3891,9 @@ name = "otto-browser"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
- "dirs 7.0.0",
+ "dirs",
  "ego-tree",
  "futures-util",
  "hex",
@@ -3915,7 +3909,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tokio-tungstenite 0.30.0",
+ "tokio-tungstenite",
  "tracing",
 ]
 
@@ -3926,7 +3920,6 @@ dependencies = [
  "axum",
  "otto-core",
  "otto-state",
- "otto-swarm",
  "serde",
  "serde_json",
  "sqlx",
@@ -3941,7 +3934,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "lettre",
@@ -3954,7 +3947,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-tungstenite 0.30.0",
+ "tokio-tungstenite",
  "tracing",
 ]
 
@@ -4025,7 +4018,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "clickhouse",
  "futures-util",
@@ -4059,7 +4052,7 @@ name = "otto-design"
 version = "0.2.0"
 dependencies = [
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "hex",
  "http-body-util",
@@ -4150,12 +4143,12 @@ dependencies = [
  "axum",
  "chrono",
  "hex",
+ "otto-agent-run",
  "otto-context",
  "otto-core",
  "otto-sessions",
  "otto-skills",
  "otto-state",
- "otto-telemetry",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -4170,7 +4163,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "otto-core",
@@ -4188,9 +4181,9 @@ name = "otto-k8s"
 version = "0.2.0"
 dependencies = [
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
- "dirs 7.0.0",
+ "dirs",
  "futures-util",
  "hex",
  "http-body-util",
@@ -4286,6 +4279,7 @@ dependencies = [
  "chrono",
  "otto-core",
  "otto-pty",
+ "otto-sandbox",
  "serde",
  "serde_json",
  "tokio",
@@ -4299,10 +4293,9 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "http-body-util",
- "include_dir",
  "otto-context",
  "otto-core",
  "otto-design",
@@ -4311,6 +4304,7 @@ dependencies = [
  "otto-memory",
  "otto-orchestrator",
  "otto-sessions",
+ "otto-skills",
  "otto-state",
  "otto-swarm",
  "serde",
@@ -4367,7 +4361,6 @@ dependencies = [
  "otto-core",
  "otto-git",
  "otto-orchestrator",
- "otto-product",
  "otto-sessions",
  "otto-skills",
  "otto-state",
@@ -4391,10 +4384,10 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "chrono",
  "chrono-tz",
- "dirs 7.0.0",
+ "dirs",
  "futures-util",
  "hex",
  "hmac",
@@ -4458,7 +4451,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.30.0",
+ "tokio-tungstenite",
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
@@ -4473,12 +4466,14 @@ name = "otto-sessions"
 version = "0.2.0"
 dependencies = [
  "axum",
- "base64 0.23.1",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dashmap",
  "http-body-util",
+ "libc",
  "otto-core",
+ "otto-git",
  "otto-pty",
  "otto-rbac",
  "otto-sandbox",
@@ -4555,7 +4550,6 @@ dependencies = [
  "otto-orchestrator",
  "otto-sessions",
  "otto-state",
- "otto-telemetry",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4587,7 +4581,7 @@ dependencies = [
 name = "otto-transcript"
 version = "0.2.0"
 dependencies = [
- "base64 0.23.1",
+ "base64 0.22.1",
  "hex",
  "indexmap",
  "serde",
@@ -4603,7 +4597,7 @@ name = "otto-usage"
 version = "0.2.0"
 dependencies = [
  "chrono",
- "dirs 7.0.0",
+ "dirs",
  "futures-util",
  "otto-core",
  "otto-transcript",
@@ -4622,7 +4616,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "chrono",
- "dirs 7.0.0",
+ "dirs",
  "hex",
  "mime_guess",
  "notify",
@@ -4676,7 +4670,7 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "axum-server",
- "dirs 7.0.0",
+ "dirs",
  "notify",
  "otto-core",
  "otto-keychain",
@@ -6176,7 +6170,7 @@ version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32824fab5e16e6c4d86dc1ba84489390419a39f97699852b66480bb87d297ed8"
 dependencies = [
- "dirs 6.0.0",
+ "dirs",
 ]
 
 [[package]]
@@ -6960,23 +6954,11 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
- "tokio",
- "tungstenite 0.29.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
-dependencies = [
- "futures-util",
- "log",
  "rustls",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.30.0",
+ "tungstenite",
  "webpki-roots 0.26.11",
 ]
 
@@ -7292,25 +7274,9 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
- "sha1 0.10.7",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.10.3",
  "rustls",
  "rustls-pki-types",
- "sha1 0.11.0",
+ "sha1 0.10.7",
  "thiserror 2.0.21",
 ]
 

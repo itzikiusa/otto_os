@@ -33,6 +33,22 @@
   let tokenExpiresAt = $state('');
 
   const isEdit = $derived(editing !== null);
+  /** Repointing an account at another host must not carry the stored token
+   *  there (it would be sent as Basic auth to the new host): a changed host
+   *  needs a fresh token. */
+  function hostOf(u: string): string {
+    try {
+      return new URL(u.trim()).host.toLowerCase();
+    } catch {
+      return u.trim().toLowerCase();
+    }
+  }
+  const hostChanged = $derived.by(() => {
+    // (cast: TS narrows the `$state(null)` initializer to `null` at this point)
+    const e = editing as IssueAccount | null;
+    return !!e && hostOf(baseUrl) !== hostOf(e.base_url);
+  });
+  const needsToken = $derived(hostChanged && token === '');
 
   // ── Token-expiry helpers ───────────────────────────────────────────────────
   /** ISO timestamp → yyyy-mm-dd for an <input type="date"> (UTC date part). */
@@ -151,7 +167,7 @@
   }
 
   async function save(): Promise<void> {
-    if (!editing) return;
+    if (!editing || needsToken) return;
     busy = true;
     try {
       const body: Record<string, string | null | undefined> = {
@@ -324,7 +340,9 @@
         autocomplete="off"
         placeholder={isEdit ? '•••••• (leave blank to keep)' : ''}
       />
-      {#if isEdit}
+      {#if isEdit && hostChanged}
+        <span class="hint warn-hint" role="alert">The site changed — paste a token for the new site. The stored token is never sent to a different host.</span>
+      {:else if isEdit}
         <span class="hint">Leave blank to keep the existing token.</span>
       {:else}
         <span class="hint">
@@ -344,7 +362,7 @@
       {#if isEdit}
         <button
           class="btn primary"
-          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === ''}
+          disabled={busy || label.trim() === '' || baseUrl.trim() === '' || email.trim() === '' || needsToken}
           onclick={save}
         >
           {busy ? 'Saving…' : 'Save changes'}
@@ -436,6 +454,9 @@
   }
   .test-result.ok {
     color: var(--success);
+  }
+  .hint.warn-hint {
+    color: var(--danger);
   }
   .test-result.bad {
     color: var(--danger);

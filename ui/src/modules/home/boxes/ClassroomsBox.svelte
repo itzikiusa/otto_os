@@ -146,6 +146,15 @@
           }
           h = x;
           x.onFrame(placeOverlay);
+          x.onContextLost(() => {
+            if (dead || h !== x) return;
+            // A blank stage with no way out otherwise: drop the scene and
+            // show the error + Retry (which remounts a fresh context).
+            h = null;
+            handle = null;
+            x.destroy();
+            sceneError = 'The 3D view lost its graphics context (too many 3D views open at once).';
+          });
           x.setColors(readTokenColors(SCENE_TOKENS));
           x.setActive(untrack(() => onScreen));
           handle = x;
@@ -239,6 +248,18 @@
   function showTip(id: string, pinned = false): void {
     cancelHide();
     tip = { id, pinned };
+  }
+  const tipId = $derived(`classrooms-tip-${box.id}`);
+  /** Keyboard focus on a row's control (either button): highlight that
+   *  student and, in 3D view, show its card — the visible focus indicator
+   *  while the list itself is visually hidden. */
+  function focusStudent(id: string): void {
+    focusId = id;
+    if (mode === '3d') showTip(id);
+  }
+  function blurStudent(id: string): void {
+    if (focusId === id) focusId = null;
+    if (mode === '3d') scheduleHide();
   }
   function closeTip(): void {
     cancelHide();
@@ -378,7 +399,7 @@
 
   async function detention(s: Student): Promise<void> {
     closeTip();
-    if (await sendToDetention(s, { archive: (id) => ws.archiveSession(id), failed: (title, e) => toastError(title, e) })) {
+    if (await sendToDetention(s, { archive: (id) => ws.requestArchive(id), failed: (title, e) => toastError(title, e) })) {
       removed = new Set([...removed, s.id]);
       void poller?.now();
     }
@@ -496,15 +517,10 @@
                     <button
                       class="lmain"
                       aria-label="Open {studentAriaLabel(s, now() ? relTime(s.lastActiveAt) : '')}"
+                      aria-describedby={tip?.id === s.id ? tipId : undefined}
                       onclick={() => void open(s)}
-                      onfocus={() => {
-                        focusId = s.id;
-                        if (mode === '3d') showTip(s.id);
-                      }}
-                      onblur={() => {
-                        if (focusId === s.id) focusId = null;
-                        if (mode === '3d') scheduleHide();
-                      }}
+                      onfocus={() => focusStudent(s.id)}
+                      onblur={() => blurStudent(s.id)}
                       onmouseenter={() => mode === 'list' && showTip(s.id)}
                       onmouseleave={() => mode === 'list' && scheduleHide()}
                     >
@@ -514,7 +530,18 @@
                       {#if s.background}<span class="bg-tag">back row</span>{/if}
                       <span class="st">{s.stateLabel}</span>
                     </button>
-                    <button class="icon-btn" aria-label="More actions for {s.title}" title="More actions" aria-haspopup="menu" onclick={(e) => studentMenu(e, s)}>
+                    <!-- In 3D view the list is visually hidden, so EVERY tab stop
+                         in a row (this one too) shows the 3D highlight + card —
+                         otherwise focus would have no visible indicator. -->
+                    <button
+                      class="icon-btn"
+                      aria-label="More actions for {s.title}"
+                      title="More actions"
+                      aria-haspopup="menu"
+                      onclick={(e) => studentMenu(e, s)}
+                      onfocus={() => focusStudent(s.id)}
+                      onblur={() => blurStudent(s.id)}
+                    >
                       <Icon name="more" size={12} />
                     </button>
                   </li>
@@ -531,10 +558,13 @@
 {#if tip && tipStudent && tipText}
   <!-- Hover / focus / tap card. Fixed + clamped into the viewport; it holds
        its own actions so a pointer user can act without the menu. -->
+  <!-- Not role="tooltip": it holds buttons. A labelled group the focused row
+       points at with aria-describedby. -->
   <div
     class="tip"
-    role="tooltip"
-    id="classrooms-tip-{box.id}"
+    role="group"
+    aria-label="{tipText.title} — details"
+    id={tipId}
     bind:this={tipEl}
     onpointerenter={cancelHide}
     onpointerleave={() => {

@@ -284,15 +284,22 @@
   }
 
   // Exclude / re-include a provider. Optimistic; reverts on failure.
+  // Each PUT carries the WHOLE list, so quick toggles can land out of order:
+  // only the latest write's response may set `disabled` (an older reply used to
+  // re-apply its stale list over the newer one).
+  let toggleSeq = 0;
   async function toggleProvider(nameOfProvider: string, enable: boolean): Promise<void> {
+    const seq = ++toggleSeq;
     const next = new Set(disabled);
     if (enable) next.delete(nameOfProvider);
     else next.add(nameOfProvider);
     disabled = next;
     try {
-      allSettings = await api.put<Record<string, unknown>>('/settings', {
+      const saved = await api.put<Record<string, unknown>>('/settings', {
         disabled_providers: [...next],
       });
+      if (seq !== toggleSeq) return;
+      allSettings = saved;
       disabled = new Set((allSettings['disabled_providers'] as string[] | undefined) ?? []);
       await auth.refreshMeta();
       toasts.success(
@@ -302,6 +309,7 @@
           : 'Hidden from every picker; existing sessions keep working',
       );
     } catch (e) {
+      if (seq !== toggleSeq) return;
       // revert
       const revert = new Set(disabled);
       if (enable) revert.add(nameOfProvider);
@@ -352,7 +360,7 @@
       skipPermissions &&
       !(await confirmer.ask(
         'New agent sessions will run tools, edit files and execute commands without asking you first.',
-        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: false },
+        { title: 'Skip permission prompts?', confirmLabel: 'Skip prompts', danger: true },
       ))
     ) {
       skipPermissions = false;

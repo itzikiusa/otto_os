@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { latestOnly } from '../../lib/latest';
   import PageHeader from '../../lib/components/PageHeader.svelte';
   import { sectionLabel } from './sections';
   import PageBody from '../../lib/components/PageBody.svelte';
@@ -102,7 +103,11 @@
     return new Date(`${d}T23:59:59.999`).toISOString();
   }
 
+  // Filters change faster than the log answers: only the latest filter's
+  // response may land (an older one showed entries that didn't match it).
+  const logSeq = latestOnly();
   async function loadLog(): Promise<void> {
+    const t = logSeq.begin();
     logLoading = true;
     logError = '';
     try {
@@ -114,13 +119,15 @@
       const to = endOfDayIso(toDate);
       if (from) params.set('from', from);
       if (to) params.set('to', to);
-      const resp = await api.get<AuditLogResp>(`/audit-log?${params.toString()}`);
+      const resp = await api.get<AuditLogResp>(`/audit-log?${params.toString()}`, t.signal);
+      if (!t.current) return;
       entries = resp.entries;
       total = resp.total;
     } catch (e) {
+      if (!t.current) return;
       logError = loadErrorText(e);
     } finally {
-      logLoading = false;
+      if (t.current) logLoading = false;
     }
   }
 

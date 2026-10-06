@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deferred, loadSource } from './sourceHarness.ts';
 import * as livePaths from '../src/lib/gitLivePaths.ts';
+import * as latest from '../src/lib/latest.ts';
 
 // `repo_status_changed` (otto-git watch.rs) → git.applyRepoChanged(): the Git
 // page re-reads local status right away instead of on the next auto-fetch.
@@ -28,7 +29,7 @@ function fixture() {
       return result.promise;
     } } },
     '../loadError': { loadErrorText: (e: unknown) => (e instanceof Error ? e.message : String(e)) },
-    '../gitLivePaths': livePaths,
+    '../gitLivePaths': livePaths, '../latest': latest,
   }, { document, setTimeout, clearTimeout });
   return { git, gets, document, listeners };
 }

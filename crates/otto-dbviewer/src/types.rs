@@ -1496,7 +1496,7 @@ pub(crate) fn sql_leaves_session_state(statement: &str) -> bool {
     select_writes_session
         || (kw == "CREATE" && (upper.contains(" TEMPORARY ") || upper.contains(" TEMP ")))
         || upper.contains("GET_LOCK(")
-        || upper.contains("PG_ADVISORY_LOCK")
+        || upper.contains("ADVISORY_LOCK")
         || upper.contains("SET_CONFIG(")
 }
 

@@ -21,7 +21,12 @@
 //! operator-configured public domain (`share_base_url` in settings) when set,
 //! else derived from the `Host` request header (defaults to a relative
 //! `/#/s/{session_id}/{token}` when unavailable). The same `origin` is used to
-//! build the link emailed alongside an OTP code.
+//! build the link emailed alongside an OTP code. When neither the configured
+//! domain nor the Host is reachable from another device (the desktop app always
+//! calls 127.0.0.1) and the network listener is on, the LAN listener address
+//! (`https://<lan-ip>:<port>`) is used instead. `reachable_remotely` reports
+//! whether the final origin is non-loopback; an emailed OTP share on a loopback
+//! origin is refused with 409 (the recipient could never open it).
 //!
 //! ## Eviction on revoke
 //! After revoking a share, `SessionManager::evict(&session_id)` is called so
@@ -141,6 +146,99 @@ fn origin_from_headers(headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
+/// The origin a share link is built on, plus whether a device OTHER than this
+/// Mac can open it (S20-01: a loopback link + a "scan on your phone" QR is a
+/// dead end, so the UI warns instead and the OTP path refuses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareOrigin {
+    pub origin: String,
+    pub reachable_remotely: bool,
+}
+
+/// Host part of an origin (`scheme://host[:port]` or a bare `host[:port]`),
+/// without the port; IPv6 brackets are kept off. Empty for an empty origin.
+fn origin_host(origin: &str) -> &str {
+    let rest = origin.split_once("://").map_or(origin, |(_, r)| r);
+    let authority = rest.split(['/', '#', '?']).next().unwrap_or_default();
+    if let Some(v6) = authority.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or_default();
+    }
+    authority.split(':').next().unwrap_or_default()
+}
+
+/// True when another device could resolve `origin` to this Mac: non-empty and
+/// not loopback / unspecified / `localhost`.
+pub fn origin_is_remote(origin: &str) -> bool {
+    let host = origin_host(origin).trim().to_ascii_lowercase();
+    if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
+        return false;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => !(ip.is_loopback() || ip.is_unspecified()),
+        Err(_) => true,
+    }
+}
+
+/// Pick the share origin: the configured public domain, else a remote request
+/// Host, else the LAN listener's address, else the (loopback/empty) Host.
+pub fn resolve_share_origin(
+    configured: Option<String>,
+    host_origin: String,
+    lan_origin: Option<String>,
+) -> ShareOrigin {
+    let configured = configured
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty());
+    let origin = configured
+        .or_else(|| origin_is_remote(&host_origin).then(|| host_origin.clone()))
+        .or(lan_origin)
+        .unwrap_or(host_origin);
+    ShareOrigin {
+        reachable_remotely: origin_is_remote(&origin),
+        origin,
+    }
+}
+
+/// `https://<lan-ip>:<port>` of the network (TLS, 0.0.0.0) listener when the
+/// `network_listener` setting is enabled and this Mac has a non-loopback
+/// primary address. The port is the setting's, else the request Host's (the
+/// listener defaults to the daemon port), else 7700.
+fn lan_listener_origin(setting: Option<&serde_json::Value>, headers: &HeaderMap) -> Option<String> {
+    let setting = setting?;
+    if !setting
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let host_port = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.rsplit_once(':'))
+        .and_then(|(_, p)| p.parse::<u16>().ok());
+    let port = setting
+        .get("port")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|p| u16::try_from(p).ok())
+        .or(host_port)
+        .unwrap_or(7700);
+    let ip = primary_lan_ip()?;
+    Some(match ip {
+        std::net::IpAddr::V4(v4) => format!("https://{v4}:{port}"),
+        std::net::IpAddr::V6(v6) => format!("https://[{v6}]:{port}"),
+    })
+}
+
+/// The address the OS would route outbound traffic from. A UDP `connect` only
+/// selects a route — no packet is sent.
+fn primary_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?; // TEST-NET-1: never contacted
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 /// `POST /api/v1/sessions/{id}/share`
 ///
 /// Mint a scoped share-link token bound to the session. The raw token is
@@ -161,6 +259,11 @@ pub async fn mint_share(
             "an impersonated session cannot mint share links".into(),
         )));
     }
+
+    // Guard 1b (S1-02): a share token carries no session binding, so an
+    // agent's credential minting one could attach to a sibling terminal (and,
+    // through a tunnel, hand out a remote shell) with no person involved.
+    crate::auth::require_human(&auth.0)?;
 
     // Guard 2: block scoped (share) tokens from minting sub-shares.
     if auth.0.scope.is_some() {
@@ -199,15 +302,36 @@ pub async fn mint_share(
 
     // Resolve the base origin ONCE: prefer the operator-configured public domain
     // (`share_base_url` in settings — so links work remotely, not just at the
-    // request Host which is 127.0.0.1 for a tunneled daemon), falling back to the
-    // request's Host header.
-    let configured = otto_state::SettingsRepo::new(ctx.pool.clone())
+    // request Host which is 127.0.0.1 for the desktop app / a tunneled daemon),
+    // then a non-loopback request Host, then the LAN TLS listener's address when
+    // the network listener is on, and only then the (loopback) Host itself.
+    let settings = otto_state::SettingsRepo::new(ctx.pool.clone());
+    let configured = settings
         .get("share_base_url")
         .await?
-        .and_then(|v| v.as_str().map(str::to_string))
-        .map(|s| s.trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty());
-    let origin = configured.unwrap_or_else(|| origin_from_headers(&headers));
+        .and_then(|v| v.as_str().map(str::to_string));
+    let host_origin = origin_from_headers(&headers);
+    let lan_origin = if origin_is_remote(&host_origin) {
+        None // the caller already reached us remotely — no need to probe
+    } else {
+        let listener = settings.get("network_listener").await?;
+        lan_listener_origin(listener.as_ref(), &headers)
+    };
+    let ShareOrigin {
+        origin,
+        reachable_remotely,
+    } = resolve_share_origin(configured, host_origin, lan_origin);
+
+    // An emailed OTP share is useless when its link points at loopback: the
+    // recipient would get a dead link and a code they cannot redeem. Refuse
+    // BEFORE minting (nothing to revoke) with a fixable message.
+    if recipient.is_some() && !reachable_remotely {
+        return Err(ApiError(Error::Conflict(
+            "this link would only work on this Mac — set a Public link domain \
+             (Settings → Sharing) or turn on the network listener before emailing a share"
+                .into(),
+        )));
+    }
 
     let (token, info) = if let Some(recipient) = recipient {
         // Resolve the owner's verified Gmail sender → build the production mailer.
@@ -252,7 +376,12 @@ pub async fn mint_share(
     })
     .await;
 
-    Ok(Json(CreateShareResp { token, url, info }))
+    Ok(Json(CreateShareResp {
+        token,
+        url,
+        info,
+        reachable_remotely,
+    }))
 }
 
 /// Resolve the owner's **verified** email sender into a production [`OtpMailer`].
@@ -402,10 +531,13 @@ pub async fn extend_otp_share(
 pub async fn extend_share(
     State(ctx): State<ServerCtx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    client: Option<axum::Extension<otto_sessions::share_throttle::ClientIp>>,
     Json(req): Json<ExtendShareReq>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let ip = peer.ip();
+    // Tunnel-aware client IP (host guard) — the raw peer is 127.0.0.1 for
+    // every visitor behind the Cloudflare tunnel (S8-02).
+    let ip = client.map_or(peer.ip(), |c| c.0.ip);
 
     // 1. IP rate-limit BEFORE doing any work → 429 with Retry-After.
     if let Err(locked) = otto_sessions::share_throttle::global().check(ip) {
@@ -417,6 +549,25 @@ pub async fn extend_share(
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", secs.to_string())],
+            Json(body),
+        )
+            .into_response();
+    }
+
+    // 1b. Per-share extend budget (S8-06): every extend de-verifies the guest
+    //     and emails the recipient from the owner's sender, so a link holder
+    //     must not be able to do it at will.
+    if !extend_budget_ok(&req.token) {
+        let body = otto_core::api::Problem {
+            code: "too_many_requests".to_string(),
+            message: format!(
+                "this share was extended {EXTEND_MAX_PER_WINDOW} times in the last hour; \
+                 try again later"
+            ),
+        };
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", EXTEND_WINDOW.as_secs().to_string())],
             Json(body),
         )
             .into_response();
@@ -456,8 +607,9 @@ pub async fn extend_share(
         .into_response();
     }
 
-    // Success: clear the IP's failure tally and audit the extension.
-    otto_sessions::share_throttle::global().clear(ip);
+    // Success: audit the extension. The IP's failure tally is deliberately NOT
+    // cleared (S8-06) — a successful extend says nothing about the caller's
+    // earlier failed guesses.
     ctx.audit(NewAuditEntry {
         user_id: Some(owner_id.clone()),
         action: "share.extend".into(),
@@ -468,6 +620,40 @@ pub async fn extend_share(
     .await;
 
     Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Extends one share may take per [`EXTEND_WINDOW`] (S8-06).
+const EXTEND_MAX_PER_WINDOW: usize = 3;
+/// Sliding window for [`EXTEND_MAX_PER_WINDOW`].
+const EXTEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Take one slot of the per-share extend budget, keyed on the token's hash
+/// (never the raw token). In-memory and per-process like the IP throttle; the
+/// map is pruned on every call and capped so junk tokens can't grow it.
+fn extend_budget_ok(token: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static SLOTS: OnceLock<Mutex<HashMap<String, Vec<Instant>>>> = OnceLock::new();
+    let key = otto_rbac::tokens::token_hash(token);
+    let mut map = SLOTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    map.retain(|_, v| {
+        v.retain(|t| now.duration_since(*t) < EXTEND_WINDOW);
+        !v.is_empty()
+    });
+    if map.len() >= 10_000 && !map.contains_key(&key) {
+        return false;
+    }
+    let slots = map.entry(key).or_default();
+    if slots.len() >= EXTEND_MAX_PER_WINDOW {
+        return false;
+    }
+    slots.push(now);
+    true
 }
 
 /// `POST /api/v1/share/verify` — redeem an emailed OTP for a share token
@@ -481,10 +667,13 @@ pub async fn extend_share(
 pub async fn verify_share(
     State(ctx): State<ServerCtx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    client: Option<axum::Extension<otto_sessions::share_throttle::ClientIp>>,
     Json(req): Json<VerifyShareReq>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let ip = peer.ip();
+    // Tunnel-aware client IP (host guard) — the raw peer is 127.0.0.1 for
+    // every visitor behind the Cloudflare tunnel (S8-02).
+    let ip = client.map_or(peer.ip(), |c| c.0.ip);
 
     // 1. IP rate-limit BEFORE attempting verification → 429 with Retry-After.
     if let Err(locked) = otto_sessions::share_throttle::global().check(ip) {
@@ -680,4 +869,96 @@ pub async fn share_whoami(
         "session_id": scope.session_id,
         "role": scope.role.as_str(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S8-06: a share may be extended at most `EXTEND_MAX_PER_WINDOW` times
+    /// per window; other shares keep their own budget.
+    #[test]
+    fn extend_budget_caps_each_share_independently() {
+        let a = format!("budget-test-a-{}", otto_core::new_id());
+        let b = format!("budget-test-b-{}", otto_core::new_id());
+        for _ in 0..EXTEND_MAX_PER_WINDOW {
+            assert!(extend_budget_ok(&a));
+        }
+        assert!(!extend_budget_ok(&a), "the next extend must be refused");
+        assert!(extend_budget_ok(&b), "another share is unaffected");
+    }
+
+    #[test]
+    fn origin_is_remote_rejects_loopback_and_empty() {
+        for o in [
+            "",
+            "http://127.0.0.1:7700",
+            "http://localhost:5173",
+            "http://[::1]:7700",
+            "https://0.0.0.0:7701",
+            "http://app.localhost",
+        ] {
+            assert!(!origin_is_remote(o), "{o} must not count as remote");
+        }
+        for o in [
+            "https://otto.example.com",
+            "https://192.168.1.20:7700",
+            "https://[fe80::1]:7700",
+            "otto.example.com",
+        ] {
+            assert!(origin_is_remote(o), "{o} must count as remote");
+        }
+    }
+
+    #[test]
+    fn configured_domain_wins_and_is_trimmed() {
+        let o = resolve_share_origin(
+            Some(" https://otto.example.com/ ".into()),
+            "http://127.0.0.1:7700".into(),
+            Some("https://192.168.1.20:7700".into()),
+        );
+        assert_eq!(o.origin, "https://otto.example.com");
+        assert!(o.reachable_remotely);
+    }
+
+    #[test]
+    fn loopback_host_falls_back_to_lan_listener() {
+        let o = resolve_share_origin(
+            Some("   ".into()),
+            "http://127.0.0.1:7700".into(),
+            Some("https://192.168.1.20:7700".into()),
+        );
+        assert_eq!(o.origin, "https://192.168.1.20:7700");
+        assert!(o.reachable_remotely);
+    }
+
+    #[test]
+    fn loopback_host_without_listener_is_flagged_unreachable() {
+        let o = resolve_share_origin(None, "http://127.0.0.1:7700".into(), None);
+        assert_eq!(o.origin, "http://127.0.0.1:7700");
+        assert!(!o.reachable_remotely);
+        let empty = resolve_share_origin(None, String::new(), None);
+        assert!(!empty.reachable_remotely);
+    }
+
+    #[test]
+    fn remote_host_is_kept_over_lan_listener() {
+        let o = resolve_share_origin(
+            None,
+            "https://192.168.1.30:7700".into(),
+            Some("https://10.0.0.2:7700".into()),
+        );
+        assert_eq!(o.origin, "https://192.168.1.30:7700");
+        assert!(o.reachable_remotely);
+    }
+
+    #[test]
+    fn lan_listener_origin_requires_enabled_setting() {
+        let headers = HeaderMap::new();
+        assert_eq!(lan_listener_origin(None, &headers), None);
+        assert_eq!(
+            lan_listener_origin(Some(&serde_json::json!({ "enabled": false })), &headers),
+            None
+        );
+    }
 }

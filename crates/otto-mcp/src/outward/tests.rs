@@ -1307,6 +1307,11 @@ fn pin_verdict_denies_what_it_cannot_verify() {
     // Every tool classified unverifiable really is denied to a pin.
     for t in PIN_UNVERIFIABLE {
         assert!(pin_verdict(&pinned, t, &json!({})).is_some(), "{t}");
+        // …even when the caller echoes the pin back as `workspace_id`.
+        assert!(
+            pin_verdict(&pinned, t, &json!({"workspace_id":"ws-a"})).is_some(),
+            "{t}: pin echo must not pass"
+        );
     }
     // Global rows are fine without a workspace.
     assert!(pin_verdict(&pinned, "k8s_top", &json!({"cluster_id":"C"})).is_none());
@@ -1833,4 +1838,33 @@ fn pick_vault_workspace_prefers_writable_for_mutating_tools() {
         Some("view-only")
     );
     assert_eq!(pick_vault_workspace(&[], false), None);
+}
+
+#[test]
+fn initialize_negotiates_to_a_supported_protocol_version() {
+    use super::jsonrpc::negotiate_protocol_version as n;
+    assert_eq!(n(Some("2024-11-05")), "2024-11-05");
+    assert_eq!(n(Some("2025-06-18")), "2025-06-18");
+    // An unknown (future) revision is not echoed back.
+    assert_eq!(n(Some("2099-01-01")), "2025-03-26");
+    assert_eq!(n(None), "2025-03-26");
+}
+
+#[test]
+fn a_dot_segment_cannot_traverse_to_another_route() {
+    for dots in [".", ".."] {
+        let url = reqwest::Url::parse(&format!(
+            "http://127.0.0.1:7700/api/v1/sessions/{}/message",
+            seg(dots)
+        ))
+        .unwrap();
+        assert!(
+            url.path().starts_with("/api/v1/sessions/"),
+            "{dots}: {}",
+            url.path()
+        );
+    }
+    // Dots inside an id are untouched; other bytes are encoded.
+    assert_eq!(seg("v1.2"), "v1.2");
+    assert_eq!(seg("a/b"), "a%2Fb");
 }

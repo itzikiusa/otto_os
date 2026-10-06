@@ -5,7 +5,7 @@
   import { dialogFocus } from '../../lib/dialogFocus';
   import { toastError } from '../../lib/toastError';
   import { sentenceCase } from '../../lib/labels';
-  import { branchTracking } from './refTracking';
+  import { branchTracking, splitRemoteRef } from './refTracking';
   import { planSection } from './ref-budget';
   // Two-pane: LEFT = refs tree (local/remote/tags), MIDDLE = commit graph, RIGHT = commit detail/diff.
   import { untrack } from 'svelte';
@@ -1340,8 +1340,9 @@
     const items: MenuItem[] = [];
 
     if (b.remote) {
-      // Remote ref row: checkout as a local tracking branch; delete on origin.
-      const localName = b.name.replace(/^[^/]+\//, '');
+      // Remote ref row: checkout as a local tracking branch; delete on ITS remote
+      // (`upstream/x` must never delete `origin/x`).
+      const { remote: remoteName, branch: localName } = splitRemoteRef(b.name);
       items.push({ label: 'Checkout', icon: 'branch', action: () => checkoutRemote(b) });
       // Rebasing onto a remote ref is the common "catch up with origin" move.
       if (currentBranch && b.name !== currentBranch) {
@@ -1377,7 +1378,7 @@
         label: `Delete ${b.name}…`,
         icon: 'trash',
         danger: true,
-        action: () => void deleteRemoteBranch(localName),
+        action: () => void deleteRemoteBranch(localName, remoteName),
       });
       if (localTwin) {
         items.push({
@@ -1563,19 +1564,21 @@
     }
   }
 
-  async function deleteRemoteBranch(name: string): Promise<void> {
-    const ok = await confirmer.ask(`Delete branch “${name}” on origin? This cannot be undone.`, {
+  async function deleteRemoteBranch(name: string, remote = 'origin'): Promise<void> {
+    const full = `${remote}/${name}`;
+    const ok = await confirmer.ask(`Delete branch “${full}” on the remote “${remote}”? This cannot be undone.`, {
       title: 'Delete remote branch',
       confirmLabel: 'Delete',
       danger: true,
     });
     if (!ok) return;
-    // Remote-only: leave any local branch of the same name intact.
+    // Remote-only: leave any local branch of the same name intact. `remote_name`
+    // pins WHICH remote — the daemon pushes `--delete` to that remote, not origin.
     await mutate(
       '/branch/delete',
-      { name, remote: true, local: false, force: true },
+      { name, remote: true, remote_name: remote, local: false, force: true },
       'Remote branch deleted',
-      `origin/${name}`,
+      full,
     );
   }
 

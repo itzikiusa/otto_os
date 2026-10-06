@@ -1495,11 +1495,29 @@ impl McpApprovalRepo {
         args_hash: &str,
         requested_by: Option<&str>,
     ) -> Result<Option<String>> {
+        self.find_usable_in(workspace_id, server_id, tool, args_hash, requested_by, None)
+            .await
+    }
+
+    /// [`Self::find_usable`], additionally bound to the requesting agent
+    /// SESSION when `session` is `Some(Some(id))` (`Some(None)`: a card no
+    /// session raised — a human caller). A sibling session of the same owner
+    /// must not spend an approval a human granted for another session's call.
+    pub async fn find_usable_in(
+        &self,
+        workspace_id: Option<&str>,
+        server_id: Option<&str>,
+        tool: &str,
+        args_hash: &str,
+        requested_by: Option<&str>,
+        session: Option<Option<&str>>,
+    ) -> Result<Option<String>> {
         let now = fmt(Utc::now());
         let r = sqlx::query(
             "SELECT id FROM mcp_approvals
              WHERE status = 'approved' AND consumed_at IS NULL
                AND tool = ? AND args_hash = ? AND requested_by IS ?
+               AND (? = 0 OR requested_by_session_id IS ?)
                AND (server_id IS ? OR server_id = ?)
                AND (workspace_id IS ? OR workspace_id = ?)
                AND (expires_at IS NULL OR expires_at > ?)
@@ -1508,6 +1526,8 @@ impl McpApprovalRepo {
         .bind(tool)
         .bind(args_hash)
         .bind(requested_by)
+        .bind(i64::from(session.is_some()))
+        .bind(session.flatten())
         .bind(server_id)
         .bind(server_id)
         .bind(workspace_id)
@@ -1532,11 +1552,28 @@ impl McpApprovalRepo {
         args_hash: &str,
         requested_by: &str,
     ) -> Result<Option<String>> {
+        self.find_pending_in(workspace_id, server_id, tool, args_hash, requested_by, None)
+            .await
+    }
+
+    /// [`Self::find_pending`] bound to the requesting session (see
+    /// [`Self::find_usable_in`]): one session's retry reuses ITS card, never
+    /// a sibling session's.
+    pub async fn find_pending_in(
+        &self,
+        workspace_id: Option<&str>,
+        server_id: Option<&str>,
+        tool: &str,
+        args_hash: &str,
+        requested_by: &str,
+        session: Option<Option<&str>>,
+    ) -> Result<Option<String>> {
         let now = fmt(Utc::now());
         let r = sqlx::query(
             "SELECT id FROM mcp_approvals
              WHERE status = 'pending'
                AND tool = ? AND args_hash = ? AND requested_by = ?
+               AND (? = 0 OR requested_by_session_id IS ?)
                AND (server_id IS ? OR server_id = ?)
                AND (workspace_id IS ? OR workspace_id = ?)
                AND (expires_at IS NULL OR expires_at > ?)
@@ -1545,6 +1582,8 @@ impl McpApprovalRepo {
         .bind(tool)
         .bind(args_hash)
         .bind(requested_by)
+        .bind(i64::from(session.is_some()))
+        .bind(session.flatten())
         .bind(server_id)
         .bind(server_id)
         .bind(workspace_id)

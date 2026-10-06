@@ -11,6 +11,7 @@ import { beginNavigation, finishNavigationPaint } from './telemetry';
 // can return to previously-viewed pages.
 
 import { SvelteMap } from 'svelte/reactivity';
+import { dropShareToken, storeShareToken, storedShareToken } from './shareTokenStore';
 import { winKey } from './win';
 import { lsGet, lsSet } from './storage';
 import { isEmbedded } from './desktop';
@@ -27,6 +28,8 @@ import { activeNavId } from './sidebar';
 // The token is intentionally NOT stored in localStorage (would clobber a real
 // owner login under the 'otto_token' key and survive the session).
 // Replacing a token for the same session must refresh the guest's role too.
+// It IS mirrored into tab-scoped sessionStorage (shareTokenStore.ts) so a
+// reload of the guest page keeps access.
 const _shareTokens = new SvelteMap<string, string>();
 
 // Per-window last-route persistence (multi-window restore). Desktop-app only:
@@ -122,7 +125,16 @@ function loadLastByModule(): Map<string, string> {
 /** Retrieve the in-memory share token captured for a given session.
  *  Returns null if the URL didn't carry one or the token has been consumed. */
 export function getShareToken(sessionId: string): string | null {
-  return _shareTokens.get(sessionId) ?? null;
+  const t = _shareTokens.get(sessionId);
+  if (t) return t;
+  // A reload: the URL no longer carries the token, but this tab kept it.
+  return storedShareToken(sessionId);
+}
+
+/** The link is dead (revoked / expired): forget the tab's stored copy so a
+ *  reload doesn't keep presenting it. The in-memory token stays for this view. */
+export function forgetStoredShareToken(sessionId: string): void {
+  dropShareToken(sessionId);
 }
 
 /** decodeURIComponent that never throws: a malformed `%` escape in a pasted
@@ -203,6 +215,7 @@ class Router {
       this.parse();
       this.stack = [this.currentHash()];
       this.index = 0;
+      this.stamp();
       persistLastRoute(this.currentHash());
       this.rememberModule();
       window.addEventListener('hashchange', () => this.onHashChange());
@@ -265,6 +278,7 @@ class Router {
       const token = parts[2];
       if (sessionId && token) {
         _shareTokens.set(sessionId, token);
+        storeShareToken(sessionId, token);
         // Remove the token segment from the URL immediately (replaceState so
         // it doesn't create a new history entry — the token is one-time-view).
         const cleanHash = `#/s/${encodeURIComponent(sessionId)}`;
@@ -345,25 +359,88 @@ class Router {
     window.location.hash = hash;
   }
 
+  /** Set while our own `history.go()` undoes a refused native traversal, so
+   *  the hashchange it fires is ignored. */
+  private undoing = false;
+
+  /** Stamp the current browser history entry with its stack index (S13-09).
+   *  A native traversal (mouse back button, trackpad swipe, browser Back in
+   *  remote mode) lands on a stamped entry, which tells it apart from a new
+   *  navigation on hashchange — it used to truncate forward history and push,
+   *  so ⌘⇧←/→ diverged from the browser. */
+  private stamp(): void {
+    if (!window.location.hash) return;
+    try {
+      const prev = (history.state as Record<string, unknown> | null) ?? {};
+      history.replaceState({ ...prev, ottoIdx: this.index }, '', window.location.hash);
+    } catch {
+      /* history unavailable / sandboxed — plain push semantics */
+    }
+  }
+
+  /** The stack index of the entry a native traversal landed on, or null for
+   *  a new navigation (unstamped entry, or one from a previous page life). */
+  private traversalIndex(h: string): number | null {
+    let i: unknown;
+    try {
+      i = (history.state as { ottoIdx?: unknown } | null)?.ottoIdx;
+    } catch {
+      return null;
+    }
+    return typeof i === 'number' && i !== this.index && this.stack[i] === h ? i : null;
+  }
+
+  /** Undo a native one-step traversal the router refused (diverted / a
+   *  leave-guard): step the browser back the other way instead of
+   *  `replaceState(prev)`, which overwrote the back-target entry and
+   *  corrupted browser history. */
+  private undoTraversal(target: number): number {
+    const dir = target < this.index ? 1 : -1;
+    this.undoing = true;
+    history.go(dir);
+    return dir;
+  }
+
   private onHashChange(): void {
+    if (this.undoing) {
+      this.undoing = false;
+      return;
+    }
     // A link (`<a href="#/…">`) or a direct hash write bypasses go(): divert a
     // claimed route after the fact and put this pane's hash back, leaving the
     // page, the stack and the persisted route untouched.
     if (!this.navigating) {
       const prev = this.stack[this.index];
       const h = this.currentHash();
+      const traversal = prev !== undefined && h !== prev ? this.traversalIndex(h) : null;
       if (prev !== undefined && h !== prev && this.divert(h)) {
-        history.replaceState(null, '', prev);
+        if (traversal !== null) {
+          this.undoTraversal(traversal);
+        } else {
+          history.replaceState(null, '', prev);
+          this.stamp();
+        }
         return;
       }
-      // Unapproved navigation (a link, a direct hash write) while a guard is
-      // registered: put the old hash back at once so the page doesn't change,
-      // then re-issue the navigation only if every guard agrees.
+      // Unapproved navigation (a link, a direct hash write, a native back)
+      // while a guard is registered: put the old hash back at once so the
+      // page doesn't change, then re-issue the navigation only if every
+      // guard agrees.
       if (prev !== undefined && h !== prev && this.guards.size > 0 && this.approved !== h) {
-        history.replaceState(null, '', prev);
-        void this.mayLeave(h).then((ok) => {
-          if (ok) this.setHash(h);
-        });
+        if (traversal !== null) {
+          const dir = this.undoTraversal(traversal);
+          void this.mayLeave(h).then((ok) => {
+            if (!ok) return;
+            this.approved = h;
+            history.go(-dir);
+          });
+        } else {
+          history.replaceState(null, '', prev);
+          this.stamp();
+          void this.mayLeave(h).then((ok) => {
+            if (ok) this.setHash(h);
+          });
+        }
         return;
       }
     }
@@ -373,13 +450,22 @@ class Router {
     this.rememberModule();
     if (this.navigating) {
       this.navigating = false;
+      this.stamp();
+      return;
+    }
+    const h = this.currentHash();
+    if (this.stack[this.index] === h) return;
+    // A native back/forward onto an entry we know: move the pointer, keep
+    // the forward history (what the browser itself does).
+    const traversal = this.traversalIndex(h);
+    if (traversal !== null) {
+      this.index = traversal;
       return;
     }
     // A normal navigation: truncate any forward history and push.
-    const h = this.currentHash();
-    if (this.stack[this.index] === h) return;
     this.stack = [...this.stack.slice(0, this.index + 1), h];
     this.index = this.stack.length - 1;
+    this.stamp();
   }
 
   /** first segment, '' when none */
@@ -417,6 +503,7 @@ class Router {
     persistLastRoute(this.currentHash());
     this.rememberModule();
     if (this.index >= 0) this.stack[this.index] = this.currentHash();
+    this.stamp();
   }
 
   /** Record the current hash as its module's resume point. */

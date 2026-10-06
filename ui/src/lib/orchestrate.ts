@@ -18,6 +18,7 @@ import type { Action, BroadcastResp, ExecuteResult, Id, OrchestrateResp, Session
 import { parseCommand, parseClose, startsWithCloseVerb, type CloseRequest } from './commandParser';
 import { allProviders } from './providers';
 import { plural } from './plural';
+import { isForeground } from './stores/sessionBuckets';
 
 export interface OrchestrateCtx {
   workspaceId: string;
@@ -186,8 +187,11 @@ async function handleClose(
   // warn rather than fall through when it matches nothing.
   const deliberate = !!req && (!!req.provider || req.all || req.positions.length > 0);
   if (req?.provider) {
+    // Foreground only: "close all claude sessions" must never sweep up a
+    // workflow step, review agent or PR-draft agent running in the
+    // background (S13-04) — whichever window built the context.
     const prov = ctx.sessions.filter(
-      (s) => !s.archived && s.kind === 'agent' && s.provider === req.provider,
+      (s) => !s.archived && s.kind === 'agent' && s.provider === req.provider && isForeground(s),
     );
     ids =
       req.positions.length > 0

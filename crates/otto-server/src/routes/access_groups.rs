@@ -42,6 +42,7 @@ pub async fn create_group<S: AccessCtx>(
     Json(req): Json<GroupInput>,
 ) -> ApiResult<Json<AccessGroup>> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     Ok(Json(
         ResourceAccessRepo::new(ctx.access_pool())
             .create_group(&req.name, req.description.as_deref(), &actor(&auth))
@@ -55,6 +56,7 @@ pub async fn update_group<S: AccessCtx>(
     Json(req): Json<GroupInput>,
 ) -> ApiResult<Json<AccessGroup>> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     Ok(Json(
         ResourceAccessRepo::new(ctx.access_pool())
             .update_group(&id, &req.name, req.description.as_deref(), &actor(&auth))
@@ -67,6 +69,7 @@ pub async fn delete_group<S: AccessCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     ResourceAccessRepo::new(ctx.access_pool())
         .delete_group(&id, &actor(&auth))
         .await?;
@@ -90,6 +93,7 @@ pub async fn add_member<S: AccessCtx>(
     Path((id, uid)): Path<(Id, Id)>,
 ) -> ApiResult<StatusCode> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     ResourceAccessRepo::new(ctx.access_pool())
         .add_group_member(&id, &uid, &actor(&auth))
         .await?;
@@ -101,6 +105,7 @@ pub async fn remove_member<S: AccessCtx>(
     Path((id, uid)): Path<(Id, Id)>,
 ) -> ApiResult<StatusCode> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     ResourceAccessRepo::new(ctx.access_pool())
         .remove_group_member(&id, &uid, &actor(&auth))
         .await?;
@@ -123,6 +128,7 @@ pub async fn create_role<S: AccessCtx>(
     Json(req): Json<RoleInput>,
 ) -> ApiResult<Json<AccessRole>> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     Ok(Json(
         ResourceAccessRepo::new(ctx.access_pool())
             .create_role(
@@ -143,6 +149,7 @@ pub async fn update_role<S: AccessCtx>(
     Json(req): Json<RoleInput>,
 ) -> ApiResult<Json<AccessRole>> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     Ok(Json(
         ResourceAccessRepo::new(ctx.access_pool())
             .update_role(
@@ -163,6 +170,7 @@ pub async fn delete_role<S: AccessCtx>(
     Path(id): Path<Id>,
 ) -> ApiResult<StatusCode> {
     require_root(&auth.effective_user)?;
+    crate::auth::require_human(&auth)?;
     ResourceAccessRepo::new(ctx.access_pool())
         .delete_role(&id, &actor(&auth))
         .await?;

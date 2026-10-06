@@ -269,7 +269,8 @@ impl CredentialMonitor {
 
         self.check_agent(
             "codex",
-            codex_credentials_present(),
+            // File read: blocking pool too, not a runtime worker (S9-11).
+            crate::offload::blocking(codex_credentials_present).await,
             "Codex: re-login needed",
             "Codex credentials are missing. Run `codex login` to re-authenticate.",
             "agent_auth:codex",
@@ -646,6 +647,13 @@ async fn handle_session_transition(
                 // running under the agent (build / tests / deploy) — it does
                 // NOT need the user yet. The eventual resume produces a fresh
                 // Working→Idle transition, so the notice isn't lost, just late.
+                // Cheap gates FIRST (S9-07): background sessions and a
+                // disabled `session_events` setting discard the notice anyway,
+                // so they must not pay `tree_active`'s two whole-machine `ps`
+                // scans + 750 ms for it. `emit_session_notice` re-checks both.
+                if !idle_notice_wanted(&ctx, &s).await {
+                    return;
+                }
                 if ctx.manager.tree_active(&id).await {
                     return;
                 }
@@ -660,6 +668,19 @@ async fn handle_session_transition(
         }
         _ => {}
     }
+}
+
+/// Whether an idle notice for `s` could be emitted at all: not a background
+/// session and session notices enabled. Checked before the expensive
+/// process-tree probe.
+async fn idle_notice_wanted(ctx: &ServerCtx, s: &otto_core::domain::Session) -> bool {
+    if is_background(s) {
+        return false;
+    }
+    matches!(
+        ctx.notifications().repo().get_settings().await,
+        Ok(settings) if settings.session_events
+    )
 }
 
 /// Build + create the idle/exited notice for a (already re-validated) session.

@@ -515,8 +515,16 @@ pub async fn run_workflow(
         .await
         .map_err(ApiError)?;
 
-    let input = seed_review_mode(req.input.unwrap_or(Value::Null), req.review_mode.as_deref())
-        .map_err(ApiError)?;
+    // An Editor may pick result destinations and a working directory, but
+    // never a chat origin: `origin_workspace_id` would post through ANOTHER
+    // workspace's Slack/Telegram integration, and `channel`/`chat`/`thread`
+    // would let chat messages there control this run (S3-02).
+    let mut raw_input = req.input.unwrap_or(Value::Null);
+    otto_workflows::triggers::strip_reserved_input(
+        &mut raw_input,
+        otto_workflows::triggers::InputSource::Manual,
+    );
+    let input = seed_review_mode(raw_input, req.review_mode.as_deref()).map_err(ApiError)?;
     let run = repo(&ctx)
         .create_run(&wf.id, &wf.workspace_id, &input, Some(&user.id))
         .await
@@ -1585,43 +1593,47 @@ pub async fn webhook_trigger(
     } else {
         serde_json::from_slice(&body).unwrap_or(Value::Null)
     };
-    // Thread the trigger's default result destinations into the input (the
-    // caller's own body keys win) so a webhook-fired run reports somewhere by
-    // default instead of finishing silently.
-    if let Value::Object(spec_defaults) = &trigger.spec {
-        let map = match &mut input {
-            Value::Object(m) => m,
-            other => {
-                *other = Value::Object(Default::default());
-                match other {
-                    Value::Object(m) => m,
-                    _ => unreachable!(),
-                }
-            }
-        };
-        for key in [
-            "result_channel",
-            "result_chat",
-            "result_thread",
-            "result_webhook",
-        ] {
-            if map.contains_key(key) {
-                continue;
-            }
-            if let Some(v) = spec_defaults
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-            {
-                map.insert(key.into(), Value::String(v.to_string()));
-            }
-        }
+    // The body is UNTRUSTED (token-only, often a CI system or a URL that
+    // leaked into logs): it may never choose whose integration posts, where
+    // results go or which directory agents run in (S3-02). Only the
+    // Editor-configured trigger spec supplies those.
+    let dropped = otto_workflows::triggers::strip_reserved_input(
+        &mut input,
+        otto_workflows::triggers::InputSource::Webhook,
+    );
+    if !dropped.is_empty() {
+        tracing::warn!(workflow_id = %wf.id, ?dropped, "webhook trigger: ignored reserved run-input keys");
     }
+    let map = match &mut input {
+        Value::Object(m) => m,
+        other => {
+            // A scalar/array body is kept as the run's `payload`.
+            let payload = std::mem::take(other);
+            *other = json!({});
+            let m = other.as_object_mut().expect("just set");
+            if !payload.is_null() {
+                m.insert("payload".into(), payload);
+            }
+            m
+        }
+    };
+    // The trigger's default result destinations + run location, so a
+    // webhook-fired run reports somewhere instead of finishing silently.
+    otto_workflows::triggers::copy_result_destinations(&trigger.spec, map);
+    otto_workflows::triggers::copy_location_defaults(&trigger.spec, map);
 
+    // One run at a time per workflow, checked atomically with the insert —
+    // the same admission the schedule/event triggers and scheduled tasks use,
+    // so a retrying CI caller can't stack concurrent runs (409 instead).
     let run = repo(&ctx)
-        .create_run(&wf.id, &wf.workspace_id, &input, None)
+        .admit_run_if_idle(&wf.id, &wf.workspace_id, &input, None)
         .await
-        .map_err(ApiError)?;
+        .map_err(ApiError)?
+        .ok_or_else(|| {
+            ApiError(Error::Conflict(
+                "a run of this workflow is already in progress — retry once it finishes".into(),
+            ))
+        })?;
 
     workflow_engine::spawn_run(
         ctx.clone(),
@@ -1666,9 +1678,14 @@ pub struct ApproveRunReq {
 pub async fn approve_run(
     Path(id): Path<Id>,
     State(ctx): State<ServerCtx>,
+    auth: crate::auth::CurrentAuthContext,
     CurrentUser(user): CurrentUser,
     Json(req): Json<ApproveRunReq>,
 ) -> ApiResult<Json<Value>> {
+    // S3-01: the `human_approval` gate supervises the run's own agents. A
+    // workflow step's managed token authorizes as the run's owner, so the
+    // Editor check alone would let the supervised agent approve itself.
+    crate::auth::require_human(&auth.0)?;
     let run = repo(&ctx).get_run(&id).await.map_err(ApiError)?;
     crate::auth::require_ws_role(&ctx, &user, &run.workspace_id, WorkspaceRole::Editor).await?;
     let rev = repo(&ctx)

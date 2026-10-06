@@ -126,9 +126,9 @@ async fn usage_engine_end_to_end() {
         300,
         0.01,
     ));
-    // The background writer flushes FLUSH_INTERVAL (15 s) after the first
-    // buffered event: wait for the row to land (condition, not a fixed sleep —
-    // returns as soon as it flushes).
+    // The background writer flushes FLUSH_INTERVAL after the first buffered
+    // event, or as soon as a read pokes it (each `summary` below does): wait
+    // for the row to land (condition, not a fixed sleep).
     let deadline = std::time::Instant::now() + Duration::from_secs(25);
     while engine
         .summary(30, false)
@@ -840,6 +840,59 @@ async fn idle_stop_fires_under_a_metrics_cadence_and_keeps_every_sample() {
         (0..stored).collect::<Vec<_>>(),
         "every sample exactly once"
     );
+    engine.shutdown().await;
+}
+
+/// S9-02: usage events recorded while the server is idle-stopped are held
+/// by the writer (a background write) instead of waking it — an always-on
+/// agent no longer keeps ClickHouse up 24/7. The next foreground read wakes
+/// it and the held events land exactly once.
+#[tokio::test]
+async fn usage_writes_do_not_wake_a_parked_server() {
+    if ClickHouse::locate(None).is_none() {
+        eprintln!("SKIP: no `clickhouse` binary found on this machine");
+        return;
+    }
+    let _serial = serial().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let engine = UsageEngine::start(test_config(), tmp.path().to_path_buf()).await;
+    assert!(engine.wait_ready(Duration::from_secs(30)).await);
+    let ch = engine.clickhouse().expect("clickhouse handle");
+
+    engine.set_idle_stop(Some(Duration::from_secs(1)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !ch.is_parked() {
+        assert!(std::time::Instant::now() < deadline, "never idle-stopped");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    engine.set_idle_stop(None);
+
+    for i in 0..3 {
+        engine.record(event("claude", "s1", "claude-opus-4", "prompt", i, 1, 0.0));
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(ch.is_parked(), "a usage write woke the idle-stopped server");
+    assert_eq!(ch.park_stats(), (1, 0));
+
+    // A read wakes it and pokes the writer; the held rows follow.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let n = engine
+            .summary(30, false)
+            .await
+            .expect("summary")
+            .total_events;
+        if n == 3 {
+            break;
+        }
+        assert!(n < 3, "held events written more than once ({n})");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "held usage events never written after wake ({n}/3)"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(ch.park_stats(), (1, 1));
     engine.shutdown().await;
 }
 

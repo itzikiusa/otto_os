@@ -820,9 +820,13 @@
       persistAssistW();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    // A cancelled gesture (system gesture, focus loss) ends the drag too —
+    // else pointermove stays attached and the pane follows the cursor.
+    window.addEventListener('pointercancel', onUp);
   }
 
   // ── Connection sidebar width (resizable, persisted) ───────────────────────────

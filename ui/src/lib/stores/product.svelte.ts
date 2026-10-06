@@ -401,16 +401,20 @@ class ProductStore {
   // Optimistically reflect a Jira title/description edit in local state without a
   // full refresh round-trip. The write already succeeded upstream (Jira has the
   // change); these keep the header/body in sync so the UI updates instantly.
-  patchLocalTitle(title: string): void {
-    const id = this.selectedId;
+  /** Patch a story's title locally. `id` is the story the caller wrote to —
+   *  the list row is patched by id, the open detail only while it still
+   *  shows that story (a switch during the await must not retitle B). */
+  patchLocalTitle(id: string, title: string): void {
     if (this.detail && this.detail.story.id === id) {
       this.detail = { ...this.detail, story: { ...this.detail.story, title } };
     }
     this.stories = this.stories.map((s) => (s.id === id ? { ...s, title } : s));
   }
 
-  patchLocalBody(bodyMd: string): void {
-    if (this.detail?.source) {
+  /** Patch the open detail's cached source body — a no-op once another story
+   *  is open, so A's description never lands in B's body column. */
+  patchLocalBody(id: string, bodyMd: string): void {
+    if (this.detail?.source && this.detail.story.id === id) {
       this.detail = {
         ...this.detail,
         source: { ...this.detail.source, body_md: bodyMd },

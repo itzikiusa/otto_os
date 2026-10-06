@@ -498,7 +498,16 @@ pub async fn run_agent<C: AssistantCtx>(
     trigger: &str,
 ) -> Result<String> {
     let plan = schedule.map_or_else(RunPlan::directed, RunPlan::for_schedule);
-    let (run, cancel) = open_agent_run(ctx, agent, schedule, trigger, &plan).await?;
+    let (run, cancel) = match open_agent_run(ctx, agent, schedule, trigger, &plan).await {
+        Ok(v) => v,
+        Err(e) => {
+            // Advance the cursor on a setup error too (S4-25c): otherwise the
+            // schedule stays due and re-fires every 60 s tick for as long as
+            // the error persists.
+            advance_cursor(ctx, schedule, trigger, Utc::now()).await;
+            return Err(e);
+        }
+    };
     complete_agent_run(ctx, agent, schedule, &run.id, trigger, None, plan, cancel).await
 }
 
@@ -825,23 +834,27 @@ async fn complete_agent_run<C: AssistantCtx>(
                 (d, e, false)
             };
 
-            repo.finish_run(
-                &run_id,
-                FinishAgentRun {
-                    status: "ok".into(),
-                    summary: out.summary.clone(),
-                    report_path,
-                    report_rel: report_rel_opt,
-                    delivered,
-                    delivery_error: derr.clone(),
-                    session_id: out.session_id.clone(),
-                    report_hash: Some(hash),
-                    attempts: out.attempts,
-                    skipped_delivery: skipped,
-                    ..Default::default()
-                },
-            )
-            .await?;
+            let _ = repo
+                .finish_run(
+                    &run_id,
+                    FinishAgentRun {
+                        status: "ok".into(),
+                        summary: out.summary.clone(),
+                        report_path,
+                        report_rel: report_rel_opt,
+                        delivered,
+                        delivery_error: derr.clone(),
+                        session_id: out.session_id.clone(),
+                        report_hash: Some(hash),
+                        attempts: out.attempts,
+                        skipped_delivery: skipped,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .inspect_err(|e| warn!(agent = %agent.id, "personal agent: finish_run(ok): {e}"));
+            // The run happened — advance even when settling its row failed
+            // (S4-25c), so the schedule doesn't re-fire every tick.
             advance_cursor(ctx, schedule, trigger, now).await;
             prune(ctx, &agent.id).await;
             emit(ctx, agent, &run_id, "ok");

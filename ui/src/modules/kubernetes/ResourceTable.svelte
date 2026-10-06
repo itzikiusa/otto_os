@@ -89,9 +89,11 @@
 </script>
 
 <div class="rt" data-testid="k8s-resource-table">
-  <div class="rt-head" role="row" style="grid-template-columns:{template}">
+  <!-- Visual column labels only: the body is a listbox (each option reads its
+       cell values), so a `row` / `columnheader` here sat outside any grid. -->
+  <div class="rt-head" aria-hidden="true" style="grid-template-columns:{template}">
     {#each cols as c (c.key)}
-      <div class="rt-hcell" class:num={c.num} role="columnheader">{c.label}</div>
+      <div class="rt-hcell" class:num={c.num}>{c.label}</div>
     {/each}
   </div>
 

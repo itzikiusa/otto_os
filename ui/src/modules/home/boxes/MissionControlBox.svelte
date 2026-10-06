@@ -18,6 +18,7 @@
   import type { HomeBox } from '../home.svelte';
   import { loadErrorText } from '../../../lib/loadError';
   import { freshness, livePoll, type Poller } from './poll';
+  import LoadState from '../../../lib/components/LoadState.svelte';
 
   interface Props {
     box: HomeBox;
@@ -98,9 +99,7 @@
   {#if loading && !summary}
     <Skeleton rows={4} />
   {:else if error && !summary}
-    <EmptyState icon="warning" title="Couldn’t load Mission Control" body={error}>
-      <button class="btn small" onclick={() => poller?.now()}><Icon name="refresh" size={12} />Retry</button>
-    </EmptyState>
+    <LoadState what="Mission Control" error={error} empty onretry={() => poller?.now()} />
   {:else if summary}
     <div class="stats">
       <div class="stat"><span class="n" class:working={summary.active > 0}>{summary.active}</span><span class="l">active</span></div>

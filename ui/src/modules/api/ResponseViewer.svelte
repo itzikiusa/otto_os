@@ -6,7 +6,7 @@
   // Timeline · Tests. A failed send shows inline with the reason and what to
   // do; SSE / WebSocket requests get a live message console instead.
   import Icon from '../../lib/components/Icon.svelte';
-  import { onTabKey } from '../../lib/tabKeys';
+  import Tabs from '../../lib/components/Tabs.svelte';
   import CodeEditor from '../../lib/components/CodeEditor.svelte';
   import VirtualList from '../../lib/components/VirtualList.svelte';
   import ContextPacketDialog from '../../lib/components/ContextPacketDialog.svelte';
@@ -397,31 +397,28 @@
       <button class="icon-btn" onclick={moreMenu} aria-label="More response actions" title="More response actions"><Icon name="more" size={14} /></button>
     </div>
 
-    <div class="rtabs" role="tablist" aria-label="Response">
-      {#each tabs as t (t.id)}
-        <button class="rtab" class:active={tab === t.id} role="tab" aria-selected={tab === t.id} tabindex={tab === t.id ? 0 : -1}
-          onclick={() => (tab = t.id)} onkeydown={onTabKey}>
-          {t.label}{#if t.count}<span class="count" aria-hidden="true">{t.count}</span>{/if}
-        </button>
-      {/each}
-      {#if tab === 'body' && !resp.too_large && !isBinary}
-        <span class="grow"></span>
-        <div class="segmented view" role="group" aria-label="Body view">
-          {#if !isImage}
-            <button class:active={bodyView === 'pretty'} aria-pressed={bodyView === 'pretty'} onclick={() => (bodyView = 'pretty')}>Pretty</button>
-            <button class:active={bodyView === 'raw'} aria-pressed={bodyView === 'raw'} onclick={() => (bodyView = 'raw')}>Raw</button>
-          {/if}
-          {#if parsed !== undefined}
-            <button class:active={bodyView === 'tree'} aria-pressed={bodyView === 'tree'} onclick={() => (bodyView = 'tree')}>Tree</button>
-          {/if}
-          {#if isHtml || isImage}
-            <button class:active={bodyView === 'preview'} aria-pressed={bodyView === 'preview'} onclick={() => (bodyView = 'preview')}>Preview</button>
-          {/if}
-        </div>
-      {/if}
-    </div>
+    <!-- The Pretty/Raw/Tree picker sits in Tabs' `trailing` slot, OUTSIDE the
+         tablist: a tablist may own only tabs (VoiceOver counted the group). -->
+    <Tabs label="Response" {tabs} value={tab} onchange={(id) => (tab = id)} idBase="api-resp">
+      {#snippet trailing()}
+        {#if tab === 'body' && resp && !resp.too_large && !isBinary}
+          <div class="segmented view" role="group" aria-label="Body view">
+            {#if !isImage}
+              <button class:active={bodyView === 'pretty'} aria-pressed={bodyView === 'pretty'} onclick={() => (bodyView = 'pretty')}>Pretty</button>
+              <button class:active={bodyView === 'raw'} aria-pressed={bodyView === 'raw'} onclick={() => (bodyView = 'raw')}>Raw</button>
+            {/if}
+            {#if parsed !== undefined}
+              <button class:active={bodyView === 'tree'} aria-pressed={bodyView === 'tree'} onclick={() => (bodyView = 'tree')}>Tree</button>
+            {/if}
+            {#if isHtml || isImage}
+              <button class:active={bodyView === 'preview'} aria-pressed={bodyView === 'preview'} onclick={() => (bodyView = 'preview')}>Preview</button>
+            {/if}
+          </div>
+        {/if}
+      {/snippet}
+    </Tabs>
 
-    <div class="rbody">
+    <div class="rbody" role="tabpanel" id="api-resp-panel-{tab}" aria-labelledby="api-resp-tab-{tab}">
       {#if tab === 'body'}
         {#if resp.too_large}
           <div class="notice">
@@ -669,42 +666,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .rtabs {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 2px;
-    border-bottom: 1px solid var(--border);
-    min-width: 0;
-  }
-  .rtab {
-    height: 28px;
-    padding: 0 10px;
-    border: none;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: var(--fs-s);
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    white-space: nowrap;
-  }
-  .rtab:hover {
-    color: var(--text);
-  }
-  .rtab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
-  }
-  .count {
-    margin-inline-start: 4px;
-    color: var(--text-dim);
-    font-variant-numeric: tabular-nums;
-  }
   .segmented.view {
     align-self: center;
-    margin-bottom: 4px;
   }
   .rbody {
     flex: 1;

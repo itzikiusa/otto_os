@@ -42,6 +42,7 @@ impl Background {
 /// channel supervisor (none until onboarding).
 pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> Background {
     let mut bg = Background::default();
+    crate::host_guard::warm_own_mdns_names();
 
     // Idle-connection reapers + session sweeps.
     spawn_brokers_reaper(ctx);
@@ -57,6 +58,7 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     // Retention.
     spawn_data_retention(ctx);
     spawn_workflow_run_retention(ctx);
+    spawn_memory_fts_warmup(ctx);
 
     // Gated by OTTO_SELF_IMPROVE (enabled by default; 0/false/off disables it).
     // Computed here so the channel manager can decide whether to wire the
@@ -97,6 +99,23 @@ pub async fn spawn_background(ctx: &ServerCtx, root_user_id: Option<String>) -> 
     start_usage_tracking(ctx);
     spawn_mcp_health_sweep(ctx);
     bg
+}
+
+/// Reconcile the memory FTS index off the request path: it used to run
+/// lazily on the first memory call after boot (an O(n) body compare under
+/// `BEGIN IMMEDIATE`), so that call — often a session's recall brief — paid
+/// for it. Single-flight with the lazy path, so a racing request just waits.
+fn spawn_memory_fts_warmup(ctx: &ServerCtx) {
+    let memory = ctx.memory.clone();
+    tokio::spawn(async move {
+        let t = std::time::Instant::now();
+        let ok = memory.warm_fts().await;
+        tracing::debug!(
+            fts = ok,
+            ms = t.elapsed().as_millis() as u64,
+            "memory: FTS warmed"
+        );
+    });
 }
 
 // -- Idle-connection reapers ----------------------------------------------

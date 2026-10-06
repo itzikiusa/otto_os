@@ -26,6 +26,7 @@
 //!   POST /api/v1/canvas/scenes/{id}/assist   (ws editor) → AssistResult
 //!   POST /api/v1/canvas/assist/preview       (canvas edit) → AssistResult
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -140,13 +141,33 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
     };
     let _ = tokio::fs::write(&file_path, &agent_view).await;
     let dir_str = dir.to_string_lossy().to_string();
+    // One assist turn per scene at a time (S4-20): two tabs' turns would paste
+    // into the same resumed PTY (or mint two sessions while `session_id` is
+    // still unset) and race to commit. Released on drop, incl. a dropped request.
+    let _busy = SceneBusy::claim(&scene.id).ok_or_else(|| {
+        ApiError(Error::Conflict(
+            "an Ask AI turn is already running on this canvas".into(),
+        ))
+    })?;
     // The agent gets Edit/Write tools in this cwd; trust it so the PTY doesn't
     // stall on a first-run trust prompt (same as the orchestrate path). Trust the
     // SCENE's provider — a non-claude provider must trust the dir it will run in.
     ctx.ensure_trusted(&scene.provider, &dir_str);
 
     // Live preview: broadcast each file change while the turn runs.
-    let poll = spawn_file_poll(&ctx, &scene, &doc, &file_path, &format, &agent_view, &keep);
+    // Abort-on-drop (S4-12): the turn runs inside the HTTP request, and a
+    // dropped request future (client disconnect / reload) never reached the
+    // `abort()` after the turn — the poller then leaked forever, re-broadcasting
+    // this PRE-turn doc on every later change of the file.
+    let poll = AbortOnDrop(spawn_file_poll(
+        &ctx,
+        &scene,
+        &doc,
+        &file_path,
+        &format,
+        &agent_view,
+        &keep,
+    ));
 
     let prompt = build_assist_prompt(&req.prompt, &format, file_name(&format), &agent_view);
     let meta = serde_json::json!({ "source": "canvas_assist", "scene_id": scene.id });
@@ -177,7 +198,7 @@ pub async fn assist_scene<C: CanvasAssistCtx>(
             on_ready,
         )
         .await;
-    poll.abort();
+    drop(poll);
     let (raw, sid) = turn?;
     if scene.session_id.is_none() {
         let _ = ctx.canvas_repo().set_session(&scene.id, &sid).await;
@@ -293,6 +314,25 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
 
     let prompt = build_assist_prompt(&req.prompt, "mermaid", "canvas.mermaid", "flowchart TD\n");
     let meta = serde_json::json!({ "source": "canvas_assist_preview" });
+    // S4-11: a per-call scratch dir — never the user's repo (`ws.root_path`):
+    // the prompt tells the agent to EDIT `canvas.mermaid` in its cwd, which
+    // left a stray file in the repo root, and a full-tool session has no
+    // business in the user's checkout for a text-only preview. The guard
+    // removes the dir and kills the session even when the request is dropped.
+    let scratch = ctx
+        .data_dir()
+        .join("canvas")
+        .join("preview")
+        .join(otto_core::new_id());
+    tokio::fs::create_dir_all(&scratch)
+        .await
+        .map_err(|e| ApiError(Error::Internal(format!("canvas preview dir: {e}"))))?;
+    let cleanup = PreviewCleanup {
+        ctx: ctx.clone(),
+        dir: scratch.clone(),
+        sid: Arc::new(std::sync::Mutex::new(None)),
+    };
+    let cwd = scratch.to_string_lossy().to_string();
     // No scene here (throwaway preview) → no scene provider to honor. Run under the
     // user's workspace/global default agent rather than hard-coding claude, and pre-trust the
     // cwd so a non-claude provider doesn't stall on the first-run trust prompt.
@@ -300,26 +340,90 @@ pub async fn assist_preview<C: CanvasAssistCtx>(
         .resolve_provider(Some(&ws), None)
         .await
         .map_err(ApiError)?;
-    ctx.ensure_trusted(&provider, &ws.root_path);
-    let (raw, sid) = ctx
+    ctx.ensure_trusted(&provider, &cwd);
+    let sid_slot = Arc::clone(&cleanup.sid);
+    let (raw, _sid) = ctx
         .run_agent_turn(
             AgentTurn {
                 ws: &ws,
                 user: &user,
                 existing: None,
                 title: "Canvas: preview",
-                cwd: &ws.root_path,
+                cwd: &cwd,
                 provider: &provider,
                 meta,
                 prompt: &prompt,
             },
-            |_| {},
+            move |sid: &Id| {
+                *sid_slot.lock().unwrap() = Some(sid.clone());
+            },
         )
         .await?;
-    let _ = ctx.kill_session(&sid).await;
+    drop(cleanup); // kills the throwaway session + removes the scratch dir
     let parsed = parse_assist(&raw);
     let src = parsed.mermaid.clone().unwrap_or_default();
     Ok(Json(result_for("mermaid", &src, parsed.note)))
+}
+
+// ---------------------------------------------------------------------------
+// Drop guards
+// ---------------------------------------------------------------------------
+
+/// Aborts the wrapped task when dropped (a `JoinHandle` drop only detaches).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Scenes with an assist turn in flight (S4-20).
+fn busy_scenes() -> &'static std::sync::Mutex<std::collections::HashSet<Id>> {
+    static BUSY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Id>>> =
+        std::sync::OnceLock::new();
+    BUSY.get_or_init(Default::default)
+}
+
+/// A claimed per-scene assist slot; released on drop.
+struct SceneBusy(Id);
+
+impl SceneBusy {
+    fn claim(scene: &Id) -> Option<Self> {
+        busy_scenes()
+            .lock()
+            .unwrap()
+            .insert(scene.clone())
+            .then(|| Self(scene.clone()))
+    }
+}
+
+impl Drop for SceneBusy {
+    fn drop(&mut self) {
+        busy_scenes().lock().unwrap().remove(&self.0);
+    }
+}
+
+/// Throwaway-preview teardown (S4-11): kill the session (once `on_ready` saw
+/// it) and remove the scratch dir — on success, error, or a dropped request.
+struct PreviewCleanup<C: CanvasAssistCtx> {
+    ctx: C,
+    dir: std::path::PathBuf,
+    sid: Arc<std::sync::Mutex<Option<Id>>>,
+}
+
+impl<C: CanvasAssistCtx> Drop for PreviewCleanup<C> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(sid) = self.sid.lock().unwrap().take() {
+            let ctx = self.ctx.clone();
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    let _ = ctx.kill_session(&sid).await;
+                });
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -880,7 +984,7 @@ fn parse_assist(raw: &str) -> AssistResult {
             ..Default::default()
         };
     }
-    if let Some(v) = otto_swarm::recruiter::extract_json(raw) {
+    if let Some(v) = otto_core::text::extract_json(raw) {
         let has_elements = v
             .get("elements")
             .and_then(|e| e.as_array())
@@ -951,6 +1055,34 @@ fn prose_before_fence(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S4-20: one assist turn per scene; the slot frees on drop.
+    #[test]
+    fn scene_busy_slot_is_exclusive_and_released_on_drop() {
+        let id: Id = "scene-busy-test".into();
+        let a = SceneBusy::claim(&id).expect("first claim");
+        assert!(
+            SceneBusy::claim(&id).is_none(),
+            "second concurrent claim refused"
+        );
+        drop(a);
+        assert!(SceneBusy::claim(&id).is_some(), "released on drop");
+    }
+
+    /// S4-12: dropping the guard aborts the poller (a bare JoinHandle drop
+    /// only detaches it, leaking the loop for the daemon's lifetime).
+    #[tokio::test]
+    async fn abort_on_drop_stops_the_task() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        let g = AbortOnDrop(tokio::spawn(async move {
+            let _tx = tx; // dropped only when the task ends
+            std::future::pending::<()>().await;
+        }));
+        drop(g);
+        // The sender is dropped once the aborted task is torn down.
+        let r = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(r, Ok(None)), "task was aborted");
+    }
 
     #[test]
     fn prompt_has_sentinel_and_file() {

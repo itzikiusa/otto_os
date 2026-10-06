@@ -47,13 +47,14 @@ pub fn destination_kind(dest: &Value) -> &str {
 }
 
 /// Normalised content hash for notify-on-change — collapses whitespace so a
-/// re-run with only formatting noise still counts as "unchanged".
+/// re-run with only formatting noise still counts as "unchanged". SHA-256
+/// (first 8 bytes, hex): the value is PERSISTED, so it must be stable across
+/// Rust releases — `DefaultHasher`'s SipHash is not (S3-11), and a toolchain
+/// bump would have re-delivered every unchanged report.
 pub fn report_hash(report: &str) -> String {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
     let normalized: String = report.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    normalized.hash(&mut h);
-    format!("{:016x}", h.finish())
+    hex::encode(&Sha256::digest(normalized.as_bytes())[..8])
 }
 
 /// Append the "write your report to FILE" instruction (codex/agy write no
@@ -243,4 +244,22 @@ pub async fn deliver_webhook(url: &str, text: &str, filename: &str, bytes: &[u8]
         .await
         .map_err(|e| Error::Upstream(format!("webhook attachment: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report_hash;
+
+    /// S3-11: the persisted notify-on-change hash is a fixed algorithm — this
+    /// exact value must never change across toolchains — and whitespace-only
+    /// differences still hash equal.
+    #[test]
+    fn report_hash_is_stable_and_whitespace_insensitive() {
+        assert_eq!(report_hash("hello world"), "b94d27b9934d3e08");
+        assert_eq!(
+            report_hash("  hello\n\n world \t"),
+            report_hash("hello world")
+        );
+        assert_ne!(report_hash("hello world"), report_hash("hello  worlds"));
+    }
 }

@@ -32,6 +32,7 @@
   import WorkItemList from './WorkItemList.svelte';
   import WorkGraphView from './WorkGraphView.svelte';
   import WorkItemDetail from './WorkItemDetail.svelte';
+  import NeedsYouLink from '../home/NeedsYouLink.svelte';
 
   let summary = $state<MissionSummary | null>(null);
   let items = $state<WorkItem[]>([]);
@@ -82,7 +83,16 @@
       loading = false;
       err = '';
       items = [];
-      if (selectedId) select(null);
+      needsApprovalIds = new Set();
+      // Drop the selection synchronously: `select(null)` awaits the detail's
+      // leave check and then sets `userClosed = true` — AFTER the re-arm below
+      // — so the page stopped opening on an item after a switch. The old
+      // workspace's item is gone either way; there's nothing to keep editing.
+      ++selectionGeneration;
+      if (selectedId) {
+        selectedId = null;
+        if (router.module === 'mission-control') router.replace('mission-control');
+      }
       userClosed = false;
     });
   });
@@ -97,15 +107,9 @@
     if (pick) untrack(() => select(pick));
   });
 
-  // Tablet/phone: the detail is a full-screen sheet on the Modal layer —
-  // register it while it is up so the native browser webview hides under it
-  // (untracked: pushModal reads the counter it bumps). Desktop's side pane is
-  // not an overlay, so it never registers.
-  $effect(() => {
-    if (!selectedId || viewport.isDesktop) return;
-    untrack(() => ui.pushModal());
-    return () => untrack(() => ui.popModal());
-  });
+  // Tablet/phone: the detail is a full-screen sheet on the Modal layer. The
+  // `detailSheet` effect below registers it ONCE (pushModal + focus trap);
+  // a second registration here used to count the same sheet twice.
 
   // filters
   let kindF = $state<WorkKind | ''>('');
@@ -119,13 +123,19 @@
     qTimer = setTimeout(() => (debouncedQ = q), 250);
   }
 
-  const needsApprovalIds = $derived(
-    new Set(graph.nodes.filter((n) => n.needs_approval).map((n) => n.id)),
-  );
+  // Which list rows carry "Needs approval". Only graph nodes say so, and the
+  // graph is fetched lazily for the Graph view — so the List view used to show
+  // no badge at all while the tile read "Needs approval: 3". `reload` keeps
+  // this fresh on every load (from the graph when it fetched one, else a graph
+  // fetch only when the summary says something needs approval).
+  let needsApprovalIds = $state<Set<string>>(new Set());
+  const approvalSet = (g: GraphView) => new Set(g.nodes.filter((n) => n.needs_approval).map((n) => n.id));
 
   // Monotonic request token: a slower, OLDER response must never overwrite a
   // newer one (live ticks fire reloads back to back).
   let reqSeq = 0;
+  /** The list's page size — the server returns at most this many rows. */
+  const ITEM_LIMIT = 300;
   /** The graph is only fetched while it is shown; otherwise a reload marks it
    *  stale and flipping to the Graph view loads it then. */
   let graphStale = true;
@@ -139,7 +149,7 @@
       status: statusF || undefined,
       risk: riskF || undefined,
       q: debouncedQ || undefined,
-      limit: 300,
+      limit: ITEM_LIMIT,
     };
     const withGraph = untrack(() => view) === 'graph';
     if (!withGraph) graphStale = true;
@@ -155,6 +165,15 @@
       if (g) {
         graph = g;
         graphStale = false;
+        needsApprovalIds = approvalSet(g);
+      } else if (s.needs_approval > 0) {
+        const ag = await missionControlApi.graph(id, f);
+        if (seq !== reqSeq) return;
+        graph = ag;
+        graphStale = false;
+        needsApprovalIds = approvalSet(ag);
+      } else {
+        needsApprovalIds = new Set();
       }
     } catch (e) {
       if (seq !== reqSeq) return;
@@ -273,6 +292,8 @@
   subtitle="Every agentic activity as one traceable unit"
 >
   {#snippet actions()}
+    <!-- Work-item approvals are one source; the canonical inbox joins all — S20-07. -->
+    <NeedsYouLink />
     <button class="btn small" disabled={!ws.currentId || backfilling || loading} onclick={runBackfill} title="Re-derive the graph from every source">
       <Icon name="refresh" size={13} /> {backfilling ? 'Refreshing…' : 'Refresh'}
     </button>
@@ -373,6 +394,9 @@
         </div>
       {:else if view === 'list'}
         <WorkItemList {items} needsApproval={needsApprovalIds} {selectedId} onOpen={select} />
+        {#if items.length >= ITEM_LIMIT}
+          <p class="mc-cap" role="status">Showing the newest {ITEM_LIMIT}{summary && summary.total > ITEM_LIMIT ? ` of ${summary.total}` : ''} items — filter to narrow the list.</p>
+        {/if}
       {:else}
         <WorkGraphView {graph} {selectedId} onOpen={select} />
       {/if}
@@ -553,5 +577,10 @@
       flex: 1 1 auto;
       min-width: 0;
     }
+  }
+  .mc-cap {
+    margin: var(--sp-3) 0 0;
+    font-size: var(--fs-s);
+    color: var(--text-dim);
   }
 </style>

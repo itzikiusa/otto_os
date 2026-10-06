@@ -213,6 +213,21 @@ class ActivityStore {
     this.historyIndex = { scanned: 0, total: 0, done: false };
   }
 
+  /** The signed-in identity changed (S13-02): drop every cached trail, task
+   *  list, roll-up and artifact list — they were read with the previous
+   *  identity's token. Panels refetch through `load` / `loadSummary`. */
+  reset(): void {
+    this.trailBySession = {};
+    this.tasksBySession = {};
+    this.summaryBySession = {};
+    this.artifactsBySession = {};
+    this.artifactsLoadingBySession = {};
+    this.artifactsErrorBySession = {};
+    this.loadErrorBySession = {};
+    this.loaded.clear();
+    this.artifactsLoaded.clear();
+  }
+
   /** Drop a removed session's data. */
   forget(sessionId: string): void {
     delete this.trailBySession[sessionId];

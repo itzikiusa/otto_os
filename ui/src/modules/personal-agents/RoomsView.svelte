@@ -1,7 +1,9 @@
 <script lang="ts">
   import { rowMenu } from '../../lib/rowMenu';
   import { plural } from '../../lib/plural';
-  // Agent rooms — the only agent-to-agent transport, always user-visible.
+  // Agent channels (stored as "rooms") — the only agent-to-agent transport,
+  // always user-visible. Named "channels" in the UI so they are never confused
+  // with the sidebar's Rooms (human collaboration) — S20-07.
   // Room list + create on the left; the selected room's membership editor,
   // live message feed (WS agent_room_message + `after` paging) and the user
   // post box on the right.
@@ -143,13 +145,15 @@
         icon: 'edit',
         action: async () => {
           const name = await confirmer.promptText('Room name', { title: 'Rename room', confirmLabel: 'Rename', initial: r.room.name });
-          if (name) {
-            void personalAgents.renameRoom(r.room.id, name).catch((e) => toasts.error('Couldn’t rename the room', loadErrorText(e)));
+          // A blank (or whitespace-only) name is not a rename.
+          const trimmed = name?.trim();
+          if (trimmed && trimmed !== r.room.name) {
+            void personalAgents.renameRoom(r.room.id, trimmed).catch((e) => toasts.error('Couldn’t rename the room', loadErrorText(e)));
           }
         },
       },
       {
-        label: 'Delete room…',
+        label: 'Delete channel…',
         icon: 'trash',
         danger: true,
         action: async () => {
@@ -166,7 +170,7 @@
     try {
       await personalAgents.addMember(selectedId, agentId);
     } catch (e) {
-      toasts.error('Couldn’t add the agent to the room', loadErrorText(e));
+      toasts.error('Couldn’t add the agent to the channel', loadErrorText(e));
     }
   }
 
@@ -175,7 +179,7 @@
     try {
       await personalAgents.removeMember(selectedId, agentId);
     } catch (e) {
-      toasts.error('Couldn’t remove the agent from the room', loadErrorText(e));
+      toasts.error('Couldn’t remove the agent from the channel', loadErrorText(e));
     }
   }
 
@@ -200,13 +204,13 @@
 
 <div class="rooms">
   {#if !viewport.isPhone || !selectedId}
-  <aside class="list" aria-label="Agent rooms" bind:this={roomListEl} style="--list-pane-w:{listW}px">
+  <aside class="list" aria-label="Agent channels" bind:this={roomListEl} style="--list-pane-w:{listW}px">
     <div class="create">
       <input dir="auto"
         bind:this={createEl}
         bind:value={newRoomName}
-        placeholder="New room name"
-        aria-label="New room name"
+        placeholder="New channel name"
+        aria-label="New channel name"
         onkeydown={(e) => { if (e.key === 'Enter') void createRoom(); }}
       />
       <button class="btn small" disabled={busy || !newRoomName.trim()} onclick={createRoom}>Create</button>
@@ -241,7 +245,7 @@
   {#if !viewport.isPhone || selectedId || rooms.length === 0}
   <section class="detail">
     <LoadState
-      what="rooms"
+      what="agent channels"
       loading={roomsLoading}
       error={roomsError}
       empty={!selected}
@@ -250,9 +254,9 @@
       {#snippet emptyView()}
         <EmptyState
           icon="comment"
-          title="No rooms yet"
-          body="Rooms are how personal agents talk to each other. Every message is kept and shown here, and you can post into any room."
-          actionLabel="Create a room"
+          title="No agent channels yet"
+          body="Channels are how personal agents talk to each other. Every message is kept and shown here, and you can post into any room."
+          actionLabel="Create a channel"
           actionIcon="plus"
           onaction={() => createEl?.focus()}
         />
@@ -260,14 +264,14 @@
       {#if selected}
         <header class="detail-head">
           {#if viewport.isPhone}
-            <button class="icon-btn" aria-label="Back to rooms" title="Back to rooms"
+            <button class="icon-btn" aria-label="Back to channels" title="Back to channels"
               onclick={backToRooms}><Icon name="chevronLeft" size={16} /></button>
           {/if}
           <strong class="detail-title" title={selected.room.name}>{selected.room.name}</strong>
           <button
             class="icon-btn"
             aria-label="Room actions for {selected.room.name}"
-            title="Room actions"
+            title="Channel actions"
             onclick={(e) => roomMenu(e, selected)}><Icon name="more" size={14} /></button>
         </header>
 
@@ -279,8 +283,8 @@
               <span class="member-name" title={a?.name ?? 'Removed agent'}>{a?.name ?? 'Removed agent'}</span>
               <button
                 class="unlink"
-                aria-label="Remove {a?.name ?? 'this agent'} from the room"
-                title="Remove from room"
+                aria-label="Remove {a?.name ?? 'this agent'} from the channel"
+                title="Remove from channel"
                 onclick={() => removeMember(mid)}><Icon name="x" size={12} /></button>
             </span>
           {/each}
@@ -288,7 +292,7 @@
             <select
               class="add-member"
               value=""
-              aria-label="Add an agent to this room"
+              aria-label="Add an agent to this channel"
               onchange={(e) => {
                 void addMember((e.currentTarget as HTMLSelectElement).value);
                 (e.currentTarget as HTMLSelectElement).value = '';
@@ -304,13 +308,13 @@
         </div>
         {#if selected.members.length > 0}
           <p class="meta how">
-            Members find this room in their instructions from their next run or new chat, then read
-            and post here with the room tools.
+            Members find this channel in their instructions from their next run or new chat, then read
+            and post here with the channel (room) tools.
           </p>
         {/if}
 
-        <div class="feed" bind:this={feedEl} role="log" aria-label="Room messages" aria-live="polite">
-          <LoadState what="room messages" loading={personalAgents.messagesLoading[selectedId ?? '']}
+        <div class="feed" bind:this={feedEl} role="log" aria-label="Channel messages" aria-live="polite">
+          <LoadState what="channel messages" loading={personalAgents.messagesLoading[selectedId ?? '']}
             error={personalAgents.messagesError[selectedId ?? '']} empty={messages.length === 0}
             onretry={() => selectedId && void personalAgents.loadMessages(selectedId)}>
             {#snippet emptyView()}
@@ -350,8 +354,8 @@
             value={draft}
             oninput={(e) => { if (selectedId) drafts[selectedId] = e.currentTarget.value; }}
             rows="2"
-            aria-label="Message to the room"
-            placeholder="Post into the room (visible to all member agents)…"
+            aria-label="Message to the channel"
+            placeholder="Post into the channel (visible to all member agents)…"
             onkeydown={(e) => {
               if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void send();
             }}

@@ -38,12 +38,33 @@ const TAG_ATTRS: Record<string, Set<string>> = {
 /** data-* carriers the renderer itself emits on anchors. */
 const A_DATA = new Set(['data-path', 'data-raw', 'data-anchor', 'data-unresolved']);
 
+/** Control chars / whitespace stripped, lower-cased — what the URL parser sees. */
+function squash(v: string): string {
+  return v.replace(/[\u0000-\u0020\u007f-\u00a0\s]/g, '').toLowerCase();
+}
+
+/** A network-path reference (`//host/x`; browsers also read `\` as `/`, so
+ *  `/\host` and `\\host` too) has no scheme but leaves the app's origin — it
+ *  is an EXTERNAL link, not a relative one (S18-07). */
+export function isNetworkPath(v: string): boolean {
+  return /^[/\\]{2}/.test(squash(v));
+}
+
+/** External = leaves the app: http(s) or a network-path reference. Such
+ *  anchors always get `target=_blank rel=noopener noreferrer`, so a click can
+ *  never navigate the app's own webview to another site. */
+export function isExternalHref(v: string): boolean {
+  return /^https?:/.test(squash(v)) || isNetworkPath(v);
+}
+
 /** Scheme allow-list. Control chars / whitespace are stripped BEFORE the scheme
  *  check so `java\tscript:` (and entity-decoded variants) can't slip through;
- *  a URL with no scheme (relative, `#anchor`, `?q`) is fine. */
-function urlOk(v: string, tag: string): boolean {
-  const t = v.replace(/[\u0000-\u0020\u007f-\u00a0\s]/g, '').toLowerCase();
+ *  a URL with no scheme (relative, `#anchor`, `?q`) is fine, and a
+ *  network-path one (`//host`) is judged as https. */
+export function urlOk(v: string, tag: string): boolean {
+  let t = squash(v);
   if (t === '') return true;
+  if (isNetworkPath(t)) t = `https:${t}`;
   const m = /^([a-z][a-z0-9+.-]*):/.exec(t);
   if (!m) return true; // relative / fragment / query — no scheme
   const scheme = m[1];
@@ -90,7 +111,10 @@ export function sanitizeHtml(html: string, postProcess?: (body: HTMLElement) => 
     }
     // External links never keep an opener; internal ones never get a target.
     if (tag === 'a') {
-      if (/^\s*https?:/i.test(node.getAttribute('href') || '')) {
+      const href = node.getAttribute('href') || '';
+      if (isExternalHref(href)) {
+        // Make a network-path link explicit: `//evil/x` → `https://evil/x`.
+        if (isNetworkPath(href)) node.setAttribute('href', `https://${href.replace(/^[\u0000-\u0020\s/\\]+/, '')}`);
         node.setAttribute('target', '_blank');
         node.setAttribute('rel', 'noopener noreferrer');
       } else {

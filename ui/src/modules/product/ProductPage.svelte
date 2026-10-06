@@ -890,7 +890,11 @@
           </ul>
         </section>
       {:else if product.tab === 'overview'}
-        <OverviewTab />
+        <!-- Keyed by story: inline editors, Jira loaders and their in-flight
+             state are per story, so A's editor/transitions can never write to B. -->
+        {#key product.selectedId}
+          <OverviewTab />
+        {/key}
       {:else if product.tab === 'chat'}
         <ChatTab />
       {:else if product.tab === 'analysis'}
@@ -900,7 +904,9 @@
       {:else if product.tab === 'notes'}
         <NotesTab />
       {:else if product.tab === 'rewrite'}
-        <RewriteTab />
+        {#key product.selectedId}
+          <RewriteTab />
+        {/key}
       {:else if product.tab === 'testcases'}
         <TestCasesTab />
       {:else if product.tab === 'plan'}

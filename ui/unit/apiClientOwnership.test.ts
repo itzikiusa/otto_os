@@ -8,6 +8,7 @@ import { deferred } from './sourceHarness.ts';
 import { strictRequire } from './strictRequire.ts';
 import { HistoryRefresh, HistoryDetail } from '../src/lib/stores/apiHistory.ts';
 import * as scriptRuntime from '../src/lib/api/scripts.ts';
+import * as graphqlVars from '../src/modules/api/graphqlVars.ts';
 import * as secretShapes from '../src/lib/api/apiSecretShapes.ts';
 
 function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: any[]) => Promise<any>) {
@@ -29,6 +30,7 @@ function setup(overrides: Record<string, unknown> = {}, runScript?: (...args: an
       ['/apiHistory', {HistoryRefresh, HistoryDetail}],
       ['/apiSecretShapes', secretShapes],
       ['/scriptRunner', {runScript}],
+      ['/graphqlVars', graphqlVars],
       ['/lazyModule', {announceModule() {}}],
       ['/plural', {plural: (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`}],
       ['/api/scripts', scriptRuntime],

@@ -131,8 +131,10 @@ pub const DESIGN_WS_TOOLS: &[&str] =
     &["design_get", "design_links", "design_assist", "design_link"];
 
 /// Pin probes for id-only objects: `(tool, arg, route prefix, JSON pointer of
-/// the object's workspace)`. Run only for a workspace-pinned token, whose pin
-/// must be checked against the object's REAL workspace.
+/// the object's workspace)`. Run for EVERY call from a workspace-pinned token
+/// (whose pin must be checked against the object's REAL workspace) — the
+/// probed workspace overwrites any caller-supplied `workspace_id`, which the
+/// executor ignores for these tools.
 pub const PIN_PROBES: &[(&str, &str, &str, &str)] = &[
     (
         "get_workflow_run",
@@ -214,8 +216,9 @@ pub const PIN_NARROW_TOOLS: &[&str] = &[
 
 /// Tools whose target's workspace Otto cannot establish from the arguments
 /// (no workspace argument, no name to resolve, no probe route) — a
-/// workspace-pinned token is DENIED them. Listed so the classification test
-/// forces a conscious choice for every new tool.
+/// workspace-pinned token is DENIED them ([`pin_verdict`] enforces it,
+/// whatever `workspace_id` the caller sends). Listed so the classification
+/// test forces a conscious choice for every new tool.
 pub const PIN_UNVERIFIABLE: &[&str] = &[
     "create_work_item",
     "list_swarm_tasks",
@@ -243,6 +246,15 @@ pub fn pin_verdict(scope: &McpScope, tool: &str, args: &Value) -> Option<String>
         return Some(format!("token scope: {reason}"));
     }
     let pin = scope.workspace_id.as_deref().filter(|s| !s.is_empty())?;
+    // Enforced, not a classification: these tools never consume a
+    // `workspace_id`, so a caller echoing the pin back proves nothing.
+    if PIN_UNVERIFIABLE.contains(&tool) {
+        return Some(format!(
+            "token scope: this token is scoped to workspace '{pin}', and '{tool}' addresses \
+             an object whose workspace Otto cannot verify — use a token without a workspace \
+             pin for it"
+        ));
+    }
     if ws.is_none() && !pin_global(tool) {
         return Some(format!(
             "token scope: this token is scoped to workspace '{pin}', and Otto cannot \

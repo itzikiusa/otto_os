@@ -412,11 +412,20 @@ sessions through the inward `ottod mcp-tools` server (§5) as `otto_list_workflo
 `otto_api_list`, `otto_api_get_request`, `otto_api_history`, `aws_list_accounts`,
 `k8s_get_resources`, … so an Otto session can inspect every feature. That server
 stays read-only with named exceptions: the two canvas tools, the three Vault v3
-doc writers (`otto_vault_write`/`_rename`/`_delete` — Editor-gated as the session
-owner; delete only trashes), the API-client writers `otto_api_execute`,
-`otto_api_upsert_request`, `otto_api_run_automation`, and the three cloud-console
-writers `aws_athena_query` / `aws_sqs_send` / `k8s_action` (per-feature
-`Edit`-gated as the session owner).
+doc writers (`otto_vault_write`/`_write_file`/`_rename`/`_delete` — Editor-gated as
+the session owner; delete only trashes), the API-client writers `otto_api_execute`,
+`otto_api_upsert_request`, `otto_api_run_automation`, and the cloud-console
+writers `aws_athena_query` / `aws_sqs_send` / `aws_sqs_peek` (it consumes
+receive counts) / `k8s_action` / `k8s_pod_http` (per-feature `Edit`-gated as the
+session owner). The **IRREVERSIBLE** ones among them — `k8s_action`,
+`k8s_pod_http`, `aws_sqs_send`, `otto_api_execute`, `otto_api_run_automation`
+(`NATIVE_SESSION_WRITERS`) — do not call their daemon routes directly: the
+bridge runs them through `POST /mcp/otto-tools/invoke` as `otto.<tool>`, so they
+get the same approval gate, irreversible guardrail (an auto-approve rule needs
+`allow_irreversible`) and audit as the governed tool; a `confirm_name` the agent
+fills in itself is not an approval. They reach the governed path from a session
+credential even when not ticked in the catalog (the bridge always offered them).
+A call awaiting a human returns the `pending_approval` envelope.
 
 ### 3.4 API client through MCP
 
@@ -674,7 +683,9 @@ and the **cloud consoles** — AWS: `aws_list_accounts`, `aws_s3_list_buckets`/
 `aws_athena_list_tables`/`_get_query`, `aws_eks_list_clusters`; Kubernetes:
 `k8s_list_clusters`, `k8s_get_resources`, `k8s_describe`, `k8s_logs` (text/plain
 tail, 256 KiB cap keeping the newest lines, never `follow`), `k8s_top` — plus the
-three Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `k8s_action`.
+Edit-gated writers `aws_athena_query`, `aws_sqs_send`, `aws_sqs_peek`,
+`k8s_action`, `k8s_pod_http` (the irreversible ones approval-gated through the
+governed invoke — see above).
 
 **Cross-workspace, by name.** The native list tools (`otto_list_workflows`,
 `otto_list_connections`, `otto_list_broker_clusters`, `otto_list_swarms`,
@@ -740,9 +751,9 @@ queues every other call, or `ping`, behind it; replies are matched by JSON-RPC
 id. The enable list (+ grant) is cached for 5 s and the gateway tool list for
 30 s (refetched once on an unknown gateway tool); neither cache can widen
 access, because the daemon re-checks the enable list, the grant and the
-gateway authorization on every call. The bridge attaches to the daemon's
-database with `open_existing` — it never runs the repair `UPDATE`s or
-migrations at session start. A governed call that waits on an approval
+gateway authorization on every call. The bridge never opens the daemon's
+database: everything goes through the daemon's HTTP API, so a session start
+runs no repair `UPDATE`s or migrations. A governed call that waits on an approval
 resumes on the `mcp_approval_changed` event (5 s fallback re-read), not on a
 1 s poll.
 

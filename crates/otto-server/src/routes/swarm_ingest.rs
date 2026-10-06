@@ -16,6 +16,106 @@ use serde_json::{json, Value};
 use crate::design_format::DesignFormat;
 use crate::state::ServerCtx;
 
+/// The swarm ids an ingesting session's meta names, each VERIFIED (S4-03):
+/// the swarm lives in the session's workspace, and the agent / project / task
+/// / run (when present) belong to that swarm. Session meta is the only thing
+/// that says which swarm an agent token writes into, so a forged or stale id
+/// must never let `otto-post` / `otto-mockup` / `otto-product` reach another
+/// workspace's board, story or epic.
+#[derive(Debug, Clone)]
+pub(crate) struct SwarmScope {
+    pub swarm_id: Id,
+    pub agent_id: Option<Id>,
+    pub project_id: Option<Id>,
+    pub task_id: Option<Id>,
+    pub run_id: Option<Id>,
+}
+
+fn meta_str(meta: &Value, key: &str) -> Option<Id> {
+    meta.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve + verify [`SwarmScope`] for `session`; `None` = not a swarm
+/// session, or a meta id that does not belong (logged — the ingest stays a
+/// silent 204 so nothing about other workspaces leaks to the agent).
+pub(crate) async fn verified_swarm_scope(
+    ctx: &ServerCtx,
+    session: &otto_core::domain::Session,
+) -> Option<SwarmScope> {
+    let meta = &session.meta;
+    let ws = &session.workspace_id;
+    let deny = |what: &str| {
+        tracing::warn!(
+            session = %session.id,
+            "swarm ingest: session meta names a {what} outside its workspace/swarm; dropped"
+        );
+    };
+    let project_id = meta_str(meta, "project_id");
+    // A discovery/planner session may carry only `project_id`: derive the
+    // swarm from the project row then.
+    let swarm_id = match meta_str(meta, "swarm_id") {
+        Some(s) => s,
+        None => {
+            let pid = project_id.as_ref()?;
+            ctx.swarm_repo.get_project(pid).await.ok()?.swarm_id
+        }
+    };
+    let swarm = ctx.swarm_repo.get_swarm(&swarm_id).await.ok()?;
+    if &swarm.workspace_id != ws {
+        deny("swarm");
+        return None;
+    }
+    if let Some(pid) = &project_id {
+        match ctx.swarm_repo.get_project(pid).await {
+            Ok(p) if p.swarm_id == swarm.id && &p.workspace_id == ws => {}
+            _ => {
+                deny("project");
+                return None;
+            }
+        }
+    }
+    let agent_id = meta_str(meta, "agent_id");
+    if let Some(aid) = &agent_id {
+        match ctx.swarm_repo.get_agent(aid).await {
+            Ok(a) if a.swarm_id == swarm.id => {}
+            _ => {
+                deny("agent");
+                return None;
+            }
+        }
+    }
+    let task_id = meta_str(meta, "task_id");
+    if let Some(tid) = &task_id {
+        match ctx.swarm_repo.get_task(tid).await {
+            Ok(t) if t.swarm_id == swarm.id => {}
+            _ => {
+                deny("task");
+                return None;
+            }
+        }
+    }
+    let run_id = meta_str(meta, "run_id");
+    if let Some(rid) = &run_id {
+        match ctx.swarm_repo.get_run(rid).await {
+            Ok(r) if r.swarm_id == swarm.id => {}
+            _ => {
+                deny("run");
+                return None;
+            }
+        }
+    }
+    Some(SwarmScope {
+        swarm_id: swarm.id,
+        agent_id,
+        project_id,
+        task_id,
+        run_id,
+    })
+}
+
 #[derive(Deserialize)]
 pub struct BoardIngestReq {
     #[serde(default)]
@@ -45,24 +145,25 @@ pub async fn board_ingest(
         Ok(s) => s,
         Err(_) => return StatusCode::NO_CONTENT,
     };
-    let meta = &session.meta;
-    let swarm_id = meta.get("swarm_id").and_then(Value::as_str);
-    let agent_id = meta.get("agent_id").and_then(Value::as_str);
-    let (Some(swarm_id), Some(agent_id)) = (swarm_id, agent_id) else {
-        return StatusCode::NO_CONTENT; // not a swarm session
+    // Every id is verified against the session's workspace (S4-03).
+    let Some(scope) = verified_swarm_scope(&ctx, &session).await else {
+        return StatusCode::NO_CONTENT; // not a (valid) swarm session
     };
-    let project_id = meta
-        .get("project_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let task_id = meta
-        .get("task_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let run_id = meta
-        .get("run_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    if meta_str(&session.meta, "swarm_id").is_none() {
+        return StatusCode::NO_CONTENT; // board posts come from swarm sessions only
+    }
+    let SwarmScope {
+        swarm_id,
+        agent_id,
+        project_id,
+        task_id,
+        run_id,
+    } = scope;
+    let Some(agent_id) = agent_id else {
+        return StatusCode::NO_CONTENT; // not an agent session
+    };
+    let swarm_id = swarm_id.as_str();
+    let agent_id = agent_id.as_str();
 
     let body = req.body.trim();
     if body.is_empty() {
@@ -145,15 +246,14 @@ pub async fn product_ingest(
         Ok(s) => s,
         Err(_) => return StatusCode::NO_CONTENT,
     };
-    // Only swarm sessions may write drafts.
-    if session
-        .meta
-        .get("swarm_id")
-        .and_then(Value::as_str)
-        .is_none()
-    {
+    // Only swarm sessions may write drafts — and only into their own
+    // workspace's swarm/project (S4-03).
+    if meta_str(&session.meta, "swarm_id").is_none() {
         return StatusCode::NO_CONTENT;
     }
+    let Some(scope) = verified_swarm_scope(&ctx, &session).await else {
+        return StatusCode::NO_CONTENT;
+    };
     let body = req.body_md.trim();
     if body.is_empty() {
         return StatusCode::BAD_REQUEST;
@@ -180,16 +280,8 @@ pub async fn product_ingest(
             }
         },
     };
-    let project_id = session
-        .meta
-        .get("project_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let agent_id = session
-        .meta
-        .get("agent_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let project_id = scope.project_id;
+    let agent_id = scope.agent_id;
 
     // Epic resolution — `None` falls back to the legacy top-level draft.
     let epic_id = match project_id.as_deref() {
@@ -473,8 +565,12 @@ pub async fn ingest_mockup(
         Ok(s) => s,
         Err(_) => return StatusCode::NO_CONTENT,
     };
-    let project_id = match session.meta.get("project_id").and_then(Value::as_str) {
-        Some(p) => p.to_string(),
+    // S4-03: the project must belong to the session's workspace + swarm.
+    let project_id = match verified_swarm_scope(&ctx, &session)
+        .await
+        .and_then(|s| s.project_id)
+    {
+        Some(p) => p,
         None => return StatusCode::NO_CONTENT, // a swarm without a project
     };
 
@@ -604,8 +700,11 @@ pub async fn ingest_discovery_report(
         Ok(s) => s,
         Err(_) => return StatusCode::NO_CONTENT,
     };
-    let project_id = match session.meta.get("project_id").and_then(Value::as_str) {
-        Some(p) => p.to_string(),
+    let project_id = match verified_swarm_scope(&ctx, &session)
+        .await
+        .and_then(|s| s.project_id)
+    {
+        Some(p) => p,
         None => return StatusCode::NO_CONTENT,
     };
     let run = match ctx.discovery_repo.get_by_project(&project_id).await {
@@ -697,5 +796,96 @@ mod tests {
         );
         assert!(find_child_by_title(&kids, "Something new").is_none());
         assert!(find_child_by_title(&kids, "").is_none());
+    }
+
+    /// S4-03: ingest acts only on swarm ids that belong to the session's own
+    /// workspace (and agent/project/task/run ids of THAT swarm).
+    #[tokio::test]
+    async fn swarm_scope_rejects_ids_outside_the_session_workspace() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let u = users.create("u", "x", "U", false).await.unwrap();
+        let root = tmp.path().to_string_lossy().to_string();
+        let ws_a = ctx.workspaces.create("A", &root, &u.id).await.unwrap();
+        let ws_b = ctx.workspaces.create("B", &root, &u.id).await.unwrap();
+        let mk = |ws: &str| otto_state::NewSwarm {
+            workspace_id: ws.to_string(),
+            name: "s".into(),
+            description: String::new(),
+            preset_slug: None,
+            config: json!({}),
+            max_total_runs: None,
+            max_cost_usd: None,
+            max_runtime_secs: None,
+            max_attempts: None,
+            created_by: u.id.clone(),
+        };
+        let sa = ctx.swarm_repo.create_swarm(mk(&ws_a.id)).await.unwrap();
+        let sb = ctx.swarm_repo.create_swarm(mk(&ws_b.id)).await.unwrap();
+        let mk_agent = |s: &otto_state::Swarm| otto_state::NewAgent {
+            swarm_id: s.id.clone(),
+            workspace_id: s.workspace_id.clone(),
+            name: "a".into(),
+            title: "A".into(),
+            reports_to: None,
+            provider: "claude".into(),
+            model: None,
+            soul_name: None,
+            soul_md: None,
+            specialization: String::new(),
+            scope_md: String::new(),
+            skills: json!([]),
+            schedule: None,
+            cwd_mode: None,
+            avatar: String::new(),
+            order_idx: 0,
+            created_by: u.id.clone(),
+        };
+        let aa = ctx.swarm_repo.create_agent(mk_agent(&sa)).await.unwrap();
+        let ab = ctx.swarm_repo.create_agent(mk_agent(&sb)).await.unwrap();
+        let session = |meta: Value| otto_core::domain::Session {
+            id: "sess".into(),
+            workspace_id: ws_a.id.clone(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "claude".into(),
+            title: "t".into(),
+            status: otto_core::domain::SessionStatus::Running,
+            cwd: root.clone(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: u.id.clone(),
+            created_at: chrono::Utc::now(),
+            last_active_at: chrono::Utc::now(),
+            archived: false,
+            meta,
+        };
+        // Own swarm + own agent → scoped.
+        let ok = verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sa.id, "agent_id": aa.id})),
+        )
+        .await
+        .expect("own swarm");
+        assert_eq!(ok.swarm_id, sa.id);
+        // Another workspace's swarm (forged meta) → refused.
+        assert!(verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sb.id, "agent_id": ab.id}))
+        )
+        .await
+        .is_none());
+        // Own swarm but a foreign agent id → refused.
+        assert!(verified_swarm_scope(
+            &ctx,
+            &session(json!({"swarm_id": sa.id, "agent_id": ab.id}))
+        )
+        .await
+        .is_none());
+        // Not a swarm session at all.
+        assert!(verified_swarm_scope(&ctx, &session(json!({})))
+            .await
+            .is_none());
     }
 }

@@ -42,8 +42,8 @@
   const canPurge = $derived(resourceAccess.can('aws_account', account.id, 'sqs_purge', 'aws_sqs', 'edit'));
   const canRedrive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_redrive', 'aws_sqs', 'edit'));
   // Peek is a receive: it bumps each message's receive count (and can
-  // dead-letter it), so the daemon gates it like Send — Edit on SQS.
-  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_send', 'aws_sqs', 'edit'));
+  // dead-letter it), so the daemon gates it at Edit on its own `sqs_receive`.
+  const canReceive = $derived(resourceAccess.can('aws_account', account.id, 'sqs_receive', 'aws_sqs', 'edit'));
   // A-1: queues live per region; the picker restores the last one used.
   // svelte-ignore state_referenced_locally
   let region = $state(account.region);
@@ -79,24 +79,33 @@
     if (q) select(q);
   }
 
+  // Region-scoped, latest-wins: a slow region-A reply (or error) that lands
+  // after a switch to B must not overwrite B's error, end B's spinner, select
+  // an A queue, or fan A's queue URLs out against B's region.
+  let loadSeq = 0;
   async function load(): Promise<void> {
+    const seq = ++loadSeq;
+    const rg = rq;
     loading = true;
     try {
-      const list = await aws.loadSqsQueues(account.id, '', rq);
+      const list = await aws.loadSqsQueues(account.id, '', rg);
+      if (seq !== loadSeq) return;
       error = '';
       // Approximate counts: capped so a 500-queue account doesn't fire 500 CLI
       // calls on open (the rest load when selected), and at most 2 in flight —
       // each is an `aws` process, and 40 at once took every webview socket to
-      // the daemon for seconds. The list is usable while they fill in.
+      // the daemon for seconds. The list is usable while they fill in. Each
+      // call carries the region captured above and stops once superseded.
       loading = false;
       autoSelect(list);
       void mapLimit(list.slice(0, 40), 2, (q) =>
-        aws.loadSqsAttrs(account.id, q.url, rq).catch(() => undefined),
+        seq === loadSeq ? aws.loadSqsAttrs(account.id, q.url, rg).catch(() => undefined) : Promise.resolve(undefined),
       );
     } catch (e) {
+      if (seq !== loadSeq) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (seq === loadSeq) loading = false;
     }
   }
 
@@ -215,20 +224,43 @@
   async function send(): Promise<void> {
     if (!selected || !sendBody.trim() || !validDelay || sending) return;
     const queue = selected;
+    // The region the confirm names is the region the send goes to.
+    const region = rq;
+    const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
+    for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
+    const attrNames = Object.keys(message_attributes);
+    // Outward write: live consumers act on what lands in the queue — say
+    // where it goes and what is sent before it leaves (typed-free; prod gets
+    // the PRODUCTION line + danger styling).
     sending = true;
+    const ok = await confirmProd({
+      env: account.environment,
+      verb: 'Send message',
+      where: queueWhere(queue.name),
+      what: [
+        sendBody.trim(),
+        attrNames.length ? `Attributes: ${attrNames.join(', ')}` : '',
+        sendDelay ? `Delay: ${sendDelay}s` : '',
+        queue.fifo && sendGroup ? `Group: ${sendGroup}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    });
+    if (!ok || selected?.url !== queue.url) {
+      sending = false;
+      return;
+    }
     try {
-      const message_attributes: Record<string, { DataType: string; StringValue: string }> = {};
-      for (const a of sendAttrs) if (a.k.trim()) message_attributes[a.k.trim()] = { DataType: 'String', StringValue: a.v };
       const r = await awsApi.sqsSend(account.id, {
         url: queue.url,
         body: sendBody,
         delay_seconds: sendDelay || undefined,
         group_id: queue.fifo ? sendGroup || undefined : undefined,
         dedup_id: queue.fifo ? sendDedup || undefined : undefined,
-        message_attributes: Object.keys(message_attributes).length ? message_attributes : undefined,
-      }, rq || undefined);
+        message_attributes: attrNames.length ? message_attributes : undefined,
+      }, region || undefined);
       toasts.success('Message sent', r.message_id);
-      void aws.loadSqsAttrs(account.id, queue.url, rq);
+      void aws.loadSqsAttrs(account.id, queue.url, region);
     } catch (e) {
       toastError('Couldn’t send', e);
     } finally {
@@ -322,7 +354,7 @@
   {loading}
   bind:auto
   {region}
-  onrefresh={() => void load()}
+  onrefresh={load}
 >
   <RegionPicker {account} service="sqs" bind:region />
 </ViewToolbar>

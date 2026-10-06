@@ -8,51 +8,26 @@
 
 use otto_core::domain::{GoalLoopDefinition, GoalLoopEvaluation};
 
-/// Return the first balanced top-level `{...}` substring, or `None`.
-pub fn find_json_object(text: &str) -> Option<&str> {
-    let bytes = text.as_bytes();
-    let start = text.find('{')?;
-    let mut depth = 0usize;
-    let mut in_str = false;
-    let mut escaped = false;
-    for i in start..bytes.len() {
-        let c = bytes[i] as char;
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => in_str = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[start..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+/// The first balanced top-level `{...}` substring, or `None` (shared:
+/// [`otto_core::text::find_json_object`]).
+pub use otto_core::text::find_json_object;
+
+/// The first JSON object in `text` that deserializes as `T`: ```json fence
+/// first, else each balanced `{...}` in order ([`otto_core::text::extract_json`]
+/// skips a span that is not JSON, e.g. a `{placeholder}` in the prose).
+fn parse_object<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
+    serde_json::from_value(otto_core::text::extract_json(text)?).ok()
 }
 
 /// Parse the definer's structured goal from its (possibly fenced/prose-wrapped)
 /// reply.
 pub fn parse_definition(text: &str) -> Option<GoalLoopDefinition> {
-    let json = find_json_object(text)?;
-    serde_json::from_str(json).ok()
+    parse_object(text)
 }
 
 /// Parse the evaluator's structured verdict.
 pub fn parse_evaluation(text: &str) -> Option<GoalLoopEvaluation> {
-    let json = find_json_object(text)?;
-    serde_json::from_str(json).ok()
+    parse_object(text)
 }
 
 /// One executor's self-reported result (written to its out-file).
@@ -71,8 +46,7 @@ pub struct ExecutorResult {
 /// Parse an executor's result JSON (tolerant of fences/prose). `None` when no
 /// JSON object is present.
 pub fn parse_executor_result(text: &str) -> Option<ExecutorResult> {
-    let json = find_json_object(text)?;
-    serde_json::from_str(json).ok()
+    parse_object(text)
 }
 
 #[cfg(test)]
@@ -101,6 +75,14 @@ mod tests {
     fn none_when_no_object() {
         assert!(find_json_object("no json here").is_none());
         assert!(find_json_object("[1,2,3]").is_none());
+    }
+
+    #[test]
+    fn a_prose_placeholder_before_the_object_no_longer_hides_it() {
+        // The old first-`{` scan returned `{criterion}` and the parse failed.
+        let raw = "Checked each {criterion}. Result:\n{\"summary\":\"ok\",\"changed_files\":[]}";
+        let r = parse_executor_result(raw).expect("skips the non-JSON span");
+        assert_eq!(r.summary, "ok");
     }
 
     #[test]

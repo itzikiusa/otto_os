@@ -32,7 +32,8 @@
   import { STUDIOS, filterProjects, studioInfo, titleFromPrompt, type ProjectFilter } from './model';
   import { createDesign } from './create';
   import { generateFromBrief, referenceOf, suggestReferences } from './assist/handoff';
-  import { library } from './library.svelte';
+  import { library, LIBRARY_LIMIT } from './library.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   interface Props {
     view: 'grid' | 'spatial';
@@ -420,12 +421,7 @@
           {#if library.loading && !library.loaded}
             <Skeleton rows={1} height={220} />
           {:else if library.error && !library.loaded}
-            <div class="inline-err" role="alert">
-              <Icon name="warning" size={14} />
-              <span>Couldn’t load the design library.</span>
-              <span class="dim err-detail">{library.error}</span>
-              <button class="btn small" onclick={() => void library.load()}>Retry</button>
-            </div>
+            <LoadState variant="compact" what="the design library" error={library.error} empty onretry={() => void library.load()} />
           {:else if recent.length === 0}
             <p class="dim">Nothing here yet. Designs you and your agents make — and the ones already in Product and Canvas — show up here.</p>
           {:else}
@@ -461,6 +457,11 @@
           {:else if projects.length === 0}
             <p class="dim">No projects match this filter. <button class="linkbtn" onclick={() => (pfilter = 'all')}>Show all</button></p>
           {:else}
+            {#if library.truncated}
+              <p class="dim" role="status" data-testid="lobby-truncated">
+                Counts and filters cover the newest {LIBRARY_LIMIT} designs; older ones are still in search.
+              </p>
+            {/if}
             <div class="projects">
               {#each projects as p, i (p.id)}
                 <ProjectCard project={p} artifacts={library.artifacts} epicLabel={epicLabel(p.epic_story_id)} live={i < 6} />
@@ -838,9 +839,6 @@
   }
   .inline-err > :global(svg) {
     color: var(--danger);
-  }
-  .err-detail {
-    font-size: var(--fs-xs);
   }
   /* Rail */
   .rail {

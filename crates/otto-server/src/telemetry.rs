@@ -54,6 +54,24 @@ fn component(route: &str) -> &str {
     }
 }
 
+/// Routes whose wall time is not request latency (S9-06), so they are never
+/// timed as operations: telemetry's own reads and health probes; LONG-POLLS
+/// (`GET /sessions/{id}/wait` parks up to ~14 min for `wait_session` — it
+/// would dominate `total_ms`/p95, top the slow-operation suggestions, and past
+/// 1 h fail span validation as a silent drop); and WebSocket upgrades (the
+/// span would only time the 101, not the socket's life).
+fn untimed(route: &str, headers: &axum::http::HeaderMap) -> bool {
+    const LONG_POLLS: &[&str] = &["/api/v1/sessions/{id}/wait"];
+    route.contains("/telemetry/")
+        || route.ends_with("/health")
+        || LONG_POLLS.contains(&route)
+        || route.contains("/ws/")
+        || headers
+            .get(axum::http::header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
 pub async fn middleware(
     State(service): State<Option<Arc<TelemetryService>>>,
     req: Request,
@@ -69,7 +87,7 @@ pub async fn middleware(
     else {
         return next.run(req).await;
     };
-    if route.contains("/telemetry/") || route.ends_with("/health") {
+    if untimed(&route, req.headers()) {
         return next.run(req).await;
     }
     let component = component(&route);
@@ -222,6 +240,19 @@ mod tests {
         );
         service.shutdown().await;
         usage.shutdown().await;
+    }
+    #[test]
+    fn long_polls_and_upgrades_are_not_timed() {
+        let none = axum::http::HeaderMap::new();
+        assert!(untimed("/api/v1/sessions/{id}/wait", &none));
+        assert!(untimed("/api/v1/ws/events", &none));
+        assert!(untimed("/api/v1/telemetry/overview", &none));
+        assert!(untimed("/health", &none));
+        let mut upgrade = axum::http::HeaderMap::new();
+        upgrade.insert(axum::http::header::UPGRADE, "websocket".parse().unwrap());
+        assert!(untimed("/api/v1/rooms/{id}", &upgrade));
+        assert!(!untimed("/api/v1/sessions/{id}", &none));
+        assert!(!untimed("/api/v1/repos/{id}/fetch", &none));
     }
     #[test]
     fn workspace_routes_keep_the_feature_component() {

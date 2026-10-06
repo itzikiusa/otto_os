@@ -12,12 +12,16 @@
 //!   * [`username_key`] — `"user:<username>"`, a GLOBAL per-username tally.
 //!
 //! The per-username tally is what closes the original bypass. The client IP is
-//! taken from the real socket peer (`ConnectInfo<SocketAddr>`); Tailscale and the
-//! Tauri shell connect directly with no trusted proxy in front, so the handler
-//! must NOT honor `X-Forwarded-For` / `X-Real-IP` (an attacker would just rotate
-//! them to mint a fresh `ip|username` key per request and never trip the
-//! lockout). Even with a genuinely rotating source IP, the global per-username
-//! counter still trips after [`FAILURE_THRESHOLD`] failures against any one
+//! the host guard's tunnel-aware `ClientIp`: the real socket peer, except for a
+//! loopback peer that named the Cloudflare-tunnel host (`share_base_url`, the
+//! recommended remote setup — every tunnelled client arrives as 127.0.0.1),
+//! where `CF-Connecting-IP` identifies the client. `X-Forwarded-For` /
+//! `X-Real-IP` are never honoured (an attacker would just rotate them to mint a
+//! fresh `ip|username` key per request and never trip the lockout). Even with a
+//! genuinely rotating source IP, the global per-username counter still trips
+//! after [`FAILURE_THRESHOLD`] failures against any one account — for every
+//! client except the desktop app itself (loopback peer + loopback Host), which
+//! a remote party must not be able to lock out of its own Mac (S8-07).
 //! account. See `tests/auth_security.rs` for the property test.
 
 use std::collections::HashMap;

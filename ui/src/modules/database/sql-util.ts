@@ -8,9 +8,14 @@
 // variables" without touching the server. Kept dependency-free + pure so they're
 // trivially testable and reusable.
 
+import { escapeSqlText, pgSpanEnd, type SplitMode } from './sql-dialect.ts';
+
+export type { SplitMode } from './sql-dialect.ts';
+
 /**
  * Mark every character position as "code" (1) or "inside a string/comment"
- * (0). Handles `'…'`, `"…"`, `` `…` `` strings (with doubled-quote AND
+ * (0). `pg` mode uses the Postgres lexing in `sql-dialect.ts` (no `#`
+ * comments, `\` only escapes in `E'…'`, dollar quotes, nested comments). Handles `'…'`, `"…"`, `` `…` `` strings (with doubled-quote AND
  * backslash escapes — covers MySQL's default mode and standard SQL), `--`/`#`
  * line comments, and `/* … *​/` block comments.
  */
@@ -22,6 +27,18 @@ function codeMask(sql: string, mode: SplitMode = 'sql'): Uint8Array {
   const off = (a: number, b: number) => {
     mask.fill(0, a, Math.min(b, n));
   };
+  if (mode === 'pg') {
+    while (i < n) {
+      const e = pgSpanEnd(sql, i);
+      if (e < 0) {
+        i++;
+        continue;
+      }
+      off(i, e);
+      i = e;
+    }
+    return mask;
+  }
   while (i < n) {
     const c = sql[i];
     const c2 = i + 1 < n ? sql[i + 1] : '';
@@ -180,8 +197,6 @@ export function unmaskQueryPlaceholders(sql: string, tokens: string[]): string {
   return out;
 }
 
-/** How statements are delimited: `;` (SQL/Mongo/ClickHouse) vs one-per-line (Redis). */
-export type SplitMode = 'sql' | 'line';
 
 /** Statement segments (offsets INCLUDE the trailing delimiter), covering [0, len]. */
 function segments(sql: string, mode: SplitMode = 'sql'): { from: number; to: number }[] {
@@ -197,7 +212,7 @@ function segments(sql: string, mode: SplitMode = 'sql'): { from: number; to: num
       }
     }
   } else {
-    const mask = codeMask(sql);
+    const mask = codeMask(sql, mode);
     for (let i = 0; i < sql.length; i++) {
       if (sql[i] === ';' && mask[i]) {
         segs.push({ from: start, to: i + 1 });
@@ -287,7 +302,9 @@ export function analyzeStatement(
     const c = sql.charCodeAt(i);
     const c2 = i + 1 < n ? sql.charCodeAt(i + 1) : -1;
     let j = -1; // end of a skipped string/comment span
-    if ((c === 45 && c2 === 45) || c === 35) {
+    if (mode === 'pg') {
+      j = pgSpanEnd(sql, i);
+    } else if ((c === 45 && c2 === 45) || c === 35) {
       const e = sql.indexOf('\n', i);
       j = e < 0 ? n : e;
     } else if (c === 47 && c2 === 42) {
@@ -485,8 +502,7 @@ export function defaultVarSpec(value = ''): VarSpec {
  * emitted statement corrupts (or worse, splices the rest of the value as SQL).
  */
 export function escapeSqlString(s: string, backslashEscapes = true): string {
-  const t = backslashEscapes ? s.replace(/\\/g, '\\\\') : s;
-  return t.replace(/'/g, "''");
+  return escapeSqlText(s, backslashEscapes);
 }
 
 /**
@@ -502,7 +518,9 @@ export function renderVar(spec: VarSpec, mode: SplitMode = 'sql'): string {
   const quote = mode === 'line' ? '"' : "'";
   let inner = spec.value;
   if (spec.escape) {
-    inner = mode === 'line' ? inner.replace(/(["\\])/g, '\\$1') : escapeSqlString(inner);
+    // Postgres standard strings keep `\` literal — doubling it would change
+    // the value (`C:\tmp` → `C:\\tmp`); MySQL / ClickHouse need it doubled.
+    inner = mode === 'line' ? inner.replace(/(["\\])/g, '\\$1') : escapeSqlString(inner, mode !== 'pg');
   }
   return `${quote}${inner}${quote}`;
 }

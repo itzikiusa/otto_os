@@ -87,6 +87,10 @@
   );
   const decidedCount = $derived(choices.filter((c) => c !== null).length);
   const allDecided = $derived(conflictCount > 0 && decidedCount === conflictCount);
+  /** Markable: every conflict decided — or a loaded file with NO markers left
+   *  (already fixed by hand / a modify-delete), which the copy invites the
+   *  user to mark resolved. */
+  const canMark = $derived(file !== null && (conflictCount === 0 || allDecided));
 
   function setChoice(ordinal: number, lines: string[] | null): void {
     if (choices[ordinal] === lines) return;
@@ -188,7 +192,7 @@
   }
 
   async function markResolved(): Promise<void> {
-    if (!file || !allDecided || saving) return;
+    if (!file || !canMark || saving) return;
     saving = true;
     try {
       const content = composeContent();
@@ -214,9 +218,9 @@
     {/if}
     <button
       class="btn small primary"
-      disabled={!allDecided || saving}
+      disabled={!canMark || saving}
       onclick={markResolved}
-      title={allDecided ? 'Mark this file resolved' : 'Resolve every conflict first'}
+      title={canMark ? 'Mark this file resolved' : 'Resolve every conflict first'}
     >
       {saving ? 'Saving…' : 'Mark file resolved'}
     </button>

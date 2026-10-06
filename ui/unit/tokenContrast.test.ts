@@ -151,3 +151,52 @@ for (const combo of COMBOS) {
     });
   }
 }
+
+// Semantic tones: tokens.css promises the bare --danger/--warning/--success/
+// --info are TEXT-SAFE (chips, Badge tones, LoadState stale bars — 11–12 px
+// text) on every ground and on their own -soft tint (14%) over each ground.
+const TONES = ['--danger', '--warning', '--success', '--info'];
+for (const combo of COMBOS) {
+  const all = varsFor(combo.theme, combo.scheme);
+  test(`${combo.name}: semantic tones >= 4.5:1 on every ground and their own -soft tint`, () => {
+    const fails: string[] = [];
+    for (const tone of TONES) {
+      const fg = hex(all, tone);
+      const pct = mixPct(combo.theme, combo.scheme, `${tone}-soft`, tone);
+      for (const g of GROUNDS) {
+        const base = hex(all, g);
+        for (const [gn, ground] of [
+          [g, base],
+          [`${tone}-soft over ${g}`, mixSrgb(fg, base, pct)],
+        ] as [string, Rgb][]) {
+          const r = contrast(fg, ground);
+          if (r < 4.5) fails.push(`${tone} on ${gn}: ${r.toFixed(2)}`);
+        }
+      }
+    }
+    assert.deepEqual(fails, [], fails.join('; '));
+  });
+
+  // Switch.svelte: OFF is an outlined track (--surface-2 fill, --text-dim
+  // ring) with a --text-dim knob; ON is an --accent-solid / --success track
+  // with an --accent-contrast knob (--bg on the success track: the bright dark-
+  // scheme green under a white knob was 1.9:1). WCAG 1.4.11: every state cue >= 3:1.
+  test(`${combo.name}: Switch off/on parts >= 3:1 (WCAG 1.4.11)`, () => {
+    const fails: string[] = [];
+    const dim = hex(all, '--text-dim');
+    const offTrack = hex(all, '--surface-2');
+    const knob = hex(all, '--accent-contrast');
+    const accent = hex(all, '--accent');
+    const solidMix = (all['--accent-solid'] ?? '').match(/color-mix\(in srgb, var\(--accent\) (\d+)%, black\)/);
+    const onTrack = solidMix ? mixSrgb(accent, [0, 0, 0], Number(solidMix[1]) / 100) : accent;
+    const check = (name: string, a: Rgb, b: Rgb) => {
+      const r = contrast(a, b);
+      if (r < 3) fails.push(`${name}: ${r.toFixed(2)}`);
+    };
+    check('off knob on off track', dim, offTrack);
+    for (const g of ['--bg', '--surface', '--surface-2']) check(`off ring on ${g}`, dim, hex(all, g));
+    check('on knob on accent track', knob, onTrack);
+    check('on knob (--bg) on success track', hex(all, '--bg'), hex(all, '--success'));
+    assert.deepEqual(fails, [], fails.join('; '));
+  });
+}

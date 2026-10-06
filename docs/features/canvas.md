@@ -65,14 +65,14 @@ session** — attached to that session's right-panel **Canvas** tab so the agent
 | Agent skill | `crates/otto-skills/assets/skills/development/otto-canvas/` |
 | API contract | `docs/contracts/api.md` #102–#108, #145–#147 |
 
-> **Note on legacy code.** The tree still carries an earlier *node-graph* design
-> (`CanvasFlow.svelte`, `Toolbar.svelte`, `PresentMode.svelte`, `ToolRail.svelte`,
-> `nodes/*`, `scene.ts`, `templates.ts`, and the rich `Scene` schema in
-> `types.ts`). Those components are **not mounted** by the current `CanvasPage`
-> — the shipping canvas is the file-backed Excalidraw/Mermaid/D2 trio documented
-> here. A few helpers from that era (`parseScene`, `emptyScene`) are still used as
-> fallbacks by the store. See **Capabilities & limitations** for what this means
-> for "Present mode" and JSON export.
+> **Note on legacy code.** The earlier *node-graph* editor (`CanvasEditor`,
+> `CanvasFlow`, `Toolbar`, `ToolRail`, `PresentMode`, `nodes/*`, …) and its
+> store-side undo/redo save path were removed — `CanvasPage` never mounted them.
+> What remains from that era is `scene.ts` (`parseScene`, `emptyScene`, used as
+> fallbacks by the store) and the rich `Scene` schema in `types.ts`. See
+> **Capabilities & limitations** for what this means for "Present mode" and JSON
+> export. Keyboard access on the live editors: the diagram surface pans with the
+> arrow keys (`panKeys.ts`) and every edit goes through the source pane.
 
 ---
 
@@ -446,11 +446,11 @@ that lists the Canvas scenes linked to a story.
   first use of a D2 scene, then stays cached for the session). Excalidraw's fonts are
   served locally too (all but the CJK Xiaolai face).
 - **No Present mode in the current canvas.** Present mode (PowerPoint-style slide
-  stepping) and the top **Toolbar** (Undo/Redo, **Export JSON**, Present) belong to
-  the older node-graph design and are **not wired** into the shipping file-backed
-  page. What ships today: the Mermaid board's **Download SVG**, Excalidraw's own
-  native export menu, and per-board pan/zoom/fit. (The store still has
-  snapshot undo/redo, but no mounted UI invokes it.)
+  stepping) and the top **Toolbar** (Undo/Redo, **Export JSON**, Present) belonged
+  to the older node-graph design, which was never wired into the shipping
+  file-backed page and has been removed. What ships today: the Mermaid board's
+  **Download SVG**, Excalidraw's own native export menu (and its own undo), and
+  per-board pan/zoom/fit.
 - **Live "draws itself"** preview is a best-effort file poll (~900 ms), not a
   byte-stream — large diagrams update in visible steps.
 - **One open scene at a time**; switching scenes remounts the board (keyed by id)

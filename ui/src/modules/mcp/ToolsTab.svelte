@@ -101,13 +101,16 @@
     if (!id) return;
     loading = true;
     try {
-      tools = await mcpCpApi.cpDiscover(id);
-      toasts.success('Discovered tools', `${tools.length} found`);
+      const found = await mcpCpApi.cpDiscover(id);
+      // Switched servers meanwhile: never list server A's tools under B.
+      if (selectedServerId !== id) return;
+      tools = found;
+      toasts.success('Discovered tools', `${found.length} found`);
       ondiscovered?.();
     } catch (e) {
-      toastError('Couldn’t discover tools', e);
+      if (selectedServerId === id) toastError('Couldn’t discover tools', e);
     } finally {
-      loading = false;
+      if (selectedServerId === id) loading = false;
     }
   }
 

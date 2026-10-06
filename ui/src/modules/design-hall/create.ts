@@ -89,12 +89,20 @@ export async function createDesign(input: NewDesignInput): Promise<string> {
 }
 
 /** Import a local file as a new artifact (format from its extension / mime). */
+/** The daemon's per-version cap (docs/features/design-hall.md: 25 MB raw). */
+export const MAX_IMPORT_BYTES = 25 * 1024 * 1024;
+
 export async function importDesignFile(
   file: File,
   opts: { workspaceId: string; projectId?: string | null },
 ): Promise<string> {
   const format = formatForFile(file.name, file.type);
   if (!format) throw new Error(`Design Hall can’t import “${file.name}”. Use HTML, SVG, PNG, JPEG, GIF, WebP, PDF, GLB, glTF, Mermaid, D2 or Excalidraw.`);
+  // Refuse before base64-encoding and uploading: a 60 MB .glb used to be read,
+  // encoded and sent only for the daemon to reject it (S18-24).
+  if (file.size > MAX_IMPORT_BYTES) {
+    throw new Error(`“${file.name}” is ${(file.size / 1048576).toFixed(1)} MB — Design Hall imports up to 25 MB per file.`);
+  }
   const title = file.name.replace(/\.[^.]+$/, '') || file.name;
   const body: CreateDesignArtifactReq = {
     workspace_id: opts.workspaceId,

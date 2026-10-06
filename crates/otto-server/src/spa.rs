@@ -54,6 +54,19 @@ const REVALIDATE: &str = "no-cache";
 /// per CSP3 — also matches same-host `ws:`/`wss:` for the event/terminal
 /// sockets. `frame-ancestors 'self'` stops another site from framing the UI
 /// (clickjacking); the same-origin side pane (`?embed=1`) still works.
+///
+/// Two deliberately broad sources (S8-12 / S11-13), pinned by
+/// `csp_broad_sources_are_the_documented_ones`:
+/// - `'unsafe-eval'`: the D2 diagram renderer (`@terrastruct/d2`) loads ELK and
+///   its setup script with `new Function(...)` inside a `blob:` worker, and a
+///   blob worker inherits the DOCUMENT's policy — without it every D2 diagram
+///   fails to render. Removing it needs D2 served as a same-origin worker
+///   script with its own CSP header; until then any change must keep D2 working.
+/// - `frame-src https: http:`: the Browser panel's direct mode frames the
+///   site the user typed (`BrowserPanel.svelte`; X-Frame-Options sites fall
+///   back to the daemon proxy) and plugin panes frame their own local origin.
+///   Every such frame is cross-origin to the UI, so it gets no access to the
+///   app's DOM or storage.
 pub const SPA_CSP: &str = "default-src 'self'; \
     script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; \
     style-src 'self' 'unsafe-inline'; \
@@ -254,6 +267,33 @@ mod tests {
             .unwrap()
             .to_vec();
         (status, content_type, body)
+    }
+
+    /// S8-12 / S11-13: the only broad sources are the two documented next to
+    /// [`SPA_CSP`]; anything new (or a wider script/frame source) must be a
+    /// deliberate, reviewed change to this test.
+    #[test]
+    fn csp_broad_sources_are_the_documented_ones() {
+        let directive = |name: &str| {
+            SPA_CSP
+                .split(';')
+                .map(str::trim)
+                .find(|d| d.starts_with(name))
+                .unwrap_or_else(|| panic!("missing {name}"))
+                .to_string()
+        };
+        assert_eq!(
+            directive("script-src "),
+            "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
+            "'unsafe-eval' is only for the D2 worker; never add 'unsafe-inline'"
+        );
+        assert_eq!(
+            directive("frame-src "),
+            "frame-src 'self' blob: data: https: http:"
+        );
+        assert_eq!(directive("object-src "), "object-src 'none'");
+        assert_eq!(directive("frame-ancestors "), "frame-ancestors 'self'");
+        assert!(!SPA_CSP.contains('*'), "no wildcard sources");
     }
 
     #[tokio::test]

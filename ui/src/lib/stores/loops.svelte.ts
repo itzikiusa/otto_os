@@ -19,6 +19,7 @@ import type {
   UpdateGoalLoopReq,
 } from '../api/types';
 import { announceModule } from '../lazyModule';
+import { latestOnly } from '../latest';
 
 class LoopsStore {
   list: GoalLoop[] = $state([]);
@@ -45,6 +46,10 @@ class LoopsStore {
   private detailInflight: Promise<void> | null = null;
   private detailRerun: string | null = null;
   private lastDetailJson = '';
+  /** Every detail fetch (interactive or the background poll) takes a ticket:
+   *  a poll response that was in flight when Pause/Resume/Stop re-fetched used
+   *  to land LAST and put "Running · Pause" back for up to 30 s. */
+  private detailSeq = latestOnly();
 
   /** The workspace the list was last loaded for. */
   listWs = '';
@@ -92,12 +97,15 @@ class LoopsStore {
   /** `background`: the poll's request lane (never starves interactive fetches).
    *  Resolves false on failure (the poller backs off); never rejects. */
   private async fetchDetail(id: string, background: boolean, signal?: AbortSignal): Promise<boolean> {
+    const t = this.detailSeq.begin();
     this.loadingDetail = true;
     try {
       const path = `/goal-loops/${id}?summary=true`;
       const d = background
         ? await api.bg.get<GoalLoopDetail>(path, signal)
         : await api.get<GoalLoopDetail>(path, signal);
+      // A newer fetch (or closeDetail) superseded this one: its answer wins.
+      if (!t.current) return true;
       const json = JSON.stringify(d);
       // Unchanged (a quiet poll tick / duplicate event): keep the same object
       // so nothing downstream re-derives or re-renders.
@@ -108,13 +116,13 @@ class LoopsStore {
       this.detailError = null;
       return true;
     } catch (e) {
-      if (signal?.aborted) return true;
+      if (signal?.aborted || !t.current) return true;
       // Leave the prior detail in place on a transient failure of the same loop.
       if (this.detail && this.detail.loop.id !== id) this.detail = null;
       this.detailError = loadErrorText(e);
       return false;
     } finally {
-      this.loadingDetail = false;
+      if (t.current) this.loadingDetail = false;
     }
   }
 
@@ -134,6 +142,8 @@ class LoopsStore {
   }
 
   closeDetail(): void {
+    this.detailSeq.cancel();
+    this.loadingDetail = false;
     this.detail = null;
     this.lastDetailJson = '';
     this.fullIterations = {};
@@ -177,7 +187,7 @@ class LoopsStore {
     await this.loadDetail(id);
   }
   async answerQuestion(id: string, question: string, answer: string): Promise<void> {
-    await api.post(`/goal-loops/${id}/questions/${question}/answer`, { answer });
+    await api.post(`/goal-loops/${id}/questions/${encodeURIComponent(question)}/answer`, { answer });
     await this.loadDetail(id);
   }
 

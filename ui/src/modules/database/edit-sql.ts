@@ -3,25 +3,16 @@
 // literal/identifier helpers are exported on their own because ResultsGrid's
 // FK navigation and the "WHERE pk IN (…)" copy build predicates with them too.
 import type { DbEngine } from '../../lib/api/types';
-import { escapeSqlString } from './sql-util';
+import { backslashEscapes, boolLiteral, escapeSqlText, quoteIdent } from './sql-dialect.ts';
 import { cellStr, compactJson, isComplex, SET_EMPTY, SET_NULL } from './results-format';
 import type { DiffLine, EditAdapter, EditCtx, TypedValue } from './edit-types';
 import { plural } from '../../lib/plural';
 
 /** Quote a SQL identifier for the active engine — double-quotes for Postgres
- *  (backticks are invalid there), backticks for MySQL/ClickHouse. */
+ *  (backticks are invalid there), backticks for MySQL/ClickHouse. The rule
+ *  lives in `sql-dialect.ts` (shared with the filter chips and the splitter). */
 export function qid(engine: DbEngine | null, name: string): string {
-  return engine === 'postgres'
-    ? '"' + name.replace(/"/g, '""') + '"'
-    : '`' + name.replace(/`/g, '``') + '`';
-}
-
-// MySQL (default modes) and ClickHouse treat `\` as an escape character inside
-// a string literal — a value containing one must double it or the emitted SQL
-// corrupts (a trailing `\` even swallows the closing quote). Postgres standard
-// strings don't, so only the quote is doubled there.
-function backslashEscapes(engine: DbEngine | null): boolean {
-  return engine === 'mysql' || engine === 'clickhouse';
+  return quoteIdent(engine, name);
 }
 
 /** SQL-quote a scalar value typed into the cell editor: numbers bare (when
@@ -30,7 +21,7 @@ export function sqlLiteral(engine: DbEngine | null, raw: string, asNumber: boole
   if (raw === '' || raw === SET_NULL) return 'NULL';
   if (raw === SET_EMPTY) return "''";
   if (asNumber && /^-?\d+(\.\d+)?$/.test(raw)) return raw;
-  return `'${escapeSqlString(raw, backslashEscapes(engine))}'`;
+  return `'${escapeSqlText(raw, backslashEscapes(engine))}'`;
 }
 /** An integer column type (MySQL `BIGINT UNSIGNED`, Postgres `INT8`,
  *  ClickHouse `Nullable(UInt64)`, …) — never `POINT` / `INTERVAL`. */
@@ -56,9 +47,9 @@ export function valueLiteral(engine: DbEngine | null, v: unknown, typeHint?: str
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number' || typeof v === 'bigint') return String(v);
   if (isExactIntegerCell(v, typeHint)) return v;
-  if (typeof v === 'boolean') return engine === 'postgres' ? (v ? 'TRUE' : 'FALSE') : v ? '1' : '0';
-  if (isComplex(v)) return `'${escapeSqlString(compactJson(v), backslashEscapes(engine))}'`;
-  return `'${escapeSqlString(String(v), backslashEscapes(engine))}'`;
+  if (typeof v === 'boolean') return boolLiteral(engine, v);
+  if (isComplex(v)) return `'${escapeSqlText(compactJson(v), backslashEscapes(engine))}'`;
+  return `'${escapeSqlText(String(v), backslashEscapes(engine))}'`;
 }
 /** The cell DRAFT a typed value (Vertical editor) parks for a SQL column — the
  *  same raw text the grid's inline input would have produced, so it flows
@@ -69,7 +60,7 @@ export function typedCellDraft(engine: DbEngine | null, tv: TypedValue): string 
     case 'null':
       return SET_NULL;
     case 'bool':
-      return engine === 'postgres' ? (tv.raw === 'true' ? 'TRUE' : 'FALSE') : tv.raw === 'true' ? '1' : '0';
+      return boolLiteral(engine, tv.raw === 'true');
     case 'number':
       // Keep integer digits verbatim — `Number()` rounds beyond 2^53.
       return /^\s*-?\d+\s*$/.test(tv.raw) ? tv.raw.trim() : String(Number(tv.raw));

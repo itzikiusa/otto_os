@@ -24,8 +24,8 @@
   import { openExternal } from '../../lib/external';
   import Icon from '../../lib/components/Icon.svelte';
   import Skeleton from '../../lib/components/Skeleton.svelte';
-  import EmptyState from '../../lib/components/EmptyState.svelte';
   import ProviderIcon from '../../lib/components/ProviderIcon.svelte';
+  import LoadState from '../../lib/components/LoadState.svelte';
 
   // ── MY PULL REQUESTS ────────────────────────────────────────────────────────
   interface PrRow {
@@ -419,11 +419,7 @@
       </header>
 
       {#if accountsError}
-        <div class="fx-empty fx-empty-row" role="alert">
-          <Icon name="warning" size={14} />
-          <span class="grow">Couldn’t load Jira accounts. <span class="dim">{accountsError}</span></span>
-          <button class="btn small" onclick={() => void loadAccounts()}>Retry</button>
-        </div>
+        <LoadState variant="compact" what="Jira accounts" error={accountsError} empty onretry={() => void loadAccounts()} />
       {:else if issueAccounts.length === 0 && !workLoading}
         <div class="fx-empty dim fx-empty-row">
           <span>Connect a Jira account to see the issues assigned to you here.</span>
@@ -432,11 +428,7 @@
       {:else if workLoading}
         <div style="padding: 10px"><Skeleton rows={5} height={24} /></div>
       {:else if workError}
-        <div class="fx-empty fx-empty-row" role="alert">
-          <Icon name="warning" size={14} />
-          <span class="grow">Couldn’t load your Jira work. <span class="dim">{workError}</span></span>
-          <button class="btn small" onclick={() => void loadWork(issueAccountId)}>Retry</button>
-        </div>
+        <LoadState variant="compact" what="your Jira work" error={workError} empty onretry={() => void loadWork(issueAccountId)} />
       {:else if work.length === 0}
         <div class="fx-empty dim">No open issues are assigned to you.</div>
       {:else}

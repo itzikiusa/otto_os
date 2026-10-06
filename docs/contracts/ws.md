@@ -23,7 +23,11 @@ room credentials are never accepted by ordinary terminal/event sockets.
 Auth: prefer `Sec-WebSocket-Protocol: otto-bearer, <token>` (server echoes
 `otto-bearer` subprotocol on success, keeping the bearer token out of the URL).
 `?token=<bearer token>` query parameter is accepted as a backward-compatible
-fallback. An IP that fails token validation too many times is locked out (429).
+fallback. A token that verifies is never refused; an IP whose tokens fail
+validation too many times gets 429 (instead of 401) for further FAILED attempts.
+The IP is the tunnel-aware client IP (`CF-Connecting-IP` for a loopback request
+naming the Public link domain, else the socket peer). A store error is 503 and
+never counted.
 
 **Attach intent — `?view=1` (optional).** By default an attach that may type
 resumes an exited-but-resumable agent session (`ensure_live`: the provider CLI
@@ -64,7 +68,10 @@ connection session, where a revoked grant must drop the socket promptly). The
 capability only ever **narrows** for a live connection: a share downgraded from
 editor to viewer stops accepting input within one interval and never regains it
 without reconnecting. Revocation (share token revoked/expired, session access
-withdrawn) closes the socket within one interval — and immediately, regardless of
+withdrawn) closes THAT viewer's socket within one interval — the session itself
+keeps running (a lapsed share, an expired impersonation or a logout elsewhere
+never kills the owner's agent; a transient store error keeps the last verdict) —
+and immediately, regardless of
 cadence, when the server force-terminates the session (`{"type":"terminated"}`,
 below). Clients need no change: keep sending, and treat a dropped socket or a
 `forbidden` error frame as the authoritative answer.
@@ -401,6 +408,13 @@ are delivered to all authenticated clients.
 Ping/pong handled by the transport layer (axum auto-responds to pings; server
 sends a ping every 30s).
 
+**Credential re-validation.** The socket's token is re-checked every 60 s and
+within ~1 s of any token revocation (logout, "revoke all", API/MCP/session
+token revoke). If it no longer verifies as the same user (revoked, expired —
+e.g. an impersonation past its TTL — or the user disabled), the server sends a
+Close frame with code **4401** (`credential revoked`) and drops the socket.
+Clients must treat 4401 as "signed out", not as a transient drop.
+
 ### Agent UI control frames (per connection)
 
 The socket is otherwise server → client. The exceptions are the **agent UI
@@ -536,9 +550,11 @@ every member with `viewer`+ on the event's `workspace_id` (root receives all);
 `assistant_needs_you`, `assistant_limit`, `ui_control_requested`,
 `notifications_changed`, `workbench_doc_changed`) reach only the user named by their `user_id` (not root);
 **broadcast events** (`Notice`, `resource_access_changed`, a workspace-less
-`mcp_approval_changed`) reach every authenticated client. There are 74
+`mcp_approval_changed`) reach every authenticated client. There are 79
 variants (the sections below cover them; each `## …`/`### …` heading is one
-feature family).
+feature family). `ui/unit/eventContract.test.ts` checks every variant's tag is
+documented here and that its fields match the `OttoEvent` union in
+`ui/src/lib/api/types.ts`.
 
 Session lifecycle (session-family — owner/admin/root, viewer-gated):
 
@@ -1043,7 +1059,7 @@ blind timer.
 - Emitted by the `workgraph_projector` when a Mission Control work item is
   created or its normalized status changes (cost/title-only refreshes stay
   quiet). `kind` is the work kind (`session|swarm|goal_loop|workflow|review|
-  product_story|pr|external_trigger`); `status` is the normalized lifecycle.
+  product_story|pr|external_trigger|otto_run`); `status` is the normalized lifecycle.
 - Scope: `Workspace` (delivered to members with viewer+ on `workspace_id`).
 - The Mission Control page re-fetches the workspace summary/list on a matching
   tick instead of polling.
@@ -1739,8 +1755,11 @@ and, if the doc is open in this window and `client_id` is not this window's
 own (the `client_id` the PATCH sent), refetch the doc.
 
 ```json
-{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
+{"type":"workbench_doc_changed","workspace_id":"01J…","user_id":"01J…","doc_id":"01J…","action":"updated","rev":7,"content_hash":"9f2c…","updated_at":"2026-10-03T17:02:11Z","client_id":"w-3f2a"}
 ```
+
+`content_hash` is the doc's hash after the change: a coalesced autosave keeps
+`rev`, so a window compares the hash (not just `rev`) to know its copy is stale.
 
 `action` ∈ `created` | `updated` (content, metadata or a revision restore) |
 `trashed` | `restored` | `deleted` (permanent). `client_id` is omitted unless

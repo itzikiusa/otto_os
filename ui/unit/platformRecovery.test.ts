@@ -44,6 +44,7 @@ test('Athena history keeps its response region and rejects a late foreign histor
     historyGeneration: 0, executionGeneration: 0, history: [], historyRegion: '', historyLoading: false, historyError: '',
     account: { id: 'account' }, workgroup: 'primary', rq: 'eu-west-1', qRegion: '', qid: null,
     qstate: null, sql: '', submitting: false, result: null, resultError: null, scanned: 0, execMs: 0, ranSql: '', tab: 'history', pollN: 0,
+    pollFails: 0, statusUnknown: '', qreason: '', MAX_POLL_FAILS: 5,
     stopPoll() {}, schedulePoll() {}, nextPollMs: () => 1000,
     awsApi: { athenaHistory: () => { const r = deferred<any>(); historyCalls.push(r); return r.promise; },
       athenaStatus: async (...args: any[]) => { statusCalls.push(args); return { state: 'RUNNING' }; },

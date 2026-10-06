@@ -30,6 +30,7 @@
   import { ws } from '../../lib/stores/workspace.svelte';
   import { ctxMenu } from '../../lib/contextmenu.svelte';
   import { buildFilteredQuery, type FilterMode } from './query-filter';
+  import { filterValMatches, type FilterVal } from './filter-chips';
   import { databaseAccessChild } from '../../lib/access-options';
   import { resourceAccess } from '../../lib/stores/resource-access.svelte';
   import type { QueryResult, DbForeignKey } from '../../lib/api/types';
@@ -485,12 +486,8 @@
   const activeChips = $derived(
     (hosted ? database.filters : []).filter((c) => c.kind === 'col' && c.values.length > 0),
   );
-  function cellMatchesVal(cell: unknown, val: { raw: string; isNull: boolean }): boolean {
-    if (val.isNull) return cell === null || cell === undefined;
-    if (cell === null || cell === undefined) return false;
-    const s = cellStr(cell);
-    return s === val.raw;
-  }
+  // Typed match (a boolean chip compares by value — see filterValMatches).
+  const cellMatchesVal = (cell: unknown, val: FilterVal): boolean => filterValMatches(cell, val, cellStr);
   function chipMatches(row: unknown[]): boolean {
     for (const c of activeChips) {
       if (c.kind !== 'col') continue;

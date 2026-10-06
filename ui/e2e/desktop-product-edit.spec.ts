@@ -226,6 +226,11 @@ test('product: manually edit Jira story title and description', async ({
   await expect(titleInput).toHaveValue(INITIAL_TITLE);
   await titleInput.fill(NEW_TITLE);
   await page.locator('.title-edit').getByRole('button', { name: /^Save to / }).click();
+  // The summary is a live Jira write: it confirms with old → new first.
+  const renameDlg = page.getByRole('dialog');
+  await expect(renameDlg).toContainText('Where: Jira');
+  await expect(renameDlg).toContainText(NEW_TITLE);
+  await renameDlg.getByRole('button', { name: 'Rename issue' }).click();
 
   // Optimistic update: the header reflects the new title without a reload.
   await expect(page.locator('h2.story-title')).toHaveText(NEW_TITLE, { timeout: 10_000 });

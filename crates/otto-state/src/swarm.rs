@@ -1361,6 +1361,37 @@ impl SwarmRepo {
         self.get_task(id).await
     }
 
+    /// Compare-and-set a task's status: flips it to `status` only while it is
+    /// one of `expected`; `false` = nothing written (someone moved it). A
+    /// verification controller finishing minutes later must not overwrite an
+    /// operator's cancel / back-to-todo with `done` (S4-07).
+    pub async fn set_task_status_if(
+        &self,
+        id: &Id,
+        expected: &[&str],
+        status: &str,
+    ) -> Result<bool> {
+        let placeholders = vec!["?"; expected.len().max(1)].join(",");
+        let sql = format!(
+            "UPDATE swarm_tasks SET status = ?, updated_at = ? WHERE id = ? AND status IN ({placeholders})"
+        );
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(status)
+            .bind(fmt(Utc::now()))
+            .bind(id);
+        if expected.is_empty() {
+            q = q.bind("");
+        }
+        for st in expected {
+            q = q.bind(*st);
+        }
+        let res = q
+            .execute(&self.pool)
+            .await
+            .map_err(dberr("set task status if"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Atomically claim a `todo` task for a turn: flip it to `in_progress` (and
     /// assign `assignee` when the task has no assignee yet) ONLY if it is still
     /// `todo`. Returns whether this caller won the claim — the coordinator's
@@ -2237,6 +2268,60 @@ impl SwarmRepo {
         self.get_goal(id).await
     }
 
+    /// Replace a swarm's standing-goal templates in ONE transaction (S4-24):
+    /// concurrent PUTs serialize on SQLite's write lock instead of
+    /// interleaving their delete/insert into a duplicated set, and a failed
+    /// insert rolls the whole replace back (the caller sees the error).
+    pub async fn replace_standing_goals(
+        &self,
+        swarm_id: &Id,
+        goals: Vec<NewGoal>,
+    ) -> Result<Vec<SwarmGoal>> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(dberr("standing goals tx"))?;
+        sqlx::query(
+            "DELETE FROM swarm_goals WHERE swarm_id = ? AND kind = 'standing'
+             AND task_id IS NULL AND project_id IS NULL",
+        )
+        .bind(swarm_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(dberr("clear standing goals"))?;
+        let now = fmt(Utc::now());
+        for g in goals {
+            sqlx::query(
+                "INSERT INTO swarm_goals (id, swarm_id, workspace_id, project_id, task_id, kind, title,
+                    description, metric, comparator, target_value, block_value, verify_cmd, max_retries,
+                    blocking, status, iterations, order_idx, created_by, created_at, updated_at)
+                 VALUES (?, ?, ?, NULL, NULL, 'standing', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)",
+            )
+            .bind(new_id())
+            .bind(swarm_id)
+            .bind(&g.workspace_id)
+            .bind(&g.title)
+            .bind(&g.description)
+            .bind(&g.metric)
+            .bind(&g.comparator)
+            .bind(g.target_value)
+            .bind(g.block_value)
+            .bind(&g.verify_cmd)
+            .bind(g.max_retries)
+            .bind(g.blocking as i64)
+            .bind(g.order_idx)
+            .bind(&g.created_by)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await
+            .map_err(dberr("insert standing goal"))?;
+        }
+        tx.commit().await.map_err(dberr("standing goals commit"))?;
+        self.list_standing_goals(swarm_id).await
+    }
+
     pub async fn delete_goal(&self, id: &Id) -> Result<()> {
         sqlx::query("DELETE FROM swarm_goals WHERE id = ?")
             .bind(id)
@@ -2931,6 +3016,66 @@ mod tests {
         repo.refund_task_attempt(&task.id).await.unwrap();
         repo.refund_task_attempt(&task.id).await.unwrap();
         assert_eq!(repo.get_task(&task.id).await.unwrap().attempts, 0);
+    }
+
+    /// S4-24: the standing-goal replace is a full swap, never an append.
+    #[tokio::test]
+    async fn replace_standing_goals_swaps_the_set() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let sid = new_id();
+        let goal = |t: &str| NewGoal {
+            swarm_id: sid.clone(),
+            workspace_id: "w".into(),
+            project_id: None,
+            task_id: None,
+            kind: "standing".into(),
+            title: t.into(),
+            description: String::new(),
+            metric: None,
+            comparator: None,
+            target_value: None,
+            block_value: None,
+            verify_cmd: None,
+            max_retries: 2,
+            blocking: false,
+            order_idx: 0,
+            created_by: "u".into(),
+        };
+        let a = repo
+            .replace_standing_goals(&sid, vec![goal("a"), goal("b")])
+            .await
+            .unwrap();
+        assert_eq!(a.len(), 2);
+        let b = repo
+            .replace_standing_goals(&sid, vec![goal("c")])
+            .await
+            .unwrap();
+        assert_eq!(
+            b.iter().map(|g| g.title.as_str()).collect::<Vec<_>>(),
+            ["c"]
+        );
+    }
+
+    /// S4-07: the task-status CAS only writes from an expected status.
+    #[tokio::test]
+    async fn set_task_status_if_is_a_compare_and_set() {
+        let pool = mem_pool().await;
+        let repo = SwarmRepo::new(pool);
+        let task = repo
+            .create_task(new_task(&new_id(), "verifying"))
+            .await
+            .unwrap();
+        assert!(repo
+            .set_task_status_if(&task.id, &["verifying"], "blocked")
+            .await
+            .unwrap());
+        // The operator moved it on; a late controller write is a no-op.
+        assert!(!repo
+            .set_task_status_if(&task.id, &["verifying"], "done")
+            .await
+            .unwrap());
+        assert_eq!(repo.get_task(&task.id).await.unwrap().status, "blocked");
     }
 
     /// S1: a stop never clobbers a finished run, and a late finish never

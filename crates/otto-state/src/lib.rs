@@ -100,7 +100,7 @@ pub use browser_credentials::{
 };
 pub use connection_sections::ConnectionSectionsRepo;
 pub use connections::{ConnectionsRepo, NewConnection};
-pub use db::{open, open_existing};
+pub use db::open;
 // Re-exported so daemon-side background tasks can name the pool type without
 // taking a direct sqlx dependency.
 pub use db_explorer::{
@@ -177,7 +177,7 @@ pub use review_findings::{
     ReviewFindingsRepo,
 };
 pub use review_proof_packs::ReviewProofPacksRepo;
-pub use reviews::ReviewsRepo;
+pub use reviews::{ReviewRunContext, ReviewsRepo};
 pub use runs::RunsRepo;
 pub use saved_views::{NewSavedView, SavedView, SavedViewsRepo};
 pub use scheduled_tasks::{

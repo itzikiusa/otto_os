@@ -43,16 +43,26 @@ fn too_many_requests(retry_after: Duration) -> Response {
 /// has failed too many times in the window (S5). The username-only tally is the
 /// part that survives IP / forwarding-header rotation.
 ///
-/// We extract `ConnectInfo<SocketAddr>` (wired up in ottod via
-/// `into_make_service_with_connect_info`) for the real peer IP and deliberately
-/// ignore `X-Forwarded-For` / `X-Real-IP`: no trusted proxy sits in front, so
-/// honoring them would let an attacker rotate the header to dodge the lockout.
+/// The client IP is the host guard's tunnel-aware
+/// [`otto_sessions::share_throttle::ClientIp`]: the socket peer, except behind
+/// the documented Cloudflare tunnel (`docs/remote-access-runbook.md`), where
+/// every client is `127.0.0.1` and `CF-Connecting-IP` — trusted ONLY for a
+/// loopback peer that named the `share_base_url` host — identifies it (S8-07).
+/// `X-Forwarded-For` / `X-Real-IP` are never honoured (an attacker would
+/// rotate them to dodge the lockout).
+///
+/// The desktop app (a loopback peer addressing a loopback name) is exempt from
+/// the GLOBAL per-username lock: otherwise anyone reaching the public hostname
+/// could keep `root` locked out of its own Mac indefinitely. It still has its
+/// own per-client key.
 pub async fn login(
     State(ctx): State<ServerCtx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    client: Option<Extension<otto_sessions::share_throttle::ClientIp>>,
     Json(req): Json<LoginReq>,
 ) -> Response {
-    handle_login(&ctx, login_throttle::global(), Some(peer.ip()), req).await
+    let (ip, local) = client.map_or((peer.ip(), false), |c| (c.0.ip, c.0.local));
+    handle_login(&ctx, login_throttle::global(), Some(ip), local, req).await
 }
 
 /// Core login flow, parameterized over the attempt store and peer IP so it is
@@ -63,13 +73,21 @@ async fn handle_login(
     ctx: &ServerCtx,
     attempts: &AttemptStore,
     peer: Option<IpAddr>,
+    local: bool,
     req: LoginReq,
 ) -> Response {
     let ip_key = login_throttle::ip_key(peer, &req.username);
     let user_key = login_throttle::username_key(&req.username);
+    // The keys whose lock refuses this attempt: the desktop skips the global
+    // username lock (see `login`), every other client is held to both.
+    let gating: &[&str] = if local {
+        &[&ip_key]
+    } else {
+        &[&ip_key, &user_key]
+    };
 
     // Either key being locked rejects the attempt; report the longer wait.
-    if let Some(retry_after) = attempts.max_locked(&[&ip_key, &user_key]) {
+    if let Some(retry_after) = attempts.max_locked(gating) {
         return too_many_requests(retry_after);
     }
 
@@ -94,7 +112,7 @@ async fn handle_login(
             attempts.record_failure(&user_key);
             // Re-check so the attempt that *crosses* either threshold is itself
             // answered with the lockout, not a bare 401.
-            let locked = attempts.max_locked(&[&ip_key, &user_key]);
+            let locked = attempts.max_locked(gating);
             // No acting user on a failed login (the username may not even exist),
             // so user_id is None; the attempted username is the target.
             ctx.audit(NewAuditEntry {
@@ -122,15 +140,24 @@ async fn handle_login(
 /// Credential check shared by `login`; returns `Error::Unauthorized` for unknown
 /// user, bad password, or disabled account (so the caller can tally failures).
 async fn try_login(ctx: &ServerCtx, req: &LoginReq) -> ApiResult<LoginResp> {
-    let record = UsersRepo::new(ctx.pool.clone())
+    let record = match UsersRepo::new(ctx.pool.clone())
         .get_by_username(&req.username)
         .await
-        .map_err(|e| match e {
-            Error::NotFound(_) => Error::Unauthorized,
-            other => other,
-        })?;
+    {
+        Ok(record) => record,
+        Err(Error::NotFound(_)) => {
+            // Pay the same argon2 cost as a known user (S8-10): returning
+            // before the hash leaked which usernames exist through timing.
+            let _ = otto_rbac::verify_password(&req.password, dummy_password_hash());
+            return Err(Error::Unauthorized.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
-    if record.user.disabled || !otto_rbac::verify_password(&req.password, &record.password_hash)? {
+    // Verify BEFORE looking at `disabled`, so a disabled account costs the
+    // same as an enabled one.
+    let password_ok = otto_rbac::verify_password(&req.password, &record.password_hash)?;
+    if record.user.disabled || !password_ok {
         return Err(Error::Unauthorized.into());
     }
 
@@ -141,6 +168,13 @@ async fn try_login(ctx: &ServerCtx, req: &LoginReq) -> ApiResult<LoginResp> {
         token,
         user: record.user,
     })
+}
+
+/// A real argon2 hash (same parameters as every stored password) that no
+/// password matches, verified against for an unknown username (S8-10).
+fn dummy_password_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| otto_rbac::hash_password(&otto_core::new_id()).unwrap_or_default())
 }
 
 /// `POST /api/v1/auth/logout` — revokes the presented token.

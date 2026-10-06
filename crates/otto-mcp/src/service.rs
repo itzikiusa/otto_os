@@ -472,8 +472,10 @@ impl McpService {
                 })
             }
             _ => {
-                let mut env: BTreeMap<String, String> = std::env::vars().collect();
-                env.extend(server.env.clone());
+                // Only the server's own config + secrets: the spawn adds an
+                // allow-listed base (`client::stdio_base_env`), never the
+                // daemon's whole environment (provider keys, AWS creds…).
+                let mut env: BTreeMap<String, String> = server.env.clone();
                 env.extend(secret_env);
                 McpClient::new(Transport::Stdio {
                     command: server.command.clone(),
