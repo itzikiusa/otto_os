@@ -2754,7 +2754,11 @@
   $effect(() => {
     const name = routeRef;
     const r: RefsResp | null = refs;
-    if (!name || !r || commitsLoading || name === routeRefSeen) return;
+    if (!name) {
+      routeRefSeen = ''; // leaving the link re-arms it for the next visit
+      return;
+    }
+    if (!r || commitsLoading || name === routeRefSeen) return;
     routeRefSeen = name;
     untrack(() => {
       const b =

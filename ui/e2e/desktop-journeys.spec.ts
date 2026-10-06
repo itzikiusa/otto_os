@@ -45,8 +45,8 @@ async function openShareFor(page: Page, title: string): Promise<void> {
     data: { kind: 'agent', provider: 'shell', title, cwd: '/tmp', meta: { origin: 'e2e' } },
   });
   expect(r.ok()).toBeTruthy();
-  await page.goto('/#/agents');
-  await page.locator('.nav-item.nested-item', { hasText: title }).first().click();
+  const id = ((await r.json()) as { id: string }).id;
+  await page.goto(`/#/agents/${id}`);
   const tab = page.locator('.tab', { hasText: title });
   await expect(tab).toBeVisible({ timeout: 15_000 });
   await tab.click({ button: 'right' });
