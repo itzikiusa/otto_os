@@ -51,3 +51,14 @@ test('autoExec is one-shot: openRow clears it unless the call asks for a shell',
   // Nothing else turns it on.
   assert.equal(src.match(/autoExec = true/g), null);
 });
+
+test('autoExec is consumed once the Terminal acts on it (S16-306)', () => {
+  // `s` → shell; Logs → back to Terminal remounts ExecView: the flag must be
+  // cleared by then, or a second `kubectl exec` opens without a click.
+  const exec = readFileSync(EXEC, 'utf8');
+  assert.match(exec, /if \(untrack\(\(\) => autoOpen\)\) \{\s*untrack\(\(\) => \{\s*onautoopened\?\.\(\);\s*void open\(\);/);
+  const drawer = readFileSync(new URL('../src/modules/kubernetes/ResourceDrawer.svelte', import.meta.url), 'utf8');
+  assert.match(drawer, /autoOpen=\{autoExec\} onautoopened=\{onautoexec\}/);
+  const ws = readFileSync(new URL('../src/modules/kubernetes/ClusterWorkspace.svelte', import.meta.url), 'utf8');
+  assert.match(ws, /\{autoExec\}\s*onautoexec=\{\(\) => \(autoExec = false\)\}/);
+});
