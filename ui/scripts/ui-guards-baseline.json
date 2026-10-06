@@ -329,7 +329,6 @@
     "src/modules/vault/LiveContext.svelte": 1,
     "src/modules/vault/RecoveryView.svelte": 1,
     "src/modules/vault/Switcher.svelte": 1,
-    "src/modules/vault/TagsPanel.svelte": 1,
     "src/modules/vault/VaultPage.svelte": 1,
     "src/modules/workbench/HistoryPanel.svelte": 1,
     "src/modules/workbench/WorkbenchPage.svelte": 2,
