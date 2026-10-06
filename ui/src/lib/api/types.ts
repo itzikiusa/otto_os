@@ -3936,6 +3936,9 @@ export interface ReviewComment {
 export interface EditReviewCommentReq {
   body?: string;
   restore_draft?: boolean;
+  /** Record an approved-but-unposted comment as posted WITHOUT sending it
+   *  (its copy was found on the PR). Alone; 409 unless approved + unposted. */
+  mark_posted?: boolean;
 }
 
 export interface Review {
