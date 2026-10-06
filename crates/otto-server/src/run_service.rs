@@ -298,6 +298,16 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
     // worktree goes only after the stage has stopped, so nothing is left
     // running in a deleted directory.
     ctx.runs_engine.cancel(run_id);
+    if !ctx
+        .runs_engine
+        .wait_idle(run_id, std::time::Duration::from_secs(10))
+        .await
+    {
+        tracing::warn!(run = %run_id, "run stage still in flight 10s after cancel");
+    }
+    // Re-read AFTER the stage stopped: a review started in the last moments of
+    // the stage is recorded on the run before its reviewers spawn, and only a
+    // read taken now is guaranteed to see it (S2-302).
     let fresh = ctx.runs.get(run_id).await.unwrap_or_else(|_| run.clone());
     if let Some(review_id) = fresh.review_id.as_ref() {
         if let Ok(review) = ctx.reviews_store.get_review(review_id).await {
@@ -309,17 +319,47 @@ pub async fn cancel(ctx: &ServerCtx, run_id: &Id) -> Result<OttoRun> {
             tracing::warn!(run = %run_id, "stop goal loop on cancel: {e}");
         }
     }
-    if !ctx
-        .runs_engine
-        .wait_idle(run_id, std::time::Duration::from_secs(10))
-        .await
-    {
-        tracing::warn!(run = %run_id, "run stage still in flight 10s after cancel");
-    }
+    stop_run_sessions(ctx, &run.workspace_id, &run.id).await;
     run_engine::project(ctx, &fresh).await;
     crate::run_callback::deliver(&ctx.runs, &fresh).await;
     crate::run_workspace::remove_worktree(ctx, &run).await;
     ctx.runs.get(run_id).await
+}
+
+/// The `meta.source` values of the manager-owned sessions a run stage creates:
+/// a non-claude execute turn and the PR-draft turn. Claude execute runs on an
+/// orchestrator PTY that dies with the dropped stage future; these do NOT — a
+/// dropped `run_session_turn` only releases its turn hold.
+const RUN_SESSION_SOURCES: &[&str] = &["run_with_otto", "pr-draft"];
+
+/// Kill every live session the run's stages started (`meta.run_id == run.id`),
+/// so a cancelled codex/agy run stops editing (and spending) in a worktree that
+/// is about to be removed (S2-302 / S15-306). Interactive sessions are never
+/// touched: only the two stage sources above carry a `run_id`.
+pub(crate) async fn stop_run_sessions(ctx: &ServerCtx, workspace_id: &Id, run_id: &Id) -> usize {
+    let sessions = match ctx
+        .manager
+        .list_live_by_meta(workspace_id, None, "run_id", run_id.as_str())
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(run = %run_id, "list run sessions on cancel: {e}");
+            return 0;
+        }
+    };
+    let mut stopped = 0;
+    for s in sessions {
+        let source = s.meta.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        if !RUN_SESSION_SOURCES.contains(&source) {
+            continue;
+        }
+        match ctx.manager.kill_session(&s.id).await {
+            Ok(()) => stopped += 1,
+            Err(e) => tracing::warn!(run = %run_id, session = %s.id, "kill run session: {e}"),
+        }
+    }
+    stopped
 }
 
 /// Open the actual PR from a completed, approved run. Requires the proof pack to
@@ -422,4 +462,67 @@ pub async fn open_pr(ctx: &ServerCtx, run_id: &Id) -> Result<PrSummary> {
         })
         .await;
     Ok(pr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use otto_state::sessions::NewSession;
+
+    /// S2-302 / S15-306: a cancel kills the run's manager-owned stage sessions
+    /// (a codex execute turn, the PR-draft turn) — a dropped stage future does
+    /// not — and leaves every other session alone, including one that happens
+    /// to carry the same `run_id` under another source (a workflow step).
+    #[tokio::test]
+    async fn cancel_stops_only_the_runs_own_stage_sessions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pool = crate::test_support::mem_pool().await;
+        let ctx = ServerCtx::for_tests(&pool, tmp.path().to_path_buf()).await;
+        let users = otto_state::UsersRepo::new(pool.clone());
+        let u = users.create("u", "x", "U", false).await.unwrap();
+        let root = tmp.path().to_string_lossy().to_string();
+        let ws = ctx.workspaces.create("A", &root, &u.id).await.unwrap();
+        let repo = otto_state::SessionsRepo::new(pool.clone());
+        let mk = |meta: serde_json::Value| NewSession {
+            workspace_id: ws.id.clone(),
+            kind: otto_core::domain::SessionKind::Agent,
+            provider: "codex".into(),
+            title: "t".into(),
+            cwd: root.clone(),
+            provider_session_id: None,
+            connection_id: None,
+            created_by: u.id.clone(),
+            meta,
+        };
+        let run_id: Id = "run-1".into();
+        let exec = repo
+            .create(mk(serde_json::json!({"source": "run_with_otto", "run_id": "run-1"})))
+            .await
+            .unwrap();
+        let draft = repo
+            .create(mk(serde_json::json!({"source": "pr-draft", "run_id": "run-1"})))
+            .await
+            .unwrap();
+        let other_run = repo
+            .create(mk(serde_json::json!({"source": "run_with_otto", "run_id": "run-2"})))
+            .await
+            .unwrap();
+        let workflow = repo
+            .create(mk(serde_json::json!({"source": "workflow", "run_id": "run-1"})))
+            .await
+            .unwrap();
+        let interactive = repo.create(mk(serde_json::json!({}))).await.unwrap();
+
+        assert_eq!(stop_run_sessions(&ctx, &ws.id, &run_id).await, 2);
+        let status = |id: Id| {
+            let repo = repo.clone();
+            async move { repo.get(&id).await.unwrap().status }
+        };
+        use otto_core::domain::SessionStatus;
+        assert_eq!(status(exec.id).await, SessionStatus::Exited);
+        assert_eq!(status(draft.id).await, SessionStatus::Exited);
+        assert_ne!(status(other_run.id).await, SessionStatus::Exited);
+        assert_ne!(status(workflow.id).await, SessionStatus::Exited);
+        assert_ne!(status(interactive.id).await, SessionStatus::Exited);
+    }
 }

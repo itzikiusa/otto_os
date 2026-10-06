@@ -3801,7 +3801,7 @@ async fn draft_pr(
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty());
-    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head)
+    let resp = draft_pr_core_for(&ctx, &ws, &user, &repo.path, want, head, None)
         .await
         .map_err(crate::error::ApiError)?;
     Ok(Json(resp))
@@ -3820,12 +3820,16 @@ pub(crate) async fn draft_pr_core(
     user: &otto_core::domain::User,
     repo_path: &str,
     base: Option<&str>,
+    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
-    draft_pr_core_for(ctx, ws, user, repo_path, base, None).await
+    draft_pr_core_for(ctx, ws, user, repo_path, base, None, run_id).await
 }
 
 /// [`draft_pr_core`] for an explicit source branch `head` (`None` ⇒ the
 /// checkout's current branch). The reply's `source_branch` is `head`.
+/// `run_id` (Run with Otto) is stamped into the drafting session's meta so a
+/// run cancel can find and stop it — dropping this future does not kill a
+/// manager-owned session.
 pub(crate) async fn draft_pr_core_for(
     ctx: &ServerCtx,
     ws: &otto_core::domain::Workspace,
@@ -3833,6 +3837,7 @@ pub(crate) async fn draft_pr_core_for(
     repo_path: &str,
     base: Option<&str>,
     head: Option<&str>,
+    run_id: Option<&Id>,
 ) -> Result<otto_core::api::DraftPrResp> {
     // Runs as a REAL Otto session, not a throwaway orchestrator PTY. Drafting
     // blocks a modal for as long as it takes, and the old headless PTY gave the
@@ -3849,11 +3854,14 @@ pub(crate) async fn draft_pr_core_for(
     // so it can honor the node's chosen Provider/Model.
     let (prompt, source, base_branch) = pr_draft_prompt_for(ctx, repo_path, base, head).await?;
     let model = pr_draft_model(ctx).await;
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "source": "pr-draft",
         "model": model,
         "lean_turn": true,
     });
+    if let Some(run_id) = run_id {
+        meta["run_id"] = serde_json::json!(run_id);
+    }
     let title = format!("PR draft · {source}");
     let (reply, session_id) = crate::agent_session::run_session_turn(
         ctx,
@@ -4042,6 +4050,7 @@ pub(crate) async fn run_review_for_branch(
         jira_context,
         run_context,
         mode_override,
+        None,
     )
     .await
     .map(|(id, resolved, no_changes, _)| (id, resolved, no_changes))
@@ -4051,6 +4060,12 @@ pub(crate) async fn run_review_for_branch(
 /// length — the caller's wait budget is sized off it, and recomputing the
 /// whole review diff (one git spawn per untracked file) just for its length
 /// doubled the stage's git work.
+///
+/// `for_run`: a Run-with-Otto run to record the new `review_id` on BEFORE the
+/// background review is spawned. A run cancel drops the stage future at any
+/// await; recording it afterwards (in the stage) left a window where the
+/// review was running but the run did not name it, so cancel could not stop
+/// its reviewers (S2-302 / S15-306).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_review_for_branch_sized(
     ctx: &ServerCtx,
@@ -4061,6 +4076,7 @@ pub(crate) async fn run_review_for_branch_sized(
     jira_context: Option<String>,
     run_context: Option<String>,
     mode_override: Option<otto_core::domain::ReviewMode>,
+    for_run: Option<&Id>,
 ) -> Result<(Id, otto_git::ResolvedBase, bool, usize)> {
     let repo = ctx.git_store.get_repo(repo_id).await?;
     let workspace = ctx.workspaces.get(&repo.workspace_id).await?;
@@ -4073,6 +4089,17 @@ pub(crate) async fn run_review_for_branch_sized(
         .create_review(repo_id, LOCAL_REVIEW_PR_NUMBER)
         .await?;
     let review_id = review.id.clone();
+    if let Some(run_id) = for_run {
+        ctx.runs
+            .set_fields(
+                run_id,
+                &otto_state::runs::RunPatch {
+                    review_id: Some(review_id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+    }
     let no_changes = diff_text.trim().is_empty();
     let diff_len = diff_text.len();
 
