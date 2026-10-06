@@ -2267,7 +2267,7 @@ async fn namespace_workloads_do_not_grant_secrets_metrics_exec_or_mutation() {
         .unwrap();
     // The guard rechecks at most once per GUARD_RECHECK (S6-08); past that
     // window the revoked grant must stop the next chunk.
-    tokio::time::sleep(otto_k8s::access::GUARD_RECHECK).await;
+    tokio::time::sleep(otto_connections::stream_guard::GUARD_RECHECK).await;
     assert!(
         stream.next().await.is_none(),
         "revoked logs still emitted a chunk"

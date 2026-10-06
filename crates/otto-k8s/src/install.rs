@@ -426,7 +426,6 @@ fn tempdir_in(dir: &Path) -> std::result::Result<PathBuf, String> {
     Ok(p)
 }
 
-/// Move a downloaded file into place with mode 0755.
 /// GET a small text file (a checksum list) over HTTPS.
 async fn fetch_text(url: &str) -> std::result::Result<String, String> {
     cli::run(
@@ -470,6 +469,7 @@ fn verify_sha256(path: &Path, sums: &str, file: Option<&str>) -> std::result::Re
     Ok(())
 }
 
+/// Move a downloaded file into place with mode 0755.
 fn install_file(src: &Path, dest: &Path) -> std::result::Result<(), String> {
     if !src.is_file() {
         return Err(format!("download did not produce {}", src.display()));
