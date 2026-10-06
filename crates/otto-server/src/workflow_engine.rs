@@ -1565,6 +1565,15 @@ pub(crate) async fn sweep_orphaned_runs(ctx: &ServerCtx, prev: &HashSet<Id>) -> 
                 &nodes,
                 false,
             );
+            // The same cleanup a cancel gets (S3-305): a panicked driver left
+            // its agents running, its chat/webhook origin on "▶ started" and
+            // its worktrees provisioned.
+            kill_run_sessions(ctx, &nodes).await;
+            if let Ok(wf) = repo.get(&run.workflow_id).await {
+                spawn_recovery_delivery(ctx, &wf, &nodes, RunStatus::Error, &run.input);
+            }
+            clear_skip_markers(ctx, &id);
+            reap_run_worktrees(ctx, &id).await;
         }
     }
     suspects
@@ -2903,9 +2912,12 @@ pub async fn run_workflow(
                 finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
                 return;
             }
+            // The row is still live: delivering a result now would disagree
+            // with the `error` the orphan sweep writes once this driver exits
+            // — the sweep delivers and cleans up instead (S3-305).
             Err(e) => {
-                tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-                0
+                tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+                return;
             }
         };
         deliver_run_result(
@@ -2962,9 +2974,12 @@ pub async fn run_workflow(
             finalize_canceled_run(&ctx, &repo, &workflow, &run_id, &mut states, &input).await;
             return;
         }
+        // The row is still live: delivering a result now would disagree with
+        // the `error` the orphan sweep writes once this driver exits — the
+        // sweep delivers and cleans up instead (S3-305).
         Err(e) => {
-            tracing::warn!(%run_id, "workflow run finalize write failed: {e}");
-            0
+            tracing::warn!(%run_id, "workflow run finalize write failed (left to the orphan sweep): {e}");
+            return;
         }
     };
     // The run's deliverable: a copy of the last content-bearing step's handoff
@@ -3052,20 +3067,7 @@ async fn finalize_canceled_run(
             crate::modules::cancel_running_review(ctx, &review, &workflow.workspace_id).await;
         }
     }
-    // Stop every agent session this run spawned — a cancel must halt the live
-    // agents (each is a real claude/codex PTY that would otherwise keep working
-    // and burning tokens), not just flip the run row. Includes agent steps AND
-    // review reviewers/summarizer (their ids are harvested into `sessions`).
-    // Best-effort: a failure on one session is logged and never blocks the rest.
-    let session_ids: Vec<Id> = states
-        .iter()
-        .flat_map(|s| s.sessions.iter().cloned())
-        .collect();
-    for sid in session_ids {
-        if let Err(e) = ctx.manager.kill_session(&sid).await {
-            tracing::warn!("cancel: failed to kill workflow session {sid}: {e}");
-        }
-    }
+    kill_run_sessions(ctx, states).await;
     for s in states.iter_mut() {
         if matches!(s.status, NodeStatus::Pending | NodeStatus::Running) {
             s.status = NodeStatus::Skipped;
@@ -3118,6 +3120,24 @@ async fn finalize_canceled_run(
     );
     clear_skip_markers(ctx, run_id);
     reap_run_worktrees(ctx, run_id).await;
+}
+
+/// Stop every agent session a run spawned — a cancel (or an orphaned run)
+/// must halt the live agents (each is a real claude/codex PTY that would
+/// otherwise keep working and burning tokens), not just flip the run row.
+/// Includes agent steps AND review reviewers/summarizer (their ids are
+/// harvested into `sessions`). Best-effort: a failure on one session is
+/// logged and never blocks the rest.
+async fn kill_run_sessions(ctx: &ServerCtx, states: &[NodeRunState]) {
+    let session_ids: Vec<Id> = states
+        .iter()
+        .flat_map(|s| s.sessions.iter().cloned())
+        .collect();
+    for sid in session_ids {
+        if let Err(e) = ctx.manager.kill_session(&sid).await {
+            tracing::warn!("workflow: failed to kill run session {sid}: {e}");
+        }
+    }
 }
 
 /// Assemble the proof pack for a completed workflow run: each node's output is a
@@ -8732,7 +8752,13 @@ mod tests {
             repo.get_run(&orphan.id).await.unwrap().status,
             RunStatus::Pending
         );
+        // S3-305: the run's provisioned dir (no worktrees left in it) is
+        // reaped by the sweep, as a canceled run's would be.
+        let run_dir = ctx.data_dir.join("workflow-runs").join(&orphan.id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("run-brief.md"), "x").unwrap();
         sweep_orphaned_runs(&ctx, &first).await;
+        assert!(!run_dir.exists(), "orphan's run dir is reaped");
         let swept = repo.get_run(&orphan.id).await.unwrap();
         assert_eq!(swept.status, RunStatus::Error);
         assert!(swept
