@@ -8421,18 +8421,25 @@ mod tests {
         // It appends until told to stop (not a fixed 6×40 ms burst): on a
         // slow CI runner the burst could finish before the walk + first stat
         // even ran, leaving a static file inside the window.
+        // The writer must really be running before the window opens, and the
+        // window is wide (1 s vs a 20 ms cadence) so a starved writer thread
+        // on a loaded macOS runner can't leave the file static inside it.
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let writer = std::thread::spawn({
-            let (p, stop) = (p.clone(), Arc::clone(&stop));
+            let (p, stop, writes) = (p.clone(), Arc::clone(&stop), Arc::clone(&writes));
             move || {
                 while !stop.load(Ordering::Relaxed) {
                     append_user_message(&p, "more output");
+                    writes.fetch_add(1, Ordering::Relaxed);
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
         });
-        let detected =
-            rollout_actively_written(tmp.path(), "PSID1", Duration::from_millis(150)).await;
+        while writes.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let detected = rollout_actively_written(tmp.path(), "PSID1", Duration::from_secs(1)).await;
         stop.store(true, Ordering::Relaxed);
         writer.join().unwrap();
         assert!(detected);
