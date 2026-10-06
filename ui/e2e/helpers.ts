@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page, type Request } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import AxeBuilder from '@axe-core/playwright';
 
@@ -176,12 +176,36 @@ export async function ensureGridView(page: Page, timeout = 20_000): Promise<void
   await expect(seg.locator('.vs.on')).toHaveText('Grid');
 }
 
+/** Serious-impact axe rules each page is allowed to still have (S19-304),
+ *  ratchet-style like ui-guards-baseline.json: a page with an entry fails on
+ *  any serious rule NOT listed; a page without one is critical-only until a
+ *  baseline is recorded for it. Record / refresh with
+ *  `OTTO_A11Y_RECORD=1 npm run test:e2e -- pages.spec.ts theme.spec.ts rtl.spec.ts`
+ *  then `node scripts/a11y-baseline.mjs` (merges test-results/a11y-record.jsonl).
+ *  Only ever shrink an entry by hand; never add a rule to make a test pass. */
+const A11Y_BASELINE: Record<string, string[]> = (() => {
+  try {
+    return JSON.parse(readFileSync(join(process.cwd(), 'e2e/a11y-baseline.json'), 'utf8')) as Record<string, string[]>;
+  } catch {
+    return {};
+  }
+})();
+
+/** The baseline key for the page on screen: its hash route without a query. */
+export function a11yKey(url: string): string {
+  const hash = new URL(url).hash.replace(/^#\/?/, '');
+  return hash.split('?')[0] || 'root';
+}
+
 /**
- * Run an axe-core accessibility scan. Fails on any `critical` violation; returns
- * the full violation list so callers can additionally inspect `serious` ones.
+ * Run an axe-core accessibility scan. Fails on any `critical` violation, and
+ * on any `serious` one not in the page's ratcheted allowlist
+ * (e2e/a11y-baseline.json; see A11Y_BASELINE). Returns the full violation list
+ * so callers can additionally inspect `serious` ones.
  */
 export async function expectAccessible(
   page: Page,
+  opts: { key?: string } = {},
 ): Promise<Awaited<ReturnType<AxeBuilder['analyze']>>['violations']> {
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
@@ -191,6 +215,16 @@ export async function expectAccessible(
     critical,
     `critical a11y violations: ${critical.map((v) => v.id).join(', ')}`,
   ).toEqual([]);
+  const key = opts.key ?? a11yKey(page.url());
+  const serious = [...new Set(results.violations.filter((v) => v.impact === 'serious').map((v) => v.id))].sort();
+  if (process.env.OTTO_A11Y_RECORD) {
+    mkdirSync(join(process.cwd(), 'test-results'), { recursive: true });
+    appendFileSync(join(process.cwd(), 'test-results/a11y-record.jsonl'), `${JSON.stringify({ key, serious })}\n`);
+  } else if (A11Y_BASELINE[key]) {
+    const allowed = new Set(A11Y_BASELINE[key]);
+    const fresh = serious.filter((id) => !allowed.has(id));
+    expect(fresh, `new serious a11y violations on "${key}" (not in e2e/a11y-baseline.json): ${fresh.join(', ')}`).toEqual([]);
+  }
   return results.violations;
 }
 
