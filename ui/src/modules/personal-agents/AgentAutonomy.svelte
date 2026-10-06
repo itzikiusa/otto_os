@@ -256,7 +256,7 @@
 
     <section class="pa-panel" aria-labelledby="primary-h">
       <h2 id="primary-h">Your agent</h2>
-      <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared room. One per workspace.</p>
+      <p class="hint">Your primary assistant: it handles general requests and routes specialist work to your other agents through a shared agent channel. One per workspace.</p>
       <label class="chk"><input type="checkbox" bind:checked={primary} disabled={!editable || saving} /> Make this my primary agent</label>
     </section>
 

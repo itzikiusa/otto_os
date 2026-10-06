@@ -297,6 +297,26 @@ pub struct CreateShareResp {
     /// shows a "only works on this Mac" warning instead of the phone QR hint.
     #[serde(default)]
     pub reachable_remotely: bool,
+    /// Who can open `url` (S20-303): `remote` (a public/routable origin),
+    /// `lan` (a private/link-local address — the LAN listener — so only
+    /// devices on this Mac's network, behind a self-signed-certificate
+    /// warning) or `local` (loopback/empty: this Mac only).
+    #[serde(default)]
+    pub reach: ShareReach,
+}
+
+/// How far a share link's origin reaches (see [`CreateShareResp::reach`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareReach {
+    /// Any device on the internet (a public domain / routable address).
+    Remote,
+    /// Only devices on this Mac's local network (RFC 1918, link-local, ULA,
+    /// `.local`).
+    Lan,
+    /// This Mac only (loopback or no origin).
+    #[default]
+    Local,
 }
 
 /// `GET /api/v1/sessions/{id}/shares` response.

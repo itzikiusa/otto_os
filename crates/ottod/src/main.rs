@@ -497,7 +497,28 @@ async fn serve_network_listener(
         }
     };
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    // Bind HERE (not inside `serve`) so a taken port is known before anything
+    // advertises the listener: share links read the recorded port, never the
+    // setting (S20-303).
+    let listener = match std::net::TcpListener::bind(addr).and_then(|l| {
+        l.set_nonblocking(true)?;
+        Ok(l)
+    }) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("network listener: bind {addr} failed: {e}");
+            return Ok(None);
+        }
+    };
+    let server = match axum_server::from_tcp_rustls(listener, tls) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::error!("network listener: {e}");
+            return Ok(None);
+        }
+    };
     tracing::info!("network listener on https://0.0.0.0:{port} (TLS)");
+    otto_server::transport::set_network_listener_port(Some(port));
     let router = router.clone();
     // axum-server drives shutdown via its own Handle; bridge the watch signal
     // into a graceful_shutdown so the TLS listener drains in step with the
@@ -513,13 +534,15 @@ async fn serve_network_listener(
         // `into_make_service_with_connect_info::<SocketAddr>` makes each
         // request's real socket peer available to handlers via
         // `ConnectInfo<SocketAddr>` (used by the login throttle, S5).
-        if let Err(e) = axum_server::bind_rustls(addr, tls)
+        if let Err(e) = server
             .handle(handle)
             .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await
         {
             tracing::error!("network listener: {e}");
         }
+        // No longer serving: stop advertising it.
+        otto_server::transport::set_network_listener_port(None);
     })))
 }
 

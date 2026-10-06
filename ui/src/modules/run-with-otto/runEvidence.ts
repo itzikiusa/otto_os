@@ -29,14 +29,17 @@ export function runEvidenceLinks(
       route: `proof/${enc(run.proof_pack_id)}`,
     });
   }
-  // Review findings live on the repo's Review tab (one list per repo).
-  if (run.repo_id && (run.review_id || run.findings_total > 0)) {
+  // Review findings: the repo's Review tab opened ON this run's review
+  // (`…/review/<review_id>`, shown read-only with its severities) — the bare
+  // tab opens a clean slate where the run's findings hid in "Past reviews"
+  // (S20-301). Without a review id there is nothing specific to show.
+  if (run.repo_id && run.review_id) {
     out.push({
       key: 'findings',
       label: 'Open findings',
       title: 'The code-review findings for this run’s branch',
       icon: 'search',
-      route: `git/${enc(run.repo_id)}/review`,
+      route: `git/${enc(run.repo_id)}/review/${enc(run.review_id)}`,
     });
   }
   if (run.goal_loop_id) {
@@ -54,7 +57,9 @@ export function runEvidenceLinks(
       label: 'View branch diff',
       title: `See ${run.branch} on the repository graph`,
       icon: 'branch',
-      route: `git/${enc(run.repo_id)}/graph`,
+      // The branch is ONE encoded segment (`otto%2Frun-x`); the graph jumps
+      // to its tip (S20-301).
+      route: `git/${enc(run.repo_id)}/graph/${enc(run.branch)}`,
     });
   }
   return out;

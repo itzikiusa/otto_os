@@ -280,6 +280,15 @@
     }
   }
 
+  /** Stop the drafting agent's session (kill the PTY, keep the row). */
+  async function stopDraftSession(id: Id): Promise<void> {
+    try {
+      await api.post(`/sessions/${id}/kill`, {});
+    } catch {
+      // Already exited / gone: nothing left to stop.
+    }
+  }
+
   /** Esc / backdrop / ✕: a stray key must not throw away a typed (or agent-
    *  drafted) title, description or reviewer list — ask first. */
   async function requestClose(): Promise<void> {
@@ -292,7 +301,14 @@
         cancelLabel: 'Keep editing',
         danger: true,
       });
-      if (ok) onclose();
+      if (!ok) return;
+      // The draft runs as a real Otto session: closing alone would let it
+      // finish the turn and spend tokens nobody will read (S20-305). Stop its
+      // PTY (the row stays, so Agents still shows what it did). Best-effort —
+      // it may have spawned too recently to be known, or just finished.
+      const sid = liveDraftId;
+      if (sid) void stopDraftSession(sid);
+      onclose();
       return;
     }
     const edited = title.trim() !== '' || description.trim() !== '' || reviewers.length > 0 || revQuery.trim() !== '';

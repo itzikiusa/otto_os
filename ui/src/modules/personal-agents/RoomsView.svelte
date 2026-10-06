@@ -132,7 +132,7 @@
       showingList = false;
       if (newRoomName === submitted) newRoomName = '';
     } catch (e) {
-      createError = `Couldn’t create the room. ${loadErrorText(e)}`;
+      createError = `Couldn’t create the channel. ${loadErrorText(e)}`;
     } finally {
       busy = false;
     }
@@ -144,11 +144,11 @@
         label: 'Rename',
         icon: 'edit',
         action: async () => {
-          const name = await confirmer.promptText('Room name', { title: 'Rename room', confirmLabel: 'Rename', initial: r.room.name });
+          const name = await confirmer.promptText('Channel name', { title: 'Rename channel', confirmLabel: 'Rename', initial: r.room.name });
           // A blank (or whitespace-only) name is not a rename.
           const trimmed = name?.trim();
           if (trimmed && trimmed !== r.room.name) {
-            void personalAgents.renameRoom(r.room.id, trimmed).catch((e) => toasts.error('Couldn’t rename the room', loadErrorText(e)));
+            void personalAgents.renameRoom(r.room.id, trimmed).catch((e) => toasts.error('Couldn’t rename the channel', loadErrorText(e)));
           }
         },
       },
@@ -157,8 +157,8 @@
         icon: 'trash',
         danger: true,
         action: async () => {
-          if (await confirmer.ask(`Delete room “${r.room.name}” and its transcript? Member agents stay; only the room and its messages go.`, { title: 'Delete room', danger: true, confirmLabel: 'Delete' })) {
-            void personalAgents.deleteRoom(r.room.id).catch((e) => toasts.error('Couldn’t delete the room', loadErrorText(e)));
+          if (await confirmer.ask(`Delete channel “${r.room.name}” and its transcript? Member agents stay; only the channel and its messages go.`, { title: 'Delete channel', danger: true, confirmLabel: 'Delete' })) {
+            void personalAgents.deleteRoom(r.room.id).catch((e) => toasts.error('Couldn’t delete the channel', loadErrorText(e)));
           }
         },
       },
@@ -238,7 +238,7 @@
     </ul>
   </aside>
   {#if !viewport.isPhone}
-    <PaneDivider bind:width={listW} storageKey="personalAgents.rooms.listW" label="Resize the rooms list" />
+    <PaneDivider bind:width={listW} storageKey="personalAgents.rooms.listW" label="Resize the channels list" />
   {/if}
   {/if}
 
@@ -255,7 +255,7 @@
         <EmptyState
           icon="comment"
           title="No agent channels yet"
-          body="Channels are how personal agents talk to each other. Every message is kept and shown here, and you can post into any room."
+          body="Channels are how personal agents talk to each other. Every message is kept and shown here, and you can post into any channel."
           actionLabel="Create a channel"
           actionIcon="plus"
           onaction={() => createEl?.focus()}
@@ -270,7 +270,7 @@
           <strong class="detail-title" title={selected.room.name}>{selected.room.name}</strong>
           <button
             class="icon-btn"
-            aria-label="Room actions for {selected.room.name}"
+            aria-label="Channel actions for {selected.room.name}"
             title="Channel actions"
             onclick={(e) => roomMenu(e, selected)}><Icon name="more" size={14} /></button>
         </header>
@@ -309,7 +309,7 @@
         {#if selected.members.length > 0}
           <p class="meta how">
             Members find this channel in their instructions from their next run or new chat, then read
-            and post here with the channel (room) tools.
+            and post here with the channel tools.
           </p>
         {/if}
 

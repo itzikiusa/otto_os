@@ -6726,7 +6726,14 @@ export interface CreateShareResp {
    *  or empty (no Public link domain and no network listener) — show the
    *  "only works on this Mac" warning instead of the phone QR hint. */
   reachable_remotely: boolean;
+  /** Who can open `url` (S20-303): `remote` (routable/public), `lan` (the
+   *  LAN listener's private address — same Wi-Fi only, self-signed
+   *  certificate) or `local` (this Mac only). Absent on older daemons. */
+  reach?: ShareReach;
 }
+
+/** See {@link CreateShareResp.reach}. */
+export type ShareReach = 'remote' | 'lan' | 'local';
 
 // ---------------------------------------------------------------------------
 // Email sender (Gmail App Password → Keychain; mobile plan Task 7.1).
