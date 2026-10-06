@@ -4,6 +4,7 @@
 
 import { api } from '../api/client';
 import { loadErrorText } from '../loadError';
+import { toastError } from '../toastError';
 import { computeRunStats, EMPTY_AGENT_STATS, type AgentRunStats, type RunStats } from '../../modules/swarm/runStats';
 import type { OttoEvent } from '../api/types';
 import type {
@@ -512,14 +513,16 @@ class SwarmStore {
     }
   }
 
-  /** Stop an in-flight plan/recruit for `sid`: kills the live agent session(s)
-   *  server-side and prevents retries. Best-effort. */
-  async stopAgentRun(sid: string): Promise<void> {
+  /** Stop the in-flight `kind` turn (plan or recruit — only that one, so
+   *  "Stop planning" no longer kills a recruit, S17-307) for `sid`: kills the
+   *  live agent session(s) server-side and prevents retries. A failed stop
+   *  toasts — the agent may still be running. */
+  async stopAgentRun(sid: string, kind: 'plan' | 'recruit'): Promise<void> {
     if (!this.wsId) return;
     try {
-      await api.post(`/workspaces/${this.wsId}/swarm/swarms/${sid}/agent-stop`);
-    } catch {
-      /* best-effort */
+      await api.post(`/workspaces/${this.wsId}/swarm/swarms/${sid}/agent-stop?kind=${kind}`);
+    } catch (e) {
+      toastError(kind === 'plan' ? 'Couldn’t stop planning' : 'Couldn’t stop recruiting', e);
     }
   }
 

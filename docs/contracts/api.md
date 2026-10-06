@@ -334,7 +334,7 @@ workspace from the row.
 | — | POST /api/v1/ingest/swarm/product | session token | `{title?,body_md}` | 204 |
 | — | POST /api/v1/ingest/swarm/mockup | session token | `{title,format,content}` | 204 |
 | — | POST /api/v1/ingest/swarm/discovery-report | session token | `{report_md}` | 204 |
-| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | — | `{ok:true}` |
+| — | POST /api/v1/workspaces/{id}/swarm/swarms/{sid}/agent-stop | ws editor | `?kind=plan\|recruit` (optional; absent stops both, unknown → 400) | `{ok:true, stopped:bool}` — `stopped` false when no such turn was running |
 
 Notes:
 - `config.max_parallel_sessions` is the per-swarm concurrency cap (the Coordinator's
@@ -381,7 +381,8 @@ Notes:
   supplies a story/run id); if no discovery run resolves, nothing is written. Fire-and-forget
   (always 204).
 - `POST /workspaces/{id}/swarm/swarms/{sid}/agent-stop` (ws editor) stops a single running
-  swarm-agent turn for `{sid}` without pausing the whole swarm; returns `{ok:true}`.
+  swarm-agent turn for `{sid}` without pausing the whole swarm; `?kind=plan|recruit` stops only
+  that turn (a concurrent recruit survives "Stop planning"); returns `{ok:true, stopped}`.
 - Assigning a task to a *leader* (an agent with reports) triggers a delegation turn
   that decomposes it into subtasks for the reports.
 - `SwarmRun.tokens_input` / `tokens_output` / `cost_usd` are backfilled on the run's
