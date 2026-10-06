@@ -731,8 +731,11 @@ async fn scoped<S: K8sCtx>(ctx: &S, user: &User, mut q: FleetQuery) -> ApiResult
         return Ok(q);
     }
     let mut scope: FleetScope = Vec::new();
+    // Tier + groups once per request, each cluster's policy once (S6-309).
+    let pool = ctx.pool();
+    let ev = crate::access::Evaluator::load(&pool, user).await?;
     for c in Clusters::new(ctx).list().await? {
-        match super::http::metrics_scope(&ctx.pool(), user, &c.id).await? {
+        match super::http::metrics_scope_with(&ev, &pool, &c.id).await? {
             Some(super::http::NsScope::All) => scope.push((c.id.to_string(), None)),
             Some(super::http::NsScope::Only(set)) if !set.is_empty() => {
                 scope.push((c.id.to_string(), Some(set.into_iter().collect())))

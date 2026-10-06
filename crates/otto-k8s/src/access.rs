@@ -185,6 +185,78 @@ fn namespaces_allowing_any_in(
         .collect()
 }
 
+/// A per-request snapshot of the caller's Kubernetes tier and group
+/// memberships, so a handler that asks about MANY clusters or namespaces
+/// loads them once and each cluster's live policy once, then evaluates in
+/// memory with the same deny-wins [`ResourceAccess::evaluate_policy`] as
+/// [`allowed`] (S6-309: the fleet scope used to cost ~3 queries per
+/// `allowed()` × (2 + granted namespaces) per cluster, on every request).
+pub struct Evaluator {
+    user: User,
+    groups: Vec<Id>,
+    has_tier: bool,
+}
+
+impl Evaluator {
+    pub async fn load(pool: &DbPool, user: &User) -> Result<Self> {
+        let has_tier = GrantsRepo::new(pool.clone())
+            .capability_of(user, Feature::Kubernetes)
+            .await?
+            >= Capability::View;
+        let groups = if has_tier {
+            otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
+                .groups_for_user(&user.id)
+                .await?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            user: user.clone(),
+            groups,
+            has_tier,
+        })
+    }
+
+    /// Cluster `id`'s live policy; `None` when the caller lacks the
+    /// Kubernetes tier or the cluster is gone (both deny, as in [`allowed`]).
+    pub async fn policy(&self, pool: &DbPool, id: &Id) -> Result<Option<AccessPolicy>> {
+        if !self.has_tier {
+            return Ok(None);
+        }
+        match otto_state::resource_access::ResourceAccessRepo::new(pool.clone())
+            .get_live_policy(ResourceKind::K8sCluster, id)
+            .await
+        {
+            Ok(policy) => Ok(Some(policy)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`allowed`] against an already-loaded `policy`; an invalid namespace
+    /// or an evaluation error denies.
+    pub fn allows(&self, policy: &AccessPolicy, id: &Id, op: &str, ns: Option<&str>) -> bool {
+        let Ok(child) = namespace(ns) else {
+            return false;
+        };
+        let resource = ResourceRef {
+            kind: ResourceKind::K8sCluster,
+            id: id.clone(),
+            child,
+        };
+        ResourceAccess::evaluate_policy(
+            &self.user.id,
+            self.user.is_root,
+            self.user.disabled,
+            &self.groups,
+            policy,
+            &resource,
+            op,
+        )
+        .is_ok_and(|d| d.allowed)
+    }
+}
+
 pub async fn check(
     pool: &DbPool,
     user: &User,
