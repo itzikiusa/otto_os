@@ -140,6 +140,30 @@ fn classify_read_only(engine: Engine, statement: &str, prefix: &str, why: &str) 
     Ok(())
 }
 
+/// The export gate (S16-303): an export re-runs its statement, so only a
+/// read may be exported, on every connection. Tagged [`READ_ONLY_PREFIX`]
+/// like a read-only run; the UI explains that export re-runs the statement.
+pub fn ensure_export_read_only(engine: Engine, statement: &str) -> Result<()> {
+    classify_read_only(
+        engine,
+        statement,
+        READ_ONLY_PREFIX,
+        "an export re-runs the statement, so it must be a read",
+    )
+}
+
+/// Set the server-derived `__read_only_execution` flag on resolved driver
+/// params (config parsing strips `__` keys from stored params, and the flag
+/// is excluded from the pool cache key).
+fn force_read_only_execution(params: &mut Value) {
+    if !params.is_object() {
+        *params = Value::Object(serde_json::Map::new());
+    }
+    if let Some(map) = params.as_object_mut() {
+        map.insert("__read_only_execution".into(), Value::Bool(true));
+    }
+}
+
 /// Evict cached SSH tunnels idle longer than this — dropping them kills the
 /// `ssh` child via `SshTunnel::Drop`. Enforced both lazily (on the next
 /// `resolve`) and by a background reaper (`reap_idle`) so an idle daemon doesn't
@@ -2567,9 +2591,13 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self
+        let mut r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_export")
             .await?;
+        // Native barrier behind the classifier (S16-303): ClickHouse runs it
+        // `readonly=2`; MySQL/PostgreSQL exports already use a READ ONLY
+        // transaction.
+        force_read_only_execution(&mut r.config.params);
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
         let result = self
@@ -2641,9 +2669,13 @@ impl DbViewerService {
         self.guard_export(conn_id, user_id, statement, node).await?;
 
         let child = crate::access::child(node);
-        let r = self
+        let mut r = self
             .resolve(conn_id, user_id, child.as_deref(), "db_export")
             .await?;
+        // Native barrier behind the classifier (S16-303): ClickHouse runs it
+        // `readonly=2`; MySQL/PostgreSQL exports already use a READ ONLY
+        // transaction.
+        force_read_only_execution(&mut r.config.params);
         self.verify_native(conn_id, user_id, &r).await?;
         let started = Instant::now();
         let result = self
@@ -2725,6 +2757,13 @@ impl DbViewerService {
         };
         self.authorize_snap(snap, user_id, node, "db_export")
             .await?;
+        // An export RE-RUNS the statement (S16-303): "Export all rows…" on an
+        // `UPDATE … RETURNING *` grid would apply the write a second time. On
+        // EVERY connection — not only guarded/enforced ones — an export must
+        // be a read; there is no confirm path.
+        let engine = Engine::from_kind(snap.conn.kind)
+            .ok_or_else(|| Error::Invalid("not a database".into()))?;
+        ensure_export_read_only(engine, statement)?;
         if snap.enforced() {
             let engine = Engine::from_kind(snap.conn.kind)
                 .ok_or_else(|| Error::Invalid("not a database".into()))?;
