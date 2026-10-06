@@ -166,7 +166,7 @@ test('a push that changed auth.rs drops its viewed mark, composer and expansions
   const same = unchangedPaths(prev, next);
   assert.deepEqual([...same], ['ok.rs']);
   assert.deepEqual([...carryViewed(new Set(['auth.rs', 'ok.rs', 'sum.rs']), same)], ['ok.rs']);
-  const composer = { path: 'auth.rs', oldLine: null, newLine: 120, line: 120, side: 'RIGHT' as const };
+  const composer = { path: 'auth.rs', oldLine: null, newLine: 120, line: 120, side: 'new' as const };
   const carried = carryViewState(
     { overrides: {}, composer, uncapped: new Map([['auth.rs', new Set([3])], ['ok.rs', new Set([1])]]), full: new Set() },
     same,
