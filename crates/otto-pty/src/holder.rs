@@ -960,81 +960,83 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
     let mut exit_rx = sh.handle.on_exit();
     let mut exit_sent = false;
 
-    while snapshot_sent {
-        tokio::select! {
-            changed = kick.changed() => {
-                if changed.is_err() || *kick.borrow() != gen {
-                    superseded.store(true, Ordering::SeqCst);
-                    let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
-                    break;
-                }
-            }
-            _ = &mut eof_rx => break,
-            chunk = out.recv() => {
-                match chunk {
-                    Ok(bytes) => {
-                        if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // This client fell behind: replace the lost chunks
-                        // with one fresh snapshot (it rebuilds from it).
-                        let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
-                        out = snap.output;
-                        let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
-                        payload.extend_from_slice(&snap.data);
-                        if write_frame(&mut wr, frame::SNAPSHOT, &payload).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            Some(ack) = ack_rx.recv() => {
-                let payload = serde_json::to_vec(&ack).unwrap_or_default();
-                if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
-                    break;
-                }
-            }
-            code = wait_exit(&mut exit_rx), if !exit_sent => {
-                // Final output first: wait (bounded — a grandchild may keep
-                // the tty open) for the reader to drain, then forward what
-                // the receiver still holds, then the exit itself.
-                let mut done = sh.handle.output_closed();
-                let _ = tokio::time::timeout(Duration::from_secs(1), done.wait_for(|d| *d)).await;
-                let mut failed = false;
-                loop {
-                    match out.try_recv() {
-                        Ok(bytes) => {
-                            if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
-                                failed = true;
+    if snapshot_sent {
+        loop {
+            tokio::select! {
+                        changed = kick.changed() => {
+                            if changed.is_err() || *kick.borrow() != gen {
+                                superseded.store(true, Ordering::SeqCst);
+                                let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
                                 break;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
-                        Err(_) => break,
-                    }
-                }
-                // Acks for input the child consumed before exiting go out
-                // before the exit too: the client fails a still-pending write
-                // on EXITED, which reported delivered input as lost.
-                while let Ok(ack) = ack_rx.try_recv() {
-                    let payload = serde_json::to_vec(&ack).unwrap_or_default();
-                    if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
-                        failed = true;
-                        break;
-                    }
-                }
-                if failed {
-                    break;
-                }
-                let payload = serde_json::json!({ "code": code }).to_string();
-                if write_frame(&mut wr, frame::EXITED, payload.as_bytes()).await.is_err() {
-                    break;
-                }
-                exit_sent = true;
-                sh.wake.notify_one();
+                        _ = &mut eof_rx => break,
+                        chunk = out.recv() => {
+                            match chunk {
+                                Ok(bytes) => {
+                                    if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    // This client fell behind: replace the lost chunks
+                                    // with one fresh snapshot (it rebuilds from it).
+                                    let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
+                                    out = snap.output;
+                                    let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
+                                    payload.extend_from_slice(&snap.data);
+                                    if write_frame(&mut wr, frame::SNAPSHOT, &payload).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        Some(ack) = ack_rx.recv() => {
+                            let payload = serde_json::to_vec(&ack).unwrap_or_default();
+                            if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
+                                break;
+                            }
+                        }
+                        code = wait_exit(&mut exit_rx), if !exit_sent => {
+                            // Final output first: wait (bounded — a grandchild may keep
+                            // the tty open) for the reader to drain, then forward what
+                            // the receiver still holds, then the exit itself.
+                            let mut done = sh.handle.output_closed();
+                            let _ = tokio::time::timeout(Duration::from_secs(1), done.wait_for(|d| *d)).await;
+                            let mut failed = false;
+                            loop {
+                                match out.try_recv() {
+                                    Ok(bytes) => {
+                                        if write_frame(&mut wr, frame::OUTPUT, &bytes).await.is_err() {
+                                            failed = true;
+                                            break;
+                                        }
+                                    }
+                                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                            // Acks for input the child consumed before exiting go out
+                            // before the exit too: the client fails a still-pending write
+                            // on EXITED, which reported delivered input as lost.
+                            while let Ok(ack) = ack_rx.try_recv() {
+                                let payload = serde_json::to_vec(&ack).unwrap_or_default();
+                                if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed {
+                                break;
+                            }
+                            let payload = serde_json::json!({ "code": code }).to_string();
+                            if write_frame(&mut wr, frame::EXITED, payload.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            exit_sent = true;
+                            sh.wake.notify_one();
+                        }
             }
         }
     }
