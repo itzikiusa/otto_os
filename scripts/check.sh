@@ -5,7 +5,10 @@
 #   * Rust: the workspace crates whose files changed (fmt + clippy) and those
 #     crates plus every crate that depends on them (tests — an API change can
 #     break a dependent), found via `cargo metadata`;
-#   * UI: `npm run check` + `npm run test:unit`, only when ui/ changed.
+#   * UI: `npm run check` + `npm run test:unit` + `npm run build` + the bundle
+#     budget (scripts/bundle-budget.mjs), only when ui/ changed;
+#   * guard inputs: docs/contracts/** and the sidebar/sidePane/uiCommands UI
+#     files also select the Rust crates whose tests read or mirror them.
 # A change to a root build file (Cargo.toml, Cargo.lock, .cargo/, .config/,
 # rust-toolchain) selects the whole workspace — exactly the CI gate.
 #
@@ -17,6 +20,7 @@
 #   --all          whole workspace + UI (what CI runs)
 #   --check        rustfmt --check instead of reformatting changed files
 #   --no-clippy    skip clippy          --no-test   skip nextest + doc-tests
+#                  (--no-test also skips the nextest filter guard)
 #   --no-ui        skip the UI gates    --dry-run   print the plan, run nothing
 # Env: CARGO=<wrapper> to route cargo builds through a throttle wrapper;
 #      NEXTEST_PROFILE (default: default) e.g. `ci` for CI's 4 test processes.
@@ -35,7 +39,7 @@ while [ $# -gt 0 ]; do
     --no-test) TEST=0 ;;
     --no-ui) UI=0 ;;
     --dry-run) DRY=1 ;;
-    -h | --help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "check.sh: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -80,13 +84,24 @@ build_files = ("Cargo.toml", "Cargo.lock", ".cargo/", ".config/", "rust-toolchai
 if os.environ["ALL"] == "1" or any(c.startswith(build_files) for c in changed_paths):
     print("changed: all"); print("tested: all"); sys.exit()
 changed = sorted({n for n, d in dirs.items() for c in changed_paths if c.startswith(d)})
+# Non-crate inputs that Rust guard tests read or mirror: the route/policy
+# inventories and ws.md drift guard (otto-server) and the ui-commands catalog
+# (include_str! in otto-mcp, whose paneKeys mirror sidebar.ts / sidePane.ts).
+# A docs- or UI-only change must still run those tests (S12-311).
+GUARD_INPUTS = {
+    "docs/contracts/": ("otto-server", "otto-mcp"),
+    "ui/src/lib/sidebar.ts": ("otto-mcp",),
+    "ui/src/lib/sidePane.ts": ("otto-mcp",),
+    "ui/src/lib/uiCommands": ("otto-mcp",),
+}
+guarded = {p for pre, ps in GUARD_INPUTS.items() for c in changed_paths if c.startswith(pre) for p in ps if p in dirs}
 # reverse-dependency closure over workspace path dependencies
 rdeps = {n: set() for n in dirs}
 for p in pkgs:
     for d in p["dependencies"]:
         if d["name"] in rdeps and d.get("path"):
             rdeps[d["name"]].add(p["name"])
-seen, todo = set(changed), list(changed)
+seen, todo = set(changed) | guarded, sorted(set(changed) | guarded)
 while todo:
     for r in rdeps[todo.pop()]:
         if r not in seen:
@@ -109,7 +124,7 @@ echo "rust tested:   ${RUST_TESTED:-none}"
 echo "ui changed:    $( [ "$UI_CHANGED" = 1 ] && echo yes || echo no)"
 
 # ── Rust ──────────────────────────────────────────────────────────────────────
-if [ -n "$RUST_CHANGED" ]; then
+if [ -n "$RUST_CHANGED" ] || [ -n "$RUST_TESTED" ]; then
   step "rustfmt"
   if [ "$RUST_CHANGED" = all ]; then
     if [ "$FMT_CHECK" = 1 ]; then run "$CARGO" fmt --all --check; else run "$CARGO" fmt --all; fi
@@ -123,7 +138,7 @@ if [ -n "$RUST_CHANGED" ]; then
     echo "(no changed .rs files)"
   fi
 
-  if [ "$CLIPPY" = 1 ]; then
+  if [ "$CLIPPY" = 1 ] && [ -n "$RUST_CHANGED" ]; then
     step "clippy (changed crates, all targets, -D warnings)"
     # shellcheck disable=SC2046
     run "$CARGO" clippy $(pkg_args "$RUST_CHANGED") --all-targets -- -D warnings
@@ -153,14 +168,27 @@ for p in json.load(sys.stdin)["packages"]:
       # shellcheck disable=SC2046
       [ -z "$LIBS" ] || run "$CARGO" test $(pkg_args "$LIBS") --doc
     fi
+    # CI's nextest override-filter guard (Rust job) whenever the config it
+    # checks changed — every override disjunct must still match a test.
+    if [ "$ALL" = 1 ] || printf '%s\n' "$CHANGED" | grep -q '^\.config/nextest\.toml$'; then
+      if cargo nextest --version >/dev/null 2>&1; then
+        run python3 scripts/check-nextest-filters.py
+      else
+        echo "(cargo-nextest not installed — skipping scripts/check-nextest-filters.py)"
+      fi
+    fi
   fi
 fi
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 if [ "$UI" = 1 ] && [ "$UI_CHANGED" = 1 ]; then
-  step "ui: npm run check + test:unit"
+  step "ui: npm run check + test:unit + build + bundle budget"
   run npm --prefix ui run check
   run npm --prefix ui run test:unit
+  # CI's UI job also builds and checks the gzip bundle budget; a deleted or
+  # grown chunk fails there, so catch it here too (S12-303).
+  run npm --prefix ui run build
+  run node ui/scripts/bundle-budget.mjs
 fi
 
 if [ -z "$RUST_CHANGED" ] && [ "$UI_CHANGED" = 0 ]; then

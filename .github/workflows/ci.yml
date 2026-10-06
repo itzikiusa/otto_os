@@ -142,6 +142,7 @@ jobs:
       # Same full binary/test inventory as cargo test; shared external resources
       # are bounded in .config/nextest.toml. Ignored tests remain ignored.
       - name: cargo nextest
+        id: nextest
         env:
           OTTO_REQUIRE_CLICKHOUSE: "1"
         run: cargo nextest run --workspace --profile ci --no-fail-fast
@@ -150,8 +151,11 @@ jobs:
       # test: a crate split / module move otherwise orphans a `timing` or
       # `processes` entry silently and the wall-clock asserts it protects
       # run under full contention again. Lists the binaries built above.
+      # Only when nextest actually ran (pass or test failure): after an
+      # earlier step failed (fmt, clippy) the binaries were never built and
+      # listing would compile the whole workspace just to report noise.
       - name: nextest override filters match tests
-        if: success() || failure()
+        if: (success() || failure()) && (steps.nextest.outcome == 'success' || steps.nextest.outcome == 'failure')
         run: python3 scripts/check-nextest-filters.py
 
       # Scale gates kept out of the everyday run (#[ignore], e.g. the 50k-revision
