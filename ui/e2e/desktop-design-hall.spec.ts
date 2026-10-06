@@ -217,7 +217,10 @@ test('a project page loads its own designs from the server (not the lobby librar
   await expectNoHorizontalOverflow(page);
 
   // A live rename PATCHES that one card (a detail GET) — it no longer
-  // re-reads the whole slice through /design/search.
+  // re-reads the whole slice through /design/search. The rename only reaches
+  // the page over /ws/events, so wait for the stream before sending it (a
+  // first connect doesn't resync — an event sent before it is simply missed).
+  await expect(page.locator('[title="Event stream: live"]')).toBeVisible({ timeout: 15_000 });
   let searches = 0;
   page.on('request', (r) => {
     if (r.url().includes('/design/search') && r.url().includes(`project_id=${project.id}`)) searches++;
