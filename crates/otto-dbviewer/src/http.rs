@@ -908,6 +908,8 @@ async fn export_to_path<S: DbViewerCtx>(
     if req.local_path.trim().is_empty() {
         return Err(ApiErr(Error::Invalid("local_path is required".into())));
     }
+    // Root-only BEFORE anything touches the host path (resolve creates dirs).
+    ctx.db().require_local_path_access(&id, &user.id).await?;
     let dest = resolve_export_dest(&req.local_path, req.format)?;
 
     // Stream progress as NDJSON so a large export never idles out the browser
@@ -1035,6 +1037,8 @@ async fn import_query<S: DbViewerCtx>(
             "local_path and table are required".into(),
         )));
     }
+    // Root-only: a clean 403 rather than an `{error}` line mid-stream.
+    ctx.db().require_local_path_access(&id, &user.id).await?;
     let path = expand_home(&req.local_path);
     let batch_size = req.batch_size.unwrap_or(500).clamp(1, 5000);
 
