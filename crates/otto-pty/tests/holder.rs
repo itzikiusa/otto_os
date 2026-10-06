@@ -222,15 +222,18 @@ fn exit_while_detached_is_reported_on_adoption() {
     // A held handle can be mid-reconnect for a moment (its send path reports
     // "connection lost" until the reader re-attaches) — that is the designed
     // behaviour, so retry the input briefly instead of failing on the first try.
+    // An exit counts as delivered: the child exits only after reading it.
     let mut wrote = Err(otto_core::error::Error::Internal("not attempted".into()));
     for _ in 0..100 {
         wrote = h.write(b"z\n");
-        if wrote.is_ok() {
+        if wrote.is_ok() || h.has_exited() {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    wrote.expect("write");
+    if !h.has_exited() {
+        wrote.expect("write");
+    }
     drop(h);
     std::thread::sleep(Duration::from_millis(800));
     assert!(
@@ -246,6 +249,121 @@ fn exit_while_detached_is_reported_on_adoption() {
         "its final screen is still there"
     );
     drop(adopted);
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// A holder whose child exited while its (detached) handle let go: it lingers
+/// for the next daemon. Returns its socket and pid.
+fn lingering_exited_holder(cfg: &HolderConfig) -> (PathBuf, u32) {
+    let h = PtyHandle::spawn_held(
+        cfg,
+        &sh("echo READY; sleep 0.3; exit 3"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.detach();
+    wait_until("exit", Duration::from_secs(10), || h.has_exited());
+    drop(h);
+    (only_socket(cfg), holder_pid)
+}
+
+/// A RELEASE that could not go out because the connection was mid-reconnect
+/// fell back to a detached thread — which gave up at once when the child's
+/// exit was already known (a dead-on-arrival adoption), so the dropped handle
+/// left the exited holder lingering for its whole exit linger.
+#[test]
+fn release_while_reconnecting_reaches_an_exited_holder() {
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let (socket, holder_pid) = lingering_exited_holder(&cfg);
+    let adopted = PtyHandle::adopt(&socket).expect("adopt the lingering holder");
+    adopted.simulate_holder_reconnecting();
+    assert!(adopted.has_exited(), "dead on arrival");
+    drop(adopted);
+    // Well inside the 30 s exit linger: only a delivered RELEASE ends it.
+    wait_until("holder gone", Duration::from_secs(10), || {
+        !pid_alive(holder_pid)
+    });
+}
+
+/// A client that sends KILL + RELEASE and hangs up at once (a daemon dropping
+/// its handle) while the holder is busy writing to it: the holder's write hits
+/// EPIPE first and used to abort the connection's reader with the control
+/// frames still unread — the child ran on and the holder lingered for the
+/// orphan TTL. The ignored filler frames ahead of the KILL keep the reader
+/// busy so the failed write wins that race.
+#[test]
+fn control_frames_sent_right_before_a_hang_up_are_honoured() {
+    use std::io::{Read, Write};
+    fn encode(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![kind];
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+    const HELLO: u8 = 0x01;
+    const HELLO_ACK: u8 = 0x02;
+    const RELEASE: u8 = 0x7E;
+    const KILL: u8 = 0x7F;
+    /// An unassigned kind: holders ignore unknown frames.
+    const FILLER: u8 = 0x6A;
+
+    let dir = short_tempdir();
+    let cfg = config(dir.path());
+    let h = PtyHandle::spawn_held(
+        &cfg,
+        &sh("while :; do echo spam; done"),
+        80,
+        24,
+        serde_json::Value::Null,
+    )
+    .expect("spawn held");
+    // READY scrolls out of the history at once: wait for the stream itself.
+    wait_until("output", Duration::from_secs(10), || {
+        screen_text(&h).contains("spam")
+    });
+    let child = h.pid().unwrap();
+    let holder_pid = h.holder().unwrap().holder_pid;
+    h.detach();
+    drop(h);
+
+    let mut s = std::os::unix::net::UnixStream::connect(only_socket(&cfg)).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(&encode(HELLO, br#"{"proto_major":1,"proto_minor":2}"#))
+        .expect("hello");
+    let mut hdr = [0u8; 5];
+    s.read_exact(&mut hdr).expect("hello ack header");
+    assert_eq!(hdr[0], HELLO_ACK);
+    let mut ack = vec![0u8; u32::from_be_bytes([hdr[1], hdr[2], hdr[3], hdr[4]]) as usize];
+    s.read_exact(&mut ack).expect("hello ack");
+    let mut burst = Vec::new();
+    for _ in 0..20_000 {
+        burst.extend_from_slice(&encode(FILLER, &[]));
+    }
+    burst.extend_from_slice(&encode(KILL, &[]));
+    burst.extend_from_slice(&encode(RELEASE, &[]));
+    // Keep reading what the holder streams so the burst is not stuck behind a
+    // full socket buffer, then hang up the moment it is all written.
+    let mut rd = s.try_clone().expect("clone");
+    let sink = std::thread::spawn(move || {
+        let mut buf = [0u8; 1 << 16];
+        while matches!(rd.read(&mut buf), Ok(n) if n > 0) {}
+    });
+    s.write_all(&burst).expect("burst");
+    let _ = s.shutdown(std::net::Shutdown::Both);
+    let _ = sink.join();
+    drop(s);
+
+    wait_until(
+        "child killed",
+        otto_pty::KILL_GRACE * 2 + Duration::from_secs(5),
+        || !pid_alive(child),
+    );
     wait_until("holder gone", Duration::from_secs(10), || {
         !pid_alive(holder_pid)
     });

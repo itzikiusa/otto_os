@@ -184,7 +184,7 @@ impl HeldConn {
         let conn = Arc::clone(self);
         std::thread::spawn(move || {
             for round in 0..FALLBACK_ROUNDS {
-                if conn.terminated.load(Ordering::SeqCst) || conn.exited.load(Ordering::SeqCst) {
+                if conn.fallback_done() {
                     break;
                 }
                 if round > 0 {
@@ -196,6 +196,18 @@ impl HeldConn {
             }
             conn.fallback_running.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// Nothing left for a fallback to deliver: the holder was ended over a
+    /// fresh connection, or the child's exit is known and nobody asked for a
+    /// RELEASE. A known exit alone is NOT enough once a RELEASE is pending: a
+    /// handle dropped mid-reconnect (or right after adopting a dead-on-arrival
+    /// holder) would otherwise lose it — and the closing reader never
+    /// reconnects to re-send it — leaving the exited holder lingering.
+    fn fallback_done(&self) -> bool {
+        self.terminated.load(Ordering::SeqCst)
+            || (self.exited.load(Ordering::SeqCst)
+                && !self.release_requested.load(Ordering::SeqCst))
     }
 
     /// [`crate::holder::terminate`] over a fresh connection (KILL + RELEASE),

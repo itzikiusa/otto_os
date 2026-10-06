@@ -94,6 +94,9 @@ pub const DEFAULT_EXIT_LINGER: Duration = Duration::from_secs(10 * 60);
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Handshake (HELLO → HELLO_ACK → SNAPSHOT) and control-write timeout.
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a finished client connection keeps reading the control frames
+/// (KILL / RELEASE) its client sent before hanging up.
+const CLIENT_DRAIN: Duration = Duration::from_millis(500);
 /// `sun_path` is 104 bytes on macOS (108 on Linux), NUL included. Keep a
 /// margin so a socket path never silently truncates.
 const MAX_SOCKET_PATH: usize = 100;
@@ -950,26 +953,18 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
     let snap = sh.handle.snapshot_and_subscribe(EMULATOR_SCROLLBACK_LINES);
     let mut payload = frame::grid(snap.cols, snap.rows).to_vec();
     payload.extend_from_slice(&snap.data);
-    if write_frame(&mut wr, frame::SNAPSHOT, &payload)
+    let snapshot_sent = write_frame(&mut wr, frame::SNAPSHOT, &payload)
         .await
-        .is_err()
-    {
-        reader_task.abort();
-        input_task.abort();
-        sh.release_claim(gen);
-        return;
-    }
+        .is_ok();
     let mut out = snap.output;
     let mut exit_rx = sh.handle.on_exit();
-    let mut kicked = false;
     let mut exit_sent = false;
 
-    loop {
+    while snapshot_sent {
         tokio::select! {
             changed = kick.changed() => {
                 if changed.is_err() || *kick.borrow() != gen {
                     superseded.store(true, Ordering::SeqCst);
-                    kicked = true;
                     let _ = write_frame(&mut wr, frame::SUPERSEDED, &[]).await;
                     break;
                 }
@@ -1021,6 +1016,16 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
                         Err(_) => break,
                     }
                 }
+                // Acks for input the child consumed before exiting go out
+                // before the exit too: the client fails a still-pending write
+                // on EXITED, which reported delivered input as lost.
+                while let Ok(ack) = ack_rx.try_recv() {
+                    let payload = serde_json::to_vec(&ack).unwrap_or_default();
+                    if write_frame(&mut wr, frame::INPUT_ACK, &payload).await.is_err() {
+                        failed = true;
+                        break;
+                    }
+                }
                 if failed {
                     break;
                 }
@@ -1033,14 +1038,21 @@ async fn serve_client(stream: tokio::net::UnixStream, sh: Arc<Shared>) {
             }
         }
     }
+    // Whatever ended this connection — a kick, OR a write that failed because
+    // the client already hung up — drain the control frames it sent first (a
+    // KILL / RELEASE racing the end) until it hangs up. Aborting the reader
+    // straight away lost them: a daemon dropping its handle (KILL + RELEASE,
+    // then close) while we were writing output or the EXITED frame got EPIPE
+    // here, and the unread KILL left the child running (the holder lingering
+    // for the orphan TTL) or the unread RELEASE kept an exited holder around
+    // for the exit linger. Only control frames count from here on (input
+    // belongs to no one now). Bounded: a client that hung up is at EOF at
+    // once, a superseded daemon closes on SUPERSEDED, a terminate() client
+    // within 300 ms.
+    superseded.store(true, Ordering::SeqCst);
     input_task.abort();
     let _ = wr.shutdown().await;
-    if kicked {
-        // Drain control frames this client already sent (a KILL / RELEASE
-        // racing the kick) until it hangs up — bounded: a superseded daemon
-        // closes on SUPERSEDED, a terminate() client within 300 ms.
-        let _ = tokio::time::timeout(Duration::from_millis(500), &mut reader_task).await;
-    }
+    let _ = tokio::time::timeout(CLIENT_DRAIN, &mut reader_task).await;
     reader_task.abort();
     sh.release_claim(gen);
 }
