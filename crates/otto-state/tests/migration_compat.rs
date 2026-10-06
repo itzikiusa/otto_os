@@ -43,13 +43,12 @@ async fn schema(conn: &mut SqliteConnection) -> Schema {
     .unwrap();
     let mut out = Schema::new();
     for t in tables {
-        let rows: Vec<(String, i64, Option<String>, i64)> = sqlx::query_as(
-            "SELECT name, \"notnull\", dflt_value, pk FROM pragma_table_info(?)",
-        )
-        .bind(&t)
-        .fetch_all(&mut *conn)
-        .await
-        .unwrap();
+        let rows: Vec<(String, i64, Option<String>, i64)> =
+            sqlx::query_as("SELECT name, \"notnull\", dflt_value, pk FROM pragma_table_info(?)")
+                .bind(&t)
+                .fetch_all(&mut *conn)
+                .await
+                .unwrap();
         let cols = rows
             .into_iter()
             .map(|(name, nn, dflt, pk)| {
@@ -109,10 +108,16 @@ async fn memory() -> SqlitePool {
 /// Run one migration the way sqlx does (in a transaction unless `no_tx`).
 async fn apply(conn: &mut SqliteConnection, sql: &str, no_tx: bool) {
     if no_tx {
-        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned())).execute(&mut *conn).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
     } else {
         let mut tx = conn.begin().await.unwrap();
-        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned())).execute(&mut *tx).await.unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_owned()))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
     }
 }
