@@ -990,25 +990,33 @@ function build(
   let raf = 0;
   let last = performance.now();
   let acc = 0;
+  /** Uncapped time since the last drawn frame (camera flights run on it). */
+  let accRaw = 0;
   const frameFns: (() => void)[] = [];
   const lostFns: (() => void)[] = [];
 
   function frame(now: number): void {
     raf = 0;
     if (!active) return;
-    const dt = Math.min(100, now - last);
+    const raw = Math.max(0, now - last);
+    const dt = Math.min(250, raw);
     last = now;
     acc += dt;
+    accRaw += raw;
     if (acc < FPS_MS) {
       raf = requestAnimationFrame(frame);
       return;
     }
+    // Life steps are capped (a long stall never teleports anyone); camera
+    // flights use real time, so a slow GPU still lands them on schedule.
     const step = acc;
+    const elapsed = accRaw;
     acc = 0;
+    accRaw = 0;
     // Camera.
     if (cam.tween) {
       const tw = cam.tween;
-      tw.t += step;
+      tw.t += elapsed;
       const k = ease(Math.min(1, tw.t / tw.ms));
       cam.pos.lerpVectors(tw.from[0], tw.to[0], k);
       cam.target.lerpVectors(tw.from[1], tw.to[1], k);
