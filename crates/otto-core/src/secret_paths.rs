@@ -179,7 +179,7 @@ pub fn protected_dirs() -> Vec<PathBuf> {
 
 /// A file's identity: `(st_dev, st_ino)`. Two spellings of one directory
 /// (firmlink, case variant on case-insensitive APFS, a mount alias) share it.
-type FileId = (u64, u64);
+pub type FileId = (u64, u64);
 
 #[cfg(unix)]
 fn file_id(p: &Path) -> Option<FileId> {

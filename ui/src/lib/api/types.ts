@@ -2715,8 +2715,6 @@ export interface ImportCreateResult {
   skipped: string[];
   created: Connection[];
   failed: { name: string; error: string }[];
-  /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
-  user_owned: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -4719,6 +4717,8 @@ export interface InstallAllBundledResp {
   skipped: string[];
   /** Skills that failed to install; the rest of the batch still ran. */
   failed: { name: string; error: string }[];
+  /** `<provider skills dir>/<name>` paths left untouched: a user-owned skill of that name already lives there. */
+  user_owned: string[];
 }
 
 export interface GlobalSoulReq {
