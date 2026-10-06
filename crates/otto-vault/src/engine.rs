@@ -971,13 +971,33 @@ impl VaultEngine {
     /// unless the vault ROOT itself was (deliberately, by root) placed there.
     /// Covers vaults registered before roots were vetted (S7-01) — a legacy
     /// `~` vault can't stream `Library/Application Support/Otto/otto.db`.
+    ///
+    /// A path that CONTAINS a protected dir is refused too (S7-303): on a
+    /// legacy vault rooted at `~/Library`, renaming or trashing
+    /// `Application Support` would carry the live data dir along.
     fn refuse_protected(rootc: &Path, path: &Path) -> Result<()> {
         use otto_core::secret_paths as sp;
-        if sp::is_denied_file(path) || (sp::in_protected_dir(path) && !sp::in_protected_dir(rootc))
-        {
+        let set = sp::protected_set();
+        if set.in_protected_dir(rootc) {
+            // Root deliberately placed a vault there: only key-like names.
+            return if sp::is_denied_file(path) {
+                Err(Error::Forbidden(
+                    "path holds credentials or Otto's own state".into(),
+                ))
+            } else {
+                Ok(())
+            };
+        }
+        if sp::is_denied_file(path) || set.in_protected_dir(path) {
             return Err(Error::Forbidden(
                 "path holds credentials or Otto's own state".into(),
             ));
+        }
+        if let Some(p) = set.contained_in(path) {
+            return Err(Error::Forbidden(format!(
+                "path contains {}, which holds credentials or Otto's own state",
+                p.display()
+            )));
         }
         Ok(())
     }
